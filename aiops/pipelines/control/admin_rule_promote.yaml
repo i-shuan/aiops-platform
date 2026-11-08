@@ -1,0 +1,7 @@
+name: admin_rule_promote
+description: "手動動作／排程：頻繁調參的實體產生 detector.rules 靜態規則提案（仍要回測、核准）"
+nodes:
+  # 排程直接跑（python -m aiops.interfaces.cli run-once -w admin_rule_promote）時用這裡的參數；API 請求帶的值優先
+  - name: rule_promote
+    operator: admin.rule_promote
+    params: {min_approvals: 3, window_days: 30, consecutive: 3}

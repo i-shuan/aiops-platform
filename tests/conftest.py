@@ -9,9 +9,9 @@ from datetime import datetime, timezone  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from aiops.app import create_app  # noqa: E402
-from aiops.operators import load_all  # noqa: E402
-from aiops.operators.notifiers.transport import LogTransport  # noqa: E402
+from aiops.interfaces.app import create_app  # noqa: E402
+from aiops.interfaces.runner import load_all  # noqa: E402
+from aiops.stages.notification.transport import LogTransport  # noqa: E402
 from aiops.storage import db, models  # noqa: E402
 
 load_all()

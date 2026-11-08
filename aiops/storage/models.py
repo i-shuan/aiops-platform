@@ -242,7 +242,7 @@ class FeedbackRow(Base):
 class ActiveDetectorConfigRow(Base):
     """偵測器現行參數，分層：(偵測器, 管線, 實體)，"*" = 不限定。
     三個獨立欄位組成唯一鍵（不組字串），實體名稱裡有冒號也不會歧義。
-    套用時取最具體的一層：管線×實體 > 管線 > 實體 > 全域（core/params.pick_most_specific）。"""
+    套用時取最具體的一層：管線×實體 > 管線 > 實體 > 全域（engine/params.pick_most_specific）。"""
 
     __tablename__ = "active_detector_configs"
     __table_args__ = (UniqueConstraint("detector_name", "pipeline", "entity", name="uq_active_detector_configs_scope"),)

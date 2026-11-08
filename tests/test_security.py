@@ -1,10 +1,10 @@
-"""API 認證：每一個 /api 端點都必須驗 token；驗證寫在 security/，用 Depends 掛在 router 上，api.py 不碰。"""
+"""API 認證：每一個 /api 端點都必須驗 token；驗證寫在 interfaces/bootstrap/auth.py，用 Depends 掛在 router 上，api.py 不碰。"""
 import re
 
 import pytest
 from fastapi.testclient import TestClient
 
-from aiops.app import create_app
+from aiops.interfaces.app import create_app
 
 
 def _api_routes(app):
@@ -59,7 +59,7 @@ def test_health_is_public(anon):
 
 def test_new_domains_are_protected_automatically():
     """驗證掛在 init_routers 上：每個領域 router 都有 require_token，不靠各領域自己記得加。"""
-    from aiops.security.auth import require_token
+    from aiops.interfaces.bootstrap.auth import require_token
 
     app = create_app()
     unprotected = [

@@ -1,7 +1,7 @@
 """資料真的存進資料庫：換一個連線（模擬服務重啟）後還在；資料庫連不上時回 503。"""
 import pytest
 
-from aiops.app import create_app
+from aiops.interfaces.app import create_app
 from aiops.storage import db, models
 
 SILENCE = {"kind": "maintenance", "start": "2026-11-08T04:00:00+08:00", "end": "2026-11-08T06:00:00+08:00",
@@ -42,8 +42,8 @@ def test_times_are_stored_as_utc(file_db):
 
 def test_startup_waits_for_database_then_gives_up(monkeypatch):
     """資料庫比平台晚就緒時，啟動要等它；等超過時限才放棄。"""
-    from aiops import initialization
-    from aiops.core.errors import InfrastructureError
+    from aiops.interfaces import bootstrap as initialization
+    from aiops.engine.errors import InfrastructureError
     from aiops.storage import db as db_module
 
     calls, now = [], [0.0]

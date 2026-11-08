@@ -25,7 +25,7 @@ spec:
           containers:
             - name: tasks
               {{- include "aiops.container" . | nindent 14 }}
-              args: ["python", "-m", "aiops.tasks", "run-once", "-w", {{ .Values.tasks.workflow | quote }}]
+              args: ["python", "-m", "aiops.interfaces.cli", "run-once", "-w", {{ .Values.tasks.workflow | quote }}]
               resources:
                 {{- toYaml .Values.tasks.resources | nindent 16 }}
               volumeMounts:

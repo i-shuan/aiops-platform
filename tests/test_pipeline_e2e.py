@@ -5,15 +5,15 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from aiops.core.requests import (
+from aiops.engine.requests import (
     LotPathsMerge,
     MappingApprove,
     MappingSubmit,
     SilenceCreate,
     TraceMerge,
 )
-from aiops.datasource_specs.elasticsearch import ElasticsearchSpec
-from aiops.runner import run, run_context
+from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.interfaces.runner import run, run_context
 from aiops.storage.repository import Anomalies, DetectorModels, Incidents, Notifications
 
 WF = "metrics_only"
@@ -40,8 +40,8 @@ def test_first_run_detects_groups_notifies_and_persists(now, sent):
 
 def _go_with(now, resolve_after_minutes):
     """跟內建 workflow 一樣，只是把心跳的結案門檻換掉。"""
-    from aiops.core.pipeline import Pipeline, load_workflow
-    from aiops.runner import workflow_path
+    from aiops.engine.pipeline import Pipeline, load_workflow
+    from aiops.interfaces.runner import workflow_path
     from aiops.storage.hooks import StorageHooks
 
     wf = load_workflow(workflow_path(WF))
@@ -72,8 +72,8 @@ def test_incident_resolves_once_quiet_long_enough_with_identical_labels(now, sen
 
 
 def test_manual_resolve_sends_ends_at_and_cannot_be_done_twice(now, sent):
-    from aiops.core.errors import Conflict
-    from aiops.core.requests import UidRef
+    from aiops.engine.errors import Conflict
+    from aiops.engine.requests import UidRef
 
     _go_with(now, resolve_after_minutes=60)
     uid = Incidents.get(1)["uid"]
@@ -87,7 +87,7 @@ def test_manual_resolve_sends_ends_at_and_cannot_be_done_twice(now, sent):
 def test_notify_failure_fails_the_run_and_stores_no_half_state(now, monkeypatch):
     monkeypatch.setenv("AIOPS_NOTIFIER", "alertmanager")
     monkeypatch.setenv("AIOPS_ALERTMANAGER_URL", "http://127.0.0.1:1")  # 沒人在聽
-    from aiops.core.errors import InfrastructureError
+    from aiops.engine.errors import InfrastructureError
 
     with pytest.raises(InfrastructureError):
         _go(now)
@@ -97,7 +97,7 @@ def test_notify_failure_fails_the_run_and_stores_no_half_state(now, monkeypatch)
 
 def test_unknown_notifier_is_infrastructure_error(now, monkeypatch):
     monkeypatch.setenv("AIOPS_NOTIFIER", "carrier-pigeon")
-    from aiops.core.errors import InfrastructureError
+    from aiops.engine.errors import InfrastructureError
 
     with pytest.raises(InfrastructureError, match="carrier-pigeon"):
         _go(now)
@@ -118,7 +118,7 @@ def test_silence_created_through_admin_suppresses_the_next_run(now, sent):
 
 
 def test_external_anomalies_join_the_next_run_once(now, sent):
-    from aiops.core.requests import ExternalAnomalyIn, IngestAnomalies
+    from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
 
     body = IngestAnomalies(pipeline="factory", source="fdc", anomalies=[ExternalAnomalyIn(
         external_id="a1", entity="ETCH-01", metric="rf", ts=now, score=5, attrs={"dept": "fab-etch"})])
@@ -158,7 +158,7 @@ def _approve(fields):
 
 
 def test_approved_mapping_reaches_the_es_query(now, es_bodies):
-    from aiops.core.pipeline import TargetSpec
+    from aiops.engine.pipeline import TargetSpec
 
     _approve({"@timestamp": "ts", "transaction.duration.us": "value", "service.name": "entity"})
     ctx = _go(now, targets=[TargetSpec(**ES_TARGET)])
@@ -170,14 +170,14 @@ def test_approved_mapping_reaches_the_es_query(now, es_bodies):
 
 
 def test_without_a_mapping_the_short_query_is_a_target_error_and_nothing_is_sent(now, es_bodies):
-    from aiops.core.pipeline import TargetSpec
+    from aiops.engine.pipeline import TargetSpec
 
     ctx = _go(now, targets=[TargetSpec(**ES_TARGET)])
     assert [e.entity for e in ctx.errors] == ["cart"] and es_bodies == []
 
 
 def test_a_newer_approved_mapping_replaces_the_old_one(now, es_bodies):
-    from aiops.core.pipeline import TargetSpec
+    from aiops.engine.pipeline import TargetSpec
 
     _approve({"@timestamp": "ts", "transaction.duration.us": "value", "service.name": "entity"})
     _approve({"event.ingested": "ts", "span.duration.us": "value", "labels.svc": "entity"})
@@ -191,7 +191,7 @@ def test_a_newer_approved_mapping_replaces_the_old_one(now, es_bodies):
 
 
 def _spans(now, minutes=60, slow=30):
-    from aiops.core.requests import SpanIn
+    from aiops.engine.requests import SpanIn
 
     out = []
     for i in range(minutes):
@@ -213,7 +213,7 @@ def test_trace_merge_derives_call_edges_and_persists(traces):
 
 
 def test_detection_reads_the_trace_source_like_any_metric(now, traces):
-    from aiops.core.pipeline import TargetSpec
+    from aiops.engine.pipeline import TargetSpec
 
     ctx = _go(now, targets=[TargetSpec(source_type="trace", query="cart/p95_ms", entity="cart")])
     assert ctx.errors == [] and len(ctx.anomalies) == 1
@@ -221,19 +221,19 @@ def test_detection_reads_the_trace_source_like_any_metric(now, traces):
 
 @pytest.mark.parametrize("query", ["cart/latency", "cart", "nobody/p95_ms"])
 def test_bad_trace_queries_are_target_errors(now, traces, query):
-    from aiops.core.pipeline import TargetSpec
+    from aiops.engine.pipeline import TargetSpec
 
     assert _go(now, targets=[TargetSpec(source_type="trace", query=query, entity="x")]).errors
 
 
 def test_derived_topology_merges_incidents_and_explicit_empty_topology_disables_it(now, traces):
-    from aiops.core.pipeline import TargetSpec
-    from aiops.core.types import AnomalyEvent
+    from aiops.engine.pipeline import TargetSpec
+    from aiops.engine.types import AnomalyEvent
 
     targets = [TargetSpec(source_type="trace", query="cart/p95_ms", entity="cart"),
                TargetSpec(source_type="trace", query="frontend/p95_ms", entity="frontend")]
-    from aiops.core.pipeline import Pipeline, load_workflow
-    from aiops.runner import workflow_path
+    from aiops.engine.pipeline import Pipeline, load_workflow
+    from aiops.interfaces.runner import workflow_path
     from aiops.storage.hooks import StorageHooks
 
     wf = load_workflow(workflow_path("it_otel"))
@@ -248,7 +248,7 @@ def test_derived_topology_merges_incidents_and_explicit_empty_topology_disables_
 
 
 def _lot_steps(now):
-    from aiops.core.requests import LotStepIn
+    from aiops.engine.requests import LotStepIn
 
     return [LotStepIn(lot_id=f"L{n}", station=st, equipment=eq, start=now + timedelta(minutes=10 * k),
                       end=now + timedelta(minutes=10 * k + 8))
@@ -264,7 +264,7 @@ def test_lot_paths_flow_is_derived_idempotently_and_has_no_topology_field(now):
 
 
 def test_factory_groups_and_root_cause_points_to_the_upstream_tool(now, sent):
-    from aiops.core.requests import ExternalAnomalyIn, IngestAnomalies
+    from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
 
     run("admin_merge_lot_paths", request=LotPathsMerge(steps=_lot_steps(now)))
     items = [ExternalAnomalyIn(external_id="e", entity="ETCH-01", metric="rf_power", ts=now, score=5),
@@ -280,7 +280,7 @@ def test_factory_groups_and_root_cause_points_to_the_upstream_tool(now, sent):
 
 
 def test_rca_gets_topology_and_trace_evidence_without_the_caller_passing_anything(now, traces, sent):
-    from aiops.core.requests import ExternalAnomalyIn, IngestAnomalies
+    from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
 
     items = [ExternalAnomalyIn(external_id="f", entity="frontend", metric="latency", ts=now - timedelta(minutes=29), score=3),
              ExternalAnomalyIn(external_id="c", entity="cart", metric="latency", ts=now - timedelta(minutes=30), score=6)]

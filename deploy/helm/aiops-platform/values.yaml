@@ -27,7 +27,7 @@ devSecretEnv: {}
 tasks:
   enabled: true
   schedule: "*/5 * * * *"
-  # 要跑哪條管線：aiops/workflows/<名稱>.yaml（it_otel、it_apm、factory、metrics_only）
+  # 要跑哪條管線：aiops/pipelines/<子資料夾>/<名稱>.yaml（it_otel、it_apm、factory、metrics_only）
   workflow: metrics_only
   resources:
     requests: {cpu: 100m, memory: 256Mi}

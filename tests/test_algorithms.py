@@ -6,19 +6,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aiops.core.context import PeerGroup, PipelineContext, Target
-from aiops.core.errors import BadRequest, WorkflowError
-from aiops.core.pipeline import Pipeline, load_workflow
-from aiops.core.registry import OperatorRegistry
-from aiops.core.types import AnomalyEvent
-from aiops.datasource_specs.base import InvalidQueryError
-from aiops.datasource_specs.elasticsearch import ElasticsearchSpec
-from aiops.datasource_specs.mock import _seasonal
-from aiops.datasource_specs.prometheus import PrometheusSpec
-from aiops.operators.detectors.base import DetectorOperator, pack_arrays, unpack_arrays
-from aiops.operators.detectors.ensemble import EnsembleOperator
-from aiops.operators.fetch import FetchOperator, fetch_target_frame
-from aiops.runner import run_context
+from aiops.engine.context import PeerGroup, PipelineContext, Target
+from aiops.engine.errors import BadRequest, WorkflowError
+from aiops.engine.pipeline import Pipeline, load_workflow
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.types import AnomalyEvent
+from aiops.sources.base import InvalidQueryError
+from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.mock import _seasonal
+from aiops.sources.prometheus import PrometheusSpec
+from aiops.stages.detectors.base import DetectorOperator, pack_arrays, unpack_arrays
+from aiops.stages.ensemble.ensemble import EnsembleOperator
+from aiops.stages.ingestion.fetch import FetchOperator, fetch_target_frame
+from aiops.interfaces.runner import run_context
 from aiops.storage import crud
 from aiops.storage.models import AnomalyRow, DetectorModelRow
 
@@ -107,7 +107,7 @@ targets:
 
 
 def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
-    from aiops.runner import workflow_path
+    from aiops.interfaces.runner import workflow_path
 
     wf = load_workflow(workflow_path("it_otel"))
     nodes = {n.name: n for n in wf.nodes}
@@ -118,7 +118,7 @@ def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
 @pytest.mark.parametrize("name", ["it_otel", "factory"])
 def test_default_detection_is_a_majority_vote_of_three_detectors(name):
     """真實資料回放：多數決比聯集少 88% 的單點誤報。it_otel 與 factory 預設都是這個組合。"""
-    from aiops.runner import workflow_path
+    from aiops.interfaces.runner import workflow_path
 
     wf = load_workflow(workflow_path(name))
     ops = [n.operator for n in wf.nodes]

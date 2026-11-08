@@ -7,12 +7,12 @@ from aiops.storage.repository import ActiveConfigs, DetectorModels, Proposals
 
 T0 = datetime(2026, 11, 8, 0, 0)
 
-from aiops.core.context import PipelineContext
-from aiops.core.errors import InfrastructureError, NotFound
-from aiops.core.pipeline import NodeSpec, Pipeline, load_workflow
-from aiops.core.registry import OperatorRegistry
-from aiops.operators.base import BaseOperator
-from aiops.runner import workflow_path
+from aiops.engine.context import PipelineContext
+from aiops.engine.errors import InfrastructureError, NotFound
+from aiops.engine.pipeline import NodeSpec, Pipeline, load_workflow
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.operator import BaseOperator
+from aiops.interfaces.runner import workflow_path
 from aiops.storage.hooks import StorageHooks
 
 
@@ -97,7 +97,7 @@ def test_update_for_a_row_that_does_not_exist_is_a_conflict_not_an_insert():
 
 
 def test_pipeline_rerun_after_training_bumps_the_version_only_when_it_retrains(now):
-    from aiops.runner import run_context
+    from aiops.interfaces.runner import run_context
 
     run_context("metrics_only", now=now, strict=False)
     row = DetectorModels.get("metrics_only", "cpu", "cpu", "detector.zscore") or next(iter(_all_models()), None)
@@ -120,7 +120,7 @@ def test_concurrent_first_training_in_the_pipeline_logs_a_conflict_and_keeps_the
                                 T0, T0, 1, expected_version=0, node="detect")  # 另一個 worker 在這個 worker 寫入前先寫了
 
     monkeypatch.setattr(hooks.StorageHooks, "load_target", load_then_other_worker_wins)
-    from aiops.runner import run_context
+    from aiops.interfaces.runner import run_context
 
     ctx = run_context("metrics_only", now=now, strict=False)
     assert any("conflict-kept-newer" in line for line in ctx.audit)
@@ -131,9 +131,9 @@ def test_concurrent_first_training_in_the_pipeline_logs_a_conflict_and_keeps_the
 
 
 def test_concurrent_approvals_only_one_wins(now):
-    from aiops.core.errors import Conflict
-    from aiops.core.requests import ProposalApprove, ProposalBacktest, ProposalCreate
-    from aiops.runner import run
+    from aiops.engine.errors import Conflict
+    from aiops.engine.requests import ProposalApprove, ProposalBacktest, ProposalCreate
+    from aiops.interfaces.runner import run
 
     def propose(threshold):
         pid = run("admin_proposal_create", request=ProposalCreate(

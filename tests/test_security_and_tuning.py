@@ -4,23 +4,23 @@ import sys
 
 import pytest
 
-from aiops import runner
-from aiops.core.context import PipelineContext
-from aiops.core.errors import BadRequest
-from aiops.core.params import ANY, deep_merge, pick_most_specific
-from aiops.core.pipeline import NodeSpec, Pipeline, load_workflow
-from aiops.core.requests import (
+from aiops.interfaces import runner
+from aiops.engine.context import PipelineContext
+from aiops.engine.errors import BadRequest
+from aiops.engine.params import ANY, deep_merge, pick_most_specific
+from aiops.engine.pipeline import NodeSpec, Pipeline, load_workflow
+from aiops.engine.requests import (
     FeedbackPropose,
     FeedbackSubmit,
     ProposalApprove,
     ProposalBacktest,
     ProposalCreate,
 )
-from aiops.operators.detectors.chronic import ChronicDetector
-from aiops.operators.llm import registry
-from aiops.operators.llm.base import BaseLLM
-from aiops.operators.llm.providers import build_llm
-from aiops.runner import run, run_context, workflow_path
+from aiops.stages.detectors.chronic import ChronicDetector
+from aiops.stages.enrichment import registry
+from aiops.stages.enrichment.base import BaseLLM
+from aiops.stages.enrichment.providers import build_llm
+from aiops.interfaces.runner import run, run_context, workflow_path
 from aiops.storage import crud
 from aiops.storage.hooks import StorageHooks
 from aiops.storage.models import AnomalyRow
@@ -91,7 +91,7 @@ def test_cli_may_load_its_own_file_but_the_api_path_may_not(tmp_path, now):
     with pytest.raises(BadRequest):
         workflow_path(str(custom))  # 預設（API 用的）不接受檔案路徑
     assert workflow_path(str(custom), allow_file=True) == custom
-    from aiops.tasks.__main__ import run_once
+    from aiops.interfaces.cli.__main__ import run_once
 
     assert run_once(str(custom), now) == 0
 
@@ -134,7 +134,7 @@ def test_anomaly_event_roundtrip_keeps_lineage(now):
     ctx = run_context("metrics_only", now=now, strict=False)
     event = ctx.incidents[0].events[0]
     assert event.detector == ZSCORE and event.detector_node == "detect"
-    from aiops.core.types import AnomalyEvent
+    from aiops.engine.types import AnomalyEvent
 
     again = AnomalyEvent.from_dict(event.to_dict())
     assert (again.detector, again.detector_node) == (ZSCORE, "detect")
@@ -340,22 +340,22 @@ def test_a_new_provider_needs_only_the_decorator(monkeypatch):
 
 
 def test_modules_dropped_into_the_folder_are_discovered(tmp_path, monkeypatch):
-    import aiops.operators.llm as package
+    import aiops.stages.enrichment as package
 
     (tmp_path / "zzz_provider.py").write_text(
-        "from aiops.operators.llm.registry import register\n"
+        "from aiops.stages.enrichment.registry import register\n"
         "@register('zzz', requires_model=False)\n"
         "def _zzz(model, base_url, api_key):\n    return None\n", encoding="utf-8")
     monkeypatch.setattr(package, "__path__", [*package.__path__, str(tmp_path)])
     monkeypatch.setattr(registry, "_ENTRIES", dict(registry._ENTRIES))
     monkeypatch.setattr(registry, "_scanned", False)
-    monkeypatch.delitem(sys.modules, "aiops.operators.llm.zzz_provider", raising=False)
+    monkeypatch.delitem(sys.modules, "aiops.stages.enrichment.zzz_provider", raising=False)
     assert "zzz" in registry.names()
-    monkeypatch.delitem(sys.modules, "aiops.operators.llm.zzz_provider", raising=False)
+    monkeypatch.delitem(sys.modules, "aiops.stages.enrichment.zzz_provider", raising=False)
 
 
 def test_unknown_provider_error_lists_the_available_ones():
-    from aiops.operators.llm.base import LLMError
+    from aiops.stages.enrichment.base import LLMError
 
     with pytest.raises(LLMError, match="noop"):
         build_llm("mystery", "m")

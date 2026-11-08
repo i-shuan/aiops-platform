@@ -1,4 +1,4 @@
-"""引擎的載入與寫入點（實作 core.pipeline.Hooks）。
+"""引擎的載入與寫入點（實作 engine.pipeline.Hooks）。
 
 - 載入：Pipeline 跑之前，把「要先存起來、之後被讀進流程」的輸入放進 ctx（靜音、冷卻紀錄、欄位對照、基準線、拓撲…）
 - 寫入：Pipeline 跑完，把最終結果寫進資料庫（異常、事件群、通知紀錄、審計、新訓練的基準線）
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from aiops.core.context import (
+from aiops.engine.context import (
     DetectorState,
     KnowledgeCase,
     LotEdge,
@@ -18,9 +18,9 @@ from aiops.core.context import (
     Silence,
     TraceRow,
 )
-from aiops.core.params import pick_most_specific
-from aiops.core.topology import lot_edges_from_paths
-from aiops.core.types import AnomalyEvent, Incident, as_utc
+from aiops.engine.params import pick_most_specific
+from aiops.engine.topology import lot_edges_from_paths
+from aiops.engine.types import AnomalyEvent, Incident, as_utc
 from aiops.storage.repository import (
     ActiveConfigs,
     Anomalies,

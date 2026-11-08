@@ -1,4 +1,4 @@
-# aiops-platform：同一個映像檔跑 API（預設）與排程（python -m aiops.tasks ...）
+# aiops-platform：同一個映像檔跑 API（預設）與排程（python -m aiops.interfaces.cli ...）
 FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -22,4 +22,4 @@ USER 10001
 ENV AIOPS_DATABASE_URL=sqlite:////data/aiops.db
 EXPOSE 8000
 
-CMD ["uvicorn", "aiops.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "aiops.interfaces.app:app", "--host", "0.0.0.0", "--port", "8000"]

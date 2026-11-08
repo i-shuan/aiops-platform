@@ -12,21 +12,23 @@
 
 | 層次 | 所在位置 | 職責 | 嚴格禁止事項 |
 | :--- | :--- | :--- | :--- |
-| **資料流載體** | `core/context.py` | 貫穿整條 Pipeline 的強型別 `PipelineContext` | 嚴禁在節點間傳遞鬆散無型別的 `dict` |
-| **管線引擎** | `core/pipeline.py` | 讀取工作定義，按序實例化算子並調用 `.execute(ctx)` | 嚴禁在引擎內 hardcode 具體算子邏輯 |
-| **算子註冊** | `core/registry.py` | 算子註冊中心 (`OperatorRegistry`)，負責動態發現與驗證 | — |
-| **可抽換算子** | `operators/*` | 業務零件（Detector、Grouper、Suppressor、RCA、LLM、Notifier） | 嚴禁 import 具體資料表 ORM；嚴禁碰外網（LLM 與 Notifier 除外） |
-| **外部源適配** | `datasource_specs/*` | 外部資料庫語法轉換與連線（Prometheus, ES, OTel），輸出 DataFrame | 嚴禁 import `models` 或 `operators` |
+| **資料流載體** | `engine/context.py` | 貫穿整條 Pipeline 的強型別 `PipelineContext` | 嚴禁在節點間傳遞鬆散無型別的 `dict` |
+| **管線引擎** | `engine/pipeline.py` | 讀取工作定義，按序實例化算子並調用 `.execute(ctx)` | 嚴禁在引擎內 hardcode 具體算子邏輯 |
+| **算子註冊** | `engine/registry.py` | 算子註冊中心 (`OperatorRegistry`)，負責動態發現與驗證 | — |
+| **管線算子** | `stages/*` | 依執行順序分段：ingestion → detectors → ensemble → grouping → scoring → suppression → rca → enrichment（LLM）→ notification | 嚴禁 import 具體資料表 ORM 與 `storage`；嚴禁碰外網（`enrichment/`、`notification/notifiers.py`、`notification/transport.py` 除外；只有 `ingestion/fetch.py` 能用 `sources`） |
+| **控制面** | `control_plane/*` | 手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） | 唯一可以 import `storage` 的算子（目前都只透過 `storage/repository.py`）；也可以連外 |
+| **外部源適配** | `sources/*`（查詢語法解析在 `sources/query/`） | 外部資料庫語法轉換與連線（Prometheus, ES, OTel），輸出 DataFrame | 嚴禁 import `models`、`stages`、`control_plane` |
 | **持久化層** | `storage/*` | 資料庫模型定義（SQLAlchemy）與 Repository | 嚴禁業務判斷邏輯 |
-| **排程入口** | `tasks/*` | 呼叫 Pipeline 執行（支援 K8s CronJob 或定時 Loop） | 嚴禁直接在排程中操作底層運算 |
-| **API 接口** | `api/*` | 外部查詢與手動觸發，掛載 Token 驗證 | 零業務邏輯（嚴禁 `if / for / try`），純調度 Pipeline 或查詢 Storage |
+| **管線 YAML** | `pipelines/*` | `detection/`（偵測告警）、`rca/`（RCA 診斷）、`control/`（`admin_*` 手動動作）；以名稱載入，名稱全域唯一 | 嚴禁在 YAML 以外的地方寫死流程 |
+| **排程入口** | `interfaces/cli/*` | 呼叫 Pipeline 執行（支援 K8s CronJob 或定時 Loop） | 嚴禁直接在排程中操作底層運算 |
+| **API 接口** | `interfaces/api/*`（`interfaces/app.py` 建立 app，`interfaces/bootstrap/` 掛驗證與錯誤處理，`interfaces/runner.py` 是組裝點） | 外部查詢與手動觸發，掛載 Token 驗證 | 零業務邏輯（嚴禁 `if / for / try`），純調度 Pipeline 或查詢 Storage |
 
 ### 🚫 架構自動化防禦（違規將導致 `test_architecture.py` 報錯）
 1. **嚴禁內部跨節點偷渡**：任何算子內部嚴禁出現 `ReadDAO` 去翻其他模組的表。所有上游資訊必須由 `ctx` 取得。
-2. **算子獨立性**：`operators/detectors/` 各演算法之間嚴禁互相 import。
-3. **可選能力無害化（LLM Degradation）**：`operators/llm/` 必須提供 `noop` 實作。未配置金鑰時管線必須平滑降級至模板，嚴禁阻斷 Pipeline。
+2. **算子獨立性**：`stages/detectors/` 各演算法之間嚴禁互相 import。
+3. **可選能力無害化（LLM Degradation）**：`stages/enrichment/` 必須提供 `noop` 實作。未配置金鑰時管線必須平滑降級至模板，嚴禁阻斷 Pipeline。
 4. **模型序列化安全**：整個 `aiops/` 嚴禁 import `pickle`／`joblib`／`dill`／`cloudpickle`／`shelve`／`marshal`，也不准出現 `allow_pickle=True`。非 JSON 的模型本體只能用 npz（`pack_arrays`／`unpack_arrays`）。
-5. **RCA 不寫死**：報告段落是 `rca.section.*`、根因演算法是 `rca.root_cause.*`，都走 `OperatorRegistry`；`operators/rca/report.py` 不得 import 具體段落或演算法。
+5. **RCA 不寫死**：報告段落是 `rca.section.*`、根因演算法是 `rca.root_cause.*`，都走 `OperatorRegistry`；`stages/rca/report.py` 不得 import 具體段落或演算法。
 
 ---
 
@@ -36,7 +38,7 @@
 
 ```python
 from abc import ABC, abstractmethod
-from aiops.core.context import PipelineContext
+from aiops.engine.context import PipelineContext
 
 class BaseOperator(ABC):
     @abstractmethod
@@ -56,10 +58,10 @@ class BaseOperator(ABC):
    * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only`、`detector.ensemble` 這類不學習的算子不繼承它。
    * `AnomalyEvent` 是 frozen：建立後不准改分數或偵測器名稱。要合併多個偵測器的判斷，用 `detector.ensemble` 產生新的裁決事件。
  * **RCA 根因演算法（`rca.root_cause.*`）**：
-   * 繼承 `operators/rca/base.RootCauseOperator`，只寫 `rank(incident, ctx) -> list[RootCandidate]`（由可能到不可能排好；資料不足回空清單，段落會略過）。
+   * 繼承 `stages/rca/base.RootCauseOperator`，只寫 `rank(incident, ctx) -> list[RootCandidate]`（由可能到不可能排好；資料不足回空清單，段落會略過）。
    * 需要原始時序時，在它前面放 `ingestion.incident_series`（讀 `ctx.rca_series`），不准自己連資料源。
  * **RCA 報告段落（`rca.section.*`）**：
-   * 繼承 `operators/rca/base.RcaSection`，寫 `applies()` 與 `build()`；資料不夠就讓 `applies()` 回 False（記進 `rca_skipped`），不准輸出空殼。
+   * 繼承 `stages/rca/base.RcaSection`，寫 `applies()` 與 `build()`；資料不夠就讓 `applies()` 回 False（記進 `rca_skipped`），不准輸出空殼。
  * **Grouper（事件收斂）**：
    * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
  * **Suppressor（告警抑制）**：
@@ -72,14 +74,14 @@ class BaseOperator(ABC):
 
 ## 3. 標準算子實作範例
 
-### 範例一：可自由抽換的 MAD 檢測器 (`operators/detectors/mad.py`)
+### 範例一：可自由抽換的 MAD 檢測器 (`stages/detectors/mad.py`)
 
 ```python
 import numpy as np
 import pandas as pd
-from aiops.core.registry import OperatorRegistry
-from aiops.operators.base import BaseOperator
-from aiops.core.context import PipelineContext, AnomalyResult
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.operator import BaseOperator
+from aiops.engine.context import PipelineContext, AnomalyResult
 
 @OperatorRegistry.register("detector.mad")
 class MADDetector(BaseOperator):
@@ -110,12 +112,12 @@ class MADDetector(BaseOperator):
         return ctx
 ```
 
-### 範例二：可自由外接或中斷的 LLM 算子 (`operators/llm/summarizer.py`)
+### 範例二：可自由外接或中斷的 LLM 算子 (`stages/enrichment/summarizer.py`)
 
 ```python
-from aiops.core.registry import OperatorRegistry
-from aiops.operators.base import BaseOperator
-from aiops.core.context import PipelineContext
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.operator import BaseOperator
+from aiops.engine.context import PipelineContext
 
 @OperatorRegistry.register("enrichment.llm_summary")
 class LLMSummarizer(BaseOperator):
@@ -183,9 +185,9 @@ nodes:
 
 **節點失敗怎麼處理**：預設任何節點出錯都讓這一輪（或這條序列）失敗。旁路裝飾節點（LLM 摘要等）加上 `optional: true`，失敗時只記進 `errors`（實體名為 `node:<節點名>`）並跳過，後面的節點與最終寫入照常執行。`InfrastructureError`（DB、資料源連不上）不受 `optional` 影響，一律讓整輪失敗。**不要把 fetch、detector、group、suppress、payload、notify 標成 optional。**
 
-**參數優先序**：演算法預設值 ← 後台核准的調參 ← YAML `params`，逐鍵合併（`core/params.deep_merge`）；YAML 寫了的鍵鎖定、不被調參覆蓋。調參分層 (偵測器, 管線, 實體)，取最具體的一層（管線×實體 > 管線 > 實體 > 全域）。
+**參數優先序**：演算法預設值 ← 後台核准的調參 ← YAML `params`，逐鍵合併（`engine/params.deep_merge`）；YAML 寫了的鍵鎖定、不被調參覆蓋。調參分層 (偵測器, 管線, 實體)，取最具體的一層（管線×實體 > 管線 > 實體 > 全域）。
 
-**workflow 只能用名稱**：API 的 `workflow` 欄位只接受 `[A-Za-z0-9_-]+` 的內建名稱（`runner.workflow_path`），絕不接受路徑；只有排程 CLI 可以用 `allow_file=True` 載入自己的 YAML 檔。
+**workflow 只能用名稱**：API 的 `workflow` 欄位只接受 `[A-Za-z0-9_-]+` 的內建名稱（`interfaces/runner.workflow_path`，在 `pipelines/` 所有子資料夾依名稱找檔，名稱重複直接報錯），絕不接受路徑；只有排程 CLI 可以用 `allow_file=True` 載入自己的 YAML 檔。
 
 **並發安全**：偵測器基準線（`detector_models`）與現行參數（`active_detector_configs`）用 `version` 欄位做樂觀鎖，寫入必須帶讀取當時的版本；版本已被別人推進就不覆蓋（基準線記在 audit，調參核准回 409 並把提案標成 stale）。
 
@@ -194,23 +196,25 @@ nodes:
 ## 5. 檔案歸屬決策樹 (Where Does New Code Go?)
 
  * **要寫新的異常檢測演算法（如 Isolation Forest）？**
-   👉 寫入 `aiops/operators/detectors/<name>.py`，掛上 `@OperatorRegistry.register("detector.<name>")`。
+   👉 寫入 `aiops/stages/detectors/<name>.py`，掛上 `@OperatorRegistry.register("detector.<name>")`。
  * **要新增 LLM 供應商（如 Mistral、內部私有模型）？**
-   👉 在 `aiops/operators/llm/` 放一個檔案，用 `@register("<name>")`（`operators/llm/registry.py`）登記 factory，啟動時自動掃描載入；不用改 `providers.py`、也不用改引擎。
+   👉 在 `aiops/stages/enrichment/` 放一個檔案，用 `@register("<name>")`（`stages/enrichment/registry.py`）登記 factory，啟動時自動掃描載入；不用改 `providers.py`、也不用改引擎。
  * **要新增監控指標或日誌連線源（如 InfluxDB）？**
-   👉 寫入 `aiops/datasource_specs/<name>.py`，繼承 `BaseDataSourceSpec`，輸出轉成標準 DataFrame。
+   👉 寫入 `aiops/sources/<name>.py`，繼承 `BaseDataSourceSpec`，輸出轉成標準 DataFrame。
  * **要擴充新的收斂邏輯（如針對特定微服務呼叫鏈、同機櫃）？**
-   👉 寫入 `aiops/operators/alerts/group.py`（或同目錄新檔案），實作 `BaseOperator`、用 `core/types.merge_incidents` 給判斷函式；機櫃、網段這類資訊放在 target 的 `attrs`。
+   👉 寫入 `aiops/stages/grouping/group.py`（或同目錄新檔案），實作 `BaseOperator`、用 `engine/types.merge_incidents` 給判斷函式；機櫃、網段這類資訊放在 target 的 `attrs`。
  * **要換 RCA 根因演算法（如 Random Walk、因果推論）？**
-   👉 寫入 `aiops/operators/rca/algorithms/<name>.py`，繼承 `RootCauseOperator`、註冊成 `rca.root_cause.<name>`，在 `rca_report*.yaml` 換掉 `root_cause` 節點。
+   👉 寫入 `aiops/stages/rca/algorithms/<name>.py`，繼承 `RootCauseOperator`、註冊成 `rca.root_cause.<name>`，在 `rca_report*.yaml` 換掉 `root_cause` 節點。
  * **要新增 RCA 報告段落？**
-   👉 寫入 `aiops/operators/rca/sections/<name>.py`，繼承 `RcaSection`、註冊成 `rca.section.<key>`，加進 `rca.report` 的 `sections` 清單。
+   👉 寫入 `aiops/stages/rca/sections/<name>.py`，繼承 `RcaSection`、註冊成 `rca.section.<key>`，加進 `rca.report` 的 `sections` 清單。
  * **要讓偵測器動態找同儕（同 service 的所有 pod）？**
    👉 不寫程式：target 加 `peer_group: {query, by}`。資料源要支援多序列分組就實作 `BaseDataSourceSpec.fetch_group`。
+ * **要新增手動動作（核准、匯入、查詢這類 `admin.*`）？**
+   👉 學習閉環相關寫入 `aiops/control_plane/learning/`，其他維運動作寫入 `aiops/control_plane/operations/`；註冊成 `admin.<name>`，在 `aiops/pipelines/control/admin_<name>.yaml` 宣告，API 端點在 `aiops/interfaces/api/` 只呼叫 `run("admin_<name>")`。
  * **要新增資料庫紀錄欄位？**
    👉 寫入 `aiops/storage/models.py`，只能透過 `aiops/storage/repository.py` 操作讀寫；並在 `migrations/postgres/` 補一支可重複執行的 SQL（沒有 Alembic，既有 PostgreSQL 靠它升級）。
  * **要調整執行步驟與算法超參數？**
-   👉 寫入 `aiops/workflows/<scene>.yaml`，完全不改動任何 Python 程式碼。
+   👉 寫入 `aiops/pipelines/<detection|rca|control>/<scene>.yaml`（名稱在 `pipelines/` 內必須唯一），完全不改動任何 Python 程式碼。
 
 ---
 

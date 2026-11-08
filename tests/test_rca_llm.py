@@ -5,14 +5,14 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from aiops.core.errors import InfrastructureError, NotFound, WorkflowError
-from aiops.core.pipeline import Pipeline, load_workflow
-from aiops.core.requests import ExternalAnomalyIn, IngestAnomalies
-from aiops.core.types import Notification
-from aiops.operators.llm.base import BaseLLM, LLMError, parse_json_reply
-from aiops.operators.llm.providers import AnthropicLLM, OpenAICompatibleLLM, build_llm
-from aiops.operators.notifiers.transport import AlertmanagerTransport
-from aiops.runner import run, run_context, workflow_path
+from aiops.engine.errors import InfrastructureError, NotFound, WorkflowError
+from aiops.engine.pipeline import Pipeline, load_workflow
+from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
+from aiops.engine.types import Notification
+from aiops.stages.enrichment.base import BaseLLM, LLMError, parse_json_reply
+from aiops.stages.enrichment.providers import AnthropicLLM, OpenAICompatibleLLM, build_llm
+from aiops.stages.notification.transport import AlertmanagerTransport
+from aiops.interfaces.runner import run, run_context, workflow_path
 from aiops.storage.hooks import StorageHooks
 
 
@@ -21,7 +21,7 @@ def _incident(now, topology=None, tag="x"):
     items = [ExternalAnomalyIn(external_id=f"{tag}1", entity="svc-a", metric="latency", ts=now - timedelta(minutes=1), score=3),
              ExternalAnomalyIn(external_id=f"{tag}2", entity="svc-b", metric="latency", ts=now - timedelta(minutes=2), score=6)]
     run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="it_otel", source="x", anomalies=items))
-    from aiops.core.pipeline import Pipeline as P
+    from aiops.engine.pipeline import Pipeline as P
 
     wf = load_workflow(workflow_path("it_otel"))
     wf.topology = topology if topology is not None else [("svc-a", "svc-b")]
@@ -84,11 +84,11 @@ class FakeLLM(BaseLLM):
 
 
 def _use(monkeypatch, llm):
-    monkeypatch.setattr("aiops.operators.llm.summarizer.build_llm", lambda *a, **k: llm)
+    monkeypatch.setattr("aiops.stages.enrichment.summarizer.build_llm", lambda *a, **k: llm)
 
 
 def test_noop_never_touches_the_network_and_uses_the_template(now, monkeypatch):
-    monkeypatch.setattr("aiops.operators.llm.summarizer.build_llm",
+    monkeypatch.setattr("aiops.stages.enrichment.summarizer.build_llm",
                         lambda *a, **k: pytest.fail("noop 不該建立 LLM"))
     monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("noop 不該發出請求"))
     n = _rca(_incident(now), now=now)["narrative"]

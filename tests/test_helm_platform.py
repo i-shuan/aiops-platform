@@ -55,7 +55,7 @@ def test_cronjob_runs_once_per_tick_without_overlap():
     cron = _render("existingSecret=s")["CronJob"][0]
     assert cron["spec"]["concurrencyPolicy"] == "Forbid"
     _, tasks = _containers(_render("existingSecret=s"))
-    assert tasks["args"] == ["python", "-m", "aiops.tasks", "run-once", "-w", "metrics_only"]
+    assert tasks["args"] == ["python", "-m", "aiops.interfaces.cli", "run-once", "-w", "metrics_only"]
 
 
 def test_dev_postgres_wires_database_url_automatically():

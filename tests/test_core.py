@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from aiops.core.context import PipelineContext
-from aiops.core.errors import InfrastructureError, NotFound, WorkflowError
-from aiops.core.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow, load_workflow
-from aiops.core.registry import OperatorRegistry
-from aiops.operators.base import BaseOperator
+from aiops.engine.context import PipelineContext
+from aiops.engine.errors import InfrastructureError, NotFound, WorkflowError
+from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow, load_workflow
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.operator import BaseOperator
 
 NOW = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
-WORKFLOWS = Path(__file__).resolve().parents[1] / "aiops" / "workflows"
+WORKFLOWS = Path(__file__).resolve().parents[1] / "aiops" / "pipelines"
 
 
 def _wf(*nodes: tuple[str, str, dict], targets=("a", "b")):
@@ -49,10 +49,11 @@ def test_duplicate_node_names_rejected():
 
 
 def test_every_shipped_workflow_loads_and_builds():
-    names = sorted(p.stem for p in WORKFLOWS.glob("*.yaml"))
+    paths = {p.stem: p for p in WORKFLOWS.rglob("*.yaml")}
+    names = sorted(paths)
     assert len(names) >= 20
     for name in names:
-        Pipeline(load_workflow(WORKFLOWS / f"{name}.yaml"))
+        Pipeline(load_workflow(paths[name]))
 
 
 def test_bad_workflow_file_is_a_workflow_error(tmp_path):

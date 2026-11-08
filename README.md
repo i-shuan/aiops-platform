@@ -56,7 +56,7 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 
   抓取(fetch) → 偵測(detector.*) → 只留新異常 → 心跳／恢復 → 收斂 → 計分 → 抑制 → 通知內容 → 通知(notifier.*) → 寫入
        ▲                                                                                              │
-  datasource_specs                                                           只有「最終結果」進資料庫（Incident、通知紀錄、模型狀態）
+  sources                                                                    只有「最終結果」進資料庫（Incident、通知紀錄、模型狀態）
   (Prometheus／VM／ES)                                    節點之間不透過資料庫傳資料；管線前後由 storage/hooks.py 一次載入／一次寫入
                                                                              通知 ──► aiops-alertmanager ──► Slack／Teams／PagerDuty
                                                                                   └──► Grafana（只顯示，不發通知）
@@ -64,18 +64,13 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 
 | 目錄 | 是什麼 |
 |---|---|
-| `aiops/core/` | `PipelineContext`（強型別）、Pipeline 引擎、算子註冊中心、錯誤型別、請求模型 |
-| `aiops/operators/` | 可抽換算子：`detectors`、`alerts`（收斂／計分／抑制／恢復）、`rca`、`llm`（含 `noop`）、`notifiers`、`fetch`、`admin`（手動動作） |
-| `aiops/workflows/` | 管線 YAML：`it_otel`、`it_apm`、`factory`、`metrics_only`、`rca_report`、`rca_report_correlation` 與各 `admin_*` 手動動作。調整流程只改這裡 |
+| `aiops/engine/` | 底座：`PipelineContext`（強型別）、Pipeline 引擎、算子註冊中心、`BaseOperator`、錯誤型別、請求模型 |
+| `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`）、`rca/`（`rca_report`、`rca_report_correlation`）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
+| `aiops/stages/` | 管線算子，依執行順序分段：`ingestion` → `detectors` → `ensemble` → `grouping` → `scoring` → `suppression` → `rca` → `enrichment`（LLM，含 `noop`）→ `notification` |
+| `aiops/control_plane/` | 控制面手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） |
+| `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch`；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
 | `aiops/storage/` | SQLAlchemy 資料表、repository、`hooks.py`（管線前後的載入／寫入） |
-| `aiops/api/` | 薄薄一層 HTTP：把請求交給 `aiops/runner.py`，不含業務邏輯 |
-| `aiops/datasource_specs/` | 資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch` |
-| `aiops/metric_query/` | 查詢語法解析與時間窗對齊（不連線） |
-| `aiops/tasks/` | 排程入口（`python -m aiops.tasks`），只負責呼叫 Pipeline |
-| `aiops/security/` | API token 驗證 |
-| `aiops/infrastructure/` | 故障看守（本機日誌、備援 webhook） |
-| `aiops/initialization/` | 啟動時初始化：註冊算子、掛 router 與 token 驗證、錯誤轉 HTTP、等資料庫就緒 |
-| `aiops/app.py`、`aiops/runner.py` | FastAPI 入口；以及把 workflow、算子、storage 組起來的唯一組裝點 |
+| `aiops/interfaces/` | 對外介面：`api/`（薄薄一層 HTTP）、`app.py`（FastAPI 入口）、`cli/`（排程，`python -m aiops.interfaces.cli`）、`bootstrap/`（啟動初始化、token 驗證、故障看守）、`runner.py`（唯一組裝點） |
 | `tests/dev_es_key.py` | 開發輔助腳本（不是測試）：建本機用的唯讀 ES key 並寫進 `secrets.local.yaml`；檔名不是 `test_` 開頭，pytest 不會執行它 |
 | `secrets.local.example.yaml` | 本機開發金鑰範本；複製成 `secrets.local.yaml`（已被 `.gitignore` 擋住）再填值 |
 | `migrations/postgres/` | 既有 PostgreSQL 的手動升級 SQL（沒有 Alembic，可重複執行） |
@@ -86,27 +81,39 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 
 ### `aiops/` 每個檔案在做什麼
 
-依賴方向：`api` → `runner` → `core`（引擎）← `operators`（零件）；`storage` 只在管線前後被 `storage/hooks.py` 呼叫。`core` 不 import 平台任何其他層。`operators/` 裡只有 `fetch.py` 碰資料源、只有 `admin/` 碰資料庫。
+依賴方向：`interfaces`（API、CLI）→ `interfaces/runner.py` → `engine`（引擎）← `stages`、`control_plane`（算子）；`storage` 只在管線前後被 `storage/hooks.py` 呼叫。`engine` 不 import 平台任何其他層。算子裡只有 `stages/ingestion/fetch.py` 碰資料源（`sources`），只有 `control_plane/` 碰資料庫。
+
+三條業務主線各自對應：偵測告警管線 = `pipelines/detection/` + `stages/`（ingestion → notification）；RCA 診斷管線 = `pipelines/rca/` + `stages/rca/`、`stages/enrichment/`；學習閉環 = `pipelines/control/` + `control_plane/learning/`。
 
 ```
 aiops/
-├── app.py                           建立 FastAPI 應用（create_app），提供 /health
-├── runner.py                        組裝點：用名稱找 workflow（API 拒絕路徑與軟連結）、接上 StorageHooks，提供 run() / run_context()
-├── core/                            引擎與共用型別（不 import 平台任何其他層）
+├── engine/                          底座：引擎與共用型別（不 import 平台任何其他層）
 │   ├── context.py                   強型別 PipelineContext：載入的輸入、流動的資料、RCA 欄位；to_result() 組 API 回傳
 │   ├── pipeline.py                  讀 Workflow YAML、建立算子、驗證節點順序、依序執行；optional 節點與單條序列失敗隔離
 │   ├── registry.py                  OperatorRegistry：@register 登記、依名稱建立
+│   ├── operator.py                  BaseOperator 基底（scope: target／batch、node_name）
 │   ├── types.py                     AnomalyEvent（不可變）、Incident（事件群）、Notification、merge_incidents
 │   ├── requests.py                  API／手動動作的請求模型（Pydantic）
 │   ├── errors.py                    平台錯誤型別，API 層統一轉成 HTTP 狀態碼
 │   ├── params.py                    參數深度合併、調參分層挑選（管線×實體 > 管線 > 實體 > 全域）
 │   ├── topology.py                  IT 呼叫關係與工廠 Lot 流向，統一成「異常會從 A 傳到 B」的有向邊
 │   └── signature.py                 事件群特徵簽章與 Jaccard 相似度（歷史相似案例用）
-├── operators/                       可抽換零件（算子）
-│   ├── base.py                      BaseOperator 基底（scope: target／batch、node_name）
-│   ├── __init__.py                  load_all()：掃描並登記所有算子
-│   ├── fetch.py                     唯一碰資料源的算子：ingestion.fetch、ingestion.incident_series
-│   ├── detectors/                   偵測器（繼承 DetectorOperator，彼此不互相 import）
+├── pipelines/                       管線 YAML（沒有 Python，調整流程只改這裡；以名稱載入，名稱不准重複）
+│   ├── detection/                   偵測告警管線
+│   │   ├── it_otel.yaml             IT：抓指標 → 168 時段偵測 → 拓撲收斂 → 黃金訊號計分 → 抑制 → 通知
+│   │   ├── it_apm.yaml              IT：APM 產品資料，有服務拓撲與黃金訊號（偵測用 zscore，不是 168 時段）
+│   │   ├── factory.yaml             工廠：Lot 履歷收斂，沒有黃金訊號與同根因抑制
+│   │   └── metrics_only.yaml        只有時序指標，沒有 trace 與拓撲
+│   ├── rca/                         RCA 診斷管線
+│   │   ├── rca_report.yaml          針對一個事件群產生 RCA 報告（根因用拓撲）
+│   │   └── rca_report_correlation.yaml  RCA 報告（根因用時序互相關）
+│   └── control/                     控制面手動動作
+│       └── admin_*.yaml             18 個，每個手動動作一個，API 呼叫時載入
+├── stages/                          管線算子，依執行順序分段（套件名稱不能以數字開頭，順序寫在 stages/__init__.py）
+│   ├── _common.py                   共用小工具（還沒有事件群時每筆異常先自成一群）
+│   ├── ingestion/                   1. 抓資料
+│   │   └── fetch.py                 唯一碰資料源的算子：ingestion.fetch、ingestion.incident_series
+│   ├── detectors/                   2. 偵測器（繼承 DetectorOperator，彼此不互相 import）
 │   │   ├── base.py                  共同骨架：參數合併、基準線載入／保存、異常血緣、模型檔（npz）打包
 │   │   ├── zscore.py                detector.zscore：偏離訓練期平均幾個標準差
 │   │   ├── mad.py                   detector.mad：中位數與 MAD，比 zscore 耐尖峰
@@ -117,16 +124,16 @@ aiops/
 │   │   ├── shift.py                 detector.shift：相鄰兩點跳變
 │   │   ├── peer.py                  detector.peer：跟同儕中位數的殘差比（同儕可寫死或動態分群）
 │   │   ├── rules.py                 detector.rules：人訂上下限加連續 N 點，不學習
-│   │   ├── ensemble.py              detector.ensemble：多個偵測節點投票（聯集／交集／多數決／至少 N 票）
 │   │   └── new_only.py              detector.new_only：只留比最後一筆已存異常更新的，重跑不重複告警
-│   ├── alerts/                      告警處理
-│   │   ├── group.py                 事件收斂：same_entity／topology_chain／lot_path_chain
-│   │   ├── score.py                 計分：golden_signals（含黃金訊號加權）、p0_boost（牽涉 P0 加分）
-│   │   ├── suppress.py              抑制：suppress_window（靜音）／same_root_cause（同根因）／dedup（冷卻）
-│   │   ├── heartbeat.py             進行中事件群的心跳重送與結案（恢復通知）
-│   │   ├── payload.py               定嚴重度、產生通知內容（一個部門一則，路由標籤由平台決定）
-│   │   └── _common.py               共用小工具（還沒有事件群時每筆異常先自成一群）
-│   ├── rca/                         根因分析
+│   ├── ensemble/                    3. 多偵測器裁決
+│   │   └── ensemble.py              detector.ensemble：多個偵測節點投票（聯集／交集／多數決／至少 N 票）
+│   ├── grouping/                    4. 事件收斂
+│   │   └── group.py                 same_entity／topology_chain／lot_path_chain
+│   ├── scoring/                     5. 計分
+│   │   └── score.py                 golden_signals（含黃金訊號加權）、p0_boost（牽涉 P0 加分）
+│   ├── suppression/                 6. 抑制
+│   │   └── suppress.py              suppress_window（靜音）／same_root_cause（同根因）／dedup（冷卻）
+│   ├── rca/                         7. 根因分析（RCA 診斷管線）
 │   │   ├── base.py                  兩種契約：RootCauseOperator（寫 rank()）、RcaSection（寫 applies()／build()）
 │   │   ├── report.py                rca.report：依 sections 清單組裝報告，資料不足的段落略過
 │   │   ├── algorithms/              根因演算法（換節點就換演算法）
@@ -139,63 +146,60 @@ aiops/
 │   │       ├── evidence.py          Trace 佐證（錯誤率、p95）
 │   │       ├── similar_cases.py     歷史相似案例與當時的處置
 │   │       └── actions.py           規則式建議處置
-│   ├── llm/                         可選的 AI 能力（noop 永遠不連外）
+│   ├── enrichment/                  8. 可選的 AI 能力（noop 永遠不連外）
 │   │   ├── base.py                  BaseLLM 介面、LLMError、解析模型回覆成 JSON
 │   │   ├── registry.py              供應商註冊表：放一個檔案、用 @register 登記，啟動時自動掃描
 │   │   ├── providers.py             內建供應商 noop／openai（含相容端點）／anthropic，build_llm()
 │   │   ├── summarizer.py            enrichment.llm_summary：RCA 總結敘述，失敗或驗證不過就退回模板
 │   │   └── narrative.py             敘述的提示詞、模板，以及依據驗證
-│   ├── notifiers/                   通知出口
-│   │   ├── operators.py             notifier.log／alertmanager／auto（依 AIOPS_NOTIFIER 選）
-│   │   └── transport.py             實際傳輸：AlertmanagerTransport（v2 API）、LogTransport（只寫日誌）
-│   └── admin/                       手動動作（唯一可以用 storage.repository 的算子）
+│   └── notification/                9. 通知
+│       ├── payload.py               alert.notify_payload：定嚴重度、產生通知內容（一個部門一則，路由標籤由平台決定）
+│       ├── heartbeat.py             alert.heartbeat：進行中事件群的心跳重送與結案（恢復通知）
+│       ├── notifiers.py             notifier.log／alertmanager／auto（依 AIOPS_NOTIFIER 選）
+│       └── transport.py             實際傳輸：AlertmanagerTransport（v2 API）、LogTransport（只寫日誌）
+├── control_plane/                   控制面手動動作（唯一可以用 storage.repository 的算子）
+│   ├── learning/                    學習閉環
+│   │   ├── tuning.py                調參唯一收口：提案 → 回測 → 核准；回饋、漏報補錄、寫入經驗庫
+│   │   ├── tuning_rules.py          從回饋文字抽調參規則（LLM 提議、平台驗證，不過就退回固定規則）
+│   │   └── learning.py              調參成效報表、頻繁調參轉靜態規則提案
+│   └── operations/                  日常維運
 │       ├── incidents.py             事件群查詢與手動結案
 │       ├── silences.py              建立靜音／維護窗口
 │       ├── mappings.py              欄位對照審核（提交 → 核准，舊版自動作廢）
 │       ├── ingest.py                外部異常接收、trace 合成（含服務呼叫關係）、Lot 履歷合成
-│       ├── tuning.py                調參唯一收口：提案 → 回測 → 核准；回饋、漏報補錄、寫入經驗庫
-│       ├── tuning_rules.py          從回饋文字抽調參規則（LLM 提議、平台驗證，不過就退回固定規則）
-│       ├── learning.py              調參成效報表、頻繁調參轉靜態規則提案
 │       └── sources.py               檢查每個資料源有沒有設定、連不連得上
-├── workflows/                       管線 YAML（沒有 Python，調整流程只改這裡）
-│   ├── it_otel.yaml                 IT：抓指標 → 168 時段偵測 → 拓撲收斂 → 黃金訊號計分 → 抑制 → 通知
-│   ├── it_apm.yaml                  IT：APM 產品資料，有服務拓撲與黃金訊號（偵測用 zscore，不是 168 時段）
-│   ├── factory.yaml                 工廠：Lot 履歷收斂，沒有黃金訊號與同根因抑制
-│   ├── metrics_only.yaml            只有時序指標，沒有 trace 與拓撲
-│   ├── rca_report.yaml              針對一個事件群產生 RCA 報告（根因用拓撲）
-│   ├── rca_report_correlation.yaml  RCA 報告（根因用時序互相關）
-│   └── admin_*.yaml                 18 個，每個手動動作一個，API 呼叫時載入
+├── sources/                         外部資料源適配（輸出標準 DataFrame；不 import storage 與算子）
+│   ├── __init__.py                  依名稱取得資料源、逐一自我檢查
+│   ├── base.py                      資料源介面 fetch_data／fetch_group／check，以及「查詢寫錯」「沒資料」兩種錯誤
+│   ├── prometheus.py                Prometheus 與 VictoriaMetrics（query_range；支援依標籤分組的動態同儕）
+│   ├── elasticsearch.py             ES 降採樣查詢（date_histogram）轉成標準序列
+│   ├── mock.py                      開發用假資料（含 seasonal: 日週期資料與動態同儕群）
+│   ├── _http.py                     共用 HTTP：連線／認證／伺服器錯誤轉成 InfrastructureError
+│   └── query/                       查詢語法解析與時間窗對齊（不連線）
+│       ├── promql.py                PromQL 基本檢查（只擋明顯寫錯的）
+│       ├── elasticsearch.py         ES 查詢的 JSON 字串 → date_histogram search body
+│       ├── trace.py                 內部 trace 來源的「服務/欄位」語法
+│       └── window.py                時間窗對齊到 step 的整數倍（UTC）
 ├── storage/                         資料庫（節點之間不經過它，只在管線前後被 hooks.py 呼叫）
 │   ├── hooks.py                     引擎的載入與寫入點：管線前一次載入輸入、管線後一次寫入最終結果
 │   ├── models.py                    14 張表：incidents、silences、notifications、anomalies、detector_models、field_mappings、external_anomalies、trace_series、service_edges、lot_paths、tuning_proposals、feedback、active_detector_configs、incident_knowledge
 │   ├── repository.py                各表讀寫，沒有業務判斷；基準線與調參用 version 做樂觀鎖
 │   ├── crud.py                      共用存取函式（建立、更新、條件式更新、單次 IN 查詢…）
 │   └── db.py                        連線與 session（SQLite 開發／測試、PostgreSQL 正式），連不上轉成 InfrastructureError
-├── api/                             HTTP，零業務邏輯，每個 router 都要 token
-│   ├── runs.py                      POST /api/v1/runs、POST /api/v1/rca、GET /api/v1/operators
-│   ├── alerts.py                    靜音（建立、列出）、事件群查詢與結案
-│   ├── ingestion.py                 欄位對照、trace／Lot 合成、外部異常接收、資料源自我檢查
-│   └── tuning.py                    提案、回測、核准、回饋、成效報表（/metrics）、規則升級（/rules/promote）
-├── datasource_specs/                外部資料源適配（輸出標準 DataFrame）
-│   ├── __init__.py                  依名稱取得資料源、逐一自我檢查
-│   ├── base.py                      資料源介面 fetch_data／fetch_group／check，以及「查詢寫錯」「沒資料」兩種錯誤
-│   ├── prometheus.py                Prometheus 與 VictoriaMetrics（query_range；支援依標籤分組的動態同儕）
-│   ├── elasticsearch.py             ES 降採樣查詢（date_histogram）轉成標準序列
-│   ├── mock.py                      開發用假資料（含 seasonal: 日週期資料與動態同儕群）
-│   └── _http.py                     共用 HTTP：連線／認證／伺服器錯誤轉成 InfrastructureError
-├── metric_query/                    查詢語法解析與時間窗對齊（不連線）
-│   ├── promql.py                    PromQL 基本檢查（只擋明顯寫錯的）
-│   ├── elasticsearch.py             ES 查詢的 JSON 字串 → date_histogram search body
-│   ├── trace.py                     內部 trace 來源的「服務/欄位」語法
-│   └── window.py                    時間窗對齊到 step 的整數倍（UTC）
-├── tasks/                           排程入口
-│   └── __main__.py                  CLI：run-once、loop、source-check（只呼叫 Pipeline，不做運算）
-├── security/                        認證
-│   └── auth.py                      Bearer token 驗證；沒設 token 一律拒絕；AIOPS_AUTH_DISABLED 只限本機開發
-├── infrastructure/                  故障看守
-│   └── fallback.py                  資料庫掛掉時的備援：寫本機日誌、打備援 webhook
-└── initialization/                  啟動時初始化
-    └── __init__.py                  登記算子、自動掃描 api/ 掛 router 與 token、錯誤轉 HTTP、等資料庫就緒
+└── interfaces/                      對外介面
+    ├── app.py                       建立 FastAPI 應用（create_app），提供 /health
+    ├── runner.py                    組裝點：load_all() 掃描所有算子；用名稱在 pipelines/ 找 workflow（拒絕路徑、軟連結、重複名稱）、接上 StorageHooks，提供 run() / run_context()
+    ├── api/                         HTTP，零業務邏輯，每個 router 都要 token
+    │   ├── runs.py                  POST /api/v1/runs、POST /api/v1/rca、GET /api/v1/operators
+    │   ├── alerts.py                靜音（建立、列出）、事件群查詢與結案
+    │   ├── ingestion.py             欄位對照、trace／Lot 合成、外部異常接收、資料源自我檢查
+    │   └── tuning.py                提案、回測、核准、回饋、成效報表（/metrics）、規則升級（/rules/promote）
+    ├── cli/                         排程入口
+    │   └── __main__.py              CLI：run-once、loop、source-check（只呼叫 Pipeline，不做運算）
+    └── bootstrap/                   啟動組裝
+        ├── __init__.py              登記算子、自動掃描 api/ 掛 router 與 token、錯誤轉 HTTP、等資料庫就緒
+        ├── auth.py                  Bearer token 驗證；沒設 token 一律拒絕；AIOPS_AUTH_DISABLED 只限本機開發
+        └── fallback.py              故障看守：資料庫掛掉時寫本機日誌、打備援 webhook
 ```
 
 ## 本機開發
@@ -227,13 +231,13 @@ macOS／Linux 把 `.venv/Scripts/python` 換成 `.venv/bin/python`。
 API 一律要 token。本機開發可以先關掉驗證：
 
 ```bash
-AIOPS_AUTH_DISABLED=true .venv/Scripts/python -m uvicorn aiops.app:app --reload
+AIOPS_AUTH_DISABLED=true .venv/Scripts/python -m uvicorn aiops.interfaces.app:app --reload
 ```
 
 或設定一組開發用 token：
 
 ```bash
-AIOPS_API_TOKEN=dev-only-token .venv/Scripts/python -m uvicorn aiops.app:app --reload
+AIOPS_API_TOKEN=dev-only-token .venv/Scripts/python -m uvicorn aiops.interfaces.app:app --reload
 ```
 
 PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後到 http://127.0.0.1:8000/docs 看所有端點。資料預設存在 `./aiops-local.db`。
@@ -241,12 +245,12 @@ PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後�
 ### 跑排程
 
 ```bash
-.venv/Scripts/python -m aiops.tasks run-once -w it_otel
+.venv/Scripts/python -m aiops.interfaces.cli run-once -w it_otel
 ```
 
 | 指令 | 用途 |
 |---|---|
-| `run-once -w <workflow>` | 跑一輪就結束（適合 K8s CronJob）。`-w` 可以是 `aiops/workflows/` 的名稱或自己的 YAML 路徑；有任何一條序列失敗則結束碼非 0 |
+| `run-once -w <workflow>` | 跑一輪就結束（適合 K8s CronJob）。`-w` 可以是 `aiops/pipelines/` 底下任一 YAML 的名稱（不含副檔名與子資料夾）或自己的 YAML 路徑；有任何一條序列失敗則結束碼非 0 |
 | `loop -w <workflow> --interval 60` | 常駐，每隔 N 秒跑一輪（只適合單一副本） |
 | `source-check` | 檢查每個資料源有沒有設定、連不連得上 |
 
@@ -260,7 +264,7 @@ PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後�
 - **參數合併**：演算法預設值 ← 後台核准的調參 ← YAML 的 `params`，逐個鍵合併。**YAML 寫了的鍵是鎖定的**，不會被後台調參蓋掉；沒寫的鍵才吃調參。想讓某個參數交給後台調，就不要寫在 YAML。
 - **調參分層**：核准的參數有 (偵測器, 管線, 實體) 三個維度，`*` 代表不限定。套用時取最具體的一層：管線×實體 > 管線 > 實體 > 全域。回饋轉提案可用 `scope: entity | pipeline | global` 選層級（預設 `pipeline`）。不同層的提案互不使對方過期。
 - **回測切段**：回測資料前 `train_ratio`（預設 0.7）拿來訓練、後面拿來測試，只計算測試段的異常，避免用同一段資料訓練又評分。滾動窗的偵測器（如 `chronic`）會往前多帶 `warmup_points()` 個點讓窗口湊滿，這些點不計分。
-- **LLM 供應商**：放一個檔案到 `aiops/operators/llm/`，用 `@register("名稱")` 登記即可，啟動時自動掃描載入，不用改其他地方。
+- **LLM 供應商**：放一個檔案到 `aiops/stages/enrichment/`，用 `@register("名稱")` 登記即可，啟動時自動掃描載入，不用改其他地方。
 
 ### 偵測演算法一覽
 
@@ -299,7 +303,7 @@ targets:
 | `rca.root_cause.pagerank` | 反向傳播圖上的 Personalized PageRank：拖垮越多下游、越異常的上游排越前 | 拓撲或 Lot 流向 |
 | `rca.root_cause.cross_correlation` | 事件時段原始時序的時間位移互相關：誰的波動領先別人 | 前面要有 `ingestion.incident_series`（`rca_report_correlation.yaml` 已經接好）；這是相關不是因果 |
 
-報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/operators/rca/sections/` 放一個檔案。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
+報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
 
 ### 學習閉環
 

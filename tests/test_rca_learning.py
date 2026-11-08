@@ -6,14 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aiops.core.context import KnowledgeCase, PipelineContext, Target
-from aiops.core.errors import WorkflowError
-from aiops.core.pipeline import Pipeline, load_workflow
-from aiops.core.registry import OperatorRegistry
-from aiops.core.requests import ExternalAnomalyIn, IngestAnomalies
-from aiops.core.signature import metric_names
-from aiops.core.types import AnomalyEvent, Incident
-from aiops.runner import run, run_context, workflow_path
+from aiops.engine.context import KnowledgeCase, PipelineContext, Target
+from aiops.engine.errors import WorkflowError
+from aiops.engine.pipeline import Pipeline, load_workflow
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
+from aiops.engine.signature import metric_names
+from aiops.engine.types import AnomalyEvent, Incident
+from aiops.interfaces.runner import run, run_context, workflow_path
 from aiops.storage.hooks import StorageHooks
 
 T = datetime(2026, 11, 8, 11, 0, tzinfo=timezone.utc)

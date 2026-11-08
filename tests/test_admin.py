@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from aiops.core.errors import BadRequest, Conflict, NotFound
-from aiops.core.requests import (
+from aiops.engine.errors import BadRequest, Conflict, NotFound
+from aiops.engine.requests import (
     ExternalAnomalyIn,
     FeedbackPropose,
     FeedbackSubmit,
@@ -18,8 +18,8 @@ from aiops.core.requests import (
     SourceRef,
     SilenceCreate,
 )
-from aiops.operators.llm.base import BaseLLM, LLMError
-from aiops.runner import run, run_context
+from aiops.stages.enrichment.base import BaseLLM, LLMError
+from aiops.interfaces.runner import run, run_context
 from aiops.storage.repository import ActiveConfigs, Proposals
 
 
@@ -78,7 +78,7 @@ def test_proposal_validation():
         _propose(params={"threshold": 99})
     with pytest.raises(BadRequest, match="沒有參數"):
         _propose(params={"treshold": 3})
-    from aiops.core.errors import WorkflowError
+    from aiops.engine.errors import WorkflowError
 
     with pytest.raises(WorkflowError):
         _propose("detector.nope")
@@ -183,11 +183,11 @@ class _Fake(BaseLLM):
 
 
 def _llm_propose(monkeypatch, uid, reply=None, error=None):
-    from aiops.core.pipeline import Pipeline, load_workflow
-    from aiops.runner import workflow_path
+    from aiops.engine.pipeline import Pipeline, load_workflow
+    from aiops.interfaces.runner import workflow_path
     from aiops.storage.hooks import StorageHooks
 
-    monkeypatch.setattr("aiops.operators.admin.tuning.build_llm", lambda *a, **k: _Fake(reply, error))
+    monkeypatch.setattr("aiops.control_plane.learning.tuning.build_llm", lambda *a, **k: _Fake(reply, error))
     wf = load_workflow(workflow_path("admin_feedback_propose"))
     wf.nodes[0].params["provider"] = "openai"
     req = FeedbackPropose(feedback_id=_feedback(uid), proposer="bot")

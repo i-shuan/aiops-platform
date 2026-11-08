@@ -4,7 +4,7 @@ AIOPS_DATABASE_URL：
 - 預設 sqlite:///./aiops-local.db
 - 正式例：postgresql+psycopg://user:pass@host:5432/aiops（需另裝 psycopg）
 
-資料庫連不上一律轉成 InfrastructureError，由 initialization 回 503 並走看守機制。
+資料庫連不上一律轉成 InfrastructureError，由 interfaces/bootstrap 回 503 並走看守機制。
 """
 import os
 from collections.abc import Iterator
@@ -15,7 +15,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from aiops.core.errors import InfrastructureError
+from aiops.engine.errors import InfrastructureError
 
 DEFAULT_URL = "sqlite:///./aiops-local.db"
 

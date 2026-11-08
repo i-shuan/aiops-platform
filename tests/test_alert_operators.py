@@ -3,9 +3,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from aiops.core.context import LotEdge, OpenIncident, PipelineContext, RecentNotification, Silence
-from aiops.core.registry import OperatorRegistry
-from aiops.core.types import AnomalyEvent, Incident
+from aiops.engine.context import LotEdge, OpenIncident, PipelineContext, RecentNotification, Silence
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.types import AnomalyEvent, Incident
 
 T0 = datetime(2026, 11, 8, tzinfo=timezone.utc)
 

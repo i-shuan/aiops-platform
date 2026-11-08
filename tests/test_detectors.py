@@ -6,10 +6,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from aiops.core.context import DetectorState, PeerRef, PipelineContext, Target
-from aiops.core.errors import BadRequest
-from aiops.core.registry import OperatorRegistry
-from aiops.operators.detectors.base import DetectorOperator
+from aiops.engine.context import DetectorState, PeerRef, PipelineContext, Target
+from aiops.engine.errors import BadRequest
+from aiops.engine.registry import OperatorRegistry
+from aiops.stages.detectors.base import DetectorOperator
 
 T0 = datetime(2026, 11, 8, tzinfo=timezone.utc)
 DETECTORS = [n for n in OperatorRegistry.names("detector.")

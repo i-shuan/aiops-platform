@@ -1,0 +1,255 @@
+"""PipelineContext：貫穿整條 Pipeline 的強型別資料載體。
+
+節點之間只透過它傳遞資料，不透過資料庫、也不傳鬆散的 dict。
+引擎在跑之前把「要先存起來、之後被讀進流程」的輸入（靜音、冷卻紀錄、欄位對照、偵測基準線…）載入這裡；
+算子只讀 ctx，自己不碰 DB。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+import pandas as pd
+from pydantic import BaseModel
+
+from aiops.engine.types import AnomalyEvent, Incident, Notification
+
+
+@dataclass
+class PeerRef:
+    source_type: str
+    query: str
+
+
+@dataclass
+class PeerGroup:
+    """動態同儕：一個查詢撈回整群序列，依 by 標籤分成各成員；自己以外的成員就是同儕。
+
+    query 可以用 ${屬性名} 引用 target 的 attrs（例如 cpu{service="${service}"}），同一份 YAML 套到不同服務。
+    自己是哪個成員：attrs[by]，沒有就用 entity。
+    """
+
+    query: str
+    by: str
+    source_type: str = ""  # 空 = 跟 target 同一個資料源
+
+
+@dataclass
+class Target:
+    """要偵測的一條序列。同儕給 peer 偵測器用：peers 是寫死的名單，peer_group 是依標籤動態聚合。"""
+
+    source_type: str
+    query: str
+    entity: str
+    attrs: dict[str, Any] = field(default_factory=dict)
+    peers: list[PeerRef] = field(default_factory=list)
+    peer_group: PeerGroup | None = None
+
+
+@dataclass
+class AnomalyResult:
+    algorithm: str
+    timestamps: list[str]
+    values: list[float]
+    scores: list[float]
+    is_anomaly: list[bool]
+
+    @property
+    def latest_is_anomaly(self) -> bool:
+        return bool(self.is_anomaly[-1]) if self.is_anomaly else False
+
+    @property
+    def count(self) -> int:
+        return int(sum(self.is_anomaly))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"algorithm": self.algorithm, "timestamps": self.timestamps, "values": self.values,
+                "scores": self.scores, "is_anomaly": self.is_anomaly, "anomaly_count": self.count}
+
+
+@dataclass
+class DetectorState:
+    """批次訓練保存的基準線。"""
+
+    state: dict[str, Any]
+    trained_at: datetime
+    train_start: datetime | None = None
+    train_end: datetime | None = None
+    points: int = 0
+    version: int = 0  # 讀取當時的資料庫版本（0 = 資料庫還沒有這一筆）；寫回時用來偵測別人是否已經更新
+    detector: str = ""  # 算子名（例如 detector.zscore）。ctx 裡的 key 是節點名稱，寫回時兩個都要
+    # 非 JSON 的模型本體（例如數值陣列）。只允許安全格式（npz，不允許 pickle），沒有就是 None
+    artifact: bytes | None = None
+    artifact_format: str = ""
+
+
+@dataclass
+class RootCandidate:
+    """RCA 根因候選：由 rca.root_cause.* 算子產生，報告段落只負責呈現。"""
+
+    entity: str
+    score: float
+    reason: str
+
+
+@dataclass
+class KnowledgeCase:
+    """歷史事故經驗庫的一筆（確認為真異常、且有寫處置的事件群）。"""
+
+    incident_uid: str
+    pipeline: str
+    entities: list[str]
+    metrics: list[str]
+    signals: list[str]
+    resolution: str
+    root_cause: str
+    created_at: datetime
+
+
+@dataclass
+class Silence:
+    id: int
+    kind: str
+    start: datetime
+    end: datetime
+    entity: str | None = None
+    dept: str | None = None
+
+
+@dataclass
+class RecentNotification:
+    fingerprint: str
+    last_event_ts: datetime
+    incident_uid: str = ""
+
+
+@dataclass
+class LotEdge:
+    upstream: str
+    downstream: str
+    lots: int
+
+
+@dataclass
+class TraceRow:
+    service: str
+    ts: datetime
+    count: int
+    error_rate: float
+    p95_ms: float
+
+
+@dataclass
+class OpenIncident:
+    """已通知、還在進行中的事件群（心跳與結案用）。"""
+
+    id: int
+    uid: str
+    preset: str
+    severity: str
+    incident: Incident
+
+
+@dataclass
+class ReportSection:
+    key: str
+    title: str
+    body: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"key": self.key, "title": self.title, "body": self.body}
+
+
+@dataclass
+class TargetError:
+    entity: str
+    message: str
+
+
+@dataclass
+class PipelineContext:
+    pipeline: str
+    now: datetime
+    target: Target | None = None  # None = 批次層（所有 target 的結果合併後）
+
+    # ── 載入的輸入（引擎在跑之前載入；算子只讀）──
+    field_maps: dict[str, dict[str, str]] = field(default_factory=dict)  # source_type -> 已核准對照（來源欄 -> 標準欄）
+    trace_rows: dict[str, list[TraceRow]] = field(default_factory=dict)  # 服務 -> trace 合成時序
+    # 節點名稱 -> tuning 核准的現行參數（已依 管線×實體 > 管線 > 實體 > 全域 挑出最具體的一筆）
+    detector_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 基準線
+    last_anomaly_ts: datetime | None = None  # 這條序列最後一筆已存的異常時間（只處理比它新的）
+    silences: list[Silence] = field(default_factory=list)
+    recent_notifications: list[RecentNotification] = field(default_factory=list)
+    topology: list[tuple[str, str]] = field(default_factory=list)  # (caller, callee)
+    lot_edges: list[LotEdge] = field(default_factory=list)
+    # Workflow 明確給了（含給空清單）就不要再從 trace／Lot 履歷自動推導
+    topology_explicit: bool = False
+    lot_edges_explicit: bool = False
+    external_anomaly_ids: list[int] = field(default_factory=list)  # 這一輪處理掉的外部匯入異常
+    open_incidents: list[OpenIncident] = field(default_factory=list)
+    entity_last_seen: dict[str, datetime] = field(default_factory=dict)  # 實體 -> 最近一次異常
+    knowledge_cases: list[KnowledgeCase] = field(default_factory=list)  # RCA：可比對的歷史事故
+
+    # ── 流動的資料 ──
+    # 欄位 ts、value；有同儕時加 peer_0、peer_1…；fetch 設了 lags_minutes 時加 lag_<分鐘>（同一時刻往前 N 分鐘的值）
+    raw_df: pd.DataFrame | None = None
+    train_df: pd.DataFrame | None = None
+    peer_members: list[str] = field(default_factory=list)  # 動態同儕：peer_0、peer_1… 依序是哪些成員
+    detector_runs: list[str] = field(default_factory=list)  # 這條序列跑過的偵測節點（裁決算子用來知道誰沒投票）
+    anomaly_result: AnomalyResult | None = None
+    new_detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 這次新訓練的，最後才存
+    anomalies: list[AnomalyEvent] = field(default_factory=list)
+    incidents: list[Incident] = field(default_factory=list)
+    incident_ids: dict[str, int] = field(default_factory=dict)  # 事件群 fingerprint -> 已存的 id（持久化後填）
+    rca_root_candidates: list[RootCandidate] = field(default_factory=list)  # 由 rca.root_cause.* 排序好
+    rca_root_algorithm: str = ""
+    # RCA 重抓的事件時段原始時序：(實體, 指標) -> DataFrame(ts, value)。給互相關等需要原始資料的演算法
+    rca_series: dict[tuple[str, str], pd.DataFrame] = field(default_factory=dict)
+    rca_sections: list[ReportSection] = field(default_factory=list)
+    rca_skipped: list[str] = field(default_factory=list)
+    llm_summary: str | None = None
+    llm_claims: list[dict[str, Any]] = field(default_factory=list)
+    llm_generated_by: str = "template"
+    llm_rejected: str | None = None
+    notifications: list[Notification] = field(default_factory=list)
+    resolved_incident_ids: list[int] = field(default_factory=list)
+    errors: list[TargetError] = field(default_factory=list)
+    audit: list[str] = field(default_factory=list)
+
+    # ── 手動動作（API）：請求與結果 ──
+    incident_id: int | None = None  # RCA 等針對單一事件群的流程
+    incident_pipeline: str = ""  # 那個事件群是哪條管線產生的（RCA 的 ctx.pipeline 是報告流程自己的名字）
+    request: BaseModel | None = None
+    result: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_suppressed(self) -> bool:
+        return any(i.suppressed_by for i in self.incidents)
+
+    def log(self, message: str) -> None:
+        self.audit.append(message)
+
+    def to_result(self) -> dict[str, Any]:
+        """API 回傳用：這一輪的結果摘要。手動動作的結果（result）原樣帶出。"""
+        out: dict[str, Any] = {"pipeline": self.pipeline, **self.result}
+        if self.incidents:
+            out["incidents"] = [
+                {"id": self.incident_ids.get(i.fingerprint), "uid": i.uid, "severity": i.severity,
+                 "suppressed_by": i.suppressed_by, **i.to_dict()}
+                for i in self.incidents
+            ]
+        if self.anomalies or self.notifications or self.incidents:
+            out.update(anomalies=len(self.anomalies), notifications=len(self.notifications),
+                       resolved_incidents=len(self.resolved_incident_ids))
+        if self.rca_sections or self.rca_skipped:
+            out.update(sections=[s.to_dict() for s in self.rca_sections], skipped=self.rca_skipped,
+                       root_cause={"algorithm": self.rca_root_algorithm,
+                                   "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason}
+                                                  for c in self.rca_root_candidates]},
+                       narrative={"summary": self.llm_summary, "claims": self.llm_claims,
+                                  "generated_by": self.llm_generated_by, "rejected": self.llm_rejected})
+        if self.errors:
+            out["errors"] = [{"entity": e.entity, "message": e.message} for e in self.errors]
+        return out

@@ -2,7 +2,7 @@
 
 兩種人會用它：
 - storage/hooks.py：引擎在 Pipeline 前面載入輸入、後面寫入最終結果
-- operators/admin/*：手動動作（核准欄位對照、核准調參…）管理自己的狀態
+- control_plane/*：手動動作（核准欄位對照、核准調參…）管理自己的狀態
 偵測、收斂、抑制、RCA 這類流程算子不得 import 這裡（tests/test_architecture.py 檢查）。
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from aiops.core.params import ANY
+from aiops.engine.params import ANY
 from aiops.storage import crud
 from aiops.storage.models import (
     ActiveDetectorConfigRow,
@@ -156,7 +156,7 @@ class DetectorModels:
 
 class ActiveConfigs:
     """偵測器現行參數，分層存放：(偵測器, 管線, 實體)，"*" = 不限定。整個系統只有 admin.tuning.approve 會呼叫 set()。
-    要「套用哪一筆」的優先序規則不在這裡（core/params.pick_most_specific），這裡只負責撈資料。"""
+    要「套用哪一筆」的優先序規則不在這裡（engine/params.pick_most_specific），這裡只負責撈資料。"""
 
     @staticmethod
     def get(detector: str, pipeline: str = ANY, entity: str = ANY) -> Row | None:

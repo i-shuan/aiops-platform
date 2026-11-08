@@ -5,14 +5,14 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from aiops.datasource_specs import check_sources, get_datasource_spec
-from aiops.datasource_specs.base import InvalidQueryError, NoDataError
-from aiops.datasource_specs.elasticsearch import ElasticsearchSpec
-from aiops.datasource_specs.prometheus import PrometheusSpec, VictoriaMetricsSpec
-from aiops.core.errors import InfrastructureError
-from aiops.metric_query.elasticsearch import parse_es_query
-from aiops.metric_query.promql import validate_promql
-from aiops.metric_query.window import align_window
+from aiops.sources import check_sources, get_datasource_spec
+from aiops.sources.base import InvalidQueryError, NoDataError
+from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.prometheus import PrometheusSpec, VictoriaMetricsSpec
+from aiops.engine.errors import InfrastructureError
+from aiops.sources.query.elasticsearch import parse_es_query
+from aiops.sources.query.promql import validate_promql
+from aiops.sources.query.window import align_window
 
 START = datetime(2026, 11, 8, 0, 0, 30, tzinfo=timezone.utc)
 END = datetime(2026, 11, 8, 0, 10, 45, tzinfo=timezone.utc)

@@ -1,5 +1,5 @@
-from aiops.core.errors import InfrastructureError
-from aiops.infrastructure import fallback
+from aiops.engine.errors import InfrastructureError
+from aiops.interfaces.bootstrap import fallback
 from aiops.storage.repository import Silences
 
 
