@@ -54,6 +54,19 @@ class BaseDetector(_Plugin, ABC):
     """
 
     fitted: bool = False
+    # True：df 除了 ts、value 還必須有 peer_* 欄位（同儕序列），由 Command 依 request 的 peers 準備
+    requires_peers: bool = False
+    # 可調參數：名稱 -> (預設值, 最小值, 最大值)。tuning（含 LLM 從回饋抽規則）只能改這些，且不能超出範圍
+    tunable: dict[str, tuple[float, float, float]] = {}
+
+    def validate_params(self) -> None:
+        """參數本身不合理就丟 ValueError（Command 會轉成 400）。預設檢查 tunable 範圍。"""
+        for key, (_default, low, high) in self.tunable.items():
+            if key in self.params and not (low <= float(self.params[key]) <= high):
+                raise ValueError(f"{self.name}.{key}={self.params[key]} 超出範圍 [{low}, {high}]")
+
+    def param(self, key: str) -> float:
+        return float(self.params.get(key, self.tunable[key][0]))
 
     @abstractmethod
     def fit(self, df: pd.DataFrame) -> BaseDetector: ...
@@ -218,9 +231,17 @@ class BaseSectionBuilder(_Plugin, ABC):
     def build(self, incident: Incident, context: dict[str, Any]) -> ReportSection: ...
 
 
-# ── LLM ──
+# ── 拓撲：統一成「異常會從 A 傳到 B」的有向邊 ──
 
 
-class BaseLLMProvider(_Plugin, ABC):
-    @abstractmethod
-    def complete(self, prompt: str) -> str: ...
+def propagation_edges(context: dict[str, Any]) -> set[tuple[str, str]]:
+    """IT 的 topology 是 [caller, callee]：callee（被呼叫的依賴）出事會拖垮 caller，所以傳播方向是 callee -> caller。
+    工廠的 lot_edges 是 {"from", "to", "lots"}：上游機台出事會流到下游，傳播方向是 from -> to。
+    """
+    edges = {(e[1], e[0]) for e in context.get("topology", []) if len(e) == 2 and e[0] != e[1]}
+    min_lots = int(context.get("min_lots", 1))
+    edges |= {
+        (e["from"], e["to"]) for e in context.get("lot_edges", [])
+        if e.get("from") != e.get("to") and int(e.get("lots", 1)) >= min_lots
+    }
+    return edges

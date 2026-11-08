@@ -6,9 +6,10 @@ from aiops.plugins.registry import DetectorRegistry
 
 @DetectorRegistry.register
 class ZScoreDetector(BaseDetector):
-    """偏離訓練期平均幾個標準差。params: threshold（預設 3.0）。"""
+    """偏離訓練期平均幾個標準差。params: threshold。"""
 
     name = "zscore"
+    tunable = {"threshold": (3.0, 1.0, 10.0)}
 
     def fit(self, df: pd.DataFrame) -> "ZScoreDetector":
         self.mean_ = float(df["value"].mean())
@@ -27,11 +28,10 @@ class ZScoreDetector(BaseDetector):
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
-        threshold = float(self.params.get("threshold", 3.0))
         scores = ((df["value"] - self.mean_) / self.std_).abs() if self.std_ else df["value"] * 0.0
         return AnomalyResult(
             timestamps=[t.isoformat() for t in df["ts"]],
             values=df["value"].tolist(),
             scores=scores.round(4).tolist(),
-            is_anomaly=(scores > threshold).tolist(),
+            is_anomaly=(scores > self.param("threshold")).tolist(),
         )

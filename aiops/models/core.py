@@ -163,6 +163,20 @@ class TuningProposalRow(Base):
     approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
+class FeedbackRow(Base):
+    """維運人員對事件群的回饋（誤報、確認、漏報）。可以轉成調參提案，但只能經提案 -> 回測 -> 核准生效。"""
+
+    __tablename__ = "feedback"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    incident_uid: Mapped[str] = mapped_column(String(40), index=True)
+    verdict: Mapped[str] = mapped_column(String(16))
+    detector_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    text: Mapped[str] = mapped_column(String(4000))
+    author: Mapped[str] = mapped_column(String(128))
+    proposal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class ActiveDetectorConfigRow(Base):
     __tablename__ = "active_detector_configs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -184,6 +198,7 @@ TABLE_OWNERS = {
     "field_mappings": "ingestion",
     "external_anomalies": "ingestion",
     "tuning_proposals": "tuning",
+    "feedback": "tuning",
     "active_detector_configs": "tuning",
 }
 

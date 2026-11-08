@@ -1,11 +1,10 @@
 from datetime import datetime, timedelta
 
-from aiops.commands.base import BaseCommand, CommandError
-from aiops.datasource_specs import get_datasource_spec
+from aiops.commands.base import BaseCommand
+from aiops.domains.detection.commands._detector import build_detector, load_frame
 from aiops.domains.detection.dao import DetectorModelDAO
 from aiops.domains.detection.schemas import DetectionTrainRequest
 from aiops.plugins.base import as_utc
-from aiops.plugins.registry import DetectorRegistry
 
 
 class TrainDetectorCommand(BaseCommand):
@@ -16,8 +15,7 @@ class TrainDetectorCommand(BaseCommand):
         self.now = now
 
     def validate(self) -> None:
-        if not DetectorRegistry.has(self.req.detector_name):
-            raise CommandError(f"未知的檢測外掛: {self.req.detector_name}")
+        self.detector = build_detector(self.req.detector_name, {}, self.req.peers, check_params=False)
 
     def run(self) -> dict:
         self.validate()
@@ -34,7 +32,7 @@ class TrainDetectorCommand(BaseCommand):
                         "trained_at": existing["trained_at"]}
 
         tr = req.train_time_range
-        df = get_datasource_spec(req.metric.source_type).fetch_data(req.metric.query, tr.start, tr.end, tr.step_seconds)
-        detector = DetectorRegistry.get(req.detector_name)().fit(df)
-        saved = DetectorModelDAO.save(*key, detector.get_state(), tr.start, tr.end, len(df), trained_at=now)
+        df = load_frame(req.metric, req.peers, tr)
+        self.detector.fit(df)
+        saved = DetectorModelDAO.save(*key, self.detector.get_state(), tr.start, tr.end, len(df), trained_at=now)
         return {"trained": True, "model_id": saved["id"], "points": len(df), "trained_at": saved["trained_at"]}

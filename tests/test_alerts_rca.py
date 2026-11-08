@@ -27,19 +27,28 @@ def test_metrics_only_pipeline_uses_fewer_parts(client):
     assert [i["score"] for i in incidents] == [4, 3, 1]
 
 
+def _rca(client, incident_id, preset, **kw):
+    r = client.post("/api/v1/rca/generate", json={"incident_id": incident_id, "preset": preset, **kw})
+    assert r.status_code == 200, r.text
+    return r.json()["result"]
+
+
 def test_rca_sections_follow_preset(client):
     chain = _process(client, "it_otel")[1]
-    it = client.post("/api/v1/rca/generate", json={"incident_id": chain["id"], "preset": "it_otel"}).json()["result"]
-    assert [s["key"] for s in it["sections"]] == ["summary", "timeline", "affected_entities", "golden_signals"]
+    it = _rca(client, chain["id"], "it_otel", context=CONTEXT)
+    assert [s["key"] for s in it["sections"]] == [
+        "summary", "timeline", "affected_entities", "golden_signals",
+        "root_cause_candidates", "propagation_path", "suggested_actions"]
+    assert it["skipped"] == ["trace_evidence"]  # 沒給 trace_series
 
-    basic = client.post("/api/v1/rca/generate", json={"incident_id": chain["id"], "preset": "metrics_only"}).json()
-    assert [s["key"] for s in basic["result"]["sections"]] == ["summary", "timeline", "affected_entities"]
+    basic = _rca(client, chain["id"], "metrics_only")
+    assert [s["key"] for s in basic["sections"]] == ["summary", "timeline", "affected_entities", "suggested_actions"]
 
 
 def test_rca_skips_sections_without_data(client):
-    lone = _process(client, "it_otel")[0]  # svc-c 只有 disk_io，沒有黃金訊號
-    r = client.post("/api/v1/rca/generate", json={"incident_id": lone["id"], "preset": "it_otel"}).json()["result"]
-    assert r["skipped"] == ["golden_signals"]
+    lone = _process(client, "it_otel")[0]  # svc-c 只有 disk_io，沒有黃金訊號、也不在拓撲裡
+    r = _rca(client, lone["id"], "it_otel", context=CONTEXT)
+    assert r["skipped"] == ["golden_signals", "root_cause_candidates", "propagation_path", "trace_evidence"]
 
 
 def test_rca_unknown_incident_is_404(client):

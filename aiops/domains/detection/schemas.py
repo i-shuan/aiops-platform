@@ -21,6 +21,8 @@ class DetectionRunRequest(BaseModel):
     attrs: dict[str, Any] = Field(default_factory=dict)
     # 給了就：優先載入這條管線保存的模型（沒有就 fit 並保存），並把「新的」異常寫進 anomalies
     pipeline: str | None = None
+    # 同儕序列（peer 偵測器必填）：同服務其他 Pod、同型號其他機台
+    peers: list[MetricTarget] = Field(default_factory=list)
 
 
 class DetectionTrainRequest(BaseModel):
@@ -31,3 +33,4 @@ class DetectionTrainRequest(BaseModel):
     entity: str | None = None
     # 給了就：現有模型比這個分鐘數新就不重訓
     if_older_than_minutes: int | None = Field(None, gt=0)
+    peers: list[MetricTarget] = Field(default_factory=list)

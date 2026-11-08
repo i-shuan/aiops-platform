@@ -32,15 +32,34 @@ def _incidents():
 CTX = {"topology": [["a", "b"]], "p0_entities": ["b"]}
 
 
+# 需要參數才能偵測的偵測器，契約測試用的範例參數
+SAMPLE_PARAMS = {"rules": {"upper": 80}}
+# 刻意不對單點尖峰反應的偵測器（chronic 只抓持續偏移，單點會被滾動平均稀釋）
+IGNORES_SINGLE_SPIKE = {"chronic"}
+
+
+def _df_for(name: str) -> pd.DataFrame:
+    """需要同儕的偵測器，補兩條平穩的同儕序列。"""
+    if DetectorRegistry.get(name).requires_peers:
+        return DF.assign(peer_0=50.0, peer_1=51.0)
+    return DF
+
+
+def _detector(name: str):
+    return DetectorRegistry.get(name)(SAMPLE_PARAMS.get(name, {}))
+
+
 @pytest.mark.parametrize("name", DetectorRegistry.names())
 def test_detector_contract(name):
-    det = DetectorRegistry.get(name)({})
+    det, df = _detector(name), _df_for(name)
+    det.validate_params()
     with pytest.raises(RuntimeError):
-        det.detect(DF)
-    assert det.fit(DF) is det
-    result = det.detect(DF)
+        det.detect(df)
+    assert det.fit(df) is det
+    result = det.detect(df)
     assert isinstance(result, AnomalyResult)
-    assert len(result.is_anomaly) == len(result.scores) == len(DF)
+    assert len(result.is_anomaly) == len(result.scores) == len(df)
+    assert result.is_anomaly[30] != (name in IGNORES_SINGLE_SPIKE), f"{name} 對第 30 點尖峰的反應不符預期"
 
 
 @pytest.mark.parametrize("name", DetectorRegistry.names())
@@ -48,11 +67,22 @@ def test_detector_state_round_trips_through_json(name):
     """批次訓練的狀態要能存進 DB（JSON）再載回，載回後偵測結果必須一模一樣。"""
     import json
 
-    trained = DetectorRegistry.get(name)({}).fit(DF)
+    df = _df_for(name)
+    trained = _detector(name).fit(df)
     state = json.loads(json.dumps(trained.get_state()))
-    restored = DetectorRegistry.get(name)({}).load_state(state)
+    restored = _detector(name).load_state(state)
     assert restored.fitted
-    assert restored.detect(DF).to_dict() == trained.detect(DF).to_dict()
+    assert restored.detect(df).to_dict() == trained.detect(df).to_dict()
+
+
+@pytest.mark.parametrize("name", DetectorRegistry.names())
+def test_detector_tunable_ranges_are_sane(name):
+    """可調參數的預設值要落在範圍內，超出範圍的參數要被 validate_params 擋下。"""
+    cls = DetectorRegistry.get(name)
+    for key, (default, low, high) in cls.tunable.items():
+        assert low <= default <= high, f"{name}.{key}"
+        with pytest.raises(ValueError):
+            cls({**SAMPLE_PARAMS.get(name, {}), key: high + 1}).validate_params()
 
 
 @pytest.mark.parametrize("name", GrouperRegistry.names())

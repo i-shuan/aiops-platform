@@ -1,7 +1,29 @@
 from typing import Any
 
 from aiops.models import crud
-from aiops.models.core import ActiveDetectorConfigRow, TuningProposalRow
+from aiops.models.core import ActiveDetectorConfigRow, FeedbackRow, IncidentRow, TuningProposalRow
+
+
+class FeedbackDAO:
+    @staticmethod
+    def create(row: dict[str, Any]) -> dict[str, Any]:
+        return crud.create(FeedbackRow, **row)
+
+    @staticmethod
+    def get(feedback_id: int) -> dict[str, Any] | None:
+        return crud.get(FeedbackRow, feedback_id)
+
+    @staticmethod
+    def link_proposal(feedback_id: int, proposal_id: int) -> dict[str, Any]:
+        return crud.update(FeedbackRow, feedback_id, proposal_id=proposal_id)
+
+
+class IncidentReadDAO:
+    """跨領域唯讀：incidents 屬於 alerts。回饋要指到真的事件群。"""
+
+    @staticmethod
+    def get_by_uid(uid: str) -> dict[str, Any] | None:
+        return crud.find_one(IncidentRow, uid=uid)
 
 
 class ProposalDAO:

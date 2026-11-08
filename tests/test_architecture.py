@@ -95,6 +95,21 @@ def test_metric_query_is_pure_parsing():
     assert not _violations("metric_query/**/*.py", bad)
 
 
+def test_llm_layer_is_transport_only():
+    """LLM 出口只負責呼叫模型：不認識領域、外掛、資料表。輸出的驗證在各領域的 Command 裡做。"""
+    banned = ("aiops.domains", "aiops.models", "aiops.plugins", "aiops.presets", "aiops.datasource_specs")
+    assert not _violations("llm/**/*.py", lambda f, m: _starts(m, *banned))
+
+
+def test_domains_do_not_import_concrete_llm_providers():
+    """只能用 aiops.llm 的 get_llm() 與 llm.base。"""
+    assert not _violations("domains/**/*.py", lambda f, m: m.startswith("aiops.llm.") and m != "aiops.llm.base")
+
+
+def test_plugins_do_not_call_llm():
+    assert not _violations("plugins/**/*.py", lambda f, m: _starts(m, "aiops.llm", "httpx"))
+
+
 def test_security_does_not_know_business():
     banned = ("aiops.domains", "aiops.models", "aiops.plugins", "aiops.datasource_specs", "aiops.notifiers")
     assert not _violations("security/**/*.py", lambda f, m: _starts(m, *banned))

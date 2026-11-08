@@ -1,7 +1,6 @@
 from aiops.plugins.base import (
     BaseDetector,
     BaseGrouper,
-    BaseLLMProvider,
     BaseScorer,
     BaseSectionBuilder,
     BaseSuppressor,
@@ -59,7 +58,3 @@ class SuppressorRegistry(_Registry):
 
 class SectionRegistry(_Registry):
     base = BaseSectionBuilder
-
-
-class LLMRegistry(_Registry):
-    base = BaseLLMProvider

@@ -5,7 +5,7 @@
 避免「人工剛調好，半夜被自動 tune 蓋掉」。
 """
 from aiops.commands.base import BaseCommand, CommandConflict, CommandError, CommandNotFound
-from aiops.datasource_specs import get_datasource_spec
+from aiops.datasource_specs import fetch_frame
 from aiops.domains.tuning.dao import ActiveConfigDAO, ProposalDAO
 from aiops.domains.tuning.schemas import BacktestRequest, ProposalCreateRequest
 from aiops.plugins.registry import DetectorRegistry
@@ -25,6 +25,10 @@ class CreateProposalCommand(BaseCommand):
     def validate(self) -> None:
         if not DetectorRegistry.has(self.req.detector_name):
             raise CommandError(f"未知的檢測外掛: {self.req.detector_name}")
+        try:
+            DetectorRegistry.get(self.req.detector_name)(self.req.params).validate_params()
+        except ValueError as e:
+            raise CommandError(f"提案參數不合法：{e}") from e
 
     def run(self) -> dict:
         self.validate()
@@ -64,12 +68,15 @@ class BacktestProposalCommand(BaseCommand):
             raise CommandConflict(f"提案狀態為 {self.row['status']}，不能再回測")
         if not DetectorRegistry.has(self.row["detector_name"]):
             raise CommandError(f"偵測器 {self.row['detector_name']} 已不存在")
+        if DetectorRegistry.get(self.row["detector_name"]).requires_peers and not self.req.peers:
+            raise CommandError(f"{self.row['detector_name']} 偵測器回測需要 peers")
 
     def run(self) -> dict:
         self.validate()
         name = self.row["detector_name"]
         m, tr = self.req.metric, self.req.time_range
-        df = get_datasource_spec(m.source_type).fetch_data(m.query, tr.start, tr.end, tr.step_seconds)
+        df = fetch_frame(m.source_type, m.query, tr.start, tr.end, tr.step_seconds,
+                         [(p.source_type, p.query) for p in self.req.peers])
         current_params = (ActiveConfigDAO.get(name) or {}).get("params", {})
         detector_cls = DetectorRegistry.get(name)
         current = detector_cls(current_params).fit(df).detect(df)

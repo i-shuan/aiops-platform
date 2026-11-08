@@ -14,7 +14,8 @@
 | 存取 | `domains/<d>/dao.py` | 讀寫資料表 | 業務判斷 |
 | 資料表 | `models/` | SQLAlchemy ORM（`core.py`）、連線與 session（`db.py`）、DAO 共用存取（`crud.py`） | 業務判斷 |
 | 調度 | `tasks/` | 排程與管線：依序呼叫各領域 Command（訓練 -> 偵測 -> 告警） | 碰 DAO、資料表、外掛、資料源、通知出口 |
-| 零件 | `plugins/<kind>/` | 純運算：偵測、收斂、計分、報告段落、LLM | 認識任何領域、碰 DB、碰外部服務 |
+| 零件 | `plugins/<kind>/` | 純運算：偵測、收斂、計分、抑制、報告段落 | 認識任何領域、碰 DB、碰外部服務（含 LLM） |
+| LLM 出口 | `llm/` | 呼叫模型（OpenAI 相容、Anthropic）；`get_llm()` 沒設定時回 None | 驗證輸出（在領域 Command 做）、認識領域 |
 | 資料源 | `datasource_specs/` | 連線、查詢、轉成 `DataFrame(ts, value)`、連線自檢 | 審核狀態、業務合成（trace 合成、Lot 履歷） |
 | 查詢語法 | `metric_query/` | 純解析：PromQL 檢查、ES 查詢 JSON 轉降採樣 search body、時間窗對齊 | 連線、碰平台其他層 |
 | 認證 | `security/` | API Bearer token 驗證（由 initialization 用 Depends 掛到每個領域 router） | 業務邏輯、在 api.py 驗證 |
@@ -47,6 +48,17 @@
 21. `metric_query/` 只能 import 自己，不得 import `httpx` 等連線套件。
 22. `security/` 不得 import `domains`、`models`、`plugins`、`datasource_specs`、`notifiers`。
 23. **每一個 `/api/` 端點都必須驗 token**：`tests/test_security.py` 逐一列舉 OpenAPI 上的所有端點，沒帶 token 必須回 401，並檢查每條路由都掛了 `require_token`。
+24. `llm/` 不得 import `domains`、`models`、`plugins`、`presets`、`datasource_specs`。
+25. 領域只能用 `aiops.llm`（`get_llm()`）與 `aiops.llm.base`，不得直接 import 具體供應商。
+26. `plugins/` 不得 import `aiops.llm` 或 `httpx`（外掛不連外部服務）。
+
+### LLM 使用守則
+
+- **LLM 只能「提議」，平台「驗證」，不過就退回模板。** 沒設定 LLM、呼叫失敗、輸出不是 JSON、驗證不過，一律退回模板，功能照常，並在結果裡標 `generated_by`（`llm`／`template`）與 `rejected`（退回原因）。
+- RCA 總結敘述（`domains/rca/commands/narrative.py`）的依據驗證：每個結論要引用存在的報告段落、不得提到事件群以外的已知實體、出現的數字要能在證據原文找到。
+- 回饋抽調參規則（`domains/tuning/commands/rule_extraction.py`）的驗證：只能改偵測器宣告的 `tunable` 參數、要在範圍內、單次變動不超過 50%、方向要跟回饋一致（誤報只能調高 threshold、漏報只能調低）。
+- LLM 產出的調參**只是提案**（`source=llm`），仍要回測與核准才生效。
+- 設定：`AIOPS_LLM_PROVIDER`（none／openai／anthropic）、`AIOPS_LLM_MODEL`、`AIOPS_LLM_API_KEY`、`AIOPS_LLM_BASE_URL`。
 
 ### 認證
 
@@ -81,7 +93,7 @@
 | trace 合成、Lot 履歷合成、外部異常匯入、欄位對照審核 | same_entity、topology_chain、lot_path_chain…（收斂 Grouper） |
 | 告警收斂管線、產生 RCA 報告 | golden_signals、p0_boost…（計分 Scorer） |
 | 建立靜音／維護窗口／排除時段、產生通知 payload、推送 | silence_window、same_root_cause、dedup…（抑制 Suppressor） |
-| | summary、timeline、golden_signals…（報告段落 Section Builder） |
+| 收集回饋、從回饋抽調參規則 | summary、timeline、root_cause_candidates…（報告段落 Section Builder，共 8 種） |
 
 - **偵測器契約只有兩個方法：`fit(df) -> self`、`detect(df) -> AnomalyResult`。** 「train」「tune」「collect」不是外掛名字，是領域 Command。
 - **trace 不另開一套 train／detect。** `ingestion` 的 `MergeTracesCommand` 把 span 轉成標準時序，之後跟一般指標走同一個偵測器。
@@ -92,12 +104,11 @@
 
 | 外掛 | 契約 | 備註 |
 |---|---|---|
-| 偵測器 `BaseDetector` | `fit(df) -> self`；`detect(df) -> AnomalyResult`；`get_state() -> dict`；`load_state(state) -> self` | 先 fit（或 load_state）才能 detect；state 必須能 JSON 序列化，載回後偵測結果要一模一樣（契約測試檢查） |
+| 偵測器 `BaseDetector` | `fit(df) -> self`；`detect(df) -> AnomalyResult`；`get_state() -> dict`；`load_state(state) -> self`；`validate_params()` | 先 fit（或 load_state）才能 detect；state 必須能 JSON 序列化，載回後偵測結果要一模一樣（契約測試檢查）。宣告 `tunable = {參數: (預設, 最小, 最大)}`，自動調參只能改這些；`requires_peers = True` 時 df 會帶 `peer_*` 欄位 |
 | 收斂 `BaseGrouper` | `group(incidents, context) -> list[Incident]` | 不得丟掉任何事件；合併用 `merge_incidents()` |
 | 計分 `BaseScorer` | `score(incident, context) -> float` | 回傳新分數，不得修改 incident |
 | 抑制 `BaseSuppressor` | `suppress(incident, context) -> str \| None` | 回傳抑制原因；`None` 表示照發。靜音、近期通知、同批事件群由 Command 放進 `context` |
 | 報告段落 `BaseSectionBuilder` | `applies(incident, context) -> bool`；`build(incident, context) -> ReportSection` | 資料不足時 `applies` 回 `False`，不輸出空殼 |
-| LLM `BaseLLMProvider` | `complete(prompt) -> str` | |
 
 **不要在外掛之外的地方偷渡這些邏輯**：收斂規則、計分規則、報告段落內容都不准寫進 Command 或 `api.py`，Command 只負責依 preset 依序呼叫外掛。
 
@@ -122,6 +133,8 @@
 - **通知內容（嚴重度、標題、路由標籤）** → `domains/alerts/commands/payload.py`。嚴重度門檻是 preset 的 `severity_thresholds`。一個部門一則通知，部門取自事件 `attrs["dept"]`，沒有就是 `unassigned`。
 - **新通知出口（例如另一種接收端）** → 繼承 `BaseNotifier`，放 `notifiers/<name>.py`，在 `notifiers/__init__.py` 的 `get_notifier()` 加分支。只負責傳送，送不出去丟 `InfrastructureError`。
 - **新 RCA 報告段落** → 繼承 `BaseSectionBuilder`，放 `plugins/rca_sections/`，加 `@SectionRegistry.register`。資料不足時讓 `applies()` 回 `False`，不要輸出空殼。
+  - 拓撲一律用 `propagation_edges(context)` 取「異常傳播方向」：IT 的 `topology`（[caller, callee]）是 callee -> caller；工廠的 `lot_edges` 是上游 -> 下游。根因推論＝沒有異常上游的異常實體。
+- **回饋** → `POST /api/v1/tuning/feedback`（要指到真的 `incident_uid`），再 `POST /api/v1/tuning/feedback/{id}/propose` 轉成調參提案。
 - **新場景或調整場景用的零件** → 改 `presets/__init__.py`，只寫外掛名字與場景參數。
 - **任何改偵測參數的需求（自動調優、LLM 從回饋抽規則、人工調整）** → 一律 `CreateProposalCommand`（`source` 填 `auto`／`llm`／`manual`），再走 `BacktestProposalCommand` -> `ApproveTuningCommand`。**不准另開路徑直接寫參數。**
 - **資料表** → `models/core.py`，並在 `TABLE_OWNERS` 登記擁有者；存取寫在各領域 `dao.py`。別的領域要讀就寫 `*ReadDAO`。

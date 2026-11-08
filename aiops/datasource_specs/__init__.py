@@ -1,4 +1,7 @@
+from datetime import datetime
 from typing import Any
+
+import pandas as pd
 
 from aiops.commands.base import CommandError
 from aiops.datasource_specs.base import BaseDataSourceSpec
@@ -17,6 +20,16 @@ def get_datasource_spec(source_type: str) -> BaseDataSourceSpec:
     if source_type not in _SPECS:
         raise CommandError(f"未知的資料源: {source_type}（可用：{', '.join(sorted(_SPECS))}）")
     return _SPECS[source_type].from_env()
+
+
+def fetch_frame(source_type: str, query: str, start: datetime, end: datetime, step_seconds: int,
+                peers: list[tuple[str, str]] | None = None) -> pd.DataFrame:
+    """抓主序列；有 peers（[(source_type, query), ...]）就各抓一條，依時間對齊成 peer_0、peer_1… 欄位。"""
+    df = get_datasource_spec(source_type).fetch_data(query, start, end, step_seconds)
+    for i, (peer_source, peer_query) in enumerate(peers or []):
+        peer = get_datasource_spec(peer_source).fetch_data(peer_query, start, end, step_seconds)
+        df = df.merge(peer.rename(columns={"value": f"peer_{i}"}), on="ts", how="left")
+    return df
 
 
 def check_sources() -> list[dict[str, Any]]:
