@@ -68,6 +68,8 @@ class BaseOperator(ABC):
  * **RCA 根因演算法（`rca.root_cause.*`）**：
    * 繼承 `stages/rca/base.RootCauseOperator`，只寫 `rank(incident, ctx) -> list[RootCandidate]`（由可能到不可能排好；資料不足回空清單，段落會略過）。
    * 需要原始時序時，在它前面放 `ingestion.incident_series`（讀 `ctx.rca_series`），不准自己連資料源。
+   * 證據不夠就回空清單，並把原因寫進 `ctx.rca_root_note`（「可能的源頭」段落會照出），不准為了有答案而硬湊候選。`rca_report` 預設的 `rca.root_cause.evidence` 讀 `ctx.rca_spans`；`ctx.rca_traces_failed`（trace 來源連不上）時不准退回拓撲硬猜。
+   * span 統計（自身耗時、入口請求、流量來源）與日誌樣板／暴增排序是共用純函式，放 `stages/rca/spans.py`、`stages/rca/logs.py`，算子與段落都用同一份。
  * **RCA 報告段落（`rca.section.*`）**：
    * 繼承 `stages/rca/base.RcaSection`，寫 `applies()` 與 `build()`；資料不夠就讓 `applies()` 回 False（記進 `rca_skipped`），不准輸出空殼。
  * **Grouper（事件收斂）**：

@@ -189,6 +189,27 @@ def test_rank_patterns_puts_new_bursts_first_then_ratio():
     assert ranked[2]["ratio"] == pytest.approx(1.0)
 
 
+def test_a_huge_burst_of_a_known_error_outranks_a_few_brand_new_ones():
+    """nov03_cascade 復盤：cart-api 連線池逾時比平常多 902 倍，卻被幾筆「新出現」的樣板擠到第 8～10 名。
+    現在新出現的樣板以「正常期間 1 筆」計倍率，跟既有樣板同一把尺排序。"""
+    baseline = _logs("cart-api", "connection pool timeout after {} ms", 2, 0, "Pool")
+    during = (_logs("cart-api", "connection pool timeout after {} ms", 900, 70, "Pool")
+              + _logs("ord-svc", "slow transaction {} ms", 4, 70, "Slow"))  # 新出現，但只有 4 筆
+    ranked = rank_patterns(during, baseline, (10.0, 60.0))
+    assert [p["error_type"] for p in ranked] == ["Pool", "Slow"]
+    assert ranked[0]["ratio"] == pytest.approx((900 / 10) / (2 / 60)) and ranked[1]["new"]
+
+
+def test_log_section_says_when_logs_were_sampled():
+    section = OperatorRegistry.create("rca.section.log_patterns", {})
+    ctx = PipelineContext(pipeline="rca", now=T0)
+    ctx.rca_logs = [LogRecord(r.ts, r.service, r.message, r.error_type, r.trace_id, 10.0)
+                    for r in _logs("pay", "connection refused to 10.0.0.{}:5432", 12, 70, "Conn")]
+    ctx.rca_logs_baseline, ctx.rca_log_window_minutes, ctx.rca_logs_sampled = [], (10.0, 60.0), True
+    body = section.build(None, ctx)
+    assert "事件期間 120 筆" in body and "抽樣" in body and "估計值" in body
+
+
 def test_log_section_lists_bursts_and_skips_without_logs():
     section = OperatorRegistry.create("rca.section.log_patterns", {"top_n": 2})
     ctx = PipelineContext(pipeline="rca", now=T0)

@@ -225,6 +225,7 @@ class IncidentTracesFetch(BaseOperator):
         ctx.log(f"incident_traces:skip:{why}")
         ctx.result["trace_fetch"] = {"source_type": self.source_type, "spans": 0, "skipped": why}
         if as_error:
+            ctx.rca_traces_failed = True  # 有設定卻撈不到：根因算子要知道證據是被吃掉的，不是本來就沒有
             ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_traces'}", f"撈 trace 失敗，拓撲只用既有的：{why}"))
         return ctx
 
@@ -295,7 +296,8 @@ class IncidentLogsFetch(BaseOperator):
         spell = _spelled_like_entities(incident.entities)
 
         def record(r):
-            return LogRecord(r["ts"], spell(r["service"]), r["message"], r.get("error_type", ""), r.get("trace_id", ""))
+            return LogRecord(r["ts"], spell(r["service"]), r["message"], r.get("error_type", ""), r.get("trace_id", ""),
+                             float(r.get("weight", 1.0)))
 
         try:
             spec = get_datasource_spec(self.source_type)
@@ -310,6 +312,7 @@ class IncidentLogsFetch(BaseOperator):
             logger.warning("incident_logs 解析失敗，略過日誌比對：%s: %s", type(e).__name__, e)
             return self._skip(ctx, f"{type(e).__name__}: {e}", as_error=True)
         ctx.rca_logs, ctx.rca_logs_baseline = logs, baseline
+        ctx.rca_logs_sampled = bool(cut1 or cut2)
         ctx.rca_log_window_minutes = ((end - start).total_seconds() / 60, self.baseline.total_seconds() / 60)
         ctx.result["log_fetch"] = {"source_type": self.source_type, "logs": len(ctx.rca_logs),
                                    "baseline_logs": len(ctx.rca_logs_baseline), "truncated": cut1 or cut2,

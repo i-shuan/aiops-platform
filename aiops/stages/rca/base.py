@@ -57,6 +57,7 @@ class RootCauseOperator(BaseOperator):
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incident = need_incident(ctx)
+        ctx.rca_root_note = ""
         ctx.rca_root_candidates = self.rank(incident, ctx)
         ctx.rca_root_algorithm = self.operator_name
         ctx.log(f"root_cause:{self.operator_name}:{len(ctx.rca_root_candidates)}")

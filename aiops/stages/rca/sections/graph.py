@@ -16,10 +16,13 @@ class RootCauseCandidates(RcaSection):
     key, title = "root_cause_candidates", "可能的源頭"
 
     def applies(self, incident, ctx):
-        return bool(ctx.rca_root_candidates)
+        # 演算法明確說「證據不足」時也要出這一段：讓值班的人知道不是沒算，而是算了但不能指認
+        return bool(ctx.rca_root_candidates or ctx.rca_root_note)
 
     def build(self, incident, ctx):
         lines = [f"{i}. {c.entity}：{c.reason}" for i, c in enumerate(ctx.rca_root_candidates, 1)]
+        if ctx.rca_root_note:
+            lines.append(ctx.rca_root_note)
         algorithm = ctx.rca_root_algorithm.removeprefix("rca.root_cause.")
         return "\n".join(lines) + f"\n（排序方法：{algorithm}）"
 

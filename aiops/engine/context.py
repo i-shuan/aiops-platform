@@ -179,6 +179,8 @@ class LogRecord:
     message: str
     error_type: str = ""
     trace_id: str = ""
+    # 抽樣權重：日誌超過上限時依時間分桶抽樣，一筆代表同時段的幾筆（= 該時段總筆數 ÷ 抽到的筆數）；沒抽樣就是 1
+    weight: float = 1.0
 
 
 @dataclass
@@ -262,6 +264,11 @@ class PipelineContext:
     incident_ids: dict[str, int] = field(default_factory=dict)  # 事件群 fingerprint -> 已存的 id（持久化後填）
     rca_root_candidates: list[RootCandidate] = field(default_factory=list)  # 由 rca.root_cause.* 排序好
     rca_root_algorithm: str = ""
+    # 根因演算法的結論說明，例如「證據不足」：沒給候選時報告要講清楚為什麼，不是讓段落默默消失
+    rca_root_note: str = ""
+    # incident_traces 有設定 trace 來源、但這一輪連不上或讀失敗（例如 ES 重啟）。跟「這個場景本來就沒有 trace」（工廠）要分開：
+    # 前者證據被吃掉，根因算子不該拿拓撲硬猜；後者退回拓撲推測是正常做法
+    rca_traces_failed: bool = False
     # RCA 重抓的事件時段原始時序：(實體, 指標) -> DataFrame(ts, value)。給互相關等需要原始資料的演算法
     rca_series: dict[tuple[str, str], pd.DataFrame] = field(default_factory=dict)
     # RCA 隨需現抓的事件前後 span（ingestion.incident_traces），給 rca.build_dynamic_topology 還原當下的呼叫關係
@@ -269,6 +276,7 @@ class PipelineContext:
     # RCA 隨需現抓的錯誤日誌（ingestion.incident_logs）：事件期間與事件前的正常期間，給 rca.section.log_patterns 比對
     rca_logs: list[LogRecord] = field(default_factory=list)
     rca_logs_baseline: list[LogRecord] = field(default_factory=list)
+    rca_logs_sampled: bool = False  # 日誌超過撈取上限，是抽樣加權的估計值（rca.section.log_patterns 要在報告裡寫明）
     rca_log_window_minutes: tuple[float, float] = (0.0, 0.0)  # (事件期間, 正常期間) 的長度，算每分鐘頻率用
     rca_sections: list[ReportSection] = field(default_factory=list)
     rca_skipped: list[str] = field(default_factory=list)
@@ -308,7 +316,7 @@ class PipelineContext:
                        resolved_incidents=len(self.resolved_incident_ids))
         if self.rca_sections or self.rca_skipped:
             out.update(sections=[s.to_dict() for s in self.rca_sections], skipped=self.rca_skipped,
-                       root_cause={"algorithm": self.rca_root_algorithm,
+                       root_cause={"algorithm": self.rca_root_algorithm, "note": self.rca_root_note,
                                    "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason}
                                                   for c in self.rca_root_candidates]},
                        narrative={"summary": self.llm_summary, "claims": self.llm_claims,

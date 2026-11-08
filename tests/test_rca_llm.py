@@ -44,12 +44,17 @@ def test_all_sections_present_when_data_is_there_and_missing_ones_are_skipped_no
     assert keys == ["summary", "timeline", "affected_entities", "golden_signals", "root_cause_candidates",
                     "propagation_path", "suggested_actions"]
     assert rca["skipped"] == ["trace_evidence", "log_patterns", "similar_cases"] and all(s["body"].strip() for s in rca["sections"])
-    assert rca["root_cause"]["algorithm"] == "rca.root_cause.topological"
+    # 預設根因算子改成 evidence；這裡沒有 trace 來源，所以退回拓撲推測，並且要在報告裡寫明不是用 trace 判斷的
+    assert rca["root_cause"]["algorithm"] == "rca.root_cause.evidence"
+    assert "沒有 trace 證據" in rca["root_cause"]["note"] and "改用 topological" in rca["root_cause"]["note"]
 
 
 def test_without_topology_the_graph_sections_are_skipped(now):
     rca = _rca(_incident(now, topology=[]), now=now)
-    assert {"root_cause_candidates", "propagation_path"} <= set(rca["skipped"])
+    assert "propagation_path" in rca["skipped"]
+    # 「可能的源頭」不再整段消失：寫明證據不足（沒有 trace、也沒有拓撲），讓值班的人知道是算了但不能指認
+    candidates = {s["key"]: s["body"] for s in rca["sections"]}["root_cause_candidates"]
+    assert candidates.startswith("證據不足") and rca["root_cause"]["candidates"] == []
 
 
 def test_root_cause_is_the_dependency_not_the_caller(now):

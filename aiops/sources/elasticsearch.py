@@ -124,7 +124,7 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         for b in range(buckets):
             lo, hi = start + step * b, (start + step * (b + 1) if b < buckets - 1 else end)
             body = {"size": candidates_per_bucket, "_source": ["trace.id"],
-                    "query": {"function_score": {"query": {"bool": {"filter": _window_filters(lo, hi, services)}},
+                    "query": {"function_score": {"query": {"bool": {"filter": _window_filters(lo, hi, services, b == buckets - 1)}},
                                                  "random_score": {"seed": SAMPLE_SEED, "field": "_seq_no"},
                                                  "boost_mode": "replace"}}}
             ids = []
@@ -164,32 +164,54 @@ class ElasticsearchSpec(BaseDataSourceSpec):
     def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
                    max_logs: int = 5000) -> tuple[list[dict[str, Any]], bool]:
         """APM 錯誤日誌（processor.event = error）。訊息依序取：error.exception（陣列或單一物件都可）的 message、
-        error.log.message、頂層 message。索引用 AIOPS_ES_LOG_INDEX 改。只呼叫 _search。"""
+        error.log.message、頂層 message。索引用 AIOPS_ES_LOG_INDEX 改。只呼叫 _search。
+
+        區間內筆數 <= max_logs：全部撈（每筆 weight=1）。超過：不再只拿時間最早的 max_logs 筆（事故後段的暴增會整段被丟掉），
+        改成把區間切成時間桶，每桶撈固定筆數，每筆帶 weight = 該桶總筆數 ÷ 撈到的筆數，暴增倍率用加權後的筆數算。
+        回傳的 truncated 為 True。"""
         index = os.environ.get("AIOPS_ES_LOG_INDEX", "").strip() or DEFAULT_LOG_INDEX
         filters = _window_filters(start, end, services)
         logs: list[dict[str, Any]] = []
         after = None
+        first = True
         while len(logs) < max_logs:
             body: dict[str, Any] = {
                 "size": min(5000, max_logs - len(logs)), "query": {"bool": {"filter": filters}},
-                "_source": ["@timestamp", "service.name", "trace.id", "message", "error.exception", "error.log", "error.culprit"],
-                # 分頁要穩定的排序：時間＋每筆唯一的 error.id（不用 _doc，跨分片沒有 PIT 時不保證順序）
-                "sort": [{"@timestamp": "asc"}, {"error.id": {"order": "asc", "missing": "_last"}}],
+                "_source": LOG_FIELDS, "sort": LOG_SORT,
             }
+            if first:
+                body["track_total_hits"] = max_logs + 1
             if after is not None:
                 body["search_after"] = after
-            resp = _http.request(self.client, self.source_type, "POST", f"{self.base_url}/{index}/_search",
-                                 headers=self.headers, json=body)
-            payload = resp.json() if resp.content else {}
-            if not resp.is_success:
-                reason = (payload.get("error") or {}).get("reason") if isinstance(payload.get("error"), dict) else None
-                raise InvalidQueryError(f"elasticsearch 撈日誌失敗（HTTP {resp.status_code}）：{reason or resp.text[:200]}")
+            payload = self._search(index, body, "撈日誌")
+            total = ((payload.get("hits") or {}).get("total") or {}).get("value")
+            if first and total is not None and total > max_logs:
+                return self._sampled_logs(index, start, end, services, max_logs), True
+            first = False
             hits = payload.get("hits", {}).get("hits", [])
             if not hits:
                 return logs, False
             logs += [r for r in (_log(h["_source"]) for h in hits) if r is not None]
             after = hits[-1]["sort"]
         return logs[:max_logs], True
+
+    def _sampled_logs(self, index: str, start: datetime, end: datetime, services: list[str] | None,
+                      max_logs: int) -> list[dict[str, Any]]:
+        buckets = max(1, min(SAMPLE_MAX_BUCKETS, math.ceil((end - start).total_seconds() / 60)))
+        step = (end - start) / buckets
+        quota = max(1, min(5000, max_logs // buckets))
+        out: list[dict[str, Any]] = []
+        for b in range(buckets):
+            lo, hi = start + step * b, (start + step * (b + 1) if b < buckets - 1 else end)
+            body = {"size": quota, "track_total_hits": True, "_source": LOG_FIELDS, "sort": LOG_SORT,
+                    "query": {"bool": {"filter": _window_filters(lo, hi, services, b == buckets - 1)}}}
+            payload = self._search(index, body, "抽樣日誌")
+            hits = payload.get("hits", {}).get("hits", [])
+            rows = [r for r in (_log(h["_source"]) for h in hits) if r is not None]
+            total = ((payload.get("hits") or {}).get("total") or {}).get("value") or len(rows)
+            weight = total / len(rows) if rows else 1.0
+            out += [{**r, "weight": weight} for r in rows]
+        return out
 
     def check(self) -> dict[str, Any]:
         return _http.check(self.client, self.source_type, f"{self.base_url}/", headers=self.headers)
@@ -201,12 +223,19 @@ SPAN_FIELDS = ["@timestamp", "trace.id", "span.id", "transaction.id", "parent.id
                "span.duration.us", "transaction.duration.us", "event.outcome"]
 SPAN_SORT = [{"@timestamp": "asc"}, {"trace.id": "asc"}, {"span.id": {"order": "asc", "missing": "_first"}}]
 SAMPLE_MAX_BUCKETS = 30
+LOG_FIELDS = ["@timestamp", "service.name", "trace.id", "message", "error.exception", "error.log", "error.culprit"]
+# 分頁要穩定的排序：時間＋每筆唯一的 error.id（不用 _doc，跨分片沒有 PIT 時不保證順序）
+LOG_SORT = [{"@timestamp": "asc"}, {"error.id": {"order": "asc", "missing": "_last"}}]
 SAMPLE_TRACES_PER_ROUND = 20
 SAMPLE_SEED = 20261103
 
 
-def _window_filters(start: datetime, end: datetime, services: list[str] | None) -> list[dict[str, Any]]:
-    filters: list[dict[str, Any]] = [{"range": {"@timestamp": {"gte": start.isoformat(), "lte": end.isoformat()}}}]
+def _window_filters(start: datetime, end: datetime, services: list[str] | None,
+                    end_inclusive: bool = True) -> list[dict[str, Any]]:
+    """時間區間＋服務過濾。分桶抽樣時，除了最後一桶都要 end_inclusive=False（含頭不含尾），
+    不然剛好落在桶邊界的文件會被相鄰兩桶各算一次，日誌權重就會偏高。"""
+    upper = "lte" if end_inclusive else "lt"
+    filters: list[dict[str, Any]] = [{"range": {"@timestamp": {"gte": start.isoformat(), upper: end.isoformat()}}}]
     if services:
         # 大小寫不分（case_insensitive，ES 7.10+）：事件實體叫 cart-api、索引裡寫 Cart-API 一樣要撈得到
         names = sorted({canonical_service(s) for s in services})

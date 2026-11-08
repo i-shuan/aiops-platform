@@ -1,4 +1,9 @@
-"""佐證段落：trace 合成出的錯誤率與延遲。"""
+"""佐證段落：trace。
+
+優先用這一輪 ingestion.incident_traces 隨需撈回來的 span（ctx.rca_spans）：各服務事件前 vs 事件期間的請求數、平均總耗時、
+每請求自身耗時（扣掉等下游的時間）、錯誤率，再附一條事件期間最慢的 trace 的呼叫鏈（依實際 parent.id 還原，標每段耗時與自身耗時）。
+這一輪沒有 span 時，才退回資料庫裡批次匯入的 trace 時序（ctx.trace_rows）。兩者都沒有就略過。
+"""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -6,8 +11,10 @@ from datetime import timedelta
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.rca.base import RcaSection
+from aiops.stages.rca.spans import call_chain, window_stats
 
 _TRACE_MARGIN = timedelta(minutes=10)
+MAX_CHAIN_LINES = 15
 
 
 def _trace_rows(incident, ctx):
@@ -15,20 +22,54 @@ def _trace_rows(incident, ctx):
     return [r for s in incident.entities for r in ctx.trace_rows.get(s, []) if start <= as_utc(r.ts) <= end]
 
 
+def _from_spans(incident, ctx) -> str:
+    spans = ctx.rca_spans
+    start, end = as_utc(incident.start), as_utc(incident.end) + timedelta(minutes=1)
+    first_ts = min(as_utc(s.ts) for s in spans)
+    before = window_stats(spans, first_ts, start) if first_ts < start else {}
+    during = window_stats(spans, start, end)
+    base_min = (start - first_ts).total_seconds() / 60
+    lines = [f"這一輪撈到 {len(spans)} 個 span、{len({s.trace_id for s in spans})} 條 trace；"
+             f"事件前 {base_min:.0f} 分鐘 vs 事件期間（每請求）："]
+    for service in sorted(during, key=lambda s: -(during[s].self_ms_per_request - (before[s].self_ms_per_request if s in before else 0))):
+        d, b = during[service], before.get(service)
+        mark = "＊" if service in incident.entities else "  "
+        if b:
+            lines.append(f"{mark}{service}：請求 {b.requests}→{d.requests}；總耗時 {b.total_ms_mean:.1f}→{d.total_ms_mean:.1f} ms；"
+                         f"自身耗時 {b.self_ms_per_request:.1f}→{d.self_ms_per_request:.1f} ms"
+                         f"（{d.self_ms_per_request - b.self_ms_per_request:+.1f}）；錯誤率 {b.error_rate:.0%}→{d.error_rate:.0%}")
+        else:
+            lines.append(f"{mark}{service}：請求 {d.requests}；總耗時 {d.total_ms_mean:.1f} ms；自身耗時 {d.self_ms_per_request:.1f} ms；"
+                         f"錯誤率 {d.error_rate:.0%}（事件前沒有資料）")
+    in_window = [s for s in spans if start <= as_utc(s.ts) < end and s.parent_id is None]
+    if in_window:
+        slowest = max(in_window, key=lambda s: s.duration_ms)
+        lines.append(f"事件期間最慢的一條 trace（{slowest.trace_id}，{slowest.duration_ms:.0f} ms）：")
+        chain = call_chain(spans, slowest.trace_id)
+        for depth, s, own in chain[:MAX_CHAIN_LINES]:
+            lines.append(f"  {'  ' * depth}{s.service}：{s.duration_ms:.1f} ms（自身 {own:.1f} ms）{'，失敗' if s.error else ''}")
+        if len(chain) > MAX_CHAIN_LINES:
+            lines.append(f"  …（還有 {len(chain) - MAX_CHAIN_LINES} 個 span）")
+    lines.append("＊ = 事件裡的服務。自身耗時 = span 耗時扣掉直接子 span 的耗時。")
+    return "\n".join(lines)
+
+
 @OperatorRegistry.register("rca.section.trace_evidence")
 class TraceEvidence(RcaSection):
-    """IT 場景：用 trace 合成出的每服務錯誤率與 p95 佐證。載入的 trace 時序沒有相關資料就略過。"""
+    """IT 場景：trace 佐證。優先用這一輪撈到的 span，沒有才用資料庫裡的 trace 時序。"""
 
     key, title = "trace_evidence", "Trace 佐證"
 
     def applies(self, incident, ctx):
-        return bool(_trace_rows(incident, ctx))
+        return bool(ctx.rca_spans) or bool(_trace_rows(incident, ctx))
 
     def build(self, incident, ctx):
+        if ctx.rca_spans:
+            return _from_spans(incident, ctx)
         by_service: dict[str, list] = {}
         for r in _trace_rows(incident, ctx):
             by_service.setdefault(r.service, []).append(r)
-        lines = []
+        lines = ["（這一輪沒有撈到 span，以下是資料庫裡批次匯入的 trace 時序）"]
         for service in sorted(by_service):
             rows = by_service[service]
             worst_err = max(rows, key=lambda r: r.error_rate)

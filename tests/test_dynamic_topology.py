@@ -92,6 +92,25 @@ def test_es_fetch_spans_stops_at_max_spans(monkeypatch):
     assert truncated and len(spans) == 2 and seen[0][1] == "/traces-otel-*/_search" and seen[0][2]["size"] == 2
 
 
+def test_es_fetch_logs_samples_evenly_and_weights_by_bucket_total_when_over_the_cap():
+    """日誌超過上限：不再只拿最早的 N 筆（事故後段的暴增會整段被丟掉），而是依時間分桶抽樣，每筆的權重 = 該桶總筆數 ÷ 抽到的筆數。"""
+    docs = []
+    for m in range(60):
+        n = 5 if m < 40 else 50  # 後 20 分鐘暴增 10 倍
+        for k in range(n):
+            docs.append({"@timestamp": (T + timedelta(minutes=m, seconds=k)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         "service": {"name": "cart-api"}, "error": {"exception": [{"message": f"pool timeout {k}", "type": "E"}]}})
+    fake = _FakeES(docs)
+    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    logs, truncated = spec.fetch_logs(T, T + timedelta(minutes=60), None, max_logs=300)
+    assert truncated and len(logs) <= 300
+    assert sum(r["weight"] for r in logs) == pytest.approx(len(docs))  # 加權後的總數還原真實筆數
+    late = sum(r["weight"] for r in logs if r["ts"] >= T + timedelta(minutes=40))
+    assert late == pytest.approx(20 * 50)  # 後段暴增沒有被截掉
+    full, cut = spec.fetch_logs(T, T + timedelta(minutes=60), None, max_logs=5000)
+    assert not cut and all(r.get("weight", 1.0) == 1.0 for r in full)  # 沒超過上限：全撈、不加權
+
+
 def _iso(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
@@ -107,7 +126,8 @@ class _FakeES:
         for f in filters:
             if "range" in f:
                 r, ts = f["range"]["@timestamp"], _iso(doc["@timestamp"])
-                if not (_iso(r["gte"]) <= ts <= _iso(r["lte"])):
+                upper_ok = ts <= _iso(r["lte"]) if "lte" in r else ts < _iso(r["lt"])
+                if not (_iso(r["gte"]) <= ts and upper_ok):
                     return False
             elif "service.name" in f.get("terms", {}):
                 if doc["service"]["name"] not in f["terms"]["service.name"]:
@@ -137,7 +157,9 @@ class _FakeES:
         hits = [{"_source": d, "sort": [start + k]} for k, (_, d) in enumerate(page)]
         out = {"hits": {"hits": hits}}
         if "track_total_hits" in body:
-            out["hits"]["total"] = {"value": min(len(matched), body["track_total_hits"]), "relation": "eq"}
+            limit = body["track_total_hits"]  # true = 精確總數；數字 = 數到這麼多就停（跟真的 ES 一樣）
+            value = len(matched) if limit is True else min(len(matched), limit)
+            out["hits"]["total"] = {"value": value, "relation": "eq"}
         return httpx.Response(200, json=out)
 
 
@@ -398,9 +420,11 @@ def _incident_without_topology(now):
     return result["incidents"][0]["id"]
 
 
-def _rca(incident_id, now, source_type):
+def _rca(incident_id, now, source_type, root_cause=None):
     wf = load_workflow(workflow_path("rca_report"))
     next(n for n in wf.nodes if n.name == "fetch_traces").params["source_type"] = source_type
+    if root_cause:
+        next(n for n in wf.nodes if n.name == "root_cause").operator = root_cause
     return Pipeline(wf, StorageHooks()).run(incident_id=incident_id, now=now).to_result()
 
 
@@ -414,14 +438,24 @@ def test_rca_ranks_root_causes_from_traces_fetched_on_demand(now, monkeypatch):
     crud.update(IncidentRow, inc_id, context={})
 
     without = _rca(inc_id, now, "elasticsearch")  # 測試環境沒有 ES：略過，跟以前一樣排不出根因
-    assert "root_cause_candidates" in without["skipped"] and without["trace_fetch"]["spans"] == 0
+    # 排不出根因時「可能的源頭」段落不再整段消失，而是寫明證據不足（以前是放進 skipped）
+    assert without["root_cause"]["candidates"] == [] and without["trace_fetch"]["spans"] == 0
+    candidates = {s["key"]: s["body"] for s in without["sections"]}["root_cause_candidates"]
+    assert candidates.startswith("證據不足") and "沒有 trace" in candidates
 
-    out = _rca(inc_id, now, "mock")  # mock 的 trace：svc-a 呼叫 svc-b、svc-b 呼叫 svc-c
+    # 這個測試驗的是「隨需撈 trace -> 還原拓撲 -> 拓撲排序」這條路，所以明確指定 topological
+    # （rca_report 的預設根因改成 evidence 了，見下面）
+    out = _rca(inc_id, now, "mock", "rca.root_cause.topological")  # mock 的 trace：svc-a 呼叫 svc-b、svc-b 呼叫 svc-c
     edges = {(e["caller"], e["callee"]) for e in out["dynamic_topology"]["edges"]}
     assert edges == {("svc-a", "svc-b"), ("svc-b", "svc-c")}
     assert out["root_cause"]["candidates"][0]["entity"] == "svc-c"  # 被呼叫的最底層依賴是源頭
     sections = {s["key"]: s["body"] for s in out["sections"]}
     assert sections["propagation_path"].startswith("svc-c（") and not out.get("errors")
+
+    # 預設的 evidence：mock 的 trace 每分鐘都一樣快（沒有任何服務自己變慢），所以據實回答證據不足，不硬湊
+    default = _rca(inc_id, now, "mock")
+    assert default["root_cause"]["algorithm"] == "rca.root_cause.evidence" and default["root_cause"]["candidates"] == []
+    assert default["root_cause"]["note"].startswith("證據不足") and default["trace_fetch"]["spans"] > 0
 
 
 def test_daily_detection_never_fetches_traces():

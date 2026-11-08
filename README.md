@@ -367,7 +367,8 @@ targets:
 
 | 根因算子 | 做法 | 需要 |
 |---|---|---|
-| `rca.root_cause.topological`（預設） | 傳播圖上沒有異常上游的實體，依最早出現排序 | 拓撲或 Lot 流向 |
+| `rca.root_cause.evidence`（`rca_report` 預設） | 這一輪撈到的 span：各服務**自身耗時**（span 耗時扣掉等下游的時間）與自身錯誤率的增量；被上游放大流量的服務，增量按流量倍數轉給放大者；前幾名拉不開或資料不足就回「證據不足」不指認。沒有 trace 的場景（工廠）退回 topological 並寫明；trace 來源連不上（例如 ES 重啟）則不退回、直接證據不足 | `ingestion.incident_traces`（已接好） |
+| `rca.root_cause.topological` | 傳播圖上沒有異常上游的實體，依最早出現排序 | 拓撲或 Lot 流向 |
 | `rca.root_cause.pagerank` | 反向傳播圖上的 Personalized PageRank：拖垮越多下游、越異常的上游排越前 | 拓撲或 Lot 流向 |
 | `rca.root_cause.cross_correlation` | 事件時段原始時序的時間位移互相關：誰的波動領先別人。前處理 `preprocess` 可選 `diff`（預設，一階差分）或 `hybrid`（只在異常時段保留穩健 z 分數、其他歸零） | 前面要有 `ingestion.incident_series`（`rca_report_correlation.yaml` 已經接好）；這是相關不是因果 |
 
@@ -397,7 +398,23 @@ targets:
 
 `hybrid` 救回了高原事件的相關性，也排對了「誰比誰晚」（ord 晚 6 點、bill 晚 10–11 點），但**兩個標準答案的第一候選都錯**：同一分鐘一起變慢的服務（例如 api-gw 直接呼叫 cart-api，延遲當下就加進去）只差 ±1 點，它照樣挑一個當「領先者」。錯的根因比沒有根因更糟，所以預設維持 `diff`，`hybrid` 要自己在 YAML 開。沒有 `min_mask_points` 防線時，`hybrid` 在無事件對照組是 40／40 誤判（只有零星異常點的服務等於拿十來個雜訊點互比）。
 
-報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
+**`rca.root_cause.evidence` 驗收（產生器正式劇本，2 週資料、seed 42，走完整 `rca_report`；trace 與日誌經真的 `ElasticsearchSpec` 撈、含抽樣）：**
+
+| 特徵組合 | callee_slowdown（真兇 bill-svc）基準 15／60 分鐘 | load_amplification（真兇 cart-api）基準 15／60 分鐘 |
+|---|---|---|
+| 純自身耗時 | ✓／✓ | ✓／✓ |
+| ＋自身錯誤率（預設） | ✓／✓ | ✓／✓（cart-api 1.50、ord-svc 0.40、bill-svc 0.28） |
+| ＋日誌權重 0.5／1.0 | ✓／✓ | ✓／✓（1.0 時 cart-api 1.89 對 ord-svc 1.39，差距縮小） |
+| 只看自身錯誤率 | ✓／✓ | ✓／✓ |
+| 對照：topological／PageRank | ✓／✓ | ✗ bill-svc／✗ ord-svc |
+
+- **沒有流量放大歸因時**，load_amplification 是 cart-api +184 ms、ord-svc +171 ms，差 8%，只能回「證據不足」；加上歸因（ord-svc、bill-svc 流入流量 2.09 倍，由 cart-api 放大）後才排對。歸因是近似：被灌流量的服務增量中 (1 − 1/流量倍數) 算給放大者，理由文字會寫出轉了多少毫秒。
+- **測試套件**（`tests/test_rca_evidence.py`）：正式劇本縮短到事故當天、3 個 seed（42、7、2026）× 兩種機制，第 1 名全部命中；把流量放大歸因關掉，load_amplification 會紅。
+- **不會無中生有**：同一套產生器、事故效果全設 0 的對照劇本，40 個時段 40 次「證據不足（沒有明顯上升）」；每個服務同幅度變慢（共同外部因素）回「證據不足（拉不開）」。
+- **真實 ES（scn 資料）**：40 個安靜時段全部「證據不足（trace 不足）」——每個服務 15 分鐘只有約 5 筆請求，低於 `min_requests` 20，**評分邏輯沒有被這批資料考驗到**。11/3 事故排出 bill-svc（自身耗時 +31 ms）、ord-svc（+20）、cart-api（+6）；這批 trace 沒有跨服務呼叫，自身耗時就是各服務總耗時，也沒有標準答案可以對。
+- **日誌**：超過上限時改成依時間分桶抽樣並加權（6,147 筆估成 6,151），倍率改成新出現與既有樣板同一把尺。但 cascade 的真正成因訊息（cart-api `HikariPool ... Connection is not available`）仍排第 10：前幾名是下游的「交易太慢」警告，平常完全沒出現所以倍率最高。日誌權重預設 0，不影響根因排名；要把成因訊息排前面需要分辨「症狀日誌」與「成因日誌」，還沒做。
+
+報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`trace_evidence` 段落優先用這一輪撈到的 span（事件前 vs 事件期間的請求、總耗時、自身耗時、錯誤率，加一條最慢 trace 的呼叫鏈），沒有才退回資料庫裡的 trace 時序。根因算子沒給候選時，「可能的源頭」段落會寫明證據不足的原因，不再整段消失。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
 
 ### 學習閉環
 
