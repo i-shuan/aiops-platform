@@ -126,6 +126,9 @@ def test_default_detection_is_a_majority_vote_of_three_detectors(name):
         "detector.hourly_baseline", "detector.mad", "detector.quantile_drift", "detector.ensemble", "detector.new_only"]
     vote = next(n for n in wf.nodes if n.operator == "detector.ensemble")
     assert vote.params == {"strategy": "majority"}
+    # it_otel 刻意用 min_weeks: 1（多數決下誤報較少）；factory 保留預設的安全退回
+    hourly = next(n for n in wf.nodes if n.operator == "detector.hourly_baseline")
+    assert hourly.params.get("min_weeks") == (1 if name == "it_otel" else None)
     pipeline = Pipeline(wf)
     assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_mad", "detect_qdrift"]  # 投票節點不載基準線
 

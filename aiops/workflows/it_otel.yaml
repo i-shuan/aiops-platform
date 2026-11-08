@@ -3,9 +3,7 @@ description: "IT：OpenTelemetry trace + 指標，有服務拓撲與黃金訊號
 
 nodes:
   # 注意 Prometheus 單次查詢上限約 11000 點：step 60 秒抓 7 天是 10081 點，剛好在上限內。
-  # 168 時段基準線每個「週幾幾點」要看過至少 2 週才會啟用（min_weeks），7 天訓練時它整條退回全段統計（等同 zscore），
-  # 不會更吵但也還沒有週期效果。要啟用：train_lookback_minutes 設 20160 以上並把 step_seconds 調大（例如 300），
-  # 流量類指標建議累積 3~4 週再信任它。
+  # 流量類指標建議累積 3~4 週再信任 168 時段基準線（要更長就把 train_lookback_minutes 加大、step_seconds 調大）。
   - name: fetch
     operator: ingestion.fetch
     params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
@@ -13,9 +11,12 @@ nodes:
   # 異常檢測：三個偵測器各自判斷，再由 detector.ensemble 多數決（超過一半同意才算異常）。
   # 真實資料回放：多數決比聯集少 88% 的單點誤報，核心事件全部留下。要換演算法就換這裡的節點
   # （detector.zscore / mad / shift / peer / rules / chronic / dod / wow / quantile_drift）。
+  # min_weeks: 1 是刻意的取捨：7 天訓練時每個時段只看過一次，標準差會被低估、單獨看會比較吵；
+  # 但它在多數決裡比「退回 zscore」少很多誤報（真實資料回放：多數決區間外警報 59 筆 vs 148 筆）。
+  # 拿掉這個參數（預設 min_weeks: 2）就會在資料不足 2 週時自動退回 zscore。
   - name: detect
     operator: detector.hourly_baseline
-    params: {tz: Asia/Taipei}
+    params: {tz: Asia/Taipei, min_weeks: 1}
   - name: detect_mad
     operator: detector.mad
   - name: detect_qdrift
