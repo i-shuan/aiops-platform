@@ -1,6 +1,6 @@
 """開發用：幫本機建一把唯讀 ES API key，直接寫進 secrets.local.yaml。
 
-    python scripts/dev_es_key.py
+    .venv\Scripts\python tests\dev_es_key.py
 
 要建 key 得用 ES 的 elastic 管理員密碼，所以這支腳本要由有叢集權限的人自己跑（AI 助理不跑）。它會：
   1. 開 kubectl port-forward 到 es-test 的 elasticsearch（結束時關掉）

@@ -1,4 +1,4 @@
-"""scripts/dev_es_key.py 的純邏輯：把 key 換進 secrets.local.yaml，不弄壞其他內容。不連叢集。"""
+"""tests/dev_es_key.py 的純邏輯：把 key 換進 secrets.local.yaml，不弄壞其他內容。不連叢集。"""
 import importlib.util
 from pathlib import Path
 
@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("dev_es_key", ROOT / "scripts" / "dev_es_key.py")
+spec = importlib.util.spec_from_file_location("dev_es_key", ROOT / "tests" / "dev_es_key.py")
 dev_es_key = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dev_es_key)
 
