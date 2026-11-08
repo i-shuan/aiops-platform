@@ -71,6 +71,7 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 | `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch`；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
 | `aiops/storage/` | SQLAlchemy 資料表、repository、`hooks.py`（管線前後的載入／寫入） |
 | `aiops/interfaces/` | 對外介面：`api/`（薄薄一層 HTTP）、`app.py`（FastAPI 入口）、`cli/`（排程，`python -m aiops.interfaces.cli`）、`bootstrap/`（啟動初始化、token 驗證、故障看守）、`runner.py`（唯一組裝點） |
+| `scripts/synth_generator/` | 合成資料產生器（不在 `aiops/` 裡，平台不 import）：由服務拓撲與故障劇本產生有因果關係的 metrics、traces、logs 與標準答案，見「合成資料產生器」 |
 | `tests/dev_es_key.py` | 開發輔助腳本（不是測試）：建本機用的唯讀 ES key 並寫進 `secrets.local.yaml`；檔名不是 `test_` 開頭，pytest 不會執行它 |
 | `secrets.local.example.yaml` | 本機開發金鑰範本；複製成 `secrets.local.yaml`（已被 `.gitignore` 擋住）再填值 |
 | `migrations/postgres/` | 既有 PostgreSQL 的手動升級 SQL（沒有 Alembic，可重複執行） |
@@ -394,6 +395,91 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0003_artifacts_missed_f
 `it_otel` 的偵測改成 `detector.hourly_baseline` 之後，舊的 `zscore` 基準線不會被沿用（演算法不同），第一次執行會抓 7 天資料重訓。
 
 SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
+
+### 合成資料產生器（`scripts/synth_generator/`）
+
+叢集上現有的 `scn`／`synth` 資料有三個缺陷，驗不了 RCA：trace 全是單服務孤島（跨服務呼叫 0 條）、各服務的延遲波形各自獨立造、log 面板讀不到例外訊息。這支產生器改成**由服務拓撲與故障劇本因果驅動**，同一份系統狀態同時產出 metrics、traces、error logs，並另存標準答案 `ground_truth.json`。它放在 `aiops/` 外面，平台程式不 import 它。
+
+四層：
+
+| 層 | 檔案 | 做什麼 |
+|---|---|---|
+| 拓撲 | `topology.py` | 呼叫 DAG：`api-gw → [cart-api, auth-svc]`、`cart-api → [ord-svc 0.8, redis-cache]`、`ord-svc → [bill-svc, inventory-db]`、`bill-svc → [billing-db, tax-gw]`。redis、db、tax-gw 是外部依賴（只有 client span） |
+| 故障劇本 | `faults.py`、`scenarios/*.yaml` | 何時開始、根因是誰、哪種機制、各服務的 lag 與振幅；共用一條包絡線（緩升 10 分、高原 90 分、指數衰減 20 分） |
+| 系統狀態＋發射器 | `waveforms.py`、`metric_emitter.py`、`trace_emitter.py` | `waveforms.SystemState` 是**唯一**的故障狀態函數（每服務每分鐘的請求數、處理時間、錯誤率、重試倍數，以及往上游加總出來的整段耗時與失敗率）。metrics 是整段 2 週的解析模型；trace 只在事件前後 ±2 小時高密度（每分鐘 12 條），平常每小時 6 條健康樣本，逐筆走訪呼叫樹，取的是同一份陣列 |
+| 寫入 | `generate.py`（本機檔案）、`es_writer.py`（載入 ES） | 預設只輸出 bulk NDJSON；寫 ES 要使用者自己跑 |
+
+產生（只寫本機，不連網路；同一個 seed 輸出逐位元組相同）：
+
+```bash
+.venv/Scripts/python -m scripts.synth_generator --scenario scripts/synth_generator/scenarios/nov03_cascade.yaml --out synth-out/nov03_cascade
+```
+
+輸出資料夾（`synth-out/` 已被 `.gitignore` 擋住）有 `metrics.ndjson`、`traces.ndjson`、`logs.ndjson`（`_bulk` 的 create 格式）、`ground_truth.json`（根因、各服務起點；**不寫進 ES**）、`manifest.json`（筆數與 sha256）。一個 2 週劇本約 13 萬筆 metrics、9 萬筆 trace、數千筆 log，共約 200 MB，跑 15 秒。
+
+離線驗證（直接 import 平台的程式吃這些檔案，印出拓撲邊、偵測器回放、三種根因演算法的排名）：
+
+```bash
+.venv/Scripts/python -m scripts.synth_generator.validate_offline synth-out/nov03_cascade
+```
+
+#### 兩種故障機制（`mechanism` 必填）
+
+平台的拓撲是 (caller, callee)，傳播方向是 **callee → caller**（`engine/topology.propagation_edges`：下游出事拖垮上游）。劇本的方向必須講清楚，所以分兩種：
+
+| mechanism | 根因在哪 | 劇本寫什麼 | 訊號長什麼樣 | 拓撲／PageRank 會怎樣 |
+|---|---|---|---|---|
+| `callee_slowdown`（`nov03_callee_slowdown.yaml`） | 最下游的服務（bill-svc 呼叫的 tax-gw 變慢） | 只寫根因自己的偏移；不准寫上游 | 上游的整段耗時本來就包含下游，**同一分鐘**一起變慢（trace 是加總出來的，不另外造） | 跟平台同向，應該指向最下游 |
+| `load_amplification`（`nov03_cascade.yaml`） | 上游（cart-api 連線池耗盡、重試風暴） | 根因要有 `call_multiplier > 1`（對下游的呼叫次數放大）；下游各自的 lag 與偏移 | 下游請求量立刻上升，下游自己的處理時間在 lag 之後才上升；上游的整段耗時也包含下游的變慢 | 跟平台反向，**預期會指錯人**——這正是這份資料要量的 |
+
+離線驗證的實際結果（seed 42，事件 11/3 14:05Z 起；拓撲由 trace 用平台的 `_span` 與 `service_edges` 還原，四條邊與劇本 DAG 完全一致）：
+
+| 劇本（真實根因） | topological | pagerank | cross_correlation（預設 `min_corr: 0.5`） |
+|---|---|---|---|
+| `nov03_callee_slowdown`（bill-svc） | bill-svc ✓ | bill-svc ✓ | 排不出（所有服務同一分鐘變慢，互相關最佳位移是 0） |
+| `nov03_cascade`（cart-api） | bill-svc ✗ | ord-svc ✗ | 排不出（差分後 \|r\| 最高 0.35）；降到 `min_corr: 0.2` 才排出 cart-api |
+
+互相關排不出來的原因：平台先做一階差分再算相關，緩升 10 分鐘的波形差分之後幾乎只剩雜訊（cart-api 對 bill-svc 差分後 r=0.25）；不差分直接比水位是 r=0.98、cart-api 領先 11 點。這是演算法的前處理問題，不是資料沒有先後。
+
+#### 指標的物理特性
+
+- **請求數**：入口 api-gw 有強日夜週期（台北時間 04:00 最低、16:00 最高）、週末 × 0.4、Poisson 噪音；下游依呼叫機率一路乘下去。給 `detector.hourly_baseline`（14 天訓練，`min_weeks` 預設 2 剛好夠）。
+- **延遲**：每筆請求對數常態（右偏長尾），沒有日夜波動。給 `detector.mad`、`detector.quantile_drift`。
+- **錯誤率**：接近 0 的截斷常態，加偶發單點毛刺（每服務每分鐘 1/1500 機率），用來測 `detector.ensemble` 能不能濾掉單點雜訊。實測：mad＋quantile_drift＋hourly_baseline 三個多數決**濾不掉**（38 個毛刺過了 33 個，因為 mad 與 hourly 都會抓單點）；只用 mad＋quantile_drift 兩個（strict 平手不算）剩 4 個。另外 mad 對錯誤率幾乎無法使用：每分鐘失敗數大多是 0，MAD = 0，任何一筆失敗都算異常（8 天跳 1.1 萬點）。
+- **CPU 沒有產生**：APM 的 CPU 在 `metrics-apm.app.*`，不在平台唯讀 key 能讀的 `metrics-apm.transaction.1m-*` 底下。
+
+#### 文件格式（照 Elastic APM 資料模型）
+
+- **trace** 發兩種文件：`processor.event: transaction`（`transaction.id`、`transaction.duration.us`；被別的服務呼叫時 `parent.id` = 上游那個 client span 的 `span.id`）與 `processor.event: span`（`span.id`、`span.duration.us`、`parent.id` = 所屬 transaction、`span.destination.service.resource`）。transaction 文件不帶 `span` 欄位，否則平台的 `_span` 會讀成耗時 0。結果欄位是 `event.outcome`（`success`／`failure`）。
+- **metrics** 依 `event.outcome` 拆成 success／failure 兩份（有失敗才有 failure），`transaction.duration.histogram` 是 ES histogram 型別（Grafana p95 面板吃它）、`summary.sum`／`value_count`、`event.success_count`。
+- **log**（`processor.event: error`）在 span 出錯（自己出錯，或呼叫下游失敗）或耗時超過平常 2.5 倍時寫，帶同一個 `trace.id`、`transaction.id`，`parent.id` 指向出事的 transaction 或 span。
+- **`error.exception` 刻意寫成單一物件 `{"type","message","handled"}`，不是 Elastic APM 真實格式的陣列。** Grafana 的 log 面板（`logMessageField: error.exception.message`）沿 `_source` 逐層走，走不進陣列，所以舊資料只顯示文件 id；ES 索引上物件跟單元素陣列等價。另外寫頂層 `message` 當保險。用程式模擬 Grafana 的取值方式，6,266 筆 log 全部取得到字串（同樣文件改成陣列則全部取不到）。**實際在 Grafana 畫面上能不能顯示，要等資料載入後才確認，還沒驗證。**
+
+#### 載入 ES（使用者自己跑）
+
+`es_writer.py` 要 ES 管理員密碼，平台程式與 AI 助理都不跑。預設 dry-run，只讀本機檔案、印出會建什麼，不連網路：
+
+```bash
+.venv/Scripts/python -m scripts.synth_generator.es_writer synth-out/nov03_cascade
+```
+
+建議先用唯讀 key 抄既有 `scn` 資料串流的 mapping（`schema/*.json` 目前是**手寫的備用 mapping，不是從叢集抓的**；這一步會覆蓋它，`summary.sum` 這類欄位的型別才會跟現有資料一樣）：
+
+```bash
+.venv/Scripts/python -m scripts.synth_generator.es_writer --fetch-schema
+```
+
+真的寫入（讀 `secrets.local.yaml` 的 `es.url` 與 `es.admin_password`；叢集上的 ES 要先 `kubectl --context rancher-desktop -n es-test port-forward svc/elasticsearch 19200:9200`）：
+
+```bash
+.venv/Scripts/python -m scripts.synth_generator.es_writer synth-out/nov03_cascade --apply
+```
+
+- 每個劇本寫進自己的 namespace（`nov03_cascade` → `gencascade`、`nov03_callee_slowdown` → `genslowdown`）：`metrics-apm.transaction.1m-<ns>`、`traces-apm-<ns>`、`logs-apm.error-<ns>`，都在平台唯讀 key 與 Grafana 讀得到的 pattern 底下。兩個劇本是同一批服務、同一段時間，所以分開放；Grafana 會兩份一起看到，看其中一份要在查詢加 `data_stream.namespace`。
+- namespace 只准 `gen` 開頭；檔案裡出現別的索引名稱就拒絕。**既有的 `scn`、`synth` 一筆都不碰**：不刪任何東西，只建／更新名為 `aiops-synth-<ns>-*` 的 index template（priority 500，只套用到那三個名稱）。
+- 資料串流已存在就拒絕寫（避免重跑寫兩份），確定要追加才加 `--append`。
+- 自己的 template 會蓋過 ES 內建的 APM template（只有 priority 最高的那個生效），所以內建的 APM ingest pipeline 不會跑，文件原樣寫入。
+- **`--apply` 與 `--fetch-schema` 都還沒有對真的 ES 跑過**（開發時不准用管理員密碼）。
 
 ## 設定（環境變數）
 
