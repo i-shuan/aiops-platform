@@ -259,3 +259,24 @@ nodes:
 3. **禁止防衛性推拖 (Direct Action Only)**：
    - 當使用者要求跑數據驗收時，不得主動切換話題去重構周邊基礎設施（如 Secret 儲存方式、文檔格式、CI 白名單）。
    - 一律以「先取得結果、印出報表」為最高優先級，周邊清理工作一律後置。
+
+---
+
+## 100. 測試誠實性與生產真實性防禦準則 (Test Integrity Guidelines)
+
+1. **嚴禁修改既有測試的邊界數值以迎合代碼 (No Test Downgrading)**：
+   - 嚴禁透過調降測試輸入數值（例如將 9.0 改為 5.9）、放寬斷言（Assertions）或刪除邊界案例來讓測試通過。
+   - 若代碼改動導致既有測試失敗，必須先判定「是原本測試假定與新架構衝突」，還是「新代碼引入了真實 Regression」。若需修改測試斷言，必須在 PR / Commit 訊息中明確陳述修改原因與業務語意變更。
+
+2. **嚴禁生產代碼包含測試環境特化分支 (No Test-Specific Hacks)**：
+   - 在 `stages/`、`storage/`、`pipelines/` 及演算法核心中，嚴禁出現 `if is_test:`、`if env == "test":`、`if "mock" in ...` 等繞道邏輯。
+   - 核心邏輯必須對生產資料與測試資料一視同仁，測試的隔離性只能透過依賴注入（DI）或 Mock Fixture 完成，代碼本體不可感知測試環境。
+   - 自動檢查：`tests/test_architecture.py::test_production_code_does_not_know_it_is_under_test`（掃 `aiops/` 的 `pytest`、`PYTEST_CURRENT_TEST`、`TESTING`、`is_test`、`test_env`）。
+
+3. **旗標與狀態的常駐相容性 (State Leakage & Reset)**：
+   - 在算子或 Engine 中引入任何旗標（如 `incidents_built`、快取、計數器）時，必須證明其生命週期在「常駐進程（Long-running Daemon / Loop）」中跨 Round 執行的重置機制，嚴禁依賴進程重啟來重置狀態。
+   - 證明方式：旗標掛在每輪新建的 `PipelineContext` 上（`Pipeline.run` 每輪 `PipelineContext(...)`），並有跨輪次測試（`test_state_does_not_leak_between_rounds_of_a_long_running_loop`）。模組層級、類別層級的可變狀態一律不准。
+
+4. **演算法死區誠實披露 (Algorithm Dead-zone Disclosure)**：
+   - 當某個演算法（如門控遮罩、互相關、分位數）在特定波形（如階梯高原、單點毛刺、微弱斜率）下無法被激發時，嚴禁透過抽換測試波形（例如將階梯波形偷換成隨機漫步）來粉飾太平。必須將該波形死區以測試標註（`@pytest.mark.xfail(strict=True)` 或 docstring）明確留存。
+   - 現有範例：`tests/test_rca_hybrid_limits.py`（短毛刺、被遮罩切斷的高原、偵測延遲造成的假領先者）。

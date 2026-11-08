@@ -137,3 +137,16 @@ def test_every_workflow_loads_and_its_operators_are_registered():
     load_all()
     for f in sorted((ROOT / "pipelines").rglob("*.yaml")):
         Pipeline(load_workflow(f))
+
+
+def test_production_code_does_not_know_it_is_under_test():
+    """CLAUDE.md 第 100 節第 2 條：生產代碼不可感知測試環境，測試隔離只能靠依賴注入。"""
+    import re
+
+    banned = re.compile(r"\bpytest\b|PYTEST_CURRENT_TEST|\bTESTING\b|\bis_test\b|\btest_env\b|_TEST_MODE|unittest\.mock")
+    bad = []
+    for f in ROOT.rglob("*.py"):
+        for no, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if banned.search(line):
+                bad.append(f"{f.relative_to(ROOT).as_posix()}:{no}: {line.strip()}")
+    assert not bad, "\n".join(bad)

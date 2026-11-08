@@ -77,26 +77,56 @@ def _uids(rounds):
 
 
 def test_two_hour_incident_is_one_card_with_rolling_summary():
+    """中間有一個分數 9.0 的峰值：預設門檻下 5.0 是 P2、9.0 是 P1，所以這場事故會從 P2 升級到 P1 一次。
+    同一個 incident_uid；Alertmanager 的標籤組合 P2、P1 各一組，P2 在升級那一輪被關掉，P1 撐到結案。"""
     FEED.clear()
     FEED["svc"] = [_ev("svc", m, value=100 + m) for m in range(1, 121)]  # 每分鐘都異常，持續 2 小時
-    FEED["svc"][60] = _ev("svc", 61, score=5.9, value=900.0)  # 中間的峰值（分數仍在 P2，不觸發升級）
+    FEED["svc"][60] = _ev("svc", 61, score=9.0, value=900.0)  # 中間的峰值
     rounds = _replay(150)
-    assert len(_uids(rounds)) == 1  # 只有一張卡
+    assert len(_uids(rounds)) == 1  # 只有一個 incident_uid
     cards = _cards(rounds)
-    assert len(cards) == 1 and list(cards.values())[0][0] == "resolved"
+    assert sorted((dict(k)["severity"], state) for k, (state, _) in cards.items()) == [("P1", "resolved"), ("P2", "resolved")]
+    esc = dict(rounds)[65]  # 峰值那一點（第 61 分）在 65 分那一輪被看到
+    assert [(n.labels["severity"], n.ends_at is not None) for n in esc] == [("P2", True), ("P1", False)]
+    assert esc[1].annotations["escalation_path"] == "P2 -> P1" and esc[1].annotations["summary"].startswith("[Escalated from P2]")
     starts = {n.starts_at for _, sent in rounds for n in sent}
-    assert starts == {T0 + timedelta(minutes=1)}  # 初發時間鎖死
-    counts = [int(sent[0].annotations["event_count"]) for _, sent in rounds if sent]
+    assert starts == {T0 + timedelta(minutes=1)}  # 初發時間鎖死（升級後的新標籤也沿用）
+    counts = [int(sent[-1].annotations["event_count"]) for _, sent in rounds if sent]
     assert counts == sorted(counts) and counts[0] == 5 and counts[-1] == 120  # 每輪累計
     mid = dict(rounds)[30][0].annotations
     assert mid["duration_minutes"] == "29" and "已持續 29 分鐘，累計 30 筆" in mid["summary"]
-    final = next(n for _, sent in rounds for n in sent if n.ends_at)
+    final = [n for _, sent in rounds for n in sent if n.ends_at][-1]  # 最後一則結案（P1 那組）
     a = final.annotations
+    assert final.labels["severity"] == "P1"  # 分數後來回到 5.0 也不降級
     assert (a["first_value"], a["peak_value"], a["latest_value"], a["event_count"]) == ("101", "900", "220", "120")
     assert "已恢復" in a["summary"] and "起跳 101 → 峰值 900" in a["description"]
     assert final.ends_at == T0 + timedelta(minutes=135)  # 最後一筆 120 分 + 安靜 15 分
     rows = Incidents.created_since(datetime(2000, 1, 1))
     assert [r["status"] for r in rows] == ["resolved"]  # 資料庫也只有一筆事件群（不再一輪一筆被冷卻擋下的）
+
+
+def test_state_does_not_leak_between_rounds_of_a_long_running_loop():
+    """常駐迴圈：同一個 Pipeline、同一個 hooks 跑很多輪。incidents_built 是每輪新建的 PipelineContext 的欄位，
+    不是類別或模組層級的狀態；第 3 輪才出現的無關實體照樣要建出自己的事件單，不會被前面輪次的旗標吃掉。"""
+    FEED.clear()
+    FEED["a"] = [_ev("a", m) for m in range(1, 21)]
+    FEED["z"] = [_ev("z", m) for m in range(11, 14)]  # 第 3 輪（10 < t <= 15）才出現，跟 a 不相鄰
+    wf, hooks = _workflow(("a", "z")), StorageHooks()
+    pipeline = Pipeline(wf, hooks)  # 同一個物件跑到底，不重新建立
+    seen, contexts = [], []
+    for m in range(5, 41, 5):
+        LogTransport.sent.clear()
+        ctx = pipeline.run(now=T0 + timedelta(minutes=m))
+        contexts.append(ctx)
+        seen.append({(n.labels["entities"], n.labels["incident_uid"]) for n in LogTransport.sent})
+    assert len({id(c) for c in contexts}) == len(contexts)  # 每輪都是新的 context
+    assert all(c.incidents_built for c in contexts if c.anomalies or c.open_incidents)
+    by_entity = {}
+    for round_ in seen:
+        for entity, uid in round_:
+            by_entity.setdefault(entity, set()).add(uid)
+    assert {e: len(u) for e, u in by_entity.items()} == {"a": 1, "z": 1}  # 各自一張卡，z 沒有被吃掉
+    assert PipelineContext(pipeline="p", now=T0).incidents_built is False  # 新 context 的預設值
 
 
 def test_flapping_below_quiet_window_never_resolves_in_between():
