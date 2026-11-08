@@ -21,8 +21,11 @@ def as_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnomalyEvent:
+    """一筆異常。建立後不可修改（frozen）：偵測器名稱、分數一旦產生，下游（收斂、計分、裁決）只能讀、不能改，
+    要調整就產生新的事件（例如 detector.ensemble 產生的裁決事件）。"""
+
     entity: str
     metric: str
     ts: datetime
@@ -32,16 +35,22 @@ class AnomalyEvent:
     # 資料血緣：哪個演算法（算子名，例如 detector.zscore）、哪個 Workflow 節點抓到的。外部匯入的異常留空
     detector: str = ""
     detector_node: str = ""
+    # 從哪個資料源來（RCA 重抓時序用）。外部匯入的異常留空
+    source_type: str = ""
+    # 裁決事件（detector.ensemble）由哪些節點投票通過；一般偵測事件留空
+    voted_by: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {"entity": self.entity, "metric": self.metric, "ts": self.ts.isoformat(),
                 "score": self.score, "attrs": self.attrs, "value": self.value,
-                "detector": self.detector, "detector_node": self.detector_node}
+                "detector": self.detector, "detector_node": self.detector_node,
+                "source_type": self.source_type, "voted_by": list(self.voted_by)}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AnomalyEvent:
         return cls(d["entity"], d["metric"], datetime.fromisoformat(d["ts"]), d["score"], d.get("attrs", {}),
-                   d.get("value"), d.get("detector", ""), d.get("detector_node", ""))
+                   d.get("value"), d.get("detector", ""), d.get("detector_node", ""), d.get("source_type", ""),
+                   tuple(d.get("voted_by", ())))
 
 
 @dataclass

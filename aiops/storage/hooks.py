@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 from aiops.core.context import (
     DetectorState,
+    KnowledgeCase,
     LotEdge,
     OpenIncident,
     PipelineContext,
@@ -26,6 +27,7 @@ from aiops.storage.repository import (
     DetectorModels,
     ExternalAnomalies,
     Incidents,
+    Knowledge,
     LotPaths,
     Mappings,
     Notifications,
@@ -39,6 +41,8 @@ RECENT_NOTIFICATION_DAYS = 7
 # 載入 trace 時序的範圍（算子再依自己的偵測窗取用）
 TRACE_LOOKBACK_DAYS = 7
 _RCA_TRACE_MARGIN = timedelta(minutes=10)
+# RCA 找相似事故時，最多拿最近幾筆經驗出來比（避免經驗庫很大時整包載入）
+KNOWLEDGE_POOL_SIZE = 500
 
 
 def _trace_service(query: str) -> str:
@@ -76,6 +80,7 @@ class StorageHooks:
                 incident = Incident.from_dict(row["incident"], uid=row["uid"])
                 ctx.incidents = [incident]
                 ctx.incident_ids[incident.fingerprint] = row["id"]
+                ctx.incident_pipeline = row["pipeline"] or ""
                 snapshot = row.get("context") or {}  # 建立當下用的拓撲優先（可重現）；沒有才用上面現推導的
                 if not ctx.topology_explicit and snapshot.get("topology"):
                     ctx.topology = [(a, b) for a, b in snapshot["topology"]]
@@ -86,6 +91,16 @@ class StorageHooks:
                 for r in rows:
                     ctx.trace_rows.setdefault(r["service"], []).append(
                         TraceRow(r["service"], as_utc(r["ts"]), r["count"], r["error_rate"], r["p95_ms"]))
+                # RCA 重抓時序（ingestion.incident_series）要用的欄位對照
+                for source_type in sorted({e.source_type for e in incident.events if e.source_type}):
+                    fields = Mappings.approved_fields(source_type)
+                    if fields:
+                        ctx.field_maps[source_type] = fields
+                # 歷史相似事故的比對池（排除自己）
+                ctx.knowledge_cases = [
+                    KnowledgeCase(k["incident_uid"], k["pipeline"], list(k["entities"]), list(k["metrics"]),
+                                  list(k["signals"]), k["resolution"], k["root_cause"], as_utc(k["created_at"]))
+                    for k in Knowledge.recent(KNOWLEDGE_POOL_SIZE) if k["incident_uid"] != incident.uid]
 
     def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None:
         target = ctx.target
@@ -115,7 +130,8 @@ class StorageHooks:
             if model:
                 ctx.detector_states[node] = DetectorState(model["state"], as_utc(model["trained_at"]),
                                                           model["train_start"], model["train_end"], model["points"],
-                                                          model["version"], op)
+                                                          model["version"], op, model["artifact"],
+                                                          model["artifact_format"])
         last = Anomalies.latest_ts(ctx.pipeline, target.entity, target.query)
         ctx.last_anomaly_ts = as_utc(last) if last else None
 
@@ -127,7 +143,8 @@ class StorageHooks:
         for node, st in ctx.new_detector_states.items():
             saved = DetectorModels.save(ctx.pipeline, target.entity, target.query, st.detector, st.state,
                                         st.train_start or ctx.now, st.train_end or ctx.now, st.points,
-                                        expected_version=st.version, node=node, trained_at=st.trained_at)
+                                        expected_version=st.version, node=node, trained_at=st.trained_at,
+                                        artifact=st.artifact, artifact_format=st.artifact_format)
             if saved is None:  # 別的 worker 先寫了：保留它較新的基準線，這次的丟掉（不是錯誤）
                 ctx.log(f"baseline:{node}:{target.entity}:conflict-kept-newer")
         # 每筆異常帶著自己的偵測器與節點（不是用「最後一個跑的偵測器」一律蓋上）

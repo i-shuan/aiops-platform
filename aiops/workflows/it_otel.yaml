@@ -2,13 +2,18 @@ name: it_otel
 description: "IT：OpenTelemetry trace + 指標，有服務拓撲與黃金訊號"
 
 nodes:
+  # 168 時段基準線要至少一週的訓練資料（10080 分鐘）。注意 Prometheus 單次查詢上限約 11000 點：
+  # step 60 秒抓 7 天是 10081 點，剛好在上限內；要抓更久請把 step_seconds 調大
   - name: fetch
     operator: ingestion.fetch
-    params: {lookback_minutes: 60, train_lookback_minutes: 1440, retrain_minutes: 1440}
+    params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
 
-  # 異常檢測：隨時換成 detector.mad / detector.shift / detector.peer / detector.rules / detector.chronic
+  # 異常檢測：一週 7×24 個時段各自一條基準線（週一早上跟週日凌晨不共用基準線）。
+  # 隨時換成 detector.zscore / mad / shift / peer / rules / chronic / dod / wow / quantile_drift；
+  # 掛多個偵測器時可以接 detector.ensemble 做交集／多數決
   - name: detect
-    operator: detector.zscore
+    operator: detector.hourly_baseline
+    params: {tz: UTC}
   - name: new_only
     operator: detector.new_only
 

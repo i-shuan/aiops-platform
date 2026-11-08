@@ -112,6 +112,13 @@ def find_one(model: Any, **filters: Any) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def find_latest(model: Any, limit: int, **filters: Any) -> list[dict[str, Any]]:
+    """id 最大的 limit 筆（由新到舊）。"""
+    stmt = select(model).where(*_where(model, filters)).order_by(model.id.desc()).limit(limit)
+    with read_session() as s:
+        return [row_to_dict(r) for r in s.scalars(stmt)]
+
+
 def find_matching(model: Any, equals: dict[str, Any], any_of: dict[str, list[Any]]) -> list[dict[str, Any]]:
     """一次查詢：equals 的欄位都相等、且 any_of 的每個欄位都落在給定的值之中（WHERE col IN (...)）。"""
     stmt = select(model).where(*_where(model, equals),

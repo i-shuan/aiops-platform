@@ -15,7 +15,8 @@ T0 = datetime(2026, 11, 8, tzinfo=timezone.utc)
 DETECTORS = [n for n in OperatorRegistry.names("detector.")
              if issubclass(OperatorRegistry.get(n), DetectorOperator)]
 SAMPLE = {"detector.rules": {"upper": 80}}
-IGNORES_SINGLE_SPIKE = {"detector.chronic"}  # 滾動平均會稀釋單點尖峰，刻意的
+# 滾動平均／滾動分位數會稀釋單點尖峰，刻意的（它們抓的是持續偏移與尾端漂移）
+IGNORES_SINGLE_SPIKE = {"detector.chronic", "detector.quantile_drift"}
 
 
 def _df(values, **cols):
@@ -31,7 +32,8 @@ def _algo(name, **extra):
 
 def _frame_for(name):
     cls = OperatorRegistry.get(name)
-    return _df(SPIKE, peer_0=50.0, peer_1=51.0) if cls.requires_peers else _df(SPIKE)
+    lags = {f"lag_{m}": 50.0 for m in _algo(name).required_lags()}  # 同比／環比：過去同一時刻的值
+    return _df(SPIKE, peer_0=50.0, peer_1=51.0, **lags) if cls.requires_peers else _df(SPIKE, **lags)
 
 
 def _ctx(df, entity="svc", peers=0, **kw):

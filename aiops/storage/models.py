@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Float, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aiops.storage.db import Base, create_all, drop_all
@@ -115,6 +115,9 @@ class DetectorModelRow(Base):
     trained_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     # 樂觀鎖：寫入時必須帶讀取當時的版本，版本已被別人推進就不覆蓋
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # 非 JSON 的模型本體（選用）。格式只允許安全的 npz（載入時禁止 pickle）；空字串 = 沒有
+    artifact_format: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    artifact: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
 
 # ── ingestion ──
@@ -210,14 +213,24 @@ class TuningProposalRow(Base):
     base_version: Mapped[int] = mapped_column(Integer)
     backtest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 調參成效報表用來切前後
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
 class FeedbackRow(Base):
-    """維運人員對事件群的回饋（誤報、確認、漏報）。可以轉成調參提案，但只能經提案 -> 回測 -> 核准生效。"""
+    """維運人員的回饋（誤報、確認、漏報）。可以轉成調參提案，但只能經提案 -> 回測 -> 核准生效。
+
+    兩種：針對某個事件群（incident_uid）；或真正的漏報——平台根本沒產生事件群，
+    這時 incident_uid 為空，改記 pipeline + entity + 發生時段（time_start、time_end）。
+    """
 
     __tablename__ = "feedback"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    incident_uid: Mapped[str] = mapped_column(String(40), index=True)
+    incident_uid: Mapped[str | None] = mapped_column(String(40), index=True, nullable=True)
+    pipeline: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    entity: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    time_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    time_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     verdict: Mapped[str] = mapped_column(String(16))
     detector_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     text: Mapped[str] = mapped_column(String(4000))
@@ -241,6 +254,25 @@ class ActiveDetectorConfigRow(Base):
     params: Mapped[dict] = mapped_column(JSON)
     source: Mapped[str] = mapped_column(String(16))
     proposal_id: Mapped[int] = mapped_column(Integer)
+
+
+class IncidentKnowledgeRow(Base):
+    """歷史事故經驗庫：確認是真異常、並寫了處置方式的事件群。RCA 用它找「以前發生過的類似事故」。
+
+    特徵簽章（entities、metrics、signals）在寫入當下從事件群抽出來存好，查詢時不必再解析事件內容。
+    """
+
+    __tablename__ = "incident_knowledge"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    incident_uid: Mapped[str] = mapped_column(String(40), unique=True)
+    pipeline: Mapped[str] = mapped_column(String(128), index=True, default="")
+    entities: Mapped[list] = mapped_column(JSON)
+    metrics: Mapped[list] = mapped_column(JSON)
+    signals: Mapped[list] = mapped_column(JSON)
+    resolution: Mapped[str] = mapped_column(String(4000))
+    root_cause: Mapped[str] = mapped_column(String(1000), default="")
+    author: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
 def reset_all() -> None:

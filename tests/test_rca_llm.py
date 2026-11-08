@@ -43,7 +43,8 @@ def test_all_sections_present_when_data_is_there_and_missing_ones_are_skipped_no
     keys = [s["key"] for s in rca["sections"]]
     assert keys == ["summary", "timeline", "affected_entities", "golden_signals", "root_cause_candidates",
                     "propagation_path", "suggested_actions"]
-    assert rca["skipped"] == ["trace_evidence"] and all(s["body"].strip() for s in rca["sections"])
+    assert rca["skipped"] == ["trace_evidence", "similar_cases"] and all(s["body"].strip() for s in rca["sections"])
+    assert rca["root_cause"]["algorithm"] == "rca.root_cause.topological"
 
 
 def test_without_topology_the_graph_sections_are_skipped(now):
@@ -61,7 +62,7 @@ def test_unknown_incident_is_not_found_and_unknown_section_is_a_workflow_error(n
     with pytest.raises(NotFound):
         run("rca_report", incident_id=999)
     wf = load_workflow(workflow_path("rca_report"))
-    wf.nodes[0].params["sections"] = ["summary", "made_up"]
+    next(n for n in wf.nodes if n.operator == "rca.report").params["sections"] = ["summary", "made_up"]
     with pytest.raises(WorkflowError, match="made_up"):
         Pipeline(wf, StorageHooks())
 

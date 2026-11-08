@@ -1,11 +1,14 @@
 name: rca_report
 description: "針對一個事件群產生 RCA 報告（IT／工廠共用；資料不足的段落自動略過）"
 nodes:
+  # 根因演算法：換成 rca.root_cause.pagerank，或用 rca_report_correlation（時序互相關）
+  - name: root_cause
+    operator: rca.root_cause.topological
   - name: report
     operator: rca.report
     params:
       sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
-                 propagation_path, trace_evidence, suggested_actions]
+                 propagation_path, trace_evidence, similar_cases, suggested_actions]
   # 可選 AI 總結：provider 設為 noop 即完全不連外、直接用模板；金鑰只從環境變數 AIOPS_LLM_API_KEY 讀
   - name: summary
     operator: enrichment.llm_summary

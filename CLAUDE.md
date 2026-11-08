@@ -25,6 +25,8 @@
 1. **嚴禁內部跨節點偷渡**：任何算子內部嚴禁出現 `ReadDAO` 去翻其他模組的表。所有上游資訊必須由 `ctx` 取得。
 2. **算子獨立性**：`operators/detectors/` 各演算法之間嚴禁互相 import。
 3. **可選能力無害化（LLM Degradation）**：`operators/llm/` 必須提供 `noop` 實作。未配置金鑰時管線必須平滑降級至模板，嚴禁阻斷 Pipeline。
+4. **模型序列化安全**：整個 `aiops/` 嚴禁 import `pickle`／`joblib`／`dill`／`cloudpickle`／`shelve`／`marshal`，也不准出現 `allow_pickle=True`。非 JSON 的模型本體只能用 npz（`pack_arrays`／`unpack_arrays`）。
+5. **RCA 不寫死**：報告段落是 `rca.section.*`、根因演算法是 `rca.root_cause.*`，都走 `OperatorRegistry`；`operators/rca/report.py` 不得 import 具體段落或演算法。
 
 ---
 
@@ -49,6 +51,15 @@ class BaseOperator(ABC):
    * 必須支援 `get_state() -> dict` 與 `load_state(state: dict)` 以供模型基準線持久化。
    * 偵測用到滾動窗時覆寫 `warmup_points() -> int`（需要前面幾個點才算得出分數），回測切測試段時會多帶這些點讓窗口湊滿（不計分）。
    * 基準線、調參、異常血緣都以 **Workflow 節點名稱**（`self.state_key`）為準，同一個演算法可以在同一條管線掛多次。
+   * 需要「往前 N 分鐘的自己」（同比、環比）時覆寫 `required_lags() -> list[int]`；fetch 要在 YAML 設對應的 `lags_minutes`，df 會多 `lag_<分鐘>` 欄位，回測也照這個抓。
+   * 模型有非 JSON 的本體時覆寫 `get_artifact() -> (格式, bytes)` 與 `load_artifact(格式, bytes)`，格式只能是 `npz`。
+   * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only`、`detector.ensemble` 這類不學習的算子不繼承它。
+   * `AnomalyEvent` 是 frozen：建立後不准改分數或偵測器名稱。要合併多個偵測器的判斷，用 `detector.ensemble` 產生新的裁決事件。
+ * **RCA 根因演算法（`rca.root_cause.*`）**：
+   * 繼承 `operators/rca/base.RootCauseOperator`，只寫 `rank(incident, ctx) -> list[RootCandidate]`（由可能到不可能排好；資料不足回空清單，段落會略過）。
+   * 需要原始時序時，在它前面放 `ingestion.incident_series`（讀 `ctx.rca_series`），不准自己連資料源。
+ * **RCA 報告段落（`rca.section.*`）**：
+   * 繼承 `operators/rca/base.RcaSection`，寫 `applies()` 與 `build()`；資料不夠就讓 `applies()` 回 False（記進 `rca_skipped`），不准輸出空殼。
  * **Grouper（事件收斂）**：
    * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
  * **Suppressor（告警抑制）**：
@@ -188,8 +199,14 @@ nodes:
    👉 在 `aiops/operators/llm/` 放一個檔案，用 `@register("<name>")`（`operators/llm/registry.py`）登記 factory，啟動時自動掃描載入；不用改 `providers.py`、也不用改引擎。
  * **要新增監控指標或日誌連線源（如 InfluxDB）？**
    👉 寫入 `aiops/datasource_specs/<name>.py`，繼承 `BaseDataSourceSpec`，輸出轉成標準 DataFrame。
- * **要擴充新的收斂邏輯（如針對特定微服務呼叫鏈）？**
-   👉 寫入 `aiops/operators/alerts/groupers.py`，實作標準 `BaseOperator`。
+ * **要擴充新的收斂邏輯（如針對特定微服務呼叫鏈、同機櫃）？**
+   👉 寫入 `aiops/operators/alerts/group.py`（或同目錄新檔案），實作 `BaseOperator`、用 `core/types.merge_incidents` 給判斷函式；機櫃、網段這類資訊放在 target 的 `attrs`。
+ * **要換 RCA 根因演算法（如 Random Walk、因果推論）？**
+   👉 寫入 `aiops/operators/rca/algorithms/<name>.py`，繼承 `RootCauseOperator`、註冊成 `rca.root_cause.<name>`，在 `rca_report*.yaml` 換掉 `root_cause` 節點。
+ * **要新增 RCA 報告段落？**
+   👉 寫入 `aiops/operators/rca/sections/<name>.py`，繼承 `RcaSection`、註冊成 `rca.section.<key>`，加進 `rca.report` 的 `sections` 清單。
+ * **要讓偵測器動態找同儕（同 service 的所有 pod）？**
+   👉 不寫程式：target 加 `peer_group: {query, by}`。資料源要支援多序列分組就實作 `BaseDataSourceSpec.fetch_group`。
  * **要新增資料庫紀錄欄位？**
    👉 寫入 `aiops/storage/models.py`，只能透過 `aiops/storage/repository.py` 操作讀寫；並在 `migrations/postgres/` 補一支可重複執行的 SQL（沒有 Alembic，既有 PostgreSQL 靠它升級）。
  * **要調整執行步驟與算法超參數？**

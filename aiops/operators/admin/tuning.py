@@ -9,6 +9,8 @@ from aiops.core.context import PipelineContext
 from aiops.core.errors import BadRequest, Conflict, NotFound
 from aiops.core.params import ANY, pick_most_specific
 from aiops.core.registry import OperatorRegistry
+from aiops.core.signature import incident_signature
+from aiops.core.types import Incident, as_utc
 from aiops.core.requests import (
     FeedbackPropose,
     FeedbackSubmit,
@@ -24,7 +26,7 @@ from aiops.operators.fetch import fetch_target_frame
 from aiops.operators.llm.base import LLMError, parse_json_reply
 from aiops.operators.llm import registry
 from aiops.operators.llm.providers import build_llm
-from aiops.storage.repository import ActiveConfigs, Feedbacks, Incidents, Proposals
+from aiops.storage.repository import ActiveConfigs, Feedbacks, Incidents, Knowledge, Proposals
 
 
 def _detector_cls(name: str) -> type[DetectorOperator]:
@@ -70,6 +72,13 @@ def _effective_row(detector: str, pipeline: str, entity: str) -> dict | None:
     return pick_most_specific(ActiveConfigs.candidates(detector, pipeline, entity), pipeline, entity)
 
 
+def _flags_in(algo: DetectorOperator, df, begin: int, stop: int, warmup: int) -> int:
+    """用 [0, begin) 訓練，數 [begin, stop) 裡被標成異常的點。前面多帶 warmup 個點讓滾動窗湊滿，但不計分。"""
+    offset = min(warmup, begin)
+    flags = algo.fit(df.iloc[:begin]).detect(df.iloc[begin - offset:stop]).is_anomaly
+    return int(sum(flags[offset:]))
+
+
 @OperatorRegistry.register("admin.proposal_create")
 class ProposalCreateOp(BaseOperator):
     scope = "batch"
@@ -106,32 +115,47 @@ class ProposalBacktestOp(BaseOperator):
         if row["status"] not in ("pending", "backtested"):
             raise Conflict(f"提案狀態為 {row['status']}，不能再回測")
         cls = _detector_cls(row["detector_name"])
-        if cls.requires_peers and not req.peers:
-            raise BadRequest(f"{row['detector_name']} 回測需要 peers")
-        tr = req.time_range
-        df = fetch_target_frame(ctx, tr.start, tr.end, tr.step_seconds).reset_index(drop=True)
-        split = int(len(df) * req.train_ratio)
-        if split < 1 or split >= len(df):
-            raise BadRequest(f"回測資料只有 {len(df)} 點，切不出訓練段與測試段，請拉長時間範圍")
-        train = df.iloc[:split]
+        if cls.requires_peers and not (req.peers or req.peer_group):
+            raise BadRequest(f"{row['detector_name']} 回測需要 peers 或 peer_group")
         current_row = _effective_row(row["detector_name"], row["pipeline"], row["entity"])
         current_params = (current_row or {}).get("params", {})
         current_algo, proposed_algo = cls(**current_params), cls(**row["params"])
+        lags = sorted({*current_algo.required_lags(), *proposed_algo.required_lags()})
+        tr = req.time_range
+        df = fetch_target_frame(ctx, tr.start, tr.end, tr.step_seconds, lags).reset_index(drop=True)
+        split = int(len(df) * req.train_ratio)
+        if split < 1 or split >= len(df):
+            raise BadRequest(f"回測資料只有 {len(df)} 點，切不出訓練段與測試段，請拉長時間範圍")
         warmup = max(current_algo.warmup_points(), proposed_algo.warmup_points())
-        offset = min(warmup, split)  # 測試段前面多帶的點數（不計分）
-        test = df.iloc[split - offset:]
-
-        def anomalies_in_test(algo) -> int:
-            flags = algo.fit(train).detect(test).is_anomaly
-            return int(sum(flags[offset:]))
-
-        current_count, proposed_count = anomalies_in_test(current_algo), anomalies_in_test(proposed_algo)
+        current_count = _flags_in(current_algo, df, split, len(df), warmup)
+        proposed_count = _flags_in(proposed_algo, df, split, len(df), warmup)
         backtest = {"metric": req.metric.model_dump(), "points": len(df), "train_points": split,
-                    "test_points": len(df) - split, "warmup_points": offset,
+                    "test_points": len(df) - split, "warmup_points": min(warmup, split),
                     "split_at": df["ts"].iloc[split].isoformat(), "current_params": current_params,
-                    "current_anomalies": current_count, "proposed_anomalies": proposed_count}
+                    "current_anomalies": current_count, "proposed_anomalies": proposed_count,
+                    "missed_windows": self._missed_windows(req.proposal_id, df, current_algo, proposed_algo, warmup)}
         ctx.result = {"proposal": Proposals.update(req.proposal_id, status="backtested", backtest=backtest)}
         return ctx
+
+    @staticmethod
+    def _missed_windows(proposal_id: int, df, current_algo, proposed_algo, warmup: int) -> list[dict]:
+        """這個提案來自「漏報」回饋時：檢查回報的那段時間，現行參數與提案參數各抓不抓得到。
+        訓練只用那段時間之前的資料（不偷看答案）。那段時間不在回測範圍內就標示出來。"""
+        out = []
+        ts = df["ts"]
+        for fb in Feedbacks.for_proposal(proposal_id):
+            if fb["verdict"] != "missed" or fb["time_start"] is None:
+                continue
+            start, end = as_utc(fb["time_start"]), as_utc(fb["time_end"])
+            item = {"feedback_id": fb["id"], "start": start.isoformat(), "end": end.isoformat()}
+            begin = int((ts < start).sum())
+            stop = int((ts <= end).sum())
+            if begin < 2 or stop <= begin:
+                out.append({**item, "note": "這段時間不在回測範圍內（或前面沒有足夠的訓練資料），請把 time_range 拉到涵蓋它"})
+                continue
+            out.append({**item, "current_caught": _flags_in(current_algo, df, begin, stop, warmup) > 0,
+                        "proposed_caught": _flags_in(proposed_algo, df, begin, stop, warmup) > 0})
+        return out
 
 
 @OperatorRegistry.register("admin.proposal_approve")
@@ -151,24 +175,40 @@ class ProposalApproveOp(BaseOperator):
             Proposals.update(req.proposal_id, status="stale")
             raise Conflict(f"現行參數已更新（目前版本 {current}，提案基準版本 {row['base_version']}），"
                            "此提案已作廢，請重新提案")
-        ctx.result = {"proposal": Proposals.update(req.proposal_id, status="approved", approved_by=req.approver),
+        ctx.result = {"proposal": Proposals.update(req.proposal_id, status="approved", approved_by=req.approver,
+                                                   approved_at=ctx.now),
                       "active_config": config}
         return ctx
 
 
 @OperatorRegistry.register("admin.feedback_submit")
 class FeedbackSubmitOp(BaseOperator):
+    """收回饋。漏報可以不指定事件群（平台根本沒告警），改記管線、實體與發生時段。
+    確認是真異常且寫了處置時，順便寫進歷史事故經驗庫（同一個事件群再寫一次就更新）。"""
+
     scope = "batch"
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         req = _need(ctx.request, FeedbackSubmit)
-        if Incidents.get_by_uid(req.incident_uid) is None:
-            raise NotFound(f"找不到事件群 {req.incident_uid}")
+        incident = None
+        if req.incident_uid is not None:
+            incident = Incidents.get_by_uid(req.incident_uid)
+            if incident is None:
+                raise NotFound(f"找不到事件群 {req.incident_uid}")
         if req.detector:
             _detector_cls(req.detector)
-        ctx.result = {"feedback": Feedbacks.create({
+        tr = req.time_range
+        feedback = Feedbacks.create({
             "incident_uid": req.incident_uid, "verdict": req.verdict, "detector_name": req.detector,
-            "text": req.text, "author": req.author, "proposal_id": None})}
+            "text": req.text, "author": req.author, "proposal_id": None,
+            "pipeline": req.pipeline or (incident["pipeline"] if incident else None),
+            "entity": req.entity, "time_start": tr.start if tr else None, "time_end": tr.end if tr else None})
+        ctx.result = {"feedback": feedback}
+        if incident is not None and req.resolution:
+            entities, metrics, signals = incident_signature(Incident.from_dict(incident["incident"], uid=incident["uid"]))
+            ctx.result["knowledge"] = Knowledge.upsert(
+                incident["uid"], pipeline=incident["pipeline"] or "", entities=entities, metrics=metrics,
+                signals=signals, resolution=req.resolution, root_cause=req.root_cause or "", author=req.author)
         return ctx
 
 
@@ -206,6 +246,10 @@ class FeedbackProposeOp(BaseOperator):
         """提案要改哪一層。管線與實體都取自這筆回饋所屬的事件群，不讓呼叫端亂填。"""
         if req.scope == "global":
             return ANY, ANY
+        if fb["incident_uid"] is None:  # 漏報補錄：管線與實體記在回饋本身
+            if req.entity is not None and req.entity != fb["entity"]:
+                raise BadRequest(f"這筆漏報是 {fb['entity']} 的，不能拿來調 {req.entity}")
+            return (fb["pipeline"], ANY) if req.scope == "pipeline" else (fb["pipeline"], fb["entity"])
         incident = Incidents.get_by_uid(fb["incident_uid"])
         if incident is None:
             raise NotFound(f"找不到事件群 {fb['incident_uid']}")

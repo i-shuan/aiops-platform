@@ -36,9 +36,7 @@ class PrometheusSpec(BaseDataSourceSpec):
     def configured(cls) -> bool:
         return bool(os.environ.get(f"{cls.env_prefix}_URL", "").strip())
 
-    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int,
-                   field_map: dict[str, str] | None = None) -> pd.DataFrame:
-        # PromQL 本身就指定好序列與標籤，不需要欄位對照；收下但不使用
+    def _query_range(self, query: str, start: datetime, end: datetime, step_seconds: int) -> tuple[str, list[dict]]:
         try:
             q = validate_promql(query)
         except ValueError as e:
@@ -51,21 +49,50 @@ class PrometheusSpec(BaseDataSourceSpec):
         payload = resp.json() if resp.content else {}
         if not resp.is_success or payload.get("status") != "success":
             raise InvalidQueryError(f"{self.source_type} 查詢失敗：{payload.get('error') or resp.text[:200]}")
-
         result = payload.get("data", {}).get("result", [])
         if not result:
             raise NoDataError(f"{self.source_type} 在這段時間沒有資料：{q}")
-        if len(result) > 1:
-            raise InvalidQueryError(f"查詢回傳 {len(result)} 條序列，請用 sum／avg by 聚合成一條：{q}")
+        return q, result
 
-        points = [(float(t), float(v)) for t, v in result[0].get("values", [])]
+    @staticmethod
+    def _frame(series: dict) -> pd.DataFrame | None:
+        points = [(float(t), float(v)) for t, v in series.get("values", [])]
         points = [(t, v) for t, v in points if math.isfinite(v)]
         if not points:
-            raise NoDataError(f"{self.source_type} 在這段時間只有 NaN／Inf：{q}")
+            return None
         return pd.DataFrame({
             "ts": pd.to_datetime([t for t, _ in points], unit="s", utc=True),
             "value": [v for _, v in points],
         })
+
+    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int,
+                   field_map: dict[str, str] | None = None) -> pd.DataFrame:
+        # PromQL 本身就指定好序列與標籤，不需要欄位對照；收下但不使用
+        q, result = self._query_range(query, start, end, step_seconds)
+        if len(result) > 1:
+            raise InvalidQueryError(f"查詢回傳 {len(result)} 條序列，請用 sum／avg by 聚合成一條：{q}")
+        df = self._frame(result[0])
+        if df is None:
+            raise NoDataError(f"{self.source_type} 在這段時間只有 NaN／Inf：{q}")
+        return df
+
+    def fetch_group(self, query: str, start: datetime, end: datetime, step_seconds: int, by: str,
+                    field_map: dict[str, str] | None = None) -> dict[str, pd.DataFrame]:
+        """一個查詢撈回整群（例如同 service 的所有 pod），依 by 標籤分成員。全是 NaN 的成員略過。"""
+        q, result = self._query_range(query, start, end, step_seconds)
+        members: dict[str, pd.DataFrame] = {}
+        for series in result:
+            labels = series.get("metric", {})
+            if by not in labels:
+                raise InvalidQueryError(f"有序列沒有 {by} 標籤，無法分組：{labels}（查詢：{q}）")
+            if labels[by] in members:
+                raise InvalidQueryError(f"{by}={labels[by]} 對到多條序列，請先 sum／avg by ({by}) 聚合：{q}")
+            df = self._frame(series)
+            if df is not None:
+                members[labels[by]] = df
+        if not members:
+            raise NoDataError(f"{self.source_type} 在這段時間只有 NaN／Inf：{q}")
+        return members
 
     def check(self) -> dict[str, Any]:
         return _http.check(self.client, self.source_type, f"{self.base_url}{self.health_path}", headers=self.headers)

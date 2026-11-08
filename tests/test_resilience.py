@@ -65,7 +65,7 @@ def test_infrastructure_error_in_an_optional_node_still_fails_the_run(now, sent)
 
 def test_optional_summary_in_rca_report_workflow_is_marked_optional():
     wf = load_workflow(workflow_path("rca_report"))
-    assert {n.name: n.optional for n in wf.nodes} == {"report": False, "summary": True}
+    assert {n.name: n.optional for n in wf.nodes} == {"root_cause": False, "report": False, "summary": True}
 
 
 # ── 偵測器基準線：樂觀鎖 ──

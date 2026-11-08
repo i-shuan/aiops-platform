@@ -1,0 +1,20 @@
+name: rca_report_correlation
+description: "RCA 報告（根因用時序互相關排序）：重抓事件時段的原始時序，看誰的波動領先別人"
+nodes:
+  # 重抓事件時段的原始時序；資料源連不上時只跳過這一步（報告其他段落照出）
+  - name: series
+    operator: ingestion.incident_series
+    optional: true
+    params: {before_minutes: 30, after_minutes: 10, step_seconds: 60, max_series: 20}
+  - name: root_cause
+    operator: rca.root_cause.cross_correlation
+    params: {max_lag_points: 10, min_corr: 0.5, use_topology: false}
+  - name: report
+    operator: rca.report
+    params:
+      sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
+                 propagation_path, trace_evidence, similar_cases, suggested_actions]
+  - name: summary
+    operator: enrichment.llm_summary
+    optional: true
+    params: {provider: noop}

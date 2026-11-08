@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from aiops.core.requests import (
     FeedbackPropose,
@@ -7,6 +7,8 @@ from aiops.core.requests import (
     ProposalApprove,
     ProposalBacktest,
     ProposalCreate,
+    RulePromote,
+    TuningMetricsQuery,
 )
 from aiops.runner import run
 
@@ -41,3 +43,13 @@ def submit_feedback(req: FeedbackSubmit):
 @router.post("/feedback/propose")
 def propose_from_feedback(req: FeedbackPropose):
     return {"result": run("admin_feedback_propose", request=req)}
+
+
+@router.get("/metrics")
+def tuning_metrics(req: TuningMetricsQuery = Depends()):
+    return {"result": run("admin_tuning_metrics", request=req)}
+
+
+@router.post("/rules/promote")
+def promote_rules(req: RulePromote):
+    return {"result": run("admin_rule_promote", request=req)}

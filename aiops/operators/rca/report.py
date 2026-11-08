@@ -1,34 +1,40 @@
 from __future__ import annotations
 
+from typing import Any
+
 from aiops.core.context import PipelineContext
-from aiops.core.errors import NotFound, WorkflowError
+from aiops.core.errors import WorkflowError
 from aiops.core.registry import OperatorRegistry
 from aiops.operators.base import BaseOperator
-from aiops.operators.rca.sections import SECTIONS
+from aiops.operators.rca.base import SECTION_PREFIX, RcaSection, need_incident
 
 
 @OperatorRegistry.register("rca.report")
 class RcaReport(BaseOperator):
-    """產生 RCA 報告：依 sections 清單逐段產生，資料不足的段落略過（記在 ctx.rca_skipped），不輸出空殼。
-    params: sections（段落代號，順序就是報告順序）。
+    """依 sections 清單逐段產生 RCA 報告。段落是註冊在 OperatorRegistry 的 rca.section.<代號>，
+    放進 operators/rca/sections/ 就能用，這裡不寫死任何段落。資料不足的段落略過（記在 ctx.rca_skipped）。
+
+    根因候選由前面的 rca.root_cause.* 節點產生；沒有根因節點時，根因相關段落會略過。
+    params: sections（段落代號，順序就是報告順序）、section_params（{代號: 參數}，給需要參數的段落）。
     """
 
     scope = "batch"
 
-    def __init__(self, sections: list[str]):
-        unknown = [s for s in sections if s not in SECTIONS]
-        if unknown:
-            raise WorkflowError(f"未知的報告段落：{unknown}（可用：{', '.join(sorted(SECTIONS))}）")
-        self.sections = list(sections)
+    def __init__(self, sections: list[str], section_params: dict[str, dict[str, Any]] | None = None):
+        section_params = section_params or {}
+        unknown_params = sorted(set(section_params) - set(sections))
+        if unknown_params:
+            raise WorkflowError(f"section_params 給了沒有列在 sections 裡的段落：{unknown_params}")
+        self.sections: list[RcaSection] = []
+        for key in sections:
+            name = f"{SECTION_PREFIX}{key}"
+            if not OperatorRegistry.has(name):
+                available = ", ".join(n.removeprefix(SECTION_PREFIX) for n in OperatorRegistry.names(SECTION_PREFIX))
+                raise WorkflowError(f"未知的報告段落：{key}（可用：{available}）")
+            self.sections.append(OperatorRegistry.create(name, section_params.get(key)))
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
-        if not ctx.incidents:
-            raise NotFound("沒有可以產生報告的事件群")
-        incident = ctx.incidents[0]
-        for key in self.sections:
-            section = SECTIONS[key]
-            if section.applies(incident, ctx):
-                ctx.rca_sections.append(section.build(incident, ctx))
-            else:
-                ctx.rca_skipped.append(key)
+        need_incident(ctx)
+        for section in self.sections:
+            ctx = section.execute(ctx)
         return ctx

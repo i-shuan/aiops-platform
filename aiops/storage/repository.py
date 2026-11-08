@@ -19,6 +19,7 @@ from aiops.storage.models import (
     ExternalAnomalyRow,
     FeedbackRow,
     FieldMappingRow,
+    IncidentKnowledgeRow,
     IncidentRow,
     LotPathRow,
     NotificationRow,
@@ -62,6 +63,10 @@ class Incidents:
     @staticmethod
     def list_open(pipeline: str) -> list[Row]:
         return crud.find(IncidentRow, pipeline=pipeline, status="open")
+
+    @staticmethod
+    def created_between(start: datetime, end: datetime) -> list[Row]:
+        return crud.find_between(IncidentRow, "created_at", start, end)
 
     @staticmethod
     def mark_resolved(incident_id: int, resolved_at: datetime) -> Row:
@@ -130,14 +135,20 @@ class DetectorModels:
                              node=node)
 
     @staticmethod
+    def for_scope(pipeline: str, entity: str, detector: str) -> list[Row]:
+        """某條管線某個實體、某個偵測器的所有基準線（不同指標、不同節點各一筆）。"""
+        return crud.find(DetectorModelRow, pipeline=pipeline, entity=entity, detector_name=detector)
+
+    @staticmethod
     def save(pipeline: str, entity: str, metric: str, detector: str, state: Row, train_start: datetime,
              train_end: datetime, points: int, *, expected_version: int, node: str = "",
-             trained_at: datetime | None = None) -> Row | None:
+             trained_at: datetime | None = None, artifact: bytes | None = None,
+             artifact_format: str = "") -> Row | None:
         """樂觀鎖寫入。expected_version 是讀取當時的版本（0 = 當時還沒有這一筆）。
         別人已經先寫了就回傳 None，不覆蓋對方較新的基準線。"""
         key = {"pipeline": pipeline, "entity": entity, "metric": metric, "detector_name": detector, "node": node}
         fields = {"state": state, "train_start": train_start, "train_end": train_end, "points": points,
-                  "trained_at": trained_at or utc_now()}
+                  "trained_at": trained_at or utc_now(), "artifact": artifact, "artifact_format": artifact_format}
         if expected_version == 0:
             return crud.insert_if_absent(DetectorModelRow, **key, **fields, version=1)
         return crud.update_if_version(DetectorModelRow, key, expected_version, **fields)
@@ -252,6 +263,16 @@ class Proposals:
     def update(proposal_id: int, **fields: Any) -> Row:
         return crud.update(TuningProposalRow, proposal_id, **fields)
 
+    @staticmethod
+    def approved_between(start: datetime, end: datetime) -> list[Row]:
+        return crud.find_between(TuningProposalRow, "approved_at", start, end)
+
+    @staticmethod
+    def open_for(detector: str, pipeline: str, entity: str) -> list[Row]:
+        """這一層還沒結案（pending／backtested）的提案。"""
+        return crud.find_matching(TuningProposalRow, {"detector_name": detector, "pipeline": pipeline, "entity": entity},
+                                  {"status": ["pending", "backtested"]})
+
 
 class Feedbacks:
     @staticmethod
@@ -265,3 +286,24 @@ class Feedbacks:
     @staticmethod
     def link_proposal(feedback_id: int, proposal_id: int) -> Row:
         return crud.update(FeedbackRow, feedback_id, proposal_id=proposal_id)
+
+    @staticmethod
+    def for_proposal(proposal_id: int) -> list[Row]:
+        return crud.find(FeedbackRow, proposal_id=proposal_id)
+
+    @staticmethod
+    def created_between(start: datetime, end: datetime) -> list[Row]:
+        return crud.find_between(FeedbackRow, "created_at", start, end)
+
+
+class Knowledge:
+    """歷史事故經驗庫。同一個事件群只留一筆，再寫一次就更新處置內容。"""
+
+    @staticmethod
+    def upsert(incident_uid: str, **fields: Any) -> Row:
+        return crud.upsert(IncidentKnowledgeRow, {"incident_uid": incident_uid}, **fields)
+
+    @staticmethod
+    def recent(limit: int) -> list[Row]:
+        """最新的 limit 筆（由新到舊）。"""
+        return crud.find_latest(IncidentKnowledgeRow, limit)

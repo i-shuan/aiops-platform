@@ -103,6 +103,27 @@ def test_llm_noop_never_builds_a_client():
     assert build_llm("noop") is None
 
 
+def test_no_insecure_model_serialization():
+    """模型檔只能用安全格式（npz + allow_pickle=False）；pickle 系列讀回時可以執行任意程式。"""
+    bad = _violations(_py(), ["pickle", "joblib", "dill", "cloudpickle", "shelve", "marshal"])
+    assert not bad, bad
+    for f in _py():
+        assert "allow_pickle=True" not in f.read_text(encoding="utf-8"), f
+
+
+def test_rca_sections_and_root_cause_algorithms_are_registered_not_hardcoded():
+    """報告段落與根因演算法都走 OperatorRegistry；rca.report 不得 import 具體段落或演算法。"""
+    report = _imports(ROOT / "operators" / "rca" / "report.py")
+    assert not [i for i in report if ".rca.sections" in i or ".rca.algorithms" in i], report
+    from aiops.core.registry import OperatorRegistry
+    from aiops.operators import load_all
+
+    load_all()
+    assert len(OperatorRegistry.names("rca.section.")) >= 9
+    assert {"rca.root_cause.topological", "rca.root_cause.pagerank", "rca.root_cause.cross_correlation"} <= set(
+        OperatorRegistry.names("rca.root_cause."))
+
+
 def test_every_workflow_loads_and_its_operators_are_registered():
     from aiops.core.pipeline import Pipeline, load_workflow
     from aiops.operators import load_all

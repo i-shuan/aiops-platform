@@ -17,7 +17,7 @@ from typing import Any, Protocol
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from aiops.core.context import LotEdge, PeerRef, PipelineContext, Target, TargetError
+from aiops.core.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
 from aiops.core.errors import InfrastructureError, PlatformError, WorkflowError
 from aiops.core.registry import OperatorRegistry
 
@@ -27,16 +27,27 @@ class PeerSpec(BaseModel):
     query: str
 
 
+class PeerGroupSpec(BaseModel):
+    """動態同儕：query 撈回整群序列、依 by 標籤分成員。query 可用 ${屬性名} 引用 target 的 attrs。"""
+
+    query: str
+    by: str = Field(min_length=1)
+    source_type: str = ""  # 空 = 跟 target 同一個資料源
+
+
 class TargetSpec(BaseModel):
     source_type: str = "mock"
     query: str
     entity: str | None = None
     attrs: dict[str, Any] = Field(default_factory=dict)
     peers: list[PeerSpec] = Field(default_factory=list)
+    peer_group: PeerGroupSpec | None = None
 
     def to_target(self) -> Target:
+        group = (PeerGroup(self.peer_group.query, self.peer_group.by, self.peer_group.source_type)
+                 if self.peer_group else None)
         return Target(self.source_type, self.query, self.entity or self.query, dict(self.attrs),
-                      [PeerRef(p.source_type, p.query) for p in self.peers])
+                      [PeerRef(p.source_type, p.query) for p in self.peers], group)
 
 
 class NodeSpec(BaseModel):
@@ -124,8 +135,8 @@ class Pipeline:
         self.target_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "target"]
         self.batch_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "batch"]
         # (節點名稱, 算子名稱)：基準線與調參都以節點區分，同一個演算法掛兩次也不會互相覆蓋
-        self.detector_nodes = [(n.name, n.operator) for n, _ in self.target_nodes
-                               if n.operator.startswith("detector.") and n.operator != "detector.new_only"]
+        # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only、ensemble 這類不需要）
+        self.detector_nodes = [(n.name, n.operator) for n, op in self.target_nodes if getattr(op, "has_baseline", False)]
 
     def run(self, *, now: datetime | None = None, targets: list[TargetSpec] | None = None,
             incident_id: int | None = None, request: BaseModel | None = None,
