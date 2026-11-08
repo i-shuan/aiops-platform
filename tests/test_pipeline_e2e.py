@@ -129,6 +129,23 @@ def test_external_anomalies_join_the_next_run_once(now, sent):
     assert run_context("factory", now=now, strict=False, targets=[]).incidents == []  # 處理過就不再讀
 
 
+def test_external_anomalies_record_which_source_judged_them(now, sent):
+    """匯入的異常沒有偵測節點，但要留下「誰判的」：detector = external:<source>，事件群快照裡也看得到。
+    外部異常不寫進 anomalies 表（那張表只記本平台偵測節點的結果，models.AnomalyRow 註解），這裡一併釘住。"""
+    from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
+    from aiops.storage import crud
+    from aiops.storage.models import AnomalyRow
+
+    body = IngestAnomalies(pipeline="factory", source="fdc", anomalies=[ExternalAnomalyIn(
+        external_id="lineage1", entity="ETCH-01", metric="rf", ts=now, score=5)])
+    run("admin_ingest_anomalies", request=body)
+    ctx = run_context("factory", now=now, strict=False, targets=[])
+    assert [(e.detector, e.detector_node) for e in ctx.incidents[0].events] == [("external:fdc", "")]
+    snapshot = Incidents.get(ctx.incident_ids[ctx.incidents[0].fingerprint])["incident"]
+    assert [e["detector"] for e in snapshot["events"]] == ["external:fdc"]
+    assert crud.find(AnomalyRow, pipeline="factory") == []
+
+
 # ── 接線 1：欄位對照 ──
 
 

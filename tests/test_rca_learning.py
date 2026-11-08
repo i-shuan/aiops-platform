@@ -57,6 +57,31 @@ def test_pagerank_prefers_the_root_that_drags_down_more_services():
     assert _rank("rca.root_cause.pagerank", ctx)[0] == "x"
 
 
+def _reasons(name, ctx):
+    return {c.entity: c.reason for c in OperatorRegistry.create(name, {}).rank(ctx.incidents[0], ctx)}
+
+
+def test_graph_reasons_say_when_the_entity_started_relative_to_the_whole_incident():
+    """nov03_cascade 復盤：被選為根因的實體其實最晚出事，理由卻寫「最早 14:22」，讀起來像全場最早。
+    理由要同時寫出它自己的首次異常時間與事件群最早時間、差幾分鐘。"""
+    ctx = _ctx([_ev("svc-a", 6, 2), _ev("svc-b", 10, 8), _ev("svc-c", 22, 3), _ev("svc-c", 25, 9)], CHAIN)
+    first_c, earliest = (T + timedelta(minutes=22)).isoformat(), (T + timedelta(minutes=6)).isoformat()
+    for algo in ("rca.root_cause.topological", "rca.root_cause.pagerank"):
+        reasons = _reasons(algo, ctx)
+        assert f"首次異常 {first_c}（事件群最早是 {earliest}，晚 16 分鐘）" in reasons["svc-c"], algo
+        assert "最早 " + first_c not in reasons["svc-c"], algo
+        assert "最高分數 9.00" in reasons["svc-c"], algo
+    assert "上游沒有其他異常" in _reasons("rca.root_cause.topological", ctx)["svc-c"]
+    assert f"首次異常 {earliest}（事件群中最早）" in _reasons("rca.root_cause.pagerank", ctx)["svc-a"]
+
+
+def test_topological_reason_still_says_when_an_entity_is_outside_the_graph():
+    ctx = _ctx([_ev("svc-a", 0, 2), _ev("lonely", 3, 5)], CHAIN)
+    reason = _reasons("rca.root_cause.topological", ctx)["lonely"]
+    assert f"首次異常 {(T + timedelta(minutes=3)).isoformat()}（事件群最早是 {T.isoformat()}，晚 3 分鐘）" in reason
+    assert "不在拓撲中，無法判斷上下游" in reason
+
+
 def test_graph_algorithms_give_nothing_without_a_graph():
     ctx = _ctx([_ev("a", 0, 2), _ev("b", 1, 3)])
     assert _rank("rca.root_cause.topological", ctx) == [] and _rank("rca.root_cause.pagerank", ctx) == []

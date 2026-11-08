@@ -10,6 +10,7 @@ from __future__ import annotations
 from aiops.engine.context import RootCandidate
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.rca.base import RootCauseOperator, first_seen, graph_edges, in_graph
+from aiops.stages.rca.algorithms.topological import onset_text
 
 
 def personalized_pagerank(nodes: list[str], edges: set[tuple[str, str]], weights: dict[str, float],
@@ -58,6 +59,7 @@ class PageRankRootCause(RootCauseOperator):
         scores = personalized_pagerank(anomalous, reversed_edges, weights, self.damping, self.iterations)
         downstream = {e: sum(1 for a, _ in inner if a == e) for e in anomalous}
         ordered = sorted(anomalous, key=lambda e: (-scores[e], seen[e][0]))
+        earliest = min(ts for ts, _ in seen.values())
         return [RootCandidate(e, scores[e], f"PageRank {scores[e]:.3f}；直接影響 {downstream[e]} 個異常實體；"
-                                            f"最早 {seen[e][0].isoformat()}，最高分數 {seen[e][1]:.2f}")
+                                            f"{onset_text(seen[e][0], earliest)}，最高分數 {seen[e][1]:.2f}")
                 for e in ordered]

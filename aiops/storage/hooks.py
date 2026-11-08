@@ -76,9 +76,9 @@ class StorageHooks:
         entities = sorted({e for o in ctx.open_incidents for e in o.incident.entities})
         ctx.entity_last_seen = {k: as_utc(v) for k, v in Anomalies.entity_last_seen(ctx.pipeline, entities).items()}
 
-        for row in ExternalAnomalies.pending(ctx.pipeline):
+        for row in ExternalAnomalies.pending(ctx.pipeline):  # 沒有偵測節點，但要記下是哪個外部來源判的
             ctx.anomalies.append(AnomalyEvent(row["entity"], row["metric"], as_utc(row["ts"]), row["score"],
-                                              row["attrs"] or {}, row["value"]))
+                                              row["attrs"] or {}, row["value"], detector=f"external:{row['source']}"))
             ctx.external_anomaly_ids.append(row["id"])
 
         if ctx.incident_id is not None:  # RCA：載入指定的事件群與佐證資料
