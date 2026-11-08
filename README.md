@@ -86,155 +86,117 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 
 ### `aiops/` 每個檔案在做什麼
 
-依賴方向：`api` → `runner` → `core`（引擎）← `operators`（零件）；`storage` 只在管線前後被 `hooks.py` 呼叫。`core` 不 import 平台任何其他層。
+依賴方向：`api` → `runner` → `core`（引擎）← `operators`（零件）；`storage` 只在管線前後被 `storage/hooks.py` 呼叫。`core` 不 import 平台任何其他層。`operators/` 裡只有 `fetch.py` 碰資料源、只有 `admin/` 碰資料庫。
 
-#### 最上層
-
-| 檔案 | 做什麼 |
-|---|---|
-| `app.py` | 建立 FastAPI 應用（`create_app()`）：呼叫 `initialization` 的各個初始化步驟，提供 `/health` |
-| `runner.py` | **組裝點**：用名稱找內建 workflow（`workflow_path`，API 只准英數底線連字號、拒絕路徑與軟連結；只有排程 CLI 可用 `allow_file=True` 載入自己的 YAML），接上 `StorageHooks`，提供 `run()` / `run_context()` 給 API 與排程 |
-| `__init__.py` | 空的，標示套件 |
-
-#### `core/`：引擎與共用型別（不 import 任何其他層）
-
-| 檔案 | 做什麼 |
-|---|---|
-| `context.py` | 強型別 `PipelineContext`：載入的輸入（靜音、拓撲、基準線…）、流動的資料（`raw_df`、`anomalies`、`incidents`…）、RCA 欄位、手動動作的 `request`／`result`；`to_result()` 組出 API 回傳 |
-| `pipeline.py` | 讀 Workflow YAML、建立算子（拼錯算子或參數在載入時就報錯）、驗證 target／batch 節點順序、依序呼叫 `execute(ctx)`；處理 `optional` 節點與每條序列的失敗隔離；定義 `Hooks` 介面 |
-| `registry.py` | `OperatorRegistry`：`@register("detector.mad")` 登記、依名稱建立 |
-| `types.py` | `AnomalyEvent`（不可變，帶偵測器血緣）、`Incident`（事件群）、`Notification`，以及 `merge_incidents`（遞移合併） |
-| `requests.py` | API 與手動動作的請求模型（Pydantic）：跑 workflow、調參、回饋、漏報補錄、成效報表、規則升級… |
-| `errors.py` | 平台錯誤型別（`BadRequest`、`NotFound`、`Conflict`、`InfrastructureError`、`WorkflowError`…），API 層統一轉成 HTTP 狀態碼 |
-| `params.py` | 參數逐鍵深度合併 `deep_merge`、調參分層挑選 `pick_most_specific`（管線×實體 > 管線 > 實體 > 全域） |
-| `topology.py` | 把 IT 呼叫關係與工廠 Lot 流向統一成「異常會從 A 傳到 B」的有向邊；Lot 路徑轉機台流向 |
-| `signature.py` | 事件群特徵簽章（實體、指標名稱、訊號）與 Jaccard 相似度，給歷史相似案例比對用 |
-
-#### `operators/`：可抽換零件
-
-| 檔案 | 做什麼 |
-|---|---|
-| `base.py` | 所有算子的基底 `BaseOperator`（`scope`: target／batch、`node_name`） |
-| `__init__.py` | `load_all()`：掃描整個套件，載入即完成登記 |
-| `fetch.py` | 唯一碰資料源的算子：`ingestion.fetch`（抓序列、同儕、動態同儕、往前位移欄位、重訓用的長歷史）、`ingestion.incident_series`（RCA 重抓事件時段的原始時序） |
-
-`operators/detectors/`（偵測器；繼承 `DetectorOperator`，各演算法之間不互相 import）
-
-| 檔案 | 算子 | 做什麼 |
-|---|---|---|
-| `base.py` | — | 共同骨架：參數合併、基準線載入／保存、產生帶血緣的異常、模型檔（npz）打包 |
-| `zscore.py` | `detector.zscore` | 偏離訓練期平均幾個標準差 |
-| `mad.py` | `detector.mad` | 中位數與 MAD（Modified Z-Score），比 zscore 耐尖峰 |
-| `hourly_baseline.py` | `detector.hourly_baseline` | 一週 168 個時段各自一組平均與標準差，可設時區 |
-| `compare.py` | `detector.dod`、`detector.wow` | 跟昨天／上週同一時刻的差值比 |
-| `quantile_drift.py` | `detector.quantile_drift` | 滾動分位數（預設 p95）漂移，抓尾端變慢 |
-| `chronic.py` | `detector.chronic` | 滾動平均跟基準比，抓小幅但持續的偏移 |
-| `shift.py` | `detector.shift` | 相鄰兩點跳變 |
-| `peer.py` | `detector.peer` | 跟同儕當下中位數的殘差比；同儕可寫死或動態分群 |
-| `rules.py` | `detector.rules` | 人訂的上下限加連續 N 點，不學習 |
-| `ensemble.py` | `detector.ensemble` | 多個偵測節點投票（聯集／交集／多數決／至少 N 票） |
-| `new_only.py` | `detector.new_only` | 只留比該序列最後一筆已存異常更新的，重跑不重複告警 |
-
-`operators/alerts/`（告警處理）
-
-| 檔案 | 算子 | 做什麼 |
-|---|---|---|
-| `group.py` | `alert.same_entity`、`topology_chain`、`lot_path_chain` | 事件收斂：同實體、服務呼叫相鄰、Lot 上下游相鄰 |
-| `score.py` | `alert.golden_signals`、`p0_boost` | 事件群計分：含黃金訊號加權、牽涉 P0 實體加分 |
-| `suppress.py` | `alert.suppress_window`、`suppress_same_root_cause`、`suppress_dedup` | 抑制：靜音／維護窗口、同根因（下游已告警）、冷卻去重 |
-| `heartbeat.py` | `alert.heartbeat` | 進行中事件群的心跳重送與結案（恢復通知） |
-| `payload.py` | `alert.notify_payload` | 定嚴重度、產生通知內容（一個部門一則，路由標籤由平台決定） |
-| `_common.py` | — | 共用小工具（還沒有事件群時每筆異常先自成一群） |
-
-`operators/rca/`（根因分析）
-
-| 檔案 | 做什麼 |
-|---|---|
-| `base.py` | 兩種契約：`RootCauseOperator`（只寫 `rank()`）與 `RcaSection`（寫 `applies()`／`build()`）；共用小工具 |
-| `report.py` | `rca.report`：依 `sections` 清單組裝報告段落，資料不足的段落略過（記在 `skipped`） |
-| `algorithms/topological.py` | `rca.root_cause.topological`（預設）：傳播圖上沒有異常上游的實體，依最早出現排序 |
-| `algorithms/pagerank.py` | `rca.root_cause.pagerank`：反向傳播圖上的 Personalized PageRank |
-| `algorithms/causal.py` | `rca.root_cause.cross_correlation`：事件時段原始時序的時間位移互相關，看誰領先 |
-| `sections/overview.py` | 摘要、時間軸、受影響實體、黃金訊號 |
-| `sections/graph.py` | 可能的源頭、傳播路徑 |
-| `sections/evidence.py` | Trace 佐證（錯誤率、p95） |
-| `sections/similar_cases.py` | 歷史相似案例與當時的處置 |
-| `sections/actions.py` | 規則式建議處置 |
-
-`operators/llm/`（可選的 AI 能力；`noop` 永遠不連外）
-
-| 檔案 | 做什麼 |
-|---|---|
-| `base.py` | `BaseLLM` 介面、`LLMError`、把模型回覆解析成 JSON |
-| `registry.py` | 供應商註冊表：放一個檔案、用 `@register` 登記，啟動時自動掃描載入 |
-| `providers.py` | 內建供應商：`noop`、`openai`（含相容端點如 vLLM、Ollama）、`anthropic`；`build_llm()` |
-| `summarizer.py` | `enrichment.llm_summary`：RCA 總結敘述，失敗或驗證不過就退回模板 |
-| `narrative.py` | 敘述的提示詞、模板，以及依據驗證（LLM 提到的實體必須真的在事件裡） |
-
-`operators/notifiers/`（通知出口）
-
-| 檔案 | 做什麼 |
-|---|---|
-| `operators.py` | `notifier.log`、`notifier.alertmanager`、`notifier.auto`（依環境變數 `AIOPS_NOTIFIER` 選） |
-| `transport.py` | 實際傳輸：`AlertmanagerTransport`（v2 API）、`LogTransport`（只寫日誌，測試用） |
-
-`operators/admin/`（手動動作；唯一可以用 `storage.repository` 的算子）
-
-| 檔案 | 算子 | 做什麼 |
-|---|---|---|
-| `incidents.py` | `admin.incident_get`、`incident_resolve` | 事件群查詢與手動結案 |
-| `silences.py` | `admin.silence_create` | 建立靜音／維護窗口 |
-| `mappings.py` | `admin.mapping_submit`、`mapping_approve`、`mapping_get_approved` | 欄位對照審核（提交 → 核准，舊版自動作廢） |
-| `ingest.py` | `admin.ingest_anomalies`、`merge_traces`、`merge_lot_paths` | 外部異常接收、trace 合成（含服務呼叫關係）、Lot 履歷合成 |
-| `tuning.py` | `admin.proposal_*`、`feedback_submit`、`feedback_propose` | 調參唯一收口：提案 → 回測（切訓練／測試段）→ 核准（樂觀鎖）；回饋與漏報補錄、寫入經驗庫 |
-| `tuning_rules.py` | — | 從回饋文字抽調參規則（LLM 提議、平台驗證，不過就退回固定規則） |
-| `learning.py` | `admin.tuning_metrics`、`admin.rule_promote` | 調參成效報表、頻繁調參轉靜態規則提案 |
-| `sources.py` | `admin.sources_check` | 檢查每個資料源有沒有設定、連不連得上 |
-
-#### `workflows/`：管線 YAML（沒有 Python）
-
-| 檔案 | 做什麼 |
-|---|---|
-| `it_otel.yaml`、`it_apm.yaml` | IT 場景：抓指標 → 168 時段偵測 → 拓撲收斂 → 黃金訊號計分 → 抑制 → 通知 |
-| `factory.yaml` | 工廠場景：Lot 履歷收斂，沒有黃金訊號與同根因抑制 |
-| `metrics_only.yaml` | 只有時序指標，沒有 trace 與拓撲 |
-| `rca_report.yaml`、`rca_report_correlation.yaml` | 針對一個事件群產生 RCA 報告；後者的根因用時序互相關 |
-| `admin_*.yaml`（18 個） | 每個手動動作一個，API 呼叫時載入 |
-
-#### `storage/`：資料庫
-
-| 檔案 | 做什麼 |
-|---|---|
-| `models.py` | 14 張表：`incidents`、`silences`、`notifications`、`anomalies`、`detector_models`、`field_mappings`、`external_anomalies`、`trace_series`、`service_edges`、`lot_paths`、`tuning_proposals`、`feedback`、`active_detector_configs`、`incident_knowledge` |
-| `repository.py` | 各表的讀寫，沒有業務判斷，回傳 dict；基準線與調參用 `version` 做樂觀鎖 |
-| `crud.py` | 共用存取函式（建立、更新、條件式更新、單次 IN 查詢…） |
-| `db.py` | 連線與 session（SQLite 開發／測試，PostgreSQL 正式），連不上轉成 `InfrastructureError` |
-| `hooks.py` | **引擎的載入與寫入點**：管線前一次載入靜音、拓撲、基準線、調參…；管線後一次寫入異常、事件群、通知紀錄。中間的節點不碰資料庫 |
-
-#### `api/`：HTTP（零業務邏輯，每個 router 都要 token）
-
-| 檔案 | 端點 |
-|---|---|
-| `runs.py` | `POST /api/v1/runs` 跑 workflow、`POST /api/v1/rca` 產生 RCA 報告、`GET /api/v1/operators` 列出所有算子 |
-| `alerts.py` | 靜音（建立、列出）、事件群查詢與結案 |
-| `ingestion.py` | 欄位對照、trace／Lot 合成、外部異常接收、資料源自我檢查 |
-| `tuning.py` | 提案、回測、核准、回饋、回饋轉提案、成效報表（`/metrics`）、規則升級（`/rules/promote`） |
-
-#### 其他
-
-| 位置 | 檔案 | 做什麼 |
-|---|---|---|
-| `datasource_specs/` | `base.py` | 資料源介面 `fetch_data`／`fetch_group`／`check`，以及「查詢寫錯」「沒資料」兩種錯誤 |
-| | `prometheus.py` | Prometheus 與 VictoriaMetrics（`query_range`；支援依標籤分組的動態同儕） |
-| | `elasticsearch.py` | ES 的降採樣查詢（`date_histogram`）轉成標準序列 |
-| | `mock.py` | 開發用假資料（含 `seasonal:` 日週期資料與動態同儕群） |
-| | `_http.py` | 共用 HTTP：連線／認證／伺服器錯誤轉成 `InfrastructureError` |
-| | `__init__.py` | 依名稱取得資料源、逐一自我檢查 |
-| `metric_query/` | `promql.py`、`elasticsearch.py`、`trace.py`、`window.py` | 查詢語法的基本檢查與解析、時間窗對齊到 step 的整數倍（不連線） |
-| `tasks/` | `__main__.py` | 排程 CLI：`run-once`、`loop`、`source-check` |
-| `security/` | `auth.py` | Bearer token 驗證；沒設 token 一律拒絕；`AIOPS_AUTH_DISABLED` 只限本機開發 |
-| `infrastructure/` | `fallback.py` | 資料庫掛掉時的備援：寫本機日誌、打備援 webhook |
-| `initialization/` | `__init__.py` | `init_operators`（掃描並登記所有算子）、`init_routers`（自動掃描 `api/` 每個有 `router` 的模組並掛上 token 驗證，新增端點檔案不必改這裡）、`init_error_handlers`（平台錯誤轉對應 HTTP 狀態碼，基礎設施錯誤轉 503 並通報）、`init_infrastructure`（備援日誌加 `init_db`）、`init_db`（建不存在的表，資料庫比平台晚就緒時最多等 `AIOPS_DB_STARTUP_TIMEOUT` 秒） |
+```
+aiops/
+├── app.py                           建立 FastAPI 應用（create_app），提供 /health
+├── runner.py                        組裝點：用名稱找 workflow（API 拒絕路徑與軟連結）、接上 StorageHooks，提供 run() / run_context()
+├── core/                            引擎與共用型別（不 import 平台任何其他層）
+│   ├── context.py                   強型別 PipelineContext：載入的輸入、流動的資料、RCA 欄位；to_result() 組 API 回傳
+│   ├── pipeline.py                  讀 Workflow YAML、建立算子、驗證節點順序、依序執行；optional 節點與單條序列失敗隔離
+│   ├── registry.py                  OperatorRegistry：@register 登記、依名稱建立
+│   ├── types.py                     AnomalyEvent（不可變）、Incident（事件群）、Notification、merge_incidents
+│   ├── requests.py                  API／手動動作的請求模型（Pydantic）
+│   ├── errors.py                    平台錯誤型別，API 層統一轉成 HTTP 狀態碼
+│   ├── params.py                    參數深度合併、調參分層挑選（管線×實體 > 管線 > 實體 > 全域）
+│   ├── topology.py                  IT 呼叫關係與工廠 Lot 流向，統一成「異常會從 A 傳到 B」的有向邊
+│   └── signature.py                 事件群特徵簽章與 Jaccard 相似度（歷史相似案例用）
+├── operators/                       可抽換零件（算子）
+│   ├── base.py                      BaseOperator 基底（scope: target／batch、node_name）
+│   ├── __init__.py                  load_all()：掃描並登記所有算子
+│   ├── fetch.py                     唯一碰資料源的算子：ingestion.fetch、ingestion.incident_series
+│   ├── detectors/                   偵測器（繼承 DetectorOperator，彼此不互相 import）
+│   │   ├── base.py                  共同骨架：參數合併、基準線載入／保存、異常血緣、模型檔（npz）打包
+│   │   ├── zscore.py                detector.zscore：偏離訓練期平均幾個標準差
+│   │   ├── mad.py                   detector.mad：中位數與 MAD，比 zscore 耐尖峰
+│   │   ├── hourly_baseline.py       detector.hourly_baseline：一週 168 時段各自一條基準線，可設時區
+│   │   ├── compare.py               detector.dod／wow：跟昨天／上週同一時刻比
+│   │   ├── quantile_drift.py        detector.quantile_drift：滾動 p95 漂移，抓尾端變慢
+│   │   ├── chronic.py               detector.chronic：滾動平均跟基準比，抓小幅持續偏移
+│   │   ├── shift.py                 detector.shift：相鄰兩點跳變
+│   │   ├── peer.py                  detector.peer：跟同儕中位數的殘差比（同儕可寫死或動態分群）
+│   │   ├── rules.py                 detector.rules：人訂上下限加連續 N 點，不學習
+│   │   ├── ensemble.py              detector.ensemble：多個偵測節點投票（聯集／交集／多數決／至少 N 票）
+│   │   └── new_only.py              detector.new_only：只留比最後一筆已存異常更新的，重跑不重複告警
+│   ├── alerts/                      告警處理
+│   │   ├── group.py                 事件收斂：same_entity／topology_chain／lot_path_chain
+│   │   ├── score.py                 計分：golden_signals（含黃金訊號加權）、p0_boost（牽涉 P0 加分）
+│   │   ├── suppress.py              抑制：suppress_window（靜音）／same_root_cause（同根因）／dedup（冷卻）
+│   │   ├── heartbeat.py             進行中事件群的心跳重送與結案（恢復通知）
+│   │   ├── payload.py               定嚴重度、產生通知內容（一個部門一則，路由標籤由平台決定）
+│   │   └── _common.py               共用小工具（還沒有事件群時每筆異常先自成一群）
+│   ├── rca/                         根因分析
+│   │   ├── base.py                  兩種契約：RootCauseOperator（寫 rank()）、RcaSection（寫 applies()／build()）
+│   │   ├── report.py                rca.report：依 sections 清單組裝報告，資料不足的段落略過
+│   │   ├── algorithms/              根因演算法（換節點就換演算法）
+│   │   │   ├── topological.py       topological（預設）：傳播圖上沒有異常上游的實體，依最早出現排序
+│   │   │   ├── pagerank.py          pagerank：反向傳播圖上的 Personalized PageRank
+│   │   │   └── causal.py            cross_correlation：事件時段原始時序的時間位移互相關，看誰領先
+│   │   └── sections/                報告段落
+│   │       ├── overview.py          摘要、時間軸、受影響實體、黃金訊號
+│   │       ├── graph.py             可能的源頭、傳播路徑
+│   │       ├── evidence.py          Trace 佐證（錯誤率、p95）
+│   │       ├── similar_cases.py     歷史相似案例與當時的處置
+│   │       └── actions.py           規則式建議處置
+│   ├── llm/                         可選的 AI 能力（noop 永遠不連外）
+│   │   ├── base.py                  BaseLLM 介面、LLMError、解析模型回覆成 JSON
+│   │   ├── registry.py              供應商註冊表：放一個檔案、用 @register 登記，啟動時自動掃描
+│   │   ├── providers.py             內建供應商 noop／openai（含相容端點）／anthropic，build_llm()
+│   │   ├── summarizer.py            enrichment.llm_summary：RCA 總結敘述，失敗或驗證不過就退回模板
+│   │   └── narrative.py             敘述的提示詞、模板，以及依據驗證
+│   ├── notifiers/                   通知出口
+│   │   ├── operators.py             notifier.log／alertmanager／auto（依 AIOPS_NOTIFIER 選）
+│   │   └── transport.py             實際傳輸：AlertmanagerTransport（v2 API）、LogTransport（只寫日誌）
+│   └── admin/                       手動動作（唯一可以用 storage.repository 的算子）
+│       ├── incidents.py             事件群查詢與手動結案
+│       ├── silences.py              建立靜音／維護窗口
+│       ├── mappings.py              欄位對照審核（提交 → 核准，舊版自動作廢）
+│       ├── ingest.py                外部異常接收、trace 合成（含服務呼叫關係）、Lot 履歷合成
+│       ├── tuning.py                調參唯一收口：提案 → 回測 → 核准；回饋、漏報補錄、寫入經驗庫
+│       ├── tuning_rules.py          從回饋文字抽調參規則（LLM 提議、平台驗證，不過就退回固定規則）
+│       ├── learning.py              調參成效報表、頻繁調參轉靜態規則提案
+│       └── sources.py               檢查每個資料源有沒有設定、連不連得上
+├── workflows/                       管線 YAML（沒有 Python，調整流程只改這裡）
+│   ├── it_otel.yaml                 IT：抓指標 → 168 時段偵測 → 拓撲收斂 → 黃金訊號計分 → 抑制 → 通知
+│   ├── it_apm.yaml                  IT：APM 產品資料，有服務拓撲與黃金訊號（偵測用 zscore，不是 168 時段）
+│   ├── factory.yaml                 工廠：Lot 履歷收斂，沒有黃金訊號與同根因抑制
+│   ├── metrics_only.yaml            只有時序指標，沒有 trace 與拓撲
+│   ├── rca_report.yaml              針對一個事件群產生 RCA 報告（根因用拓撲）
+│   ├── rca_report_correlation.yaml  RCA 報告（根因用時序互相關）
+│   └── admin_*.yaml                 18 個，每個手動動作一個，API 呼叫時載入
+├── storage/                         資料庫（節點之間不經過它，只在管線前後被 hooks.py 呼叫）
+│   ├── hooks.py                     引擎的載入與寫入點：管線前一次載入輸入、管線後一次寫入最終結果
+│   ├── models.py                    14 張表：incidents、silences、notifications、anomalies、detector_models、field_mappings、external_anomalies、trace_series、service_edges、lot_paths、tuning_proposals、feedback、active_detector_configs、incident_knowledge
+│   ├── repository.py                各表讀寫，沒有業務判斷；基準線與調參用 version 做樂觀鎖
+│   ├── crud.py                      共用存取函式（建立、更新、條件式更新、單次 IN 查詢…）
+│   └── db.py                        連線與 session（SQLite 開發／測試、PostgreSQL 正式），連不上轉成 InfrastructureError
+├── api/                             HTTP，零業務邏輯，每個 router 都要 token
+│   ├── runs.py                      POST /api/v1/runs、POST /api/v1/rca、GET /api/v1/operators
+│   ├── alerts.py                    靜音（建立、列出）、事件群查詢與結案
+│   ├── ingestion.py                 欄位對照、trace／Lot 合成、外部異常接收、資料源自我檢查
+│   └── tuning.py                    提案、回測、核准、回饋、成效報表（/metrics）、規則升級（/rules/promote）
+├── datasource_specs/                外部資料源適配（輸出標準 DataFrame）
+│   ├── __init__.py                  依名稱取得資料源、逐一自我檢查
+│   ├── base.py                      資料源介面 fetch_data／fetch_group／check，以及「查詢寫錯」「沒資料」兩種錯誤
+│   ├── prometheus.py                Prometheus 與 VictoriaMetrics（query_range；支援依標籤分組的動態同儕）
+│   ├── elasticsearch.py             ES 降採樣查詢（date_histogram）轉成標準序列
+│   ├── mock.py                      開發用假資料（含 seasonal: 日週期資料與動態同儕群）
+│   └── _http.py                     共用 HTTP：連線／認證／伺服器錯誤轉成 InfrastructureError
+├── metric_query/                    查詢語法解析與時間窗對齊（不連線）
+│   ├── promql.py                    PromQL 基本檢查（只擋明顯寫錯的）
+│   ├── elasticsearch.py             ES 查詢的 JSON 字串 → date_histogram search body
+│   ├── trace.py                     內部 trace 來源的「服務/欄位」語法
+│   └── window.py                    時間窗對齊到 step 的整數倍（UTC）
+├── tasks/                           排程入口
+│   └── __main__.py                  CLI：run-once、loop、source-check（只呼叫 Pipeline，不做運算）
+├── security/                        認證
+│   └── auth.py                      Bearer token 驗證；沒設 token 一律拒絕；AIOPS_AUTH_DISABLED 只限本機開發
+├── infrastructure/                  故障看守
+│   └── fallback.py                  資料庫掛掉時的備援：寫本機日誌、打備援 webhook
+└── initialization/                  啟動時初始化
+    └── __init__.py                  登記算子、自動掃描 api/ 掛 router 與 token、錯誤轉 HTTP、等資料庫就緒
+```
 
 ## 本機開發
 
