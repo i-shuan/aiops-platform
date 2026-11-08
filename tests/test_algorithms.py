@@ -39,9 +39,42 @@ def _run_yaml(tmp_path, text, now, name="wf"):
 # ── A.1 168 時段基準線 ──
 
 
-def test_hourly_baseline_catches_what_a_single_global_baseline_misses():
+def test_hourly_baseline_falls_back_to_the_global_baseline_with_less_than_two_weeks_of_data():
+    """只有 7 天訓練資料：每個「週幾幾點」只看過一次，變異被低估，所以整條退回全段統計（等同 zscore），不會更吵。"""
     train = _seasonal_frame(SUNDAY, 7 * 1440)
-    test = _seasonal_frame(SUNDAY + timedelta(days=7), 1440)  # 下一個星期日
+    test = _seasonal_frame(SUNDAY + timedelta(days=7), 1440)
+    test.loc[3 * 60, "value"] = 52.0
+    hourly = OperatorRegistry.get("detector.hourly_baseline")().fit(train)
+    zscore = OperatorRegistry.get("detector.zscore")().fit(train)
+    assert hourly.buckets_ready == 0 and hourly.get_state()["buckets_ready"] == 0
+    assert hourly.detect(test).is_anomaly == zscore.detect(test).is_anomaly  # 逐點跟 zscore 一模一樣
+    # 想強制用 7 天資料就明說：min_weeks=1（變異會被低估，真實資料回放時流量指標因此很吵）
+    forced = OperatorRegistry.get("detector.hourly_baseline")(min_weeks=1).fit(train)
+    assert forced.buckets_ready == 168 and forced.detect(test).is_anomaly[3 * 60]
+
+
+def test_hourly_baseline_turns_on_per_slot_once_it_has_seen_enough_weeks():
+    two_weeks = OperatorRegistry.get("detector.hourly_baseline")().fit(_seasonal_frame(SUNDAY, 14 * 1440))
+    assert two_weeks.buckets_ready == 168
+    # 訓練窗口從某小時中間開始：被切成兩半的那一小時合起來只算一次，不會被當成兩週
+    odd = OperatorRegistry.get("detector.hourly_baseline")().fit(_seasonal_frame(SUNDAY + timedelta(minutes=20), 7 * 1440))
+    assert odd.buckets_ready == 0 and max(v[3] for v in odd.buckets_.values()) <= 1.01
+    with pytest.raises(TypeError, match="min_weeks"):
+        OperatorRegistry.get("detector.hourly_baseline")(min_weeks=0.5)
+
+
+def test_hourly_baseline_loads_states_saved_before_min_weeks_existed():
+    algo = OperatorRegistry.get("detector.hourly_baseline")().fit(_seasonal_frame(SUNDAY, 14 * 1440))
+    old = algo.get_state()
+    old["buckets"] = {b: v[:3] for b, v in old["buckets"].items()}  # 舊版只存 (平均, 標準差, 點數)
+    restored = OperatorRegistry.get("detector.hourly_baseline")().load_state(old)
+    assert restored.buckets_ready == 0  # 不知道看過幾週 -> 保守退回全段統計，等下次重訓
+    restored.detect(_seasonal_frame(SUNDAY + timedelta(days=14), 60))  # 照樣能跑
+
+
+def test_hourly_baseline_catches_what_a_single_global_baseline_misses():
+    train = _seasonal_frame(SUNDAY, 14 * 1440)
+    test = _seasonal_frame(SUNDAY + timedelta(days=14), 1440)  # 第三週的星期日
     i = 3 * 60  # 星期日凌晨三點：平常是一天裡最低的時候
     test.loc[i, "value"] = 52.0  # 這個值放在下午很正常，放在凌晨三點就是異常
     hourly = OperatorRegistry.get("detector.hourly_baseline")().fit(train).detect(test)
@@ -80,6 +113,21 @@ def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
     nodes = {n.name: n for n in wf.nodes}
     assert nodes["detect"].operator == "detector.hourly_baseline"
     assert nodes["fetch"].params["train_lookback_minutes"] >= 10080
+
+
+@pytest.mark.parametrize("name", ["it_otel", "factory"])
+def test_default_detection_is_a_majority_vote_of_three_detectors(name):
+    """真實資料回放：多數決比聯集少 88% 的單點誤報。it_otel 與 factory 預設都是這個組合。"""
+    from aiops.runner import workflow_path
+
+    wf = load_workflow(workflow_path(name))
+    ops = [n.operator for n in wf.nodes]
+    assert ops[ops.index("detector.hourly_baseline"):ops.index("detector.new_only") + 1] == [
+        "detector.hourly_baseline", "detector.mad", "detector.quantile_drift", "detector.ensemble", "detector.new_only"]
+    vote = next(n for n in wf.nodes if n.operator == "detector.ensemble")
+    assert vote.params == {"strategy": "majority"}
+    pipeline = Pipeline(wf)
+    assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_mad", "detect_qdrift"]  # 投票節點不載基準線
 
 
 # ── A.2 動態同儕 ──

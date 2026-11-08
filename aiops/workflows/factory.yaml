@@ -2,13 +2,24 @@ name: factory
 description: "工廠：機台／Lot 指標，沒有 Pod、HTTP 與黃金訊號；流向來自 Lot 履歷"
 
 nodes:
+  # 168 時段基準線每個「週幾幾點」要看過至少 2 週才會啟用（min_weeks），訓練窗口不夠長時它整條退回全段統計（等同 zscore）。
+  # 要啟用：train_lookback_minutes 設 20160 以上（資料源有單次查詢點數上限就把 step_seconds 調大），建議累積 3~4 週。
   - name: fetch
     operator: ingestion.fetch
-    params: {lookback_minutes: 60, train_lookback_minutes: 1440, retrain_minutes: 1440}
+    params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
 
-  # 異常檢測：隨時換成 detector.mad / detector.shift / detector.peer / detector.rules / detector.chronic
+  # 異常檢測：三個偵測器各自判斷，再由 detector.ensemble 多數決（超過一半同意才算異常）。
+  # 要換演算法就換這裡的節點（detector.zscore / mad / shift / peer / rules / chronic / dod / wow / quantile_drift）。
   - name: detect
-    operator: detector.zscore
+    operator: detector.hourly_baseline
+    params: {tz: Asia/Taipei}
+  - name: detect_mad
+    operator: detector.mad
+  - name: detect_qdrift
+    operator: detector.quantile_drift
+  - name: vote
+    operator: detector.ensemble
+    params: {strategy: majority}
   - name: new_only
     operator: detector.new_only
 

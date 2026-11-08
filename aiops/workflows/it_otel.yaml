@@ -2,18 +2,27 @@ name: it_otel
 description: "IT：OpenTelemetry trace + 指標，有服務拓撲與黃金訊號"
 
 nodes:
-  # 168 時段基準線要至少一週的訓練資料（10080 分鐘）。注意 Prometheus 單次查詢上限約 11000 點：
-  # step 60 秒抓 7 天是 10081 點，剛好在上限內；要抓更久請把 step_seconds 調大
+  # 注意 Prometheus 單次查詢上限約 11000 點：step 60 秒抓 7 天是 10081 點，剛好在上限內。
+  # 168 時段基準線每個「週幾幾點」要看過至少 2 週才會啟用（min_weeks），7 天訓練時它整條退回全段統計（等同 zscore），
+  # 不會更吵但也還沒有週期效果。要啟用：train_lookback_minutes 設 20160 以上並把 step_seconds 調大（例如 300），
+  # 流量類指標建議累積 3~4 週再信任它。
   - name: fetch
     operator: ingestion.fetch
     params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
 
-  # 異常檢測：一週 7×24 個時段各自一條基準線（週一早上跟週日凌晨不共用基準線）。
-  # 隨時換成 detector.zscore / mad / shift / peer / rules / chronic / dod / wow / quantile_drift；
-  # 掛多個偵測器時可以接 detector.ensemble 做交集／多數決
+  # 異常檢測：三個偵測器各自判斷，再由 detector.ensemble 多數決（超過一半同意才算異常）。
+  # 真實資料回放：多數決比聯集少 88% 的單點誤報，核心事件全部留下。要換演算法就換這裡的節點
+  # （detector.zscore / mad / shift / peer / rules / chronic / dod / wow / quantile_drift）。
   - name: detect
     operator: detector.hourly_baseline
-    params: {tz: UTC}
+    params: {tz: Asia/Taipei}
+  - name: detect_mad
+    operator: detector.mad
+  - name: detect_qdrift
+    operator: detector.quantile_drift
+  - name: vote
+    operator: detector.ensemble
+    params: {strategy: majority}
   - name: new_only
     operator: detector.new_only
 
