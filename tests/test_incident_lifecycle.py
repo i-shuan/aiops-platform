@@ -13,7 +13,6 @@ from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow, load
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import WARNING, AnomalyEvent, Incident
 from aiops.interfaces.runner import workflow_path
-from aiops.stages.notification.transport import LogTransport
 from aiops.storage.hooks import StorageHooks
 from aiops.storage.repository import Incidents
 
@@ -52,13 +51,13 @@ def _ev(entity, minute, score=5.0, value=None, level="anomaly"):
                         value=value if value is not None else 100.0 + score, level=level)
 
 
-def _replay(minutes, wf=None):
-    """跑 0..minutes 分鐘，每 5 分鐘一輪。回傳每輪送出的通知 [(輪次時間, [Notification])]。"""
+def _replay(sent, minutes, wf=None):
+    """跑 0..minutes 分鐘，每 5 分鐘一輪。回傳每輪送出的通知 [(輪次時間, [Notification])]。sent 是 conftest 的通知紀錄。"""
     wf, hooks, rounds = wf or _workflow(), StorageHooks(), []
     for m in range(5, minutes + 1, 5):
-        LogTransport.sent.clear()
+        sent.clear()
         Pipeline(wf, hooks).run(now=T0 + timedelta(minutes=m))
-        rounds.append((m, list(LogTransport.sent)))
+        rounds.append((m, list(sent)))
     return rounds
 
 
@@ -76,13 +75,13 @@ def _uids(rounds):
     return {n.labels["incident_uid"] for _, sent in rounds for n in sent}
 
 
-def test_two_hour_incident_is_one_card_with_rolling_summary():
+def test_two_hour_incident_is_one_card_with_rolling_summary(sent):
     """中間有一個分數 9.0 的峰值：預設門檻下 5.0 是 P2、9.0 是 P1，所以這場事故會從 P2 升級到 P1 一次。
     同一個 incident_uid；Alertmanager 的標籤組合 P2、P1 各一組，P2 在升級那一輪被關掉，P1 撐到結案。"""
     FEED.clear()
     FEED["svc"] = [_ev("svc", m, value=100 + m) for m in range(1, 121)]  # 每分鐘都異常，持續 2 小時
     FEED["svc"][60] = _ev("svc", 61, score=9.0, value=900.0)  # 中間的峰值
-    rounds = _replay(150)
+    rounds = _replay(sent, 150)
     assert len(_uids(rounds)) == 1  # 只有一個 incident_uid
     cards = _cards(rounds)
     assert sorted((dict(k)["severity"], state) for k, (state, _) in cards.items()) == [("P1", "resolved"), ("P2", "resolved")]
@@ -105,7 +104,7 @@ def test_two_hour_incident_is_one_card_with_rolling_summary():
     assert [r["status"] for r in rows] == ["resolved"]  # 資料庫也只有一筆事件群（不再一輪一筆被冷卻擋下的）
 
 
-def test_state_does_not_leak_between_rounds_of_a_long_running_loop():
+def test_state_does_not_leak_between_rounds_of_a_long_running_loop(sent):
     """常駐迴圈：同一個 Pipeline、同一個 hooks 跑很多輪。incidents_built 是每輪新建的 PipelineContext 的欄位，
     不是類別或模組層級的狀態；第 3 輪才出現的無關實體照樣要建出自己的事件單，不會被前面輪次的旗標吃掉。"""
     FEED.clear()
@@ -115,10 +114,10 @@ def test_state_does_not_leak_between_rounds_of_a_long_running_loop():
     pipeline = Pipeline(wf, hooks)  # 同一個物件跑到底，不重新建立
     seen, contexts = [], []
     for m in range(5, 41, 5):
-        LogTransport.sent.clear()
+        sent.clear()
         ctx = pipeline.run(now=T0 + timedelta(minutes=m))
         contexts.append(ctx)
-        seen.append({(n.labels["entities"], n.labels["incident_uid"]) for n in LogTransport.sent})
+        seen.append({(n.labels["entities"], n.labels["incident_uid"]) for n in sent})
     assert len({id(c) for c in contexts}) == len(contexts)  # 每輪都是新的 context
     assert all(c.incidents_built for c in contexts if c.anomalies or c.open_incidents)
     by_entity = {}
@@ -129,29 +128,29 @@ def test_state_does_not_leak_between_rounds_of_a_long_running_loop():
     assert PipelineContext(pipeline="p", now=T0).incidents_built is False  # 新 context 的預設值
 
 
-def test_flapping_below_quiet_window_never_resolves_in_between():
+def test_flapping_below_quiet_window_never_resolves_in_between(sent):
     FEED.clear()
     # 異常 10 分鐘、回落 10 分鐘、異常 10 分鐘、回落 12 分鐘、異常 5 分鐘：每次回落都短於 15 分鐘
     minutes = [*range(1, 11), *range(21, 31), *range(43, 48)]
     FEED["svc"] = [_ev("svc", m) for m in minutes]
-    rounds = _replay(80)
+    rounds = _replay(sent, 80)
     resolved_at = [m for m, sent in rounds for n in sent if n.ends_at]
     assert len(_uids(rounds)) == 1 and resolved_at == [65]  # 中間沒有結案，最後一筆 47 分 + 15 分後那一輪才結案
     assert sum(1 for _, sent in rounds for n in sent if n.ends_at) == 1
 
 
-def test_quiet_longer_than_window_resolves_then_a_new_spike_is_a_new_card():
+def test_quiet_longer_than_window_resolves_then_a_new_spike_is_a_new_card(sent):
     FEED.clear()
     FEED["svc"] = [_ev("svc", m) for m in (*range(1, 6), *range(60, 65))]
-    rounds = _replay(90)
+    rounds = _replay(sent, 90)
     assert len(_uids(rounds)) == 2  # 安靜 55 分鐘 = 真的恢復；之後是另一場（冷卻 30 分鐘從最後一筆 5 分算，60 分已過）
 
 
-def test_escalation_closes_the_old_labels_and_keeps_one_incident():
+def test_escalation_closes_the_old_labels_and_keeps_one_incident(sent):
     FEED.clear()
     FEED["svc"] = [_ev("svc", m, score=4.0) for m in range(1, 21)] + [_ev("svc", m, score=12.0) for m in range(21, 41)] \
         + [_ev("svc", m, score=4.0) for m in range(41, 51)]
-    rounds = dict(_replay(80))
+    rounds = dict(_replay(sent, 80))
     assert {n.labels["severity"] for n in rounds[5]} == {"P2"}
     esc = rounds[25]  # 21 分起分數衝到 12
     old = [n for n in esc if n.labels["severity"] == "P2"]
@@ -169,23 +168,23 @@ def test_escalation_closes_the_old_labels_and_keeps_one_incident():
     assert sum(1 for state, _ in _cards([(m, s) for m, s in rounds.items() if m <= 45]).values() if state == "firing") == 1
 
 
-def test_warning_becomes_anomaly_in_place():
+def test_warning_becomes_anomaly_in_place(sent):
     FEED.clear()
     FEED["svc"] = [_ev("svc", m, score=2.5, level=WARNING) for m in range(1, 11)] + \
         [_ev("svc", m, score=4.0) for m in range(11, 21)]
-    rounds = dict(_replay(40))
+    rounds = dict(_replay(sent, 40))
     assert [(n.labels["severity"], n.labels["level"]) for n in rounds[5]] == [("warning", "warning")]
-    sent = rounds[15]
-    assert [(n.labels["severity"], n.labels["level"], n.ends_at is not None) for n in sent] == \
+    upgraded = rounds[15]
+    assert [(n.labels["severity"], n.labels["level"], n.ends_at is not None) for n in upgraded] == \
         [("warning", "warning", True), ("P2", "anomaly", False)]
-    assert len({n.labels["incident_uid"] for n in sent}) == 1
+    assert len({n.labels["incident_uid"] for n in upgraded}) == 1
 
 
-def test_absorbing_a_new_entity_supersedes_the_old_label_set():
+def test_absorbing_a_new_entity_supersedes_the_old_label_set(sent):
     FEED.clear()
     FEED["a"] = [_ev("a", m) for m in range(1, 31)]
     FEED["b"] = [_ev("b", m) for m in range(12, 31)]  # 12 分起 b 也出事，跟 a 相鄰
-    rounds = dict(_replay(30, _workflow(("a", "b"), topology=[("a", "b")])))
+    rounds = dict(_replay(sent, 30, _workflow(("a", "b"), topology=[("a", "b")])))
     sent = rounds[15]
     assert [(n.labels["entities"], n.ends_at is not None) for n in sent] == [("a", True), ("a, b", False)]
     assert len(_uids(rounds.items())) == 1

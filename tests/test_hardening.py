@@ -88,6 +88,21 @@ def test_hooks_turn_incidents_and_maintenance_into_exclusions_but_not_false_posi
     assert got[0][1] == T0 - timedelta(minutes=10) and got[0][2] == T0 + timedelta(minutes=30)
 
 
+def test_reused_hooks_reload_the_exclusion_pool_every_round():
+    """同一個 StorageHooks 跑兩輪、而且兩輪的 now 一樣（回放固定 --now、或 API 帶同一個 now）：
+    第二輪要看到第一輪之後才寫進去的事故，不能沿用上一輪的快取（CLAUDE.md 第 100 節第 3 條）。"""
+    hooks = StorageHooks()
+    first = _ctx(_series(30))
+    hooks.load_batch(first)
+    hooks.load_target(first, [("detect", "detector.zscore")])
+    assert first.training_exclusions == []
+    _store_incident("svc", T0, uid="later")
+    second = _ctx(_series(30))
+    hooks.load_batch(second)
+    hooks.load_target(second, [("detect", "detector.zscore")])
+    assert [w.reason for w in second.training_exclusions] == ["incident later"]
+
+
 # ── 2. warning／anomaly 兩級 ──
 
 

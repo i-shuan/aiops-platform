@@ -51,7 +51,7 @@ class WatchdogNotifier(BaseOperator):
     「心跳恢復通知」就等於「AIOps 自己掛了」。設定方式見 README「自我健康心跳」。
 
     params: ttl_minutes（預設 15；設成排程間隔的 2～3 倍，偶爾慢一輪不會誤報）。
-    出口跟 notifier.auto 一樣看 AIOPS_NOTIFIER：log 只寫日誌（不進 LogTransport.sent，不干擾事件通知的檢查）。
+    出口跟 notifier.auto 一樣看 AIOPS_NOTIFIER：log 只寫日誌（不經過 LogTransport，不會混進事件通知）。
     時間用牆上時鐘而不是 ctx.now：心跳是「程式現在活著」，回放舊資料時也一樣。
     """
 

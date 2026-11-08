@@ -170,11 +170,19 @@ class IncidentSeriesFetch(BaseOperator):
         if len(wanted) > self.max_series:
             ctx.log(f"incident_series:truncated:{len(wanted)}->{self.max_series}")
             wanted = wanted[: self.max_series]
+        skipped = []
         for source_type, metric, entity in wanted:
             try:
                 ctx.rca_series[(entity, metric)] = fetch_series(ctx, source_type, metric, start, end, self.step)
             except (NotFound, BadRequest) as e:
+                # 少一條序列，根因演算法就可能排錯：一律列在報告裡；查詢不合法是設定錯誤，另外記進 errors
                 ctx.log(f"incident_series:skip:{entity}:{e}")
+                skipped.append({"entity": entity, "metric": metric, "reason": str(e)})
+                if isinstance(e, BadRequest):
+                    logger.warning("incident_series：%s 的 %s 查詢不合法：%s", entity, metric, e)
+                    ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_series'}",
+                                                  f"{entity} 的 {metric} 查詢不合法，RCA 不含這條時序：{e}"))
+        ctx.result["series_fetch"] = {"fetched": len(ctx.rca_series), "skipped": skipped}
         return ctx
 
 

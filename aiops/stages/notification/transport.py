@@ -47,11 +47,9 @@ class AlertmanagerTransport:
 
 
 class LogTransport:
-    """開發與測試用：只寫日誌，並保留在 sent 讓測試檢查。正式環境請用 alertmanager。"""
-
-    sent: list[Notification] = []
+    """只寫日誌、不保留任何東西（AIOPS_NOTIFIER 沒設時的預設出口，常駐進程裡也會一直被呼叫）。
+    正式環境請用 alertmanager。測試要檢查送了什麼，由測試自己包 send 來錄（tests/conftest.py）。"""
 
     def send(self, notifications: list[Notification]) -> None:
         for n in notifications:
             logger.info(json.dumps({"labels": n.labels, "annotations": n.annotations}, ensure_ascii=False))
-        LogTransport.sent.extend(notifications)

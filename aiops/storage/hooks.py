@@ -58,6 +58,8 @@ class StorageHooks:
     # ── 載入 ──
 
     def load_batch(self, ctx: PipelineContext) -> None:
+        # 每輪開頭清掉排除窗快取：同一個 hooks 被重複用、兩輪 now 又相同時，不能拿到上一輪的事故清單
+        self._pool_key = self._pool = None
         ctx.silences = [Silence(r["id"], r["kind"], r["start"], r["end"], r["entity"], r["dept"])
                         for r in Silences.list_all()]
         cutoff = ctx.now - timedelta(days=RECENT_NOTIFICATION_DAYS)
@@ -145,7 +147,7 @@ class StorageHooks:
     def _exclusion_pool(self, ctx: PipelineContext):
         """這一輪所有序列共用：這條管線近期的事故（扣掉被標成誤報的）與維護窗。一輪只查一次。"""
         key = (ctx.pipeline, ctx.now)
-        if getattr(self, "_pool_key", None) != key:
+        if getattr(self, "_pool_key", None) != key or self._pool is None:
             since = ctx.now - timedelta(days=EXCLUSION_LOOKBACK_DAYS)
             false_alarms = Feedbacks.incident_uids_with_verdict("false_positive")
             incidents = []

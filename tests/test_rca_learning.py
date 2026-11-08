@@ -90,6 +90,33 @@ def test_incident_series_refetches_only_events_that_know_their_source():
     ctx = _ctx([_ev("cart", 0, 3, metric="cpu", source_type="mock"), _ev("fdc", 1, 3, metric="rf")])  # fdc 是外部匯入
     ctx = OperatorRegistry.create("ingestion.incident_series", {"before_minutes": 10, "after_minutes": 5}).execute(ctx)
     assert list(ctx.rca_series) == [("cart", "cpu")] and len(ctx.rca_series[("cart", "cpu")]) > 10
+    assert ctx.result["series_fetch"] == {"fetched": 1, "skipped": []}
+
+
+def test_incident_series_reports_every_series_it_could_not_fetch(monkeypatch):
+    """抓不到的時序不能只留在 ctx.log：根因演算法少了那條序列可能排錯，報告要看得出來少了誰。
+    查詢不合法（BadRequest）是設定錯誤，另外記進 ctx.errors；只是那段時間沒資料（NotFound）只列在 skipped。"""
+    from aiops.engine.errors import BadRequest, NotFound
+    from aiops.stages.ingestion import fetch
+
+    real = fetch.fetch_series
+
+    def flaky(ctx, source_type, query, start, end, step):
+        if query == "bad":
+            raise BadRequest("查詢語法錯")
+        if query == "gone":
+            raise NotFound("沒有資料")
+        return real(ctx, source_type, query, start, end, step)
+
+    monkeypatch.setattr(fetch, "fetch_series", flaky)
+    ctx = _ctx([_ev("cart", 0, 3, metric="cpu", source_type="mock"), _ev("db", 0, 3, metric="bad", source_type="mock"),
+                _ev("idle", 0, 3, metric="gone", source_type="mock")])
+    ctx = OperatorRegistry.create("ingestion.incident_series", {"before_minutes": 10, "after_minutes": 5}).execute(ctx)
+    assert list(ctx.rca_series) == [("cart", "cpu")]
+    assert ctx.result["series_fetch"] == {"fetched": 1, "skipped": [
+        {"entity": "db", "metric": "bad", "reason": "查詢語法錯"}, {"entity": "idle", "metric": "gone", "reason": "沒有資料"}]}
+    assert [(e.entity, e.message) for e in ctx.errors] == [
+        ("node:incident_series", "db 的 bad 查詢不合法，RCA 不含這條時序：查詢語法錯")]
 
 
 def _chain_incident(now, tag):

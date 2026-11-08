@@ -135,8 +135,11 @@ def test_every_workflow_loads_and_its_operators_are_registered():
     from aiops.interfaces.runner import load_all
 
     load_all()
-    for f in sorted((ROOT / "pipelines").rglob("*.yaml")):
-        Pipeline(load_workflow(f))
+    files = sorted((ROOT / "pipelines").rglob("*.yaml"))
+    # 路徑寫錯時 rglob 是空的、迴圈一次都不跑也會「通過」：先確認三個子資料夾都真的掃到檔案
+    assert {f.parent.name for f in files} == {"detection", "rca", "control"} and len(files) >= 20
+    for f in files:
+        assert Pipeline(load_workflow(f)).workflow.nodes, f"{f.name} 沒有任何節點"
 
 
 def test_production_code_does_not_know_it_is_under_test():
@@ -149,4 +152,194 @@ def test_production_code_does_not_know_it_is_under_test():
         for no, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             if banned.search(line):
                 bad.append(f"{f.relative_to(ROOT).as_posix()}:{no}: {line.strip()}")
+    assert not bad, "\n".join(bad)
+
+
+# ── 代碼純潔度與測試誠實性（CLAUDE.md 第 100 節）──
+
+_MUTATORS = {"append", "extend", "update", "add", "insert", "pop", "popitem", "setdefault", "clear", "remove", "discard"}
+_MUTABLE_CTORS = {"dict", "list", "set", "Counter", "defaultdict", "OrderedDict", "deque"}
+
+
+def _src(f: Path) -> str:
+    return f.read_text(encoding="utf-8-sig")
+
+
+def _is_mutable(v) -> bool:
+    if isinstance(v, (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, ast.SetComp)):
+        return True
+    if isinstance(v, ast.Call):
+        fn = v.func
+        return (fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")) in _MUTABLE_CTORS
+    return False
+
+
+def _assigned(st):
+    if isinstance(st, ast.Assign):
+        return [t.id for t in st.targets if isinstance(t, ast.Name)], st.value
+    if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+        return [st.target.id], st.value
+    return [], None
+
+
+def _mutations(node) -> list[tuple[int, ast.expr]]:
+    """node 底下所有「原地修改」的對象：x.append(...)、x[k] = ...、x[k] += ...、del x[k]。"""
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _MUTATORS:
+            out.append((n.lineno, n.func.value))
+        targets = n.targets if isinstance(n, (ast.Assign, ast.Delete)) else [n.target] if isinstance(n, ast.AugAssign) else []
+        out += [(n.lineno, t.value) for t in targets if isinstance(t, ast.Subscript)]
+    return out
+
+
+def _local_names(fn) -> set[str]:
+    args = fn.args
+    names = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
+    for n in ast.walk(fn):
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, (ast.AnnAssign, ast.For)) else []
+        names |= {t.id for t in targets if isinstance(t, ast.Name)}
+    return names
+
+
+# 只在 import 期間由裝飾器填入、之後唯讀的註冊表；不隨 Pipeline.run 改變
+_IMPORT_TIME_REGISTRIES = {("engine/registry.py", "_items"), ("stages/enrichment/registry.py", "_ENTRIES")}
+# 行程層級、刻意只建一次的東西：資料庫連線池（db.configure）與 LLM provider 的一次性掃描旗標
+_ALLOWED_GLOBALS = {("storage/db.py", "_url"), ("storage/db.py", "_engine"), ("storage/db.py", "_factory"),
+                    ("stages/enrichment/registry.py", "_scanned")}
+
+
+def test_no_module_or_class_level_state_is_mutated_at_runtime():
+    """第 100 節第 3 條：模組層級、類別層級的可變狀態一律不准（常駐進程跨輪殘留、無限長大）。
+    宣告成常數的 dict／list 可以有，但不准在任何地方被原地修改；import 期的註冊表另列白名單。"""
+    files = [(f.relative_to(ROOT).as_posix(), ast.parse(_src(f))) for f in _py()]
+    class_level = {(rel, name) for rel, tree in files for cls in ast.walk(tree) if isinstance(cls, ast.ClassDef)
+                   for st in cls.body for name in _assigned(st)[0] if _is_mutable(_assigned(st)[1])}
+    class_attrs = {name for _, name in class_level}
+    bad = []
+    for rel, tree in files:
+        module_level = {name for st in tree.body for name in _assigned(st)[0] if _is_mutable(_assigned(st)[1])}
+        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            local = _local_names(fn)
+            for line, obj in _mutations(fn):
+                if isinstance(obj, ast.Name) and obj.id in module_level and obj.id not in local:
+                    owner = (rel, obj.id)
+                elif isinstance(obj, ast.Attribute) and obj.attr in class_attrs:
+                    owner = next(o for o in class_level if o[1] == obj.attr)
+                else:
+                    continue
+                if owner not in _IMPORT_TIME_REGISTRIES:
+                    bad.append(f"{rel}:{line}: 執行期修改 {owner[0]} 的模組／類別層級 {owner[1]}")
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Global):
+                bad += [f"{rel}:{n.lineno}: global {g}" for g in n.names if (rel, g) not in _ALLOWED_GLOBALS]
+    assert class_level, "一個類別層級的可變物件都沒掃到（tunable 應該有），這個檢查會變成空轉"
+    assert not bad, "\n".join(bad)
+
+
+def test_no_mutable_default_arguments():
+    bad = [f"{f.relative_to(ROOT).as_posix()}:{fn.lineno}: {fn.name}"
+           for f in _py() for fn in ast.walk(ast.parse(_src(f))) if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+           for d in fn.args.defaults + [d for d in fn.args.kw_defaults if d is not None] if _is_mutable(d)]
+    assert not bad, "\n".join(bad)
+
+
+def _innermost_function(tree) -> dict[int, str]:
+    owner = {}
+    for fn in ast.walk(tree):  # 由外往內走：內層函式後到，會覆寫外層
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for n in ast.walk(fn):
+                owner[id(n)] = fn.name
+    return owner
+
+
+# 刻意不出聲的窄型別 except（合約就是「失敗回 None」或「照樣往上丟原本的錯」）
+_SILENT_EXCEPT_ALLOWED = {
+    ("storage/crud.py", "insert_if_absent"),  # 撞唯一鍵 = 別人先寫了，合約是回 None
+    ("storage/db.py", "_quiet_rollback"),  # 連線已斷時的 rollback；呼叫端會把原本的錯往上丟
+}
+
+
+def test_exceptions_are_never_swallowed_silently():
+    """except Exception／裸 except 必須 re-raise、記進 *.errors，或 logger.warning 以上；
+    任何 except 區塊若沒有任何呼叫也沒有 raise（pass、continue、return 常數），只能是白名單裡的合約。"""
+    bad = []
+    for f in _py():
+        rel, tree = f.relative_to(ROOT).as_posix(), ast.parse(_src(f))
+        owner = _innermost_function(tree)
+        for h in [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)]:
+            body = list(ast.walk(ast.Module(body=h.body, type_ignores=[])))
+            raises = any(isinstance(n, ast.Raise) for n in body)
+            calls = [n.func for n in body if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+            recorded = any(c.attr == "append" and getattr(c.value, "attr", "") == "errors" for c in calls)
+            logged = any(c.attr in ("warning", "error", "exception", "critical") for c in calls)
+            types = (h.type.elts if isinstance(h.type, ast.Tuple) else [h.type]) if h.type else []
+            names = {getattr(t, "id", getattr(t, "attr", "")) for t in types} or {"<bare>"}
+            if names & {"Exception", "BaseException", "<bare>"} and not (raises or recorded or logged):
+                bad.append(f"{rel}:{h.lineno}: 寬鬆 except 沒有 re-raise／errors／warning")
+            if not raises and not any(isinstance(n, ast.Call) for n in body) and \
+                    (rel, owner.get(id(h))) not in _SILENT_EXCEPT_ALLOWED:
+                bad.append(f"{rel}:{h.lineno}: except 什麼都沒做（{ast.unparse(h.body[0])}）")
+    assert not bad, "\n".join(bad)
+
+
+def test_algorithms_do_not_special_case_entities_or_lengths():
+    """不准對特定服務名或特定資料長度走不同邏輯（== "cart-api"、len(x) == 120）。
+    服務名以內建 YAML 的 targets 與 kebab-case 字面值為準；CLI 子命令名（run-once 這類）不算。"""
+    import re
+
+    import yaml
+
+    entities = {t["entity"] for f in (ROOT / "pipelines").rglob("*.yaml")
+                for t in (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).get("targets") or [] if "entity" in t}
+    kebab = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)+$")
+    bad = []
+    for f in _py():
+        rel = f.relative_to(ROOT).as_posix()
+        if rel.startswith("interfaces/cli/"):
+            continue
+        for n in ast.walk(ast.parse(_src(f))):
+            if not isinstance(n, ast.Compare):
+                continue
+            parts = [n.left, *n.comparators]
+            lits = [e for p in parts for e in (p.elts if isinstance(p, (ast.Tuple, ast.List, ast.Set)) else [p])
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if any(kebab.match(c.value) or c.value in entities for c in lits):
+                bad.append(f"{rel}:{n.lineno}: {ast.unparse(n)}")
+            exact = any(isinstance(op, (ast.Eq, ast.NotEq)) for op in n.ops)
+            if exact and any(isinstance(p, ast.Call) and getattr(p.func, "id", "") == "len" for p in parts) and \
+                    any(isinstance(p, ast.Constant) and type(p.value) is int and p.value > 2 for p in parts):
+                bad.append(f"{rel}:{n.lineno}: {ast.unparse(n)}")
+    assert entities, "內建 YAML 一個 target 都沒讀到，這個檢查會變成空轉"
+    assert not bad, "\n".join(bad)
+
+
+def test_every_test_asserts_something_and_dead_zones_are_strict():
+    """第 100 節第 1、4 條：每個 test_* 都要有 assert、pytest.raises／warns，或呼叫含 assert 的輔助函式；
+    xfail 一律 strict=True（死區被修好時要變紅、逼人把標註拿掉）；不准無條件 skip。"""
+    tests = Path(__file__).resolve().parent
+    bad = []
+    for f in sorted(tests.glob("test_*.py")):
+        tree = ast.parse(_src(f))
+        helpers = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and not n.name.startswith("test_")
+                   and any(isinstance(x, ast.Assert) for x in ast.walk(n))}
+        for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]:
+            nodes = list(ast.walk(fn))
+            ok = any(isinstance(n, ast.Assert) for n in nodes) or \
+                any(isinstance(n, ast.Attribute) and n.attr in ("raises", "warns") for n in nodes) or \
+                any(isinstance(n, ast.Call) and getattr(n.func, "id", "") in helpers for n in nodes)
+            if not ok:
+                bad.append(f"{f.name}:{fn.lineno}: {fn.name} 沒有任何斷言")
+        called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        for n in ast.walk(tree):
+            if id(n) in called:
+                continue  # @pytest.mark.xfail(...) 的 func 部分；由外層的 Call 處理
+            mark = n.func if isinstance(n, ast.Call) else n
+            if not (isinstance(mark, ast.Attribute) and isinstance(mark.value, ast.Attribute) and mark.value.attr == "mark"):
+                continue
+            kw = {k.arg: k.value for k in n.keywords} if isinstance(n, ast.Call) else {}
+            if mark.attr == "xfail" and not (isinstance(kw.get("strict"), ast.Constant) and kw["strict"].value is True):
+                bad.append(f"{f.name}:{n.lineno}: xfail 沒有 strict=True")
+            if mark.attr == "skip":
+                bad.append(f"{f.name}:{n.lineno}: 無條件 skip")
     assert not bad, "\n".join(bad)

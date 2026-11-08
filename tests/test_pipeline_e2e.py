@@ -219,11 +219,16 @@ def test_detection_reads_the_trace_source_like_any_metric(now, traces):
     assert ctx.errors == [] and len(ctx.anomalies) == 1
 
 
-@pytest.mark.parametrize("query", ["cart/latency", "cart", "nobody/p95_ms"])
-def test_bad_trace_queries_are_target_errors(now, traces, query):
+@pytest.mark.parametrize("query, why", [("cart/latency", "trace 欄位只能是 count, error_rate, p95_ms"),
+                                        ("cart", "trace 查詢格式是「服務/欄位」"),
+                                        ("nobody/p95_ms", "trace 在這段時間沒有 nobody 的資料")])
+def test_bad_trace_queries_are_target_errors(now, traces, query, why):
     from aiops.engine.pipeline import TargetSpec
 
-    assert _go(now, targets=[TargetSpec(source_type="trace", query=query, entity="x")]).errors
+    ctx = _go(now, targets=[TargetSpec(source_type="trace", query=query, entity="x")])
+    # 只記在這條 target、原因要對得上；不能是別的錯誤剛好讓 errors 非空
+    assert [e.entity for e in ctx.errors] == ["x"] and why in ctx.errors[0].message
+    assert ctx.anomalies == []
 
 
 def test_derived_topology_merges_incidents_and_explicit_empty_topology_disables_it(now, traces):

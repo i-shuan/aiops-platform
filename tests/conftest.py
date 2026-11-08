@@ -20,15 +20,26 @@ NOW = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
 
 @pytest.fixture(autouse=True)
 def fresh_db(monkeypatch):
-    """每個測試都是全新的資料庫與乾淨的通知紀錄。"""
+    """每個測試都是全新的資料庫與乾淨的通知紀錄。
+
+    通知紀錄由測試這邊錄：把 LogTransport.send 包一層，照常寫日誌、另外收進這個測試自己的 list。
+    生產代碼的 LogTransport 不保留任何東西（類別層級的 list 在常駐進程會無限長大，CLAUDE.md 第 100 節第 3 條）。"""
     db.configure("sqlite://")
     models.reset_all()
-    LogTransport.sent.clear()
+    recorded: list = []
+    original_send = LogTransport.send
+
+    def record(self, notifications):
+        original_send(self, notifications)
+        recorded.extend(notifications)
+
+    monkeypatch.setattr(LogTransport, "send", record)
     for var in ("AIOPS_ALERTMANAGER_URL", "AIOPS_ALERTMANAGER_TOKEN", "AIOPS_FALLBACK_WEBHOOK", "AIOPS_AUTH_DISABLED",
                 "AIOPS_LLM_PROVIDER", "AIOPS_LLM_MODEL", "AIOPS_LLM_API_KEY", "AIOPS_LLM_BASE_URL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AIOPS_NOTIFIER", "log")
     monkeypatch.setenv("AIOPS_API_TOKEN", TEST_TOKEN)
+    return recorded
 
 
 @pytest.fixture
@@ -37,8 +48,9 @@ def client():
 
 
 @pytest.fixture
-def sent():
-    return LogTransport.sent
+def sent(fresh_db):
+    """這個測試裡 notifier.log／notifier.auto(log) 送出的通知。"""
+    return fresh_db
 
 
 @pytest.fixture
