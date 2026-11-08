@@ -14,7 +14,7 @@ AIOps 平台：從監控指標抓異常、收斂成事件群、抑制與分送�
 
 | 環境變數 | 用途 | 要怎麼換 |
 |---|---|---|
-| `AIOPS_API_TOKEN` | 呼叫本平台 API 的 Bearer token | 產生隨機長字串（例如 `openssl rand -hex 32`）。可用逗號同時放新舊兩組，等呼叫端都換完再拿掉舊的 |
+| `AIOPS_API_TOKEN` | 呼叫本平台 API 的 Bearer token | 產生隨機長字串（例如 `openssl rand -hex 32`）。可用逗號同時放新舊兩組，等呼叫端都換完再拿掉舊的。**開發用的值在 `deploy/helm/aiops-platform/values-dev.yaml`**，換掉時也要改那個檔 |
 | `AIOPS_DATABASE_URL` | 資料庫連線（含帳密） | 正式 PostgreSQL 開專用帳號與密碼，只給本平台的資料庫權限 |
 | `AIOPS_ES_API_KEY` | 讀 Elasticsearch 的 key | 在 ES 建**唯讀**的 API key，只給需要的索引 pattern 讀取權限。建法見下面「建立平台的唯讀 ES key」。**目前還沒建**，所以平台連不上叢集的 ES（回 401）；真實資料驗收（見「目前狀態」）卡在這裡 |
 | `AIOPS_PROMETHEUS_TOKEN` | 讀 Prometheus 的 token（選填） | 依公司 Prometheus 的驗證方式核發 |
@@ -27,21 +27,30 @@ AIOps 平台：從監控指標抓異常、收斂成事件群、抑制與分送�
 **這一步要由有 ES 管理員權限的人做，平台與 AI 助理都不做**（建立金鑰等於新增憑證，平台程式也不准有任何寫入 ES 的路徑，見 [deploy/elasticsearch/README.md](deploy/elasticsearch/README.md)）。
 
 1. 在 Kibana Dev Tools 用管理員身分執行，範例在 [deploy/elasticsearch/README.md](deploy/elasticsearch/README.md#為-grafana-或平台建唯讀-key範例)。只給 `metrics-apm.transaction.1m-*`、`traces-apm-*`、`logs-apm.*` 的 `read` 與 `view_index_metadata`，不要給寫入權限，也不要共用 Grafana 的 key 或 `elastic` 超級帳號。
-2. 回傳的 `encoded` 值就是 `AIOPS_ES_API_KEY`。**本機驗證**設成環境變數（只存在這個終端機視窗，不會寫進檔案）：
+2. 回傳的 `encoded` 值**填進 [deploy/helm/aiops-platform/values-dev.yaml](deploy/helm/aiops-platform/values-dev.yaml) 的 `devSecretEnv.AIOPS_ES_API_KEY`**（把那一行開頭的 `#` 拿掉）。開發叢集的整套設定與開發用金鑰都留在這個檔案裡，換電腦、換環境才查得到值，**不要只放在某個人的環境變數**。這個檔案是整個 repo 裡唯一允許放金鑰的地方（`tests/test_deploy_secrets.py` 只放行它，而且只放行 `AIOPS_API_TOKEN`、`AIOPS_ES_API_KEY` 兩個鍵）。
+3. 部署到開發叢集：
 
-```powershell
-$env:AIOPS_ES_URL = "http://127.0.0.1:19200"
-$env:AIOPS_ES_API_KEY = "<encoded 值>"
+```bash
+helm upgrade --install aiops-platform deploy/helm/aiops-platform -n aiops-platform -f deploy/helm/aiops-platform/values-dev.yaml --set devPostgres.enabled=true
 ```
 
-   ES 在叢集裡，本機要先開 port-forward（維持開著）：
+4. 本機直接跑平台或驗證腳本時，ES 在叢集裡，要先開 port-forward（維持開著），並把 `AIOPS_ES_URL` 指向它、`AIOPS_ES_API_KEY` 用 `values-dev.yaml` 裡的值：
 
 ```bash
 kubectl --context rancher-desktop -n es-test port-forward svc/elasticsearch 19200:9200
 ```
 
-3. **上叢集**時把值放進 Secret，用 `existingSecret` 帶進平台（見「Kubernetes：平台本身」），不要寫進 values 或這個 repo。
-4. 這把 key 是開發階段用的，跟上表其他憑證一樣，**上正式環境前要撤銷重發**。
+5. 正式環境**不要用** `values-dev.yaml`：金鑰放 Kubernetes Secret，用 `existingSecret` 帶入。這把 key 與檔案裡的 `AIOPS_API_TOKEN` 都是開發階段用的，**上正式環境前要撤銷重發**。
+
+#### ES 管理員（elastic）密碼
+
+這個密碼**不寫進 repo**，也不是平台要用的（平台只用上面那把唯讀 key）。它存在叢集的 Secret `es-elastic`（namespace `es-test`），需要時由有叢集權限的人自己取：
+
+```powershell
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((kubectl --context rancher-desktop -n es-test get secret es-elastic -o go-template='{{range .data}}{{.}}{{end}}')))
+```
+
+換新叢集時，這個 Secret 由建立 ES 的 helm release 產生；新叢集上要自己確認 Secret 名稱。
 
 ### 本平台的部署設定
 

@@ -1,0 +1,19 @@
+# 只給開發用（dev-only）：開發叢集（rancher-desktop）的整套設定，連同開發用的金鑰一起留在這裡，
+# 換電腦、換環境才查得到值，不必靠某個人終端機裡的環境變數。
+#
+# 這個檔案是整個 repo 裡唯一允許放金鑰的地方（tests/test_deploy_secrets.py 只放行這個檔、只放行下面列的幾個鍵）。
+# 正式環境不要用它：改用 existingSecret，金鑰放 Kubernetes Secret。上正式環境前這裡的值全部要撤銷重發（見根目錄 README 的憑證清單）。
+#
+# 用法：
+#   helm upgrade --install aiops-platform deploy/helm/aiops-platform \
+#     -n aiops-platform -f deploy/helm/aiops-platform/values-dev.yaml --set devPostgres.enabled=true
+
+env:
+  AIOPS_ES_URL: http://elasticsearch.es-test.svc:9200
+
+devSecretEnv:
+  # 呼叫本平台 API 的 Bearer token（開發用）
+  AIOPS_API_TOKEN: dev-c7e20a3a300241e0445b9ef87cf3c043
+  # 讀 Elasticsearch 的唯讀 API key。還沒建：由有 ES 管理員權限的人建好後，把回傳的 encoded 值填在下面這一行，
+  # 並刪掉開頭的 #。建法見根目錄 README「建立平台的唯讀 ES key」。
+  # AIOPS_ES_API_KEY: "<建好後填這裡>"
