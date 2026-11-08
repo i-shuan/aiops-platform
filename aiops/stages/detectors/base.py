@@ -31,10 +31,14 @@ class DetectorOperator(BaseOperator):
     other_params: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, **params: Any):
+        routing = {k: params.pop(k) for k in ROUTING_PARAMS & set(params)}
         unknown = set(params) - set(self.tunable) - set(self.other_params)
         if unknown:
-            allowed = sorted({*self.tunable, *self.other_params})
+            allowed = sorted({*self.tunable, *self.other_params, *ROUTING_PARAMS})
             raise TypeError(f"{self.operator_name or type(self).__name__} 沒有參數 {sorted(unknown)}；可用：{allowed}")
+        # 路由參數（這個節點對哪些實體跑）由引擎讀，不進 self.params：不會傳給演算法、也不在調參能改的範圍
+        self.include_entities = _entity_set(routing, "include_entities")
+        self.exclude_entities = _entity_set(routing, "exclude_entities") or frozenset()
         self.params = params
         self.fitted = False
 
@@ -62,6 +66,13 @@ class DetectorOperator(BaseOperator):
             if key in self.params and not (low <= float(self.params[key]) <= high):
                 raise ValueError(f"{self.operator_name}.{key}={self.params[key]} 超出範圍 [{low}, {high}]")
 
+    def check_override(self, override: dict[str, Any]) -> None:
+        """target overrides 的載入期檢查：參數名稱要合法、合併後要通過範圍檢查；路由參數不准寫在 target 上。"""
+        routing = sorted(ROUTING_PARAMS & set(override))
+        if routing:
+            raise TypeError(f"{routing} 是節點的路由參數，只能寫在節點 params；target 要選偵測器請用 detectors")
+        type(self)(**deep_merge(self.params, override)).validate_params()
+
     def param(self, key: str) -> float:
         return float(self.params.get(key, self.tunable[key][0]))
 
@@ -83,9 +94,8 @@ class DetectorOperator(BaseOperator):
         if target is None or ctx.raw_df is None:
             raise BadRequest(f"{self.operator_name} 前面需要先有 ingestion.fetch（ctx.raw_df 是空的）")
         key = self.state_key
-        ctx.detector_runs.append(key)
         if ctx.raw_df.empty:
-            return ctx
+            return ctx  # 沒資料、沒評估：不算參與投票（棄權），不是投反對票
         if self.requires_peers and not (target.peers or target.peer_group):
             raise BadRequest(f"{self.operator_name} 需要同儕序列（target 的 peers 或 peer_group）")
 
@@ -112,6 +122,7 @@ class DetectorOperator(BaseOperator):
             algo.fit(df)
             ctx.new_detector_states[key] = self._snapshot(algo, ctx, df, base_version)
 
+        ctx.detector_runs.append(key)  # 真的評估過這段資料才算參與（沒抓到異常 = 反對票）
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
         # 每一筆都帶著自己是哪個演算法、哪個節點抓到的（要交集／多數決就接 detector.ensemble）
         ctx.anomaly_result = algo.detect(df)
@@ -139,10 +150,10 @@ class DetectorOperator(BaseOperator):
         return self.node_name or self.operator_name
 
     def effective_params(self, ctx: PipelineContext) -> dict[str, Any]:
-        """逐鍵合併：演算法預設值 <- tuning 核准的現行參數 <- Workflow YAML 寫的參數。
+        """逐鍵合併：演算法預設值 <- tuning 核准的現行參數 <- Workflow 節點 YAML 的 params <- target 的 overrides。
 
         YAML 寫了的鍵視為「鎖定」，不會被後台調參蓋掉；沒寫的鍵才吃調參結果。
-        （以前是 YAML 只要寫了任何一個參數，調參結果就整組失效。）
+        target 的 overrides[節點名稱] 最優先：同一個節點套到 50 個服務，個別服務要不同門檻就寫在自己的 target 上。
         調參資料裡已經不認得的參數（例如演算法改版拿掉的）直接略過並記錄，不讓整條序列失敗。
         """
         allowed = {*self.tunable, *self.other_params}
@@ -154,7 +165,11 @@ class DetectorOperator(BaseOperator):
         locked = sorted(set(tuned) & set(self.params))
         if locked:
             ctx.log(f"params:{self.state_key}:yaml-locked:{','.join(locked)}")
-        return deep_merge(tuned, self.params)
+        merged = deep_merge(tuned, self.params)
+        override = ctx.target.overrides.get(self.state_key, {}) if ctx.target else {}
+        if override:
+            ctx.log(f"params:{self.state_key}:target-override:{','.join(sorted(override))}")
+        return deep_merge(merged, override)
 
     def warmup_points(self) -> int:
         """detect() 開頭需要幾個「前面的點」才算得出分數（滾動窗）。回測切測試段時往前多帶這麼多點。"""
@@ -178,6 +193,18 @@ class DetectorOperator(BaseOperator):
 
 
 SAFE_ARTIFACT_FORMATS = frozenset({"npz"})
+
+# 每個偵測節點都能寫的路由參數（緊急止血、灰度）：exclude 優先，再看 include（有寫才限制），最後才看 target 的 detectors
+ROUTING_PARAMS = frozenset({"include_entities", "exclude_entities"})
+
+
+def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:
+    if key not in routing:
+        return None
+    value = routing[key]
+    if isinstance(value, str) or not isinstance(value, (list, tuple, set, frozenset)):
+        raise TypeError(f"{key} 必須是實體名稱的清單，不是 {value!r}")
+    return frozenset(str(v) for v in value)
 
 
 def pack_arrays(arrays: dict[str, np.ndarray]) -> tuple[str, bytes]:

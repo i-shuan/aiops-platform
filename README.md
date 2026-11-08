@@ -278,7 +278,62 @@ PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後�
 | `detector.shift` | 相鄰兩點跳變 | 突然換水位 | 跳上去之後的新水位不再報 |
 | `detector.peer` | 同時間同儕的中位數 | 同服務多個 Pod、同型號多台機台 | 同儕用 `peers` 寫死，或 `peer_group` 依標籤動態撈（Prometheus／VictoriaMetrics） |
 | `detector.rules` | 人訂的上下限、連續 N 點 | 有明確規格的指標 | `require_rule: false` 時只用核准的規則提案，沒有規則的序列不判 |
-| `detector.ensemble` | 前面幾個偵測節點的投票 | 想用交集／多數決壓誤報 | 接在偵測節點後面、`new_only` 前面 |
+| `detector.ensemble` | 前面幾個偵測節點的投票 | 想用交集／多數決壓誤報 | 接在偵測節點後面、`new_only` 前面；分母只算這條序列真的評估過資料的節點（見下方） |
+
+#### 每個服務跑哪些偵測器（target 白名單、overrides、止血）
+
+一條 workflow 的偵測節點是「菜單」，每個 target 自己點菜。三個機制，判斷順序是 **節點的 `exclude_entities` → 節點的 `include_entities` → target 的 `detectors`**，任何一關沒過，這個節點對這條序列就不跑（不載基準線、不載調參、不算投票）。
+
+```yaml
+nodes:
+  - {name: fetch, operator: ingestion.fetch, params: {lookback_minutes: 60, train_lookback_minutes: 10080}}
+  - name: detect
+    operator: detector.hourly_baseline
+    params:
+      tz: Asia/Taipei
+      min_weeks: 1
+      exclude_entities: [inv-svc]          # 緊急止血：這個節點對 inv-svc 先關掉（優先於一切）
+  - name: detect_mad
+    operator: detector.mad
+  - name: detect_qdrift
+    operator: detector.quantile_drift
+    params: {include_entities: [cart-api, ord-svc]}   # 灰度：只對這兩個服務開
+  - name: vote
+    operator: detector.ensemble
+    params: {strategy: majority, tie_breaker: strict}
+  - {name: new_only, operator: detector.new_only}
+
+targets:
+  - {source_type: prometheus, query: '...', entity: cart-api}       # 沒寫 detectors = 全部節點都跑（跟以前一樣）
+  - source_type: prometheus
+    query: '...'
+    entity: pay-api
+    detectors: [detect_mad, detector.quantile_drift]   # 節點名稱，或算子名稱（= 這個算子的所有節點）
+  - source_type: prometheus
+    query: '...'
+    entity: ord-svc
+    overrides:                                         # 這個服務自己的參數，key 是節點名稱
+      detect_mad: {threshold: 5.0}
+```
+
+- **`detectors`**：同一個算子掛兩個節點（例如 `z_short`、`z_long`）時寫節點名稱只跑那一個；寫算子名稱（`detector.zscore`）兩個都跑。不寫就是全部都跑。
+- **`overrides`**：參數優先序 `演算法預設值 ← 後台核准的調參 ← 節點 YAML params ← target overrides`（逐鍵合併，overrides 最優先），一樣要通過演算法的範圍檢查。不要把演算法參數直接攤在 target 根層級。
+- **`include_entities`／`exclude_entities`**：寫在任何偵測節點的 `params`，不會傳給演算法、後台調參也改不到（提案帶這兩個鍵會被拒絕）。
+- **投票分母**：`detector.ensemble` 只算「真的評估過這段資料」的節點。被上面三個機制跳過的、這一輪沒資料的，都算棄權、不進分母；有評估但沒抓到的算反對票。只剩 1 個參與者時它抓到就通過；參與者是偶數（最常見：白名單只留 2 個）時看 `tie_breaker`：`strict`（預設）平手不算，2 個要 2 票；`loose` 平手就算，2 個裡 1 票即通過。`at_least` 的 `min_votes` 比參與者多時降為「全部參與者都抓到」。`detector.hourly_baseline` 時段資料不足時是退回全段統計繼續判斷，**不是跳過**，所以仍然算參與者。
+- **載入期就報錯**（`WorkflowError`，API 回 400）：`detectors` 寫了對不到的節點／算子名稱（訊息會列出可用節點）、`overrides` 的 key 不是偵測節點或這個 target 沒選它、overrides 參數拼錯或超出範圍、`include/exclude_entities` 寫了 workflow targets 裡沒有的實體（止血名單打錯字＝以為停了其實沒停，所以直接擋；workflow 沒宣告 targets、全由 API 傳入時無從比對，不檢查）、target 欄位拼錯（例如 `detector:`）。API 呼叫帶進來的 `targets` 也走同一套檢查。
+
+真實資料回放（5 個 scn 服務分鐘級延遲，訓練 7 天、回放到 11/3 16:20Z；事件區間 11/3 14:00–16:30Z，數字是「區間內／區間外」的異常點）：
+
+| 設定 | 區間內 | 區間外 |
+|---|---|---|
+| 預設：hourly（`min_weeks: 1`）+ mad + qdrift 多數決，target 沒寫 `detectors` | 158 | 59 |
+| `detect` 加 `exclude_entities: [inv-svc, pay-api]` | 157 | 41 |
+| `detect` 加 `include_entities: [cart-api, ord-svc]` | 156 | 35 |
+| 每個 target `detectors: [detect_mad, detect_qdrift]`，`tie_breaker: strict` | 154 | 21 |
+| 同上，`tie_breaker: loose` | 216 | 428 |
+| 每個 target `detectors: [detect]`（只剩 1 個參與者） | 161 | 128 |
+
+`loose` 等於兩個偵測器取聯集，非常吵，只在「寧可多報」的服務用。
 
 動態同儕的寫法（自己是 `attrs[by]`，沒有就用 `entity`；`${屬性}` 會用 target 的 attrs 代入）：
 

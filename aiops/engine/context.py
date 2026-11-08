@@ -37,7 +37,11 @@ class PeerGroup:
 
 @dataclass
 class Target:
-    """要偵測的一條序列。同儕給 peer 偵測器用：peers 是寫死的名單，peer_group 是依標籤動態聚合。"""
+    """要偵測的一條序列。同儕給 peer 偵測器用：peers 是寫死的名單，peer_group 是依標籤動態聚合。
+
+    detectors：這條序列要跑哪些偵測節點（節點名稱或算子名稱；None = 全部）。引擎依它決定跳過哪些節點。
+    overrides：節點名稱 -> 參數，蓋過節點 YAML 的 params（最優先）。
+    """
 
     source_type: str
     query: str
@@ -45,6 +49,8 @@ class Target:
     attrs: dict[str, Any] = field(default_factory=dict)
     peers: list[PeerRef] = field(default_factory=list)
     peer_group: PeerGroup | None = None
+    detectors: list[str] | None = None
+    overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
