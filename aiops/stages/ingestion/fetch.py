@@ -4,6 +4,8 @@
   - 同儕：peers 寫死的名單 -> peer_0、peer_1…；peer_group 依標籤動態聚合整群 -> 接在後面，成員名單記在 ctx.peer_members
   - lags_minutes：同一時刻往前 N 分鐘的值 -> lag_<N> 欄位（給同比、環比偵測器）
 - ingestion.incident_series：RCA 用，依事件群裡每筆異常的 (資料源, 指標) 重抓事件時段的原始時序 -> ctx.rca_series
+- ingestion.incident_traces：RCA 用，隨需撈事件前後的 span -> ctx.rca_spans（給 rca.build_dynamic_topology 還原呼叫關係）。
+  日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上），只有出 RCA 報告時才去撈那一小段
 
 外部資料源走 sources，已核准的欄位對照由引擎載入 ctx.field_maps。
 source_type=trace：平台自己合成並存起來的 trace 時序（引擎載入 ctx.trace_rows），query 寫「服務/欄位」。
@@ -15,11 +17,11 @@ from string import Template
 
 import pandas as pd
 
-from aiops.engine.context import PipelineContext
-from aiops.engine.errors import BadRequest, NotFound
+from aiops.engine.context import PipelineContext, SpanRecord, TargetError
+from aiops.engine.errors import BadRequest, InfrastructureError, NotFound
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
-from aiops.sources import get_datasource_spec
+from aiops.sources import get_datasource_spec, is_configured
 from aiops.sources.query.trace import parse_trace_query
 from aiops.sources.query.window import align_window, to_utc
 from aiops.engine.operator import BaseOperator
@@ -163,4 +165,54 @@ class IncidentSeriesFetch(BaseOperator):
                 ctx.rca_series[(entity, metric)] = fetch_series(ctx, source_type, metric, start, end, self.step)
             except (NotFound, BadRequest) as e:
                 ctx.log(f"incident_series:skip:{entity}:{e}")
+        return ctx
+
+
+@OperatorRegistry.register("ingestion.incident_traces")
+class IncidentTracesFetch(BaseOperator):
+    """RCA 用：隨需撈 [事件開始 - before, 事件結束 + after] 的 span 放進 ctx.rca_spans。
+
+    只在跑 RCA 報告時執行，日常偵測不碰 trace。這是旁路佐證，撈不到不該讓整份報告失敗：
+    資料源沒設定 -> 略過（記在 audit）；連不上、查詢錯 -> 記進 errors 並略過，報告照出（拓撲就只用既有的）。
+    params: source_type（預設 elasticsearch）、before_minutes（預設 15）、after_minutes（預設 0）、
+            max_spans（上限，預設 20000，超過就截斷並註記）、only_incident_services（預設 false：撈這段時間所有服務，
+            才看得到事件實體跟沒出事的服務之間的關係；true 只撈事件裡的服務，量小但可能漏掉中間的服務）。
+    """
+
+    scope = "batch"
+
+    def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 15, after_minutes: int = 0,
+                 max_spans: int = 20000, only_incident_services: bool = False):
+        if min(before_minutes, after_minutes) < 0 or max_spans <= 0:
+            raise ValueError("before／after_minutes 不能小於 0；max_spans 必須大於 0")
+        self.source_type = source_type
+        self.before, self.after = timedelta(minutes=before_minutes), timedelta(minutes=after_minutes)
+        self.max_spans = int(max_spans)
+        self.only_incident_services = bool(only_incident_services)
+
+    def _skip(self, ctx: PipelineContext, why: str, as_error: bool) -> PipelineContext:
+        ctx.log(f"incident_traces:skip:{why}")
+        ctx.result["trace_fetch"] = {"source_type": self.source_type, "spans": 0, "skipped": why}
+        if as_error:
+            ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_traces'}", f"撈 trace 失敗，拓撲只用既有的：{why}"))
+        return ctx
+
+    def execute(self, ctx: PipelineContext) -> PipelineContext:
+        if not ctx.incidents:
+            raise NotFound("沒有可以撈 trace 的事件群")
+        incident = ctx.incidents[0]
+        if not is_configured(self.source_type):
+            return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
+        start, end = as_utc(incident.start) - self.before, as_utc(incident.end) + self.after
+        services = sorted(set(incident.entities)) if self.only_incident_services else None
+        try:
+            raw, truncated = get_datasource_spec(self.source_type).fetch_spans(start, end, services, self.max_spans)
+        except (InfrastructureError, BadRequest, NotFound) as e:
+            return self._skip(ctx, str(e), as_error=True)
+        ctx.rca_spans = [SpanRecord(s["trace_id"], s["span_id"], s.get("parent_id"), s["service"], s["ts"],
+                                    float(s.get("duration_ms") or 0.0), bool(s.get("error"))) for s in raw]
+        ctx.result["trace_fetch"] = {"source_type": self.source_type, "spans": len(ctx.rca_spans),
+                                     "truncated": truncated, "start": start.isoformat(), "end": end.isoformat(),
+                                     "services": sorted({s.service for s in ctx.rca_spans})}
+        ctx.log(f"incident_traces:{len(ctx.rca_spans)}{':truncated' if truncated else ''}")
         return ctx

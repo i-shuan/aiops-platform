@@ -44,6 +44,14 @@ class BaseDataSourceSpec(ABC):
         預設不支援；支援多序列查詢的資料源（Prometheus 系列）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援動態同儕（peer_group），請改用 peers 寫死名單")
 
+    def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
+                    max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
+        """RCA 隨需撈 trace：[start, end] 內的 span／transaction，services 給了就只撈這些服務。
+        回傳 (spans, 是否因為 max_spans 被截斷)。每個 span 是 dict：
+        trace_id、span_id、parent_id（可能是 None）、service、ts（UTC datetime）、duration_ms、error。
+        預設不支援；存 trace 的資料源（Elasticsearch APM）覆寫它。"""
+        raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
+
     @abstractmethod
     def check(self) -> dict[str, Any]:
         """連線自我檢查：{"ok": bool, "detail": str}。不得丟例外。"""

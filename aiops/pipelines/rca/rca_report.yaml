@@ -1,6 +1,15 @@
 name: rca_report
 description: "針對一個事件群產生 RCA 報告（IT／工廠共用；資料不足的段落自動略過）"
 nodes:
+  # 隨需撈事件前 15 分鐘到結束的 trace（日常偵測不撈 trace，只有出報告時才撈這一小段）。
+  # ES 沒設定就略過、連不上就記進 errors 並略過，報告照出；根因就只用既有的拓撲
+  - name: fetch_traces
+    operator: ingestion.incident_traces
+    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000}
+  # 用撈到的 span 現場還原服務呼叫關係，跟既有拓撲取聯集
+  - name: build_topology
+    operator: rca.build_dynamic_topology
+    params: {mode: merge, min_calls: 1}
   # 根因演算法：換成 rca.root_cause.pagerank，或用 rca_report_correlation（時序互相關）
   - name: root_cause
     operator: rca.root_cause.topological

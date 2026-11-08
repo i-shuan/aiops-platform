@@ -9,7 +9,7 @@ from aiops.engine.context import PipelineContext
 from aiops.engine.errors import BadRequest
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.requests import IngestAnomalies, LotPathsMerge, LotStepIn, SpanIn, TraceMerge
-from aiops.engine.topology import lot_edges_from_paths
+from aiops.engine.topology import lot_edges_from_paths, service_edges
 from aiops.engine.operator import BaseOperator
 from aiops.storage.repository import ExternalAnomalies, LotPaths, ServiceEdges, Traces
 
@@ -37,13 +37,6 @@ class IngestAnomaliesOp(BaseOperator):
         return ctx
 
 
-def _service_edges(spans: list[SpanIn]) -> Counter:
-    """父 span 的服務 -> 子 span 的服務 = 一次跨服務呼叫（同服務內的呼叫不算）。"""
-    service_of = {s.span_id: s.service for s in spans if s.span_id}
-    return Counter((service_of[s.parent_id], s.service) for s in spans
-                   if s.parent_id in service_of and service_of[s.parent_id] != s.service)
-
-
 @OperatorRegistry.register("admin.merge_traces")
 class MergeTraces(BaseOperator):
     """把 span 轉成每個服務的標準時序（count、error_rate、p95_ms），並推導服務呼叫關係。
@@ -67,7 +60,7 @@ class MergeTraces(BaseOperator):
         series = [{"service": r.service, "ts": r.ts.to_pydatetime(), "count": int(r.count),
                    "error_rate": round(float(r.error_rate), 4), "p95_ms": round(float(r.p95_ms), 2)}
                   for r in out.itertuples()]
-        edges = _service_edges(req.spans)
+        edges = service_edges(req.spans)
         if req.persist:
             Traces.upsert_series(series)
             ServiceEdges.add_calls(dict(edges))

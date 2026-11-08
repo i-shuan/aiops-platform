@@ -60,5 +60,54 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             "value": [v for _, v in points],
         })
 
+    def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
+                    max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
+        """APM 資料模型（processor.event = transaction／span）：transaction 的 id 在 transaction.id，span 的在 span.id；
+        兩者都用 parent.id 指向父節點，跨服務呼叫時下游 transaction 的 parent.id 就是上游 span 的 id。
+        用 search_after 分頁撈到 max_spans 為止（只呼叫 _search，不寫任何索引）。索引用 AIOPS_ES_TRACE_INDEX 改。"""
+        index = os.environ.get("AIOPS_ES_TRACE_INDEX", "").strip() or DEFAULT_TRACE_INDEX
+        filters: list[dict[str, Any]] = [{"range": {"@timestamp": {"gte": start.isoformat(), "lte": end.isoformat()}}}]
+        if services:
+            filters.append({"terms": {"service.name": list(services)}})
+        spans: list[dict[str, Any]] = []
+        after = None
+        while len(spans) < max_spans:
+            body: dict[str, Any] = {
+                "size": min(5000, max_spans - len(spans)), "query": {"bool": {"filter": filters}},
+                "_source": ["@timestamp", "trace.id", "span.id", "transaction.id", "parent.id", "service.name",
+                            "span.duration.us", "transaction.duration.us", "event.outcome"],
+                "sort": [{"@timestamp": "asc"}, {"trace.id": "asc"}, {"span.id": {"order": "asc", "missing": "_first"}}],
+            }
+            if after is not None:
+                body["search_after"] = after
+            resp = _http.request(self.client, self.source_type, "POST", f"{self.base_url}/{index}/_search",
+                                 headers=self.headers, json=body)
+            payload = resp.json() if resp.content else {}
+            if not resp.is_success:
+                reason = (payload.get("error") or {}).get("reason") if isinstance(payload.get("error"), dict) else None
+                raise InvalidQueryError(f"elasticsearch 撈 trace 失敗（HTTP {resp.status_code}）：{reason or resp.text[:200]}")
+            hits = payload.get("hits", {}).get("hits", [])
+            if not hits:
+                return spans, False
+            spans += [s for s in (_span(h["_source"]) for h in hits) if s is not None]
+            after = hits[-1]["sort"]
+        return spans[:max_spans], True
+
     def check(self) -> dict[str, Any]:
         return _http.check(self.client, self.source_type, f"{self.base_url}/", headers=self.headers)
+
+
+DEFAULT_TRACE_INDEX = "traces-apm-*"
+
+
+def _span(src: dict[str, Any]) -> dict[str, Any] | None:
+    own = src.get("span") or src.get("transaction") or {}
+    span_id = (src.get("span") or {}).get("id") or (src.get("transaction") or {}).get("id")
+    service = (src.get("service") or {}).get("name")
+    trace_id = (src.get("trace") or {}).get("id")
+    if not (span_id and service and trace_id):
+        return None
+    return {"trace_id": trace_id, "span_id": span_id, "parent_id": (src.get("parent") or {}).get("id"),
+            "service": service, "ts": pd.Timestamp(src["@timestamp"]).tz_convert("UTC").to_pydatetime(),
+            "duration_ms": float((own.get("duration") or {}).get("us") or 0) / 1000.0,
+            "error": (src.get("event") or {}).get("outcome") == "failure"}

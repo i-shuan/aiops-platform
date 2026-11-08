@@ -21,6 +21,11 @@ def source_types() -> list[str]:
     return sorted(_SPECS)
 
 
+def is_configured(source_type: str) -> bool:
+    """這個資料源有沒有設定（例如 AIOPS_ES_URL）。未知的資料源回 False。"""
+    return source_type in _SPECS and _SPECS[source_type].configured()
+
+
 def get_datasource_spec(source_type: str) -> BaseDataSourceSpec:
     if source_type not in _SPECS:
         raise BadRequest(f"未知的資料源: {source_type}（可用：{', '.join(sorted(_SPECS))}）")

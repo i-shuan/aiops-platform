@@ -1,7 +1,24 @@
 """拓撲方向：把 IT 的服務呼叫關係與工廠的 Lot 流向，統一成「異常會從 A 傳到 B」的有向邊。純函式。"""
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Iterable
+from typing import Any
+
 from aiops.engine.context import LotEdge
+
+
+def service_edges(spans: Iterable[Any]) -> Counter:
+    """span 的父子關係 -> 服務呼叫邊 (caller, callee)：子 span 的 parent_id 指到別的服務的 span，就是一次跨服務呼叫。
+
+    上游的 client span 與下游的 server span 共用 trace，下游的 parent_id 就是上游那個 span 的 id，所以只靠
+    span_id／parent_id 就能接起來，不需要 span.kind。同服務內的父子（handler -> db 查詢）不算。
+    span 只要有 span_id、parent_id、service 三個屬性（批次匯入的 SpanIn 與 RCA 現抓的 SpanRecord 都有）。
+    """
+    spans = list(spans)
+    service_of = {s.span_id: s.service for s in spans if s.span_id}
+    return Counter((service_of[s.parent_id], s.service) for s in spans
+                   if s.parent_id in service_of and service_of[s.parent_id] != s.service)
 
 
 def lot_edges_from_paths(paths: list[list[str]]) -> list[LotEdge]:

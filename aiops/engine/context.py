@@ -141,6 +141,19 @@ class TraceRow:
 
 
 @dataclass
+class SpanRecord:
+    """RCA 現抓的一個 span（或 transaction）。只留還原呼叫關係與佐證需要的欄位。"""
+
+    trace_id: str
+    span_id: str
+    parent_id: str | None
+    service: str
+    ts: datetime
+    duration_ms: float
+    error: bool = False
+
+
+@dataclass
 class OpenIncident:
     """已通知、還在進行中的事件群（心跳與結案用）。"""
 
@@ -207,6 +220,8 @@ class PipelineContext:
     rca_root_algorithm: str = ""
     # RCA 重抓的事件時段原始時序：(實體, 指標) -> DataFrame(ts, value)。給互相關等需要原始資料的演算法
     rca_series: dict[tuple[str, str], pd.DataFrame] = field(default_factory=dict)
+    # RCA 隨需現抓的事件前後 span（ingestion.incident_traces），給 rca.build_dynamic_topology 還原當下的呼叫關係
+    rca_spans: list[SpanRecord] = field(default_factory=list)
     rca_sections: list[ReportSection] = field(default_factory=list)
     rca_skipped: list[str] = field(default_factory=list)
     llm_summary: str | None = None

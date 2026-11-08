@@ -8,6 +8,7 @@ from aiops.sources.base import BaseDataSourceSpec
 
 SEASONAL_PREFIX = "seasonal:"
 MOCK_GROUP_SIZE = 5
+MOCK_TRACE_CHAIN = ("svc-a", "svc-b", "svc-c")
 
 
 def _splitmix(x: np.ndarray, seed: int) -> np.ndarray:
@@ -67,6 +68,25 @@ class MockSpec(BaseDataSourceSpec):
                 values[len(values) // 2] += 40
             members[f"{by}-{i}"] = pd.DataFrame({"ts": ts, "value": values})
         return members
+
+    def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
+                    max_spans: int = 20000) -> tuple[list[dict], bool]:
+        """假的分散式 trace：每分鐘一條，services 依序串成一條呼叫鏈（第一個呼叫第二個、第二個呼叫第三個…），
+        每個服務再各有一個呼叫資料庫的子 span（同服務內，不算跨服務呼叫）。沒給 services 就用 MOCK_TRACE_CHAIN。"""
+        chain = list(services) if services else list(MOCK_TRACE_CHAIN)
+        spans: list[dict] = []
+        for i, ts in enumerate(pd.date_range(start, end, freq="60s")):
+            parent = None
+            for depth, svc in enumerate(chain):
+                sid = f"m{i:06d}{depth:02d}"
+                spans.append({"trace_id": f"t{i:06d}", "span_id": sid, "parent_id": parent, "service": svc,
+                              "ts": ts.to_pydatetime(), "duration_ms": 10.0 * (len(chain) - depth), "error": False})
+                spans.append({"trace_id": f"t{i:06d}", "span_id": f"{sid}db", "parent_id": sid, "service": svc,
+                              "ts": ts.to_pydatetime(), "duration_ms": 1.0, "error": False})
+                parent = sid
+                if len(spans) >= max_spans:
+                    return spans[:max_spans], True
+        return spans, False
 
     def check(self) -> dict:
         return {"ok": True, "detail": "假資料，永遠可用"}

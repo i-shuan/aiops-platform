@@ -295,6 +295,10 @@ targets:
 
 ### RCA：根因演算法與報告段落
 
+**拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才去 ES 撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`，用環境變數 `AIOPS_ES_TRACE_INDEX` 改；上限 `max_spans`（預設 20000），超過會截斷並在結果的 `trace_fetch.truncated` 註明。
+
+> 真實資料（11/3 事件，14:05–16:20Z）：撈到 10,167 個 span、3,389 條 trace，**跨服務呼叫 0 條**——這批 trace 每條都只在一個服務裡（下游只有 redis、postgresql、oracle、tax-gw），所以拓撲與 PageRank 仍排不出根因。機制本身是通的，缺的是有串接 trace context 的資料。
+
 `rca_report.yaml` 的 `root_cause` 節點決定根因怎麼排序，報告段落只負責呈現：
 
 | 根因算子 | 做法 | 需要 |
