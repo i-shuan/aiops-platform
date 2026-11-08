@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
 from aiops.engine.errors import InfrastructureError, PlatformError, WorkflowError
@@ -36,18 +36,31 @@ class PeerGroupSpec(BaseModel):
 
 
 class TargetSpec(BaseModel):
+    # 拼錯欄位（例如 detector: 少了 s）直接報錯；不然白名單會被默默忽略、變成全部偵測器都跑
+    model_config = ConfigDict(extra="forbid")
+
     source_type: str = "mock"
     query: str
     entity: str | None = None
     attrs: dict[str, Any] = Field(default_factory=dict)
     peers: list[PeerSpec] = Field(default_factory=list)
     peer_group: PeerGroupSpec | None = None
+    # 這條序列要跑哪些偵測節點：節點名稱（nodes[].name）或算子名稱（代表這個算子的所有節點）。不寫 = 全部都跑
+    detectors: list[str] | None = Field(default=None, min_length=1)
+    # 節點名稱 -> 參數，蓋過節點 YAML 的 params（優先序最高）
+    overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        return self.entity or self.query
 
     def to_target(self) -> Target:
         group = (PeerGroup(self.peer_group.query, self.peer_group.by, self.peer_group.source_type)
                  if self.peer_group else None)
-        return Target(self.source_type, self.query, self.entity or self.query, dict(self.attrs),
-                      [PeerRef(p.source_type, p.query) for p in self.peers], group)
+        return Target(self.source_type, self.query, self.label, dict(self.attrs),
+                      [PeerRef(p.source_type, p.query) for p in self.peers], group,
+                      list(self.detectors) if self.detectors is not None else None,
+                      {k: dict(v) for k, v in self.overrides.items()})
 
 
 class NodeSpec(BaseModel):
@@ -137,12 +150,78 @@ class Pipeline:
         # (節點名稱, 算子名稱)：基準線與調參都以節點區分，同一個演算法掛兩次也不會互相覆蓋
         # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only、ensemble 這類不需要）
         self.detector_nodes = [(n.name, n.operator) for n, op in self.target_nodes if getattr(op, "has_baseline", False)]
+        self._detectors = {n.name: (n.operator, op) for n, op in self.target_nodes if getattr(op, "has_baseline", False)}
+        for spec in workflow.targets:
+            self.check_target(spec)
+        self._check_entity_routing(workflow.targets)
+
+    # ── 每條 target 跑哪些偵測節點 ──
+
+    def _available(self) -> str:
+        return "、".join(f"{name}（{operator}）" for name, (operator, _) in self._detectors.items()) or "無"
+
+    def _selected(self, detectors: list[str] | None) -> set[str]:
+        """target 的 detectors 選到的節點：寫節點名稱就是那一個，寫算子名稱就是那個算子的所有節點。"""
+        if detectors is None:
+            return set(self._detectors)
+        wanted = set(detectors)
+        return {name for name, (operator, _) in self._detectors.items() if name in wanted or operator in wanted}
+
+    def check_target(self, spec: TargetSpec) -> None:
+        """載入期檢查 target 的 detectors／overrides。YAML 的 targets 在建立管線時檢查，API 傳進來的在 run() 一開始檢查。"""
+        label = f"Workflow {self.workflow.name} 的 target {spec.label}"
+        if spec.detectors is not None:
+            known = set(self._detectors) | {operator for operator, _ in self._detectors.values()}
+            unknown = [d for d in spec.detectors if d not in known]
+            if unknown:
+                raise WorkflowError(f"{label}：detectors 裡的 {unknown} 對不到任何偵測節點名稱或算子名稱；"
+                                    f"可用：{self._available()}")
+        selected = self._selected(spec.detectors)
+        for name, override in spec.overrides.items():
+            if name not in self._detectors:
+                raise WorkflowError(f"{label}：overrides 的 {name!r} 不是偵測節點名稱；可用：{self._available()}")
+            if name not in selected:
+                raise WorkflowError(f"{label}：overrides 指定了 {name}，但 detectors 沒有選它（這組參數永遠不會用到）")
+            try:
+                self._detectors[name][1].check_override(override)
+            except (TypeError, ValueError) as e:
+                raise WorkflowError(f"{label}：overrides.{name} 不合法：{e}") from e
+
+    def _check_entity_routing(self, targets: list[TargetSpec]) -> None:
+        """節點的 include／exclude_entities 寫了 workflow 裡沒有的實體 -> 報錯。
+
+        止血名單打錯字的後果是「以為停掉了其實沒停」，比啟動失敗更難發現，所以直接擋。
+        workflow 沒宣告 targets（全部由 API 傳入）時無從比對，不檢查。
+        """
+        if not targets:
+            return
+        entities = {spec.label for spec in targets}
+        for name, (_, op) in self._detectors.items():
+            for key in ("include_entities", "exclude_entities"):
+                unknown = sorted(set(getattr(op, key, None) or ()) - entities)
+                if unknown:
+                    raise WorkflowError(f"Workflow {self.workflow.name} 節點 {name} 的 {key} 有不存在的實體 {unknown}；"
+                                        f"這條 workflow 的實體：{sorted(entities)}")
+
+    def _skip_reason(self, name: str, target: Target) -> str | None:
+        """None = 這個偵測節點要對這條序列跑。順序：exclude 優先 -> include -> target 的 detectors。"""
+        _, op = self._detectors[name]
+        if target.entity in (getattr(op, "exclude_entities", None) or ()):
+            return "excluded"
+        include = getattr(op, "include_entities", None)
+        if include is not None and target.entity not in include:
+            return "not-included"
+        if name not in self._selected(target.detectors):
+            return "not-selected"
+        return None
 
     def run(self, *, now: datetime | None = None, targets: list[TargetSpec] | None = None,
             incident_id: int | None = None, request: BaseModel | None = None,
             strict: bool = False) -> PipelineContext:
         """strict=False（排程）：某條序列失敗記在 errors，其他序列照跑；strict=True（手動動作）：失敗直接丟出。"""
         now = now or datetime.now(timezone.utc)
+        for spec in targets or []:
+            self.check_target(spec)  # API 傳進來的 targets 跟 YAML 的一樣要檢查，在做任何事之前擋下
         batch = PipelineContext(pipeline=self.workflow.name, now=now, incident_id=incident_id, request=request)
         if self.workflow.topology is not None:
             batch.topology, batch.topology_explicit = list(self.workflow.topology), True
@@ -154,9 +233,15 @@ class Pipeline:
         if self.target_nodes:
             for spec in (targets if targets is not None else self.workflow.targets):
                 ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request)
+                skipped = {name: reason for name in self._detectors
+                           if (reason := self._skip_reason(name, ctx.target)) is not None}
                 try:
-                    self.hooks.load_target(ctx, self.detector_nodes)
+                    # 被跳過的節點不載基準線與調參；也不會進 detector_runs，裁決時不算參與者
+                    self.hooks.load_target(ctx, [d for d in self.detector_nodes if d[0] not in skipped])
                     for node, op in self.target_nodes:
+                        if node.name in skipped:
+                            ctx.log(f"{node.name}:skipped:{skipped[node.name]}")
+                            continue
                         ctx = _run_node(node, op, ctx)
                     self.hooks.persist_target(ctx)
                 except InfrastructureError:

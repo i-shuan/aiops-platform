@@ -21,7 +21,7 @@ from aiops.engine.requests import (
 )
 from aiops.control_plane.learning import tuning_rules
 from aiops.engine.operator import BaseOperator
-from aiops.stages.detectors.base import DetectorOperator
+from aiops.stages.detectors.base import ROUTING_PARAMS, DetectorOperator
 from aiops.stages.ingestion.fetch import fetch_target_frame
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
 from aiops.stages.enrichment import registry
@@ -38,6 +38,9 @@ def _detector_cls(name: str) -> type[DetectorOperator]:
 
 def _check_params(name: str, params: dict) -> None:
     cls = _detector_cls(name)
+    routing = sorted(ROUTING_PARAMS & set(params))
+    if routing:
+        raise BadRequest(f"{routing} 是節點的路由參數（對哪些實體跑），只能寫在 workflow YAML，不能透過調參修改")
     try:
         cls(**params).validate_params()
     except (TypeError, ValueError) as e:
