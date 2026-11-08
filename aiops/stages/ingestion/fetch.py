@@ -12,6 +12,7 @@ source_type=trace：平台自己合成並存起來的 trace 時序（引擎載�
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from string import Template
 
@@ -22,9 +23,18 @@ from aiops.engine.errors import BadRequest, InfrastructureError, NotFound
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.sources import get_datasource_spec, is_configured
+from aiops.sources.base import canonical_service
 from aiops.sources.query.trace import parse_trace_query
 from aiops.sources.query.window import align_window, to_utc
 from aiops.engine.operator import BaseOperator
+
+logger = logging.getLogger("aiops.ingestion")
+
+
+def _spelled_like_entities(entities: list[str]):
+    """資料源回來的服務名已正規化（去空白、小寫）；換回事件實體自己的寫法，下游（拓撲、根因）用實體名比對才對得上。"""
+    aliases = {canonical_service(e): e for e in entities}
+    return lambda service: aliases.get(canonical_service(service), canonical_service(service))
 
 TRACE_SOURCE = "trace"
 
@@ -205,12 +215,17 @@ class IncidentTracesFetch(BaseOperator):
             return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
         start, end = as_utc(incident.start) - self.before, as_utc(incident.end) + self.after
         services = sorted(set(incident.entities)) if self.only_incident_services else None
+        spell = _spelled_like_entities(incident.entities)
         try:
             raw, truncated = get_datasource_spec(self.source_type).fetch_spans(start, end, services, self.max_spans)
+            spans = [SpanRecord(s["trace_id"], s["span_id"], s.get("parent_id"), spell(s["service"]), s["ts"],
+                                float(s.get("duration_ms") or 0.0), bool(s.get("error"))) for s in raw]
         except (InfrastructureError, BadRequest, NotFound) as e:
             return self._skip(ctx, str(e), as_error=True)
-        ctx.rca_spans = [SpanRecord(s["trace_id"], s["span_id"], s.get("parent_id"), s["service"], s["ts"],
-                                    float(s.get("duration_ms") or 0.0), bool(s.get("error"))) for s in raw]
+        except Exception as e:  # noqa: BLE001  旁路佐證：資料長得出乎意料也只略過這一段，不能讓整份報告失敗
+            logger.warning("incident_traces 解析失敗，略過拓撲佐證：%s: %s", type(e).__name__, e)
+            return self._skip(ctx, f"{type(e).__name__}: {e}", as_error=True)
+        ctx.rca_spans = spans
         ctx.result["trace_fetch"] = {"source_type": self.source_type, "spans": len(ctx.rca_spans),
                                      "truncated": truncated, "start": start.isoformat(), "end": end.isoformat(),
                                      "services": sorted({s.service for s in ctx.rca_spans})}
@@ -256,17 +271,24 @@ class IncidentLogsFetch(BaseOperator):
         start, end = as_utc(incident.start) - self.before, as_utc(incident.end) + self.after
         base_start = start - self.baseline
         services = sorted(set(incident.entities))
+        spell = _spelled_like_entities(incident.entities)
+
+        def record(r):
+            return LogRecord(r["ts"], spell(r["service"]), r["message"], r.get("error_type", ""), r.get("trace_id", ""))
+
         try:
             spec = get_datasource_spec(self.source_type)
             during, cut1 = spec.fetch_logs(start, end, services, self.max_logs)
             before, cut2 = spec.fetch_logs(base_start, start, services, self.max_logs)
+            logs = [record(r) for r in during]
+            # 正常期間的查詢區間跟事件期間在 start 那一刻相接，剛好落在 start 的那筆歸事件期間
+            baseline = [record(r) for r in before if as_utc(r["ts"]) < start]
         except (InfrastructureError, BadRequest, NotFound) as e:
             return self._skip(ctx, str(e), as_error=True)
-        ctx.rca_logs = [LogRecord(r["ts"], r["service"], r["message"], r.get("error_type", ""), r.get("trace_id", ""))
-                        for r in during]
-        # 正常期間的查詢區間跟事件期間在 start 那一刻相接，剛好落在 start 的那筆歸事件期間
-        ctx.rca_logs_baseline = [LogRecord(r["ts"], r["service"], r["message"], r.get("error_type", ""),
-                                           r.get("trace_id", "")) for r in before if as_utc(r["ts"]) < start]
+        except Exception as e:  # noqa: BLE001  旁路佐證：日誌長得出乎意料也只略過日誌段落，不能讓整份 RCA 報告失敗
+            logger.warning("incident_logs 解析失敗，略過日誌比對：%s: %s", type(e).__name__, e)
+            return self._skip(ctx, f"{type(e).__name__}: {e}", as_error=True)
+        ctx.rca_logs, ctx.rca_logs_baseline = logs, baseline
         ctx.rca_log_window_minutes = ((end - start).total_seconds() / 60, self.baseline.total_seconds() / 60)
         ctx.result["log_fetch"] = {"source_type": self.source_type, "logs": len(ctx.rca_logs),
                                    "baseline_logs": len(ctx.rca_logs_baseline), "truncated": cut1 or cut2,

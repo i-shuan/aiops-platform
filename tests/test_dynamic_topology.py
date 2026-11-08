@@ -14,6 +14,8 @@ from aiops.engine.topology import service_edges
 from aiops.engine.types import AnomalyEvent, Incident
 from aiops.interfaces.runner import run, workflow_path
 from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.elasticsearch import _log as es_log
+from aiops.sources.elasticsearch import _span as es_span
 from aiops.sources.mock import MockSpec
 from aiops.storage.hooks import StorageHooks
 
@@ -79,7 +81,8 @@ def test_es_fetch_spans_maps_apm_fields_and_pages():
     assert spans[2]["parent_id"] == "sp1" and spans[2]["error"] is True and spans[0]["duration_ms"] == 25.0
     assert service_edges(SpanRecord(**s) for s in spans) == {("cart-api", "ord-svc"): 1}
     assert all(m == "POST" and p == "/traces-apm-*/_search" for m, p, _ in seen)  # 只讀：只打 _search
-    assert {"terms": {"service.name": ["cart-api", "ord-svc"]}} in seen[0][2]["query"]["bool"]["filter"]
+    names = [c["term"]["service.name"] for c in seen[0][2]["query"]["bool"]["filter"][1]["bool"]["should"]]
+    assert names == [{"value": "cart-api", "case_insensitive": True}, {"value": "ord-svc", "case_insensitive": True}]
 
 
 def test_es_fetch_spans_stops_at_max_spans(monkeypatch):
@@ -108,6 +111,11 @@ class _FakeES:
                     return False
             elif "service.name" in f.get("terms", {}):
                 if doc["service"]["name"] not in f["terms"]["service.name"]:
+                    return False
+            elif "bool" in f:  # 服務名稱：should 一組 case_insensitive 的 term，符合任一個即可
+                wanted = [c["term"]["service.name"] for c in f["bool"]["should"]]
+                name = doc["service"]["name"]
+                if not any(w["value"] == name.lower() if w.get("case_insensitive") else w["value"] == name for w in wanted):
                     return False
             elif "trace.id" in f.get("terms", {}):
                 if doc["trace"]["id"] not in f["terms"]["trace.id"]:
@@ -189,6 +197,136 @@ def test_es_fetch_spans_is_complete_when_under_the_cap():
     spans, truncated = spec.fetch_spans(T, T + timedelta(minutes=2), None, max_spans=2000)
     assert not truncated and len(spans) == 80
     assert all("function_score" not in b["query"] for b in fake.bodies)  # 沒超過上限就不抽樣
+
+
+# ── 攝取層邊界：沒時區的時間戳、字串型的 exception、服務名大小寫與空白 ──
+
+
+def test_naive_timestamps_are_read_as_utc_and_offsets_are_converted():
+    base = {"service": {"name": "svc"}, "trace": {"id": "t"}, "error": {"exception": [{"message": "m"}]},
+            "transaction": {"id": "x", "duration": {"us": 1}}}
+    for stamp in ("2026-11-03T15:00:00", "2026-11-03T15:00:00Z", "2026-11-03T23:00:00+08:00", "2026-11-03 15:00:00"):
+        expect = datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc)
+        assert es_log({**base, "@timestamp": stamp})["ts"] == expect, stamp
+        assert es_span({**base, "@timestamp": stamp})["ts"] == expect, stamp
+
+
+@pytest.mark.parametrize("exception, message, kind", [
+    ([{"message": "boom", "type": "IOError"}], "boom", "IOError"),   # APM 標準：陣列
+    ({"message": "boom", "type": "IOError"}, "boom", "IOError"),     # 單一物件
+    ("plain failure", "plain failure", ""),                          # 字串
+    (["plain failure"], "plain failure", ""),                        # 陣列裡放字串
+])
+def test_exception_may_be_array_object_or_string(exception, message, kind):
+    r = es_log({"@timestamp": "2026-11-03T15:00:00Z", "service": {"name": "svc"}, "error": {"exception": exception}})
+    assert (r["message"], r["error_type"]) == (message, kind)
+
+
+@pytest.mark.parametrize("exception", [[], {}, "", "   ", None, 42])
+def test_unusable_exception_falls_back_to_other_message_fields_or_is_dropped(exception):
+    doc = {"@timestamp": "2026-11-03T15:00:00Z", "service": {"name": "svc"}, "error": {"exception": exception}}
+    assert es_log(doc) is None
+    assert es_log({**doc, "message": "top"})["message"] == "top"
+
+
+def test_service_names_read_back_are_trimmed_and_lowercased():
+    doc = {"@timestamp": "2026-11-03T15:00:00Z", "trace": {"id": "t"}, "service": {"name": " Cart-API "},
+           "transaction": {"id": "x", "duration": {"us": 1}}, "message": "m"}
+    assert es_span(doc)["service"] == "cart-api" and es_log(doc)["service"] == "cart-api"
+
+
+def test_service_filter_ignores_case_and_whitespace_of_the_incident_entity():
+    """事件實體寫成什麼樣都撈得到索引裡的 Cart-API（大小寫不分）。限制：索引裡的值本身帶前後空白，ES 的 term 比不到。"""
+    doc = {"@timestamp": "2026-11-03T15:00:00Z", "trace": {"id": "t"}, "service": {"name": "Cart-API"},
+           "transaction": {"id": "x", "duration": {"us": 1}}}
+    other = {**doc, "service": {"name": "ord-svc"}, "transaction": {"id": "y"}}
+    fake = _FakeES([doc, other])
+    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spans, _ = spec.fetch_spans(T, T + timedelta(days=30), ["  CART-api "])
+    assert [s["service"] for s in spans] == ["cart-api"]
+    # 日誌走另一個方法，過濾條件也要一樣（真實 ES 驗證時 fetch_logs 曾經漏掉，CART-API 撈到 0 筆）
+    log_doc = {"@timestamp": "2026-11-03T15:00:00Z", "service": {"name": "Cart-API"}, "message": "boom"}
+    log_fake = _FakeES([log_doc, {**log_doc, "service": {"name": "ord-svc"}}])
+    log_spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(log_fake.handler)))
+    logs, _ = log_spec.fetch_logs(T, T + timedelta(days=30), ["  CART-api "])
+    assert [r["service"] for r in logs] == ["cart-api"]
+
+
+class _FakeSpec:
+    def __init__(self, spans=None, logs=None, error=None):
+        self._spans, self._logs, self._error = spans or [], logs or [], error
+
+    def fetch_spans(self, start, end, services=None, max_spans=1):
+        if self._error:
+            raise self._error
+        return self._spans, False
+
+    def fetch_logs(self, start, end, services=None, max_logs=1):
+        if self._error:
+            raise self._error
+        return self._logs, False
+
+
+def _incident_ctx(entity):
+    ctx = PipelineContext(pipeline="rca", now=T + timedelta(hours=1))
+    ctx.incidents = [Incident([AnomalyEvent(entity, "latency", T, 5.0), AnomalyEvent(entity, "latency", T + timedelta(minutes=5), 5.0)])]
+    return ctx
+
+
+def _use_spec(monkeypatch, spec):
+    from aiops.stages.ingestion import fetch
+
+    monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
+    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+
+
+def test_fetched_records_use_the_incident_entitys_own_spelling(monkeypatch):
+    span = {"trace_id": "t", "span_id": "s", "parent_id": None, "service": "cart-api", "ts": T, "duration_ms": 1.0}
+    log = {"ts": T, "service": "cart-api", "message": "boom", "error_type": "E", "trace_id": "t"}
+    _use_spec(monkeypatch, _FakeSpec([span], [log]))
+    ctx = OperatorRegistry.create("ingestion.incident_traces", {}).execute(_incident_ctx("Cart-API"))
+    assert [s.service for s in ctx.rca_spans] == ["Cart-API"]
+    ctx = OperatorRegistry.create("ingestion.incident_logs", {}).execute(_incident_ctx("Cart-API"))
+    assert [r.service for r in ctx.rca_logs] == ["Cart-API"]
+
+
+@pytest.mark.parametrize("operator, key", [("ingestion.incident_logs", "log_fetch"), ("ingestion.incident_traces", "trace_fetch")])
+@pytest.mark.parametrize("error", [TypeError("Cannot convert tz-naive"), AttributeError("'str' object has no attribute 'get'"),
+                                   KeyError("service")])
+def test_unexpected_parse_errors_skip_the_section_instead_of_failing_the_report(monkeypatch, operator, key, error, caplog):
+    _use_spec(monkeypatch, _FakeSpec(error=error))
+    with caplog.at_level("WARNING", logger="aiops.ingestion"):
+        ctx = OperatorRegistry.create(operator, {}).execute(_incident_ctx("svc"))
+    assert ctx.result[key]["skipped"].startswith(type(error).__name__)
+    assert len(ctx.errors) == 1 and "略過" in caplog.text or "失敗" in ctx.errors[0].message
+    assert not ctx.rca_logs and not ctx.rca_spans  # 失敗時不留半份資料
+
+
+def test_malformed_record_in_the_middle_leaves_no_partial_data(monkeypatch):
+    good = {"ts": T, "service": "svc", "message": "ok", "error_type": "", "trace_id": ""}
+    _use_spec(monkeypatch, _FakeSpec(logs=[good, {"ts": T, "service": "svc"}]))  # 第二筆缺 message
+    ctx = OperatorRegistry.create("ingestion.incident_logs", {}).execute(_incident_ctx("svc"))
+    assert ctx.rca_logs == [] and ctx.result["log_fetch"]["skipped"].startswith("KeyError")
+
+
+def test_correlation_with_topology_and_no_edges_degrades_to_no_candidates():
+    import numpy as np
+    import pandas as pd
+
+    walk = np.cumsum(np.random.default_rng(7).normal(size=90))
+    ts = pd.date_range(T, periods=80, freq="60s")
+    ctx = PipelineContext(pipeline="rca", now=T)
+    incident = Incident([AnomalyEvent(e, "latency", T + timedelta(minutes=m), 5.0) for e in ("a", "b") for m in range(20, 60)])
+    ctx.rca_series = {("a", "latency"): pd.DataFrame({"ts": ts, "value": walk[3:83]}),
+                      ("b", "latency"): pd.DataFrame({"ts": ts, "value": walk[:80]})}  # b 比 a 慢 3 點
+
+    def rank(use_topology):
+        return OperatorRegistry.create("rca.root_cause.cross_correlation", {"use_topology": use_topology}).rank(incident, ctx)
+
+    assert [c.entity for c in rank(False)] == ["a"]  # 不看拓撲：a 領先
+    assert rank(True) == []  # 看拓撲但沒有任何邊：不丟例外、也不硬湊候選（報告略過這一段）
+    ctx.topology = [("b", "a")]
+    assert [c.entity for c in rank(True)] == ["a"]  # 有邊且相鄰：照常排
 
 
 # ── 算子：降級，不擋報告 ──

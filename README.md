@@ -374,6 +374,15 @@ targets:
 | ES 真實資料 11/3 事件 | 無標準答案（資料本身最早起點是 cart-api 14:46） | ord-svc 領先 bill-svc 10 點，r 0.75 | ord-svc 領先 bill-svc 10 點，r 0.98 | cart-api 領先 bill-svc、ord-svc（剛好撞到搜尋上限 20／30 點，r 0.52–0.57） |
 | ES 真實資料 40 個無事件時段 | 應該全部沒有候選 | 誤判 0／0／1 次 | 誤判 0 次 | 誤判 0 次 |
 
+**再加 `use_topology: true`（只比拓撲相鄰的服務，`min_corr` 仍是 0.5，`max_lag` 10 與 20 結果相同）：**
+
+| 資料 | 真實根因 | `diff` | `hybrid` | `hybrid` + `use_topology: true` |
+|---|---|---|---|---|
+| 產生器 `callee_slowdown` | bill-svc | 無候選 | ord-svc ✗ | ord-svc ✗（領先 cart-api 1 點，r 0.99） |
+| 產生器 `load_amplification` | cart-api | 無候選 | api-gw ✗ | api-gw ✗（領先 cart-api 1 點，r 0.99；cart-api 排第 2） |
+
+拓撲限制確實去掉了不相干的配對（`load_amplification` 的 api-gw 累計分數從 2.95 降到 0.99），但沒有改變第一名：根因跟下游同一分鐘變慢時，相鄰服務之間 ±1 點的先後是雜訊。**兩套標準答案 0／2 命中，所以預設不切。** 沒有任何拓撲邊時，`use_topology: true` 不會丟例外，結果是沒有候選、段落略過。
+
 `hybrid` 救回了高原事件的相關性，也排對了「誰比誰晚」（ord 晚 6 點、bill 晚 10–11 點），但**兩個標準答案的第一候選都錯**：同一分鐘一起變慢的服務（例如 api-gw 直接呼叫 cart-api，延遲當下就加進去）只差 ±1 點，它照樣挑一個當「領先者」。錯的根因比沒有根因更糟，所以預設維持 `diff`，`hybrid` 要自己在 YAML 開。沒有 `min_mask_points` 防線時，`hybrid` 在無事件對照組是 40／40 誤判（只有零星異常點的服務等於拿十來個雜訊點互比）。
 
 報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。

@@ -7,7 +7,8 @@ import httpx
 import pandas as pd
 
 from aiops.sources import _http
-from aiops.sources.base import BaseDataSourceSpec, InvalidQueryError, NoDataError
+from aiops.sources.base import (BaseDataSourceSpec, InvalidQueryError, NoDataError, as_utc_datetime,
+                                canonical_service)
 from aiops.sources.query.elasticsearch import bucket_value, build_search_body, parse_es_query
 from aiops.sources.query.window import align_window
 
@@ -165,9 +166,7 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         """APM 錯誤日誌（processor.event = error）。訊息依序取：error.exception（陣列或單一物件都可）的 message、
         error.log.message、頂層 message。索引用 AIOPS_ES_LOG_INDEX 改。只呼叫 _search。"""
         index = os.environ.get("AIOPS_ES_LOG_INDEX", "").strip() or DEFAULT_LOG_INDEX
-        filters: list[dict[str, Any]] = [{"range": {"@timestamp": {"gte": start.isoformat(), "lte": end.isoformat()}}}]
-        if services:
-            filters.append({"terms": {"service.name": list(services)}})
+        filters = _window_filters(start, end, services)
         logs: list[dict[str, Any]] = []
         after = None
         while len(logs) < max_logs:
@@ -209,8 +208,19 @@ SAMPLE_SEED = 20261103
 def _window_filters(start: datetime, end: datetime, services: list[str] | None) -> list[dict[str, Any]]:
     filters: list[dict[str, Any]] = [{"range": {"@timestamp": {"gte": start.isoformat(), "lte": end.isoformat()}}}]
     if services:
-        filters.append({"terms": {"service.name": list(services)}})
+        # 大小寫不分（case_insensitive，ES 7.10+）：事件實體叫 cart-api、索引裡寫 Cart-API 一樣要撈得到
+        names = sorted({canonical_service(s) for s in services})
+        filters.append({"bool": {"should": [{"term": {"service.name": {"value": n, "case_insensitive": True}}}
+                                            for n in names], "minimum_should_match": 1}})
     return filters
+
+
+def _first_exception(exc: Any) -> dict[str, Any]:
+    """error.exception 可能是陣列（APM 標準）、單一物件、字串、或陣列裡放字串；一律整理成 {message, type}。"""
+    first = exc[0] if isinstance(exc, list) and exc else exc
+    if isinstance(first, dict):
+        return first
+    return {"message": first} if isinstance(first, str) and first.strip() else {}
 
 
 def _log(src: dict[str, Any]) -> dict[str, Any] | None:
@@ -218,12 +228,11 @@ def _log(src: dict[str, Any]) -> dict[str, Any] | None:
     if not service or "@timestamp" not in src:
         return None
     error = src.get("error") or {}
-    exc = error.get("exception")
-    first = (exc[0] if exc else {}) if isinstance(exc, list) else (exc or {})
+    first = _first_exception(error.get("exception"))
     message = first.get("message") or (error.get("log") or {}).get("message") or src.get("message") or ""
     if not message:
         return None
-    return {"ts": pd.Timestamp(src["@timestamp"]).tz_convert("UTC").to_pydatetime(), "service": service,
+    return {"ts": as_utc_datetime(src["@timestamp"]), "service": canonical_service(service),
             "message": str(message), "error_type": str(first.get("type") or ""),
             "trace_id": str((src.get("trace") or {}).get("id") or "")}
 
@@ -236,6 +245,6 @@ def _span(src: dict[str, Any]) -> dict[str, Any] | None:
     if not (span_id and service and trace_id):
         return None
     return {"trace_id": trace_id, "span_id": span_id, "parent_id": (src.get("parent") or {}).get("id"),
-            "service": service, "ts": pd.Timestamp(src["@timestamp"]).tz_convert("UTC").to_pydatetime(),
+            "service": canonical_service(service), "ts": as_utc_datetime(src["@timestamp"]),
             "duration_ms": float((own.get("duration") or {}).get("us") or 0) / 1000.0,
             "error": (src.get("event") or {}).get("outcome") == "failure"}

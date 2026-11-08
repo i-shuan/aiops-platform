@@ -7,6 +7,19 @@ import pandas as pd
 from aiops.engine.errors import BadRequest, NotFound
 
 
+def canonical_service(name: Any) -> str:
+    """服務名稱正規化：去頭尾空白、轉小寫。ES 裡的 `Cart-API ` 跟事件實體 `cart-api` 要能對得上，
+    不然查詢與比對會悄悄漏掉（沒有任何錯誤，只是撈不到）。"""
+    return str(name).strip().lower()
+
+
+def as_utc_datetime(value: Any) -> datetime:
+    """ES 的 @timestamp 轉成帶 UTC 時區的 datetime。有時區就換算成 UTC；沒帶時區（naive）一律當 UTC，不丟 TypeError。"""
+    ts = pd.Timestamp(value)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    return ts.to_pydatetime()
+
+
 class InvalidQueryError(BadRequest):
     """查詢寫錯（語法、多條序列、索引不存在）：是使用者要改的，回 400。"""
 
