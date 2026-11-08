@@ -117,6 +117,27 @@ class FieldMappingRow(Base):
     approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
+class ExternalAnomalyRow(Base):
+    """外部系統（例如工廠 FDC）推來的異常。只增不改；同一來源的 external_id 只收一次。
+
+    alerts 透過 ExternalAnomalyReadDAO 依 id 往後讀，跟偵測產生的 anomalies 一起進告警管線。
+    """
+
+    __tablename__ = "external_anomalies"
+    __table_args__ = (UniqueConstraint("source", "external_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pipeline: Mapped[str] = mapped_column(String(128), index=True)
+    source: Mapped[str] = mapped_column(String(64))
+    external_id: Mapped[str] = mapped_column(String(256))
+    entity: Mapped[str] = mapped_column(String(256))
+    metric: Mapped[str] = mapped_column(String(512))
+    ts: Mapped[datetime] = mapped_column(DateTime)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score: Mapped[float] = mapped_column(Float)
+    attrs: Mapped[dict] = mapped_column(JSON, default=dict)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 # ── tuning ──
 
 
@@ -153,6 +174,7 @@ TABLE_OWNERS = {
     "anomalies": "detection",
     "detector_models": "detection",
     "field_mappings": "ingestion",
+    "external_anomalies": "ingestion",
     "tuning_proposals": "tuning",
     "active_detector_configs": "tuning",
 }

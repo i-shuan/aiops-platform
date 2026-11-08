@@ -2,7 +2,14 @@ from datetime import datetime
 from typing import Any
 
 from aiops.models import crud
-from aiops.models.core import AlertWatermarkRow, AnomalyRow, IncidentRow, NotificationRow, SilenceRow
+from aiops.models.core import (
+    AlertWatermarkRow,
+    AnomalyRow,
+    ExternalAnomalyRow,
+    IncidentRow,
+    NotificationRow,
+    SilenceRow,
+)
 
 
 class IncidentDAO:
@@ -55,3 +62,11 @@ class AnomalyReadDAO:
     @staticmethod
     def list_after(pipeline: str, last_id: int, limit: int) -> list[dict[str, Any]]:
         return crud.find(AnomalyRow, after_id=last_id, limit=limit, pipeline=pipeline)
+
+
+class ExternalAnomalyReadDAO:
+    """跨領域唯讀：external_anomalies 屬於 ingestion（外部系統推來的異常）。游標獨立記在 alert_watermarks。"""
+
+    @staticmethod
+    def list_after(pipeline: str, last_id: int, limit: int) -> list[dict[str, Any]]:
+        return crud.find(ExternalAnomalyRow, after_id=last_id, limit=limit, pipeline=pipeline)

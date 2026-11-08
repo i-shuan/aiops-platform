@@ -15,7 +15,9 @@
 | 資料表 | `models/` | SQLAlchemy ORM（`core.py`）、連線與 session（`db.py`）、DAO 共用存取（`crud.py`） | 業務判斷 |
 | 調度 | `tasks/` | 排程與管線：依序呼叫各領域 Command（訓練 -> 偵測 -> 告警） | 碰 DAO、資料表、外掛、資料源、通知出口 |
 | 零件 | `plugins/<kind>/` | 純運算：偵測、收斂、計分、報告段落、LLM | 認識任何領域、碰 DB、碰外部服務 |
-| 資料源 | `datasource_specs/` | 連線、查詢、轉成 `DataFrame(ts, value)` | 審核狀態、業務合成（trace 合成、Lot 履歷） |
+| 資料源 | `datasource_specs/` | 連線、查詢、轉成 `DataFrame(ts, value)`、連線自檢 | 審核狀態、業務合成（trace 合成、Lot 履歷） |
+| 查詢語法 | `metric_query/` | 純解析：PromQL 檢查、ES 查詢 JSON 轉降採樣 search body、時間窗對齊 | 連線、碰平台其他層 |
+| 認證 | `security/` | API Bearer token 驗證（由 initialization 用 Depends 掛到每個領域 router） | 業務邏輯、在 api.py 驗證 |
 | 場景 | `presets/` | 每個場景啟用哪些外掛（只寫名字）與場景參數（嚴重度門檻） | import 外掛或領域 |
 | 出口 | `notifiers/` | 把平台決定要發的通知送出去（Alertmanager v2、log） | 判斷要不要發、碰資料表、認識領域 |
 | 基礎設施 | `infrastructure/` | 故障看守（本機日誌、webhook）、基礎設施錯誤 | 業務邏輯 |
@@ -42,6 +44,16 @@
 18. `aiops/` 的 Python 不得出現 Alertmanager 設定語彙（路由、receiver、通道設定都只在 helm chart）。
 19. `aiops.models` 只准 `models/` 自己、各領域 `dao.py`、`initialization/` 匯入。
 20. `tasks/` 只能 import 各領域的 `commands` 與 `schemas`（加上 `aiops.schemas`、`initialization`、`infrastructure`），不得碰 DAO、`models`、`plugins`、`datasource_specs`、`notifiers`、`presets`。
+21. `metric_query/` 只能 import 自己，不得 import `httpx` 等連線套件。
+22. `security/` 不得 import `domains`、`models`、`plugins`、`datasource_specs`、`notifiers`。
+23. **每一個 `/api/` 端點都必須驗 token**：`tests/test_security.py` 逐一列舉 OpenAPI 上的所有端點，沒帶 token 必須回 401，並檢查每條路由都掛了 `require_token`。
+
+### 認證
+
+- 每個領域 router 由 `init_routers` 一律掛上 `Depends(require_token)`；**api.py 不寫任何驗證**，新增領域也不會漏掛。`/health` 公開。
+- `AIOPS_API_TOKEN`：必填，可逗號分隔多組（換 token 時新舊並存）。**沒設就全部拒絕**（fail closed）。
+- `AIOPS_AUTH_DISABLED=true`：只限本機開發，啟動時會寫警告。
+- 目前只有「有 token 就能做所有事」，還沒有角色（例如唯讀 vs 可核准調參）。
 
 ### 跨領域資料讀取規範
 
@@ -94,8 +106,14 @@
 - **新增 API 端點** → `domains/<domain>/api.py`；請求／回應規格放 `schemas.py`。跨領域共用的純資料型別（`MetricTarget`、`TimeRange`）放 `aiops/schemas.py`。
 - **新增領域** → 建 `domains/<domain>/`，放 `api.py`（定義 `router`）。`init_routers` 會自動掛載，**不要**手動註冊。
 - **業務流程** → 繼承 `BaseCommand`，放 `domains/<domain>/commands/<action>.py`。業務錯誤丟 `CommandError`／`CommandNotFound`（404）／`CommandConflict`（409）。
-- **資料進來之後的合成、匯入、欄位對照審核** → `domains/ingestion/commands/`。
-- **新監控資料源** → 繼承 `BaseDataSourceSpec`，放 `datasource_specs/<name>.py`，在 `datasource_specs/__init__.py` 的 `_SPECS` 加一行。欄位對照只讀「已核准」版本，由 Command 傳入，Spec 自己不查審核狀態。
+- **資料進來之後的合成、匯入、欄位對照審核** → `domains/ingestion/commands/`（trace 合成、Lot 履歷合成、外部異常接收、欄位對照、資料源自檢）。
+- **外部系統推異常進來**（例如工廠 FDC）→ `POST /api/v1/ingestion/anomalies`，存進 ingestion 的 `external_anomalies`（同一 `source` 的 `external_id` 只收一次）。alerts 用 `ExternalAnomalyReadDAO` 讀，跟偵測到的異常一起進同一條管線（`pipeline` 名稱要跟排程 job 一致）。
+- **Lot 履歷** → `POST /api/v1/ingestion/lot-paths/merge` 回傳每個 Lot 的機台路徑與機台間流向；`topology` 欄位可直接當告警的 `context.topology`。
+- **新監控資料源** → 繼承 `BaseDataSourceSpec`，實作 `from_env`、`configured`、`fetch_data`、`check`，放 `datasource_specs/<name>.py`，在 `datasource_specs/__init__.py` 的 `_SPECS` 加一行。查詢語法解析放 `metric_query/`。欄位對照只讀「已核准」版本，由 Command 傳入，Spec 自己不查審核狀態。
+  - 錯誤分工：查詢寫錯（語法、多條序列、索引不存在）丟 `InvalidQueryError`（400）；沒資料丟 `NoDataError`（404）；連不上、認證失敗、伺服器錯誤丟 `InfrastructureError`（503）。
+  - 現有：`mock`、`prometheus`（`AIOPS_PROMETHEUS_URL`／`_TOKEN`）、`victoriametrics`（`AIOPS_VICTORIAMETRICS_URL`／`_TOKEN`）、`elasticsearch`（`AIOPS_ES_URL`／`AIOPS_ES_API_KEY`，query 是 JSON，格式見 `metric_query/elasticsearch.py`）。
+  - Prometheus／VictoriaMetrics 查詢必須只回一條序列；多條請在 PromQL 裡 `sum`／`avg by` 聚合。
+- **資料源連線自檢** → `GET /api/v1/ingestion/sources/check` 或 `python -m aiops.tasks source-check`（有已設定但連不上的就非 0 結束）。
 - **新偵測演算法** → 繼承 `BaseDetector`，放 `plugins/detectors/<algo>.py`，加 `@DetectorRegistry.register`。
 - **新收斂規則** → 繼承 `BaseGrouper`，放 `plugins/groupers/`，加 `@GrouperRegistry.register`。合併一律用 `merge_incidents()`。
 - **新計分規則** → 繼承 `BaseScorer`，放 `plugins/scorers/`，加 `@ScorerRegistry.register`。回傳新分數，不得修改 incident。
@@ -120,7 +138,8 @@ python -m aiops.tasks run-once -c jobs.yaml        （或 loop --interval 60）
     TrainDetectorCommand  模型超過 retrain_minutes 才重訓 -> detector_models
     RunDetectionCommand   載入模型偵測 -> 只寫比上次新的異常 -> anomalies（標上 pipeline）
   ProcessPendingAnomaliesCommand
-    AnomalyReadDAO 讀游標之後的異常 -> 收斂、計分、抑制、推送 -> 推進 alert_watermarks
+    AnomalyReadDAO（偵測的）+ ExternalAnomalyReadDAO（外部推來的），各自讀游標之後的異常
+    -> 收斂、計分、抑制、推送 -> 推進各自的 alert_watermarks
 ```
 
 - 同一段時間重跑不會重複寫異常、不會重複處理（已有測試）。

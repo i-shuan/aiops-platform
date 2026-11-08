@@ -87,6 +87,19 @@ def test_datasource_specs_do_not_know_domains():
     assert not _violations("datasource_specs/**/*.py", lambda f, m: _starts(m, *banned))
 
 
+def test_metric_query_is_pure_parsing():
+    """metric_query 只做解析、組查詢、時間對齊：不連線、不碰平台其他層。"""
+    def bad(f: Path, m: str) -> bool:
+        return (m.startswith("aiops.") and not m.startswith("aiops.metric_query")) or _starts(m, "httpx", "requests")
+
+    assert not _violations("metric_query/**/*.py", bad)
+
+
+def test_security_does_not_know_business():
+    banned = ("aiops.domains", "aiops.models", "aiops.plugins", "aiops.datasource_specs", "aiops.notifiers")
+    assert not _violations("security/**/*.py", lambda f, m: _starts(m, *banned))
+
+
 def test_presets_are_names_only():
     banned = ("aiops.domains", "aiops.plugins", "aiops.models", "aiops.datasource_specs")
     assert not _violations("presets/**/*.py", lambda f, m: _starts(m, *banned))

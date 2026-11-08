@@ -1,13 +1,14 @@
 import importlib
 import pkgutil
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from aiops import domains, plugins
 from aiops.commands.base import CommandError
 from aiops.infrastructure.errors import InfrastructureError
 from aiops.infrastructure.fallback import init_fallback_logging, report_failure
+from aiops.security.auth import require_token, warn_if_disabled
 
 
 def init_plugins() -> None:
@@ -21,7 +22,8 @@ def init_plugins() -> None:
 
 
 def init_routers(app: FastAPI) -> None:
-    """掃描 domains/ 下每個子套件，有 api.py 就自動掛載其 router。新增領域不必改這裡。"""
+    """掃描 domains/ 下每個子套件，有 api.py 就自動掛載其 router，並一律掛上 token 驗證。新增領域不必改這裡。"""
+    warn_if_disabled()
     for m in pkgutil.iter_modules(domains.__path__):
         if not m.ispkg:
             continue
@@ -31,7 +33,7 @@ def init_routers(app: FastAPI) -> None:
             if e.name == f"aiops.domains.{m.name}.api":
                 continue  # 該領域還沒有 api.py
             raise
-        app.include_router(api.router)
+        app.include_router(api.router, dependencies=[Depends(require_token)])
 
 
 def init_error_handlers(app: FastAPI) -> None:

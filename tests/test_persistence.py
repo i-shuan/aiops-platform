@@ -1,6 +1,5 @@
 """資料真的存進資料庫：換一個連線（模擬服務重啟）後還在；資料庫連不上時回 503。"""
 import pytest
-from fastapi.testclient import TestClient
 
 from aiops.app import create_app
 from aiops.models import core, db
@@ -9,8 +8,17 @@ SILENCE = {"kind": "maintenance", "start": "2026-11-08T04:00:00+08:00", "end": "
            "entity": "svc-a", "reason": "換硬碟", "created_by": "amy"}
 
 
+def TestClient(app):  # noqa: N802  帶上測試 token
+    from fastapi.testclient import TestClient as _Client
+
+    from tests.conftest import AUTH
+
+    return _Client(app, headers=AUTH)
+
+
 @pytest.fixture
-def file_db(tmp_path):
+def file_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIOPS_API_TOKEN", "test-token")
     url = f"sqlite:///{(tmp_path / 'aiops.db').as_posix()}"
     db.configure(url)
     core.reset_all()

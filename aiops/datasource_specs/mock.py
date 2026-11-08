@@ -19,3 +19,6 @@ class MockSpec(BaseDataSourceSpec):
         if len(values) > 10:
             values[len(values) // 2] += 40
         return pd.DataFrame({"ts": ts, "value": values})
+
+    def check(self) -> dict:
+        return {"ok": True, "detail": "假資料，永遠可用"}
