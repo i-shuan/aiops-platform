@@ -109,6 +109,8 @@ class DetectorModelRow(Base):
     train_end: Mapped[datetime] = mapped_column(DateTime)
     points: Mapped[int] = mapped_column(Integer)
     trained_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    # 樂觀鎖：寫入時必須帶讀取當時的版本，版本已被別人推進就不覆蓋
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 # ── ingestion ──

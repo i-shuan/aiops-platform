@@ -157,6 +157,7 @@ nodes:
   # 5. 可選 AI 摘要 (設為 noop 即刻關閉，不花 Token)
   - name: ai_step
     operator: enrichment.llm_summary
+    optional: true   # 旁路節點：失敗只記進 errors 並跳過，不擋住後面的通知與落地
     params:
       provider: "noop"
 
@@ -166,6 +167,10 @@ nodes:
     params:
       endpoint: "http://alertmanager:9093"
 ```
+
+**節點失敗怎麼處理**：預設任何節點出錯都讓這一輪（或這條序列）失敗。旁路裝飾節點（LLM 摘要等）加上 `optional: true`，失敗時只記進 `errors`（實體名為 `node:<節點名>`）並跳過，後面的節點與最終寫入照常執行。`InfrastructureError`（DB、資料源連不上）不受 `optional` 影響，一律讓整輪失敗。**不要把 fetch、detector、group、suppress、payload、notify 標成 optional。**
+
+**並發安全**：偵測器基準線（`detector_models`）與現行參數（`active_detector_configs`）用 `version` 欄位做樂觀鎖，寫入必須帶讀取當時的版本；版本已被別人推進就不覆蓋（基準線記在 audit，調參核准回 409 並把提案標成 stale）。
 
 ---
 

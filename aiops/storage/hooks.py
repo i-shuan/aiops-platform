@@ -109,7 +109,8 @@ class StorageHooks:
             model = DetectorModels.get(ctx.pipeline, target.entity, target.query, op)
             if model:
                 ctx.detector_states[op] = DetectorState(model["state"], as_utc(model["trained_at"]),
-                                                        model["train_start"], model["train_end"], model["points"])
+                                                        model["train_start"], model["train_end"], model["points"],
+                                                        model["version"])
         last = Anomalies.latest_ts(ctx.pipeline, target.entity, target.query)
         ctx.last_anomaly_ts = as_utc(last) if last else None
 
@@ -119,8 +120,11 @@ class StorageHooks:
         target = ctx.target
         assert target is not None
         for op, st in ctx.new_detector_states.items():
-            DetectorModels.save(ctx.pipeline, target.entity, target.query, op, st.state, st.train_start or ctx.now,
-                                st.train_end or ctx.now, st.points, trained_at=st.trained_at)
+            saved = DetectorModels.save(ctx.pipeline, target.entity, target.query, op, st.state,
+                                        st.train_start or ctx.now, st.train_end or ctx.now, st.points,
+                                        expected_version=st.version, trained_at=st.trained_at)
+            if saved is None:  # 別的 worker 先寫了：保留它較新的基準線，這次的丟掉（不是錯誤）
+                ctx.log(f"baseline:{op}:{target.entity}:conflict-kept-newer")
         algorithm = ctx.anomaly_result.algorithm if ctx.anomaly_result else ""
         Anomalies.create_many([
             {"pipeline": ctx.pipeline, "entity": e.entity, "metric": e.metric, "ts": e.ts,

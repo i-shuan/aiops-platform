@@ -119,6 +119,19 @@ PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後�
 
 每一輪就是跑一次 Pipeline：模型過期才重訓 → 偵測並只留新異常 → 收斂、計分、抑制 → 通知 → 寫入結果。同一段時間重跑不會重複開單或重複通知（第二輪只會多一則「恢復」通知）。
 
+- **旁路節點**：workflow 的節點可加 `optional: true`（例如 `rca_report` 的 LLM 摘要）。它失敗時只記進結果的 `errors`（`node:<節點名>`），後面的節點與寫入照常；資料庫或資料源連不上仍會讓整輪失敗。
+- **並發**：偵測器基準線與現行參數用 `version` 做樂觀鎖。兩個 worker 同時訓練同一條序列時，先寫的保留，後寫的不覆蓋。
+
+### 升級既有 PostgreSQL（沒有 Alembic，要手動做一次）
+
+新增了 `detector_models.version` 欄位。全新資料庫會自動建好；**已經在跑的 PostgreSQL 必須先執行一次**，否則偵測會因為缺欄位而失敗：
+
+```sql
+ALTER TABLE detector_models ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+```
+
+SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
+
 ## 設定（環境變數）
 
 | 變數 | 預設 | 說明 |

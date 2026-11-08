@@ -127,13 +127,15 @@ class DetectorModels:
 
     @staticmethod
     def save(pipeline: str, entity: str, metric: str, detector: str, state: Row, train_start: datetime,
-             train_end: datetime, points: int, trained_at: datetime | None = None) -> Row:
-        return crud.upsert(
-            DetectorModelRow,
-            {"pipeline": pipeline, "entity": entity, "metric": metric, "detector_name": detector},
-            state=state, train_start=train_start, train_end=train_end, points=points,
-            trained_at=trained_at or utc_now(),
-        )
+             train_end: datetime, points: int, *, expected_version: int, trained_at: datetime | None = None) -> Row | None:
+        """樂觀鎖寫入。expected_version 是讀取當時的版本（0 = 當時還沒有這一筆）。
+        別人已經先寫了就回傳 None，不覆蓋對方較新的基準線。"""
+        key = {"pipeline": pipeline, "entity": entity, "metric": metric, "detector_name": detector}
+        fields = {"state": state, "train_start": train_start, "train_end": train_end, "points": points,
+                  "trained_at": trained_at or utc_now()}
+        if expected_version == 0:
+            return crud.insert_if_absent(DetectorModelRow, **key, **fields, version=1)
+        return crud.update_if_version(DetectorModelRow, key, expected_version, **fields)
 
 
 class ActiveConfigs:
@@ -149,10 +151,13 @@ class ActiveConfigs:
         return row["version"] if row else 0
 
     @staticmethod
-    def set(detector: str, params: Row, source: str, proposal_id: int) -> Row:
-        return crud.upsert(ActiveDetectorConfigRow, {"detector_name": detector},
-                           version=ActiveConfigs.version(detector) + 1, params=params, source=source,
-                           proposal_id=proposal_id)
+    def set(detector: str, params: Row, source: str, proposal_id: int, *, expected_version: int) -> Row | None:
+        """樂觀鎖寫入。expected_version 是核准當下提案的基準版本（0 = 還沒有現行參數）。
+        現行參數已被別人推進就回傳 None，不覆蓋。"""
+        fields = {"params": params, "source": source, "proposal_id": proposal_id}
+        if expected_version == 0:
+            return crud.insert_if_absent(ActiveDetectorConfigRow, detector_name=detector, version=1, **fields)
+        return crud.update_if_version(ActiveDetectorConfigRow, {"detector_name": detector}, expected_version, **fields)
 
 
 class Mappings:

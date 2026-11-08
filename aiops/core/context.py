@@ -63,6 +63,7 @@ class DetectorState:
     train_start: datetime | None = None
     train_end: datetime | None = None
     points: int = 0
+    version: int = 0  # 讀取當時的資料庫版本（0 = 資料庫還沒有這一筆）；寫回時用來偵測別人是否已經更新
 
 
 @dataclass

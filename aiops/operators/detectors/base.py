@@ -92,18 +92,19 @@ class DetectorOperator(BaseOperator):
 
         df = ctx.raw_df
         state = ctx.detector_states.get(self.operator_name)
+        base_version = state.version if state else 0  # 寫回時帶上，資料庫才能偵測並發覆蓋
         if ctx.train_df is not None:  # 批次訓練：基準線過期或還沒有
             algo.fit(ctx.train_df)
             ctx.new_detector_states[self.operator_name] = DetectorState(
                 algo.get_state(), as_utc(ctx.now), ctx.train_df["ts"].min().to_pydatetime(),
-                ctx.train_df["ts"].max().to_pydatetime(), len(ctx.train_df))
+                ctx.train_df["ts"].max().to_pydatetime(), len(ctx.train_df), base_version)
         elif state is not None:
             algo.load_state(state.state)
         else:  # 第一次：用這一輪的資料學基準線並保存
             algo.fit(df)
             ctx.new_detector_states[self.operator_name] = DetectorState(
                 algo.get_state(), as_utc(ctx.now), df["ts"].min().to_pydatetime(),
-                df["ts"].max().to_pydatetime(), len(df))
+                df["ts"].max().to_pydatetime(), len(df), base_version)
 
         ctx.anomaly_result = algo.detect(df)
         ctx.anomalies.extend(

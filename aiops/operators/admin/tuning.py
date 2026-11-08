@@ -113,12 +113,14 @@ class ProposalApproveOp(BaseOperator):
         row = _load(req.proposal_id)
         if row["status"] != "backtested":
             raise Conflict(f"提案狀態為 {row['status']}，必須先回測才能核准")
-        current = ActiveConfigs.version(row["detector_name"])
-        if current != row["base_version"]:
+        # 條件式寫入：只有現行版本仍等於提案的基準版本才會成功，檢查與寫入是同一個動作，並發核准不會互相覆蓋
+        config = ActiveConfigs.set(row["detector_name"], row["params"], row["source"], req.proposal_id,
+                                   expected_version=row["base_version"])
+        if config is None:
+            current = ActiveConfigs.version(row["detector_name"])
             Proposals.update(req.proposal_id, status="stale")
             raise Conflict(f"現行參數已更新（目前版本 {current}，提案基準版本 {row['base_version']}），"
                            "此提案已作廢，請重新提案")
-        config = ActiveConfigs.set(row["detector_name"], row["params"], row["source"], req.proposal_id)
         ctx.result = {"proposal": Proposals.update(req.proposal_id, status="approved", approved_by=req.approver),
                       "active_config": config}
         return ctx

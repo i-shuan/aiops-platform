@@ -7,6 +7,8 @@
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy import update as sql_update
+from sqlalchemy.exc import IntegrityError
 
 from aiops.storage.models import row_to_dict, utc_naive
 from aiops.storage.db import read_session, write_session
@@ -62,6 +64,26 @@ def upsert(model: Any, match: dict[str, Any], **fields: Any) -> dict[str, Any]:
                 setattr(row, k, v)
         s.flush()
         return row_to_dict(row)
+
+
+def insert_if_absent(model: Any, **fields: Any) -> dict[str, Any] | None:
+    """新增一筆；撞到唯一鍵（別人已經先寫了）回傳 None，不拋錯也不覆蓋。"""
+    try:
+        return create(model, **fields)
+    except IntegrityError:
+        return None
+
+
+def update_if_version(model: Any, match: dict[str, Any], expected_version: int, **fields: Any) -> dict[str, Any] | None:
+    """樂觀鎖更新：只有該列的 version 仍等於 expected_version 才會更新並把 version 加一。
+    沒有符合的列（別人已經改過、或列不存在）回傳 None，不覆蓋。"""
+    with write_session() as s:
+        result = s.execute(
+            sql_update(model).where(*_where(model, match), model.version == expected_version)
+            .values(**_clean(fields), version=expected_version + 1))
+        if result.rowcount != 1:
+            return None
+        return row_to_dict(s.scalars(select(model).where(*_where(model, match))).one())
 
 
 # ── 讀取 ──

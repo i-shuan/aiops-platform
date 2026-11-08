@@ -43,6 +43,9 @@ class NodeSpec(BaseModel):
     name: str
     operator: str
     params: dict[str, Any] = Field(default_factory=dict)
+    # 旁路裝飾節點（LLM 摘要等）：失敗記進 errors 並跳過，不影響後面的節點與最終寫入。
+    # 基礎設施錯誤（DB、資料源連不上）不受此限，一律讓整輪失敗。
+    optional: bool = False
 
 
 class Workflow(BaseModel):
@@ -91,6 +94,22 @@ class NullHooks:
     def persist_batch(self, ctx: PipelineContext) -> None: ...
 
 
+def _run_node(node: NodeSpec, op: Any, ctx: PipelineContext) -> PipelineContext:
+    """跑單一節點。optional 節點出錯只記錄並跳過；InfrastructureError 與非 optional 節點的錯誤一律往上丟。"""
+    ctx.log(f"{node.name}:{node.operator}")
+    if not node.optional:
+        return op.execute(ctx)
+    try:
+        return op.execute(ctx)
+    except InfrastructureError:
+        raise
+    except Exception as e:  # noqa: BLE001  旁路節點無論什麼錯都不該擋住主流程
+        entity = ctx.target.entity if ctx.target else f"node:{node.name}"
+        ctx.errors.append(TargetError(entity, f"[optional {node.name}] {e}"))
+        ctx.log(f"{node.name}:skipped")
+        return ctx
+
+
 class Pipeline:
     def __init__(self, workflow: Workflow, hooks: Hooks | None = None):
         self.workflow = workflow
@@ -124,8 +143,7 @@ class Pipeline:
                 try:
                     self.hooks.load_target(ctx, self.detector_ops)
                     for node, op in self.target_nodes:
-                        ctx.log(f"{node.name}:{node.operator}")
-                        ctx = op.execute(ctx)
+                        ctx = _run_node(node, op, ctx)
                     self.hooks.persist_target(ctx)
                 except InfrastructureError:
                     raise  # 資料庫、資料源連不上：整輪失敗，不要假裝只是這條序列的問題
@@ -136,11 +154,11 @@ class Pipeline:
                     continue
                 batch.anomalies.extend(ctx.anomalies)
                 batch.audit.extend(ctx.audit)
+                batch.errors.extend(ctx.errors)  # optional 節點在這條序列留下的錯誤
                 batch.result.update(ctx.result)
 
         for node, op in self.batch_nodes:
-            batch.log(f"{node.name}:{node.operator}")
-            batch = op.execute(batch)
+            batch = _run_node(node, op, batch)
         self.hooks.persist_batch(batch)
         return batch
 
