@@ -51,14 +51,14 @@ class AlertPipeline:
             reason = next((r for s in suppressors if (r := s.suppress(inc, ctx))), None)
             severity = severity_for(inc.score, self.preset.severity_thresholds)
             row = IncidentDAO.create(self.preset.name, inc.to_dict(), severity, reason)
-            notes = [] if reason else build_notifications(row["id"], inc, self.preset.name, severity)
+            notes = [] if reason else build_notifications(row["uid"], inc, self.preset.name, severity)
             if notes:
                 outgoing += notes
                 to_record.append((row["id"], inc, severity, len(notes)))
                 # 同一批後面的事件群也要看得到「剛剛決定要發」的這筆，避免同批重複
                 recent.append({"incident_id": row["id"], "fingerprint": inc.fingerprint, "last_event_ts": inc.end})
             results.append(
-                {"id": row["id"], **row["incident"], "severity": severity,
+                {"id": row["id"], "uid": row["uid"], **row["incident"], "severity": severity,
                  "suppressed_by": reason, "notifications": len(notes)}
             )
 

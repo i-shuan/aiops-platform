@@ -197,8 +197,9 @@ POST /api/v1/alerts/process
   - 部署：`helm upgrade grafana <舊 repo>/grafana/helmchart -n grafana-new --reuse-values --set secretData.AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.aiops-platform.svc:9093`。
 - 平台設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.<namespace>.svc:9093`。
 
-- 通知是 Alertmanager v2 格式：`labels`（`alertname=aiops_incident`、`incident_id`、`severity`、`preset`、`dept`、`entities`）、`annotations`（`summary`、`description`）、`startsAt`。
+- 通知是 Alertmanager v2 格式：`labels`（`alertname=aiops_incident`、`incident_uid`、`severity`、`preset`、`dept`、`entities`）、`annotations`（`summary`、`description`）、`startsAt`。
 - **接收端的路由只准用 labels 比對**（例如 `dept`、`severity`），不得依 `annotations` 內容判斷。
+- **對外識別一律用 `incident_uid`（`inc-<uuid>`），不得把事件群的整數 `id` 放進通知或任何外部系統。** 整數 id 在資料庫重建後會從 1 重來，曾實測造成 Alertmanager 把不相干的事件群併在同一組。整數 id 只在平台內部用（RCA 查詢、通知紀錄）。
 - 設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL`、選填 `AIOPS_ALERTMANAGER_TOKEN`（Bearer）。預設是 `log`，只寫日誌、不真的送。
 - 推送失敗會丟 `InfrastructureError`：API 回 503，並走看守機制（本機日誌、`AIOPS_FALLBACK_WEBHOOK`）。
 

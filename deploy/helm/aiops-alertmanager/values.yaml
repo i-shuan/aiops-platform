@@ -17,8 +17,9 @@ service:
 resolveTimeout: 24h
 
 route:
-  # 平台送來的一則通知 = 一個事件群 × 一個部門，不再二次分組
-  groupBy: ["incident_id", "dept"]
+  # 平台送來的一則通知 = 一個事件群 × 一個部門，不再二次分組。
+  # 一定要用全域唯一的 incident_uid；平台的整數 id 在資料庫重建後會重複
+  groupBy: ["incident_uid", "dept"]
   groupWait: 10s
   groupInterval: 5m
   # 平台已做 dedup；這裡只是保險，避免同一則被反覆提醒

@@ -41,6 +41,10 @@ def test_dept_route_matches_only_routable_labels():
             assert re.match(r"\s*(\w+)", m).group(1) in ROUTABLE_LABELS, m
 
 
+def test_groups_by_globally_unique_incident_uid():
+    assert _render()["route"]["group_by"] == ["incident_uid", "dept"]
+
+
 def test_resolve_timeout_is_long_because_platform_sends_no_ends_at():
     assert _render()["global"]["resolve_timeout"] == "24h"
 

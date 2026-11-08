@@ -39,8 +39,22 @@ def test_payload_has_severity_and_one_notification_per_dept(client, sent):
     by_dept = {n.labels["dept"]: n for n in sent}
     assert set(by_dept) == {"payments", "platform", "storage"}
     assert by_dept["storage"].labels["severity"] == "P0"
-    assert by_dept["payments"].labels["incident_id"] == str(out[("svc-a", "svc-b")]["id"])
+    assert by_dept["payments"].labels["incident_uid"] == out[("svc-a", "svc-b")]["uid"]
+    assert "incident_id" not in by_dept["payments"].labels  # 整數 id 不能拿去外面當識別
     assert by_dept["payments"].annotations["summary"].startswith("[P1] svc-a, svc-b")
+
+
+def test_incident_uid_is_unique_across_database_resets(client, sent):
+    """資料庫重建後整數 id 會從 1 重來，但送出去的 incident_uid 不能重複，否則 Alertmanager 會把不相干的事件群併成一組。"""
+    from aiops.models import core
+
+    first = _process(client)[("svc-c",)]
+    core.reset_all()
+    second = _process(client)[("svc-c",)]
+    assert first["id"] == second["id"]  # 內部 id 撞號（預期）
+    assert first["uid"] != second["uid"] and first["uid"].startswith("inc-")
+    storage_uids = [n.labels["incident_uid"] for n in sent if n.labels["dept"] == "storage"]
+    assert storage_uids == [first["uid"], second["uid"]]  # 兩次送出去的識別不同
 
 
 def test_event_without_dept_goes_to_unassigned(client, sent):

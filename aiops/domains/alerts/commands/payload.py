@@ -12,8 +12,12 @@ def severity_for(score: float, thresholds: tuple[tuple[str, float], ...]) -> str
     return thresholds[-1][0]
 
 
-def build_notifications(incident_id: int, incident: Incident, preset: str, severity: str) -> list[Notification]:
-    """一個部門一則，接收端才能用 dept 標籤直接分送；沒帶部門的歸 unassigned。"""
+def build_notifications(incident_uid: str, incident: Incident, preset: str, severity: str) -> list[Notification]:
+    """一個部門一則，接收端才能用 dept 標籤直接分送；沒帶部門的歸 unassigned。
+
+    對外只用全域唯一的 incident_uid：整數 id 會因資料庫重建從 1 重來，
+    拿去當 label 會讓 Alertmanager 把不相干的事件群分在同一組。
+    """
     entities = ", ".join(incident.entities)
     title = f"[{severity}] {entities} 異常（{len(incident.events)} 筆）"
     description = (
@@ -24,7 +28,7 @@ def build_notifications(incident_id: int, incident: Incident, preset: str, sever
         Notification(
             labels={
                 "alertname": "aiops_incident",
-                "incident_id": str(incident_id),
+                "incident_uid": incident_uid,
                 "severity": severity,
                 "preset": preset,
                 "dept": dept,

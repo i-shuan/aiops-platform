@@ -3,6 +3,7 @@
 時間一律存成「UTC、不帶時區」（crud 寫入時自動轉換）；讀出來的 naive datetime 就是 UTC。
 資料表結構目前由 create_all() 建立；上正式環境前要改用 Alembic 做 migration。
 """
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +23,11 @@ def utc_naive(value: Any) -> Any:
     return value
 
 
+def new_incident_uid() -> str:
+    """給外部（通知、Alertmanager 分組）用的全域唯一識別。整數 id 會因資料庫重建從 1 重來，不能拿去外面用。"""
+    return f"inc-{uuid.uuid4().hex}"
+
+
 def row_to_dict(row: Any) -> dict[str, Any]:
     return {attr.key: getattr(row, attr.key) for attr in row.__mapper__.column_attrs}
 
@@ -32,6 +38,8 @@ def row_to_dict(row: Any) -> dict[str, Any]:
 class IncidentRow(Base):
     __tablename__ = "incidents"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 對外識別（通知 label incident_uid）；id 只在平台內部用（RCA 查詢、通知紀錄）
+    uid: Mapped[str] = mapped_column(String(40), unique=True, default=new_incident_uid)
     preset: Mapped[str] = mapped_column(String(64))
     incident: Mapped[dict] = mapped_column(JSON)
     severity: Mapped[str] = mapped_column(String(8))
