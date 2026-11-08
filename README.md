@@ -361,7 +361,18 @@ targets:
 |---|---|---|
 | `rca.root_cause.topological`（預設） | 傳播圖上沒有異常上游的實體，依最早出現排序 | 拓撲或 Lot 流向 |
 | `rca.root_cause.pagerank` | 反向傳播圖上的 Personalized PageRank：拖垮越多下游、越異常的上游排越前 | 拓撲或 Lot 流向 |
-| `rca.root_cause.cross_correlation` | 事件時段原始時序的時間位移互相關：誰的波動領先別人 | 前面要有 `ingestion.incident_series`（`rca_report_correlation.yaml` 已經接好）；這是相關不是因果 |
+| `rca.root_cause.cross_correlation` | 事件時段原始時序的時間位移互相關：誰的波動領先別人。前處理 `preprocess` 可選 `diff`（預設，一階差分）或 `hybrid`（只在異常時段保留穩健 z 分數、其他歸零） | 前面要有 `ingestion.incident_series`（`rca_report_correlation.yaml` 已經接好）；這是相關不是因果 |
+
+**互相關的 `diff` vs `hybrid`（`min_corr` 固定 0.5，沒有降低）：**一階差分在「整段水位抬高」（高原）的事件只剩兩個邊緣，相關被雜訊淹沒；`hybrid` 把異常時段的波形完整保留、平常時段一律歸零（日夜週期不會變成假相關），遮罩來源是事件群裡同實體的異常點，前後擴 `mask_expand_minutes`（預設 5）分鐘；遮罩內少於 `min_mask_points`（預設 20）個點的實體不參與。
+
+| 資料 | 真實根因 | `diff`（max_lag 10/20/30） | `hybrid`（max_lag 10） | `hybrid`（max_lag 20/30） |
+|---|---|---|---|---|
+| 產生器 `load_amplification`（cart 14:05 → ord 14:10 → bill 14:20） | cart-api | 無候選 | api-gw ✗（領先 cart-api 1 點、ord-svc 6 點、bill-svc 10 點，r 0.98–0.99） | 同左（bill-svc 11 點） |
+| 產生器 `callee_slowdown`（各服務同一分鐘變慢） | bill-svc | 無候選 | ord-svc ✗（領先 cart-api 1 點，r 0.99） | 同左 |
+| ES 真實資料 11/3 事件 | 無標準答案（資料本身最早起點是 cart-api 14:46） | ord-svc 領先 bill-svc 10 點，r 0.75 | ord-svc 領先 bill-svc 10 點，r 0.98 | cart-api 領先 bill-svc、ord-svc（剛好撞到搜尋上限 20／30 點，r 0.52–0.57） |
+| ES 真實資料 40 個無事件時段 | 應該全部沒有候選 | 誤判 0／0／1 次 | 誤判 0 次 | 誤判 0 次 |
+
+`hybrid` 救回了高原事件的相關性，也排對了「誰比誰晚」（ord 晚 6 點、bill 晚 10–11 點），但**兩個標準答案的第一候選都錯**：同一分鐘一起變慢的服務（例如 api-gw 直接呼叫 cart-api，延遲當下就加進去）只差 ±1 點，它照樣挑一個當「領先者」。錯的根因比沒有根因更糟，所以預設維持 `diff`，`hybrid` 要自己在 YAML 開。沒有 `min_mask_points` 防線時，`hybrid` 在無事件對照組是 40／40 誤判（只有零星異常點的服務等於拿十來個雜訊點互比）。
 
 報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
 
