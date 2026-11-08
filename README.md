@@ -16,11 +16,32 @@ AIOps 平台：從監控指標抓異常、收斂成事件群、抑制與分送�
 |---|---|---|
 | `AIOPS_API_TOKEN` | 呼叫本平台 API 的 Bearer token | 產生隨機長字串（例如 `openssl rand -hex 32`）。可用逗號同時放新舊兩組，等呼叫端都換完再拿掉舊的 |
 | `AIOPS_DATABASE_URL` | 資料庫連線（含帳密） | 正式 PostgreSQL 開專用帳號與密碼，只給本平台的資料庫權限 |
-| `AIOPS_ES_API_KEY` | 讀 Elasticsearch 的 key | 在 ES 建**唯讀**的 API key，只給需要的索引 pattern 讀取權限 |
+| `AIOPS_ES_API_KEY` | 讀 Elasticsearch 的 key | 在 ES 建**唯讀**的 API key，只給需要的索引 pattern 讀取權限。建法見下面「建立平台的唯讀 ES key」。**目前還沒建**，所以平台連不上叢集的 ES（回 401）；真實資料驗收（見「目前狀態」）卡在這裡 |
 | `AIOPS_PROMETHEUS_TOKEN` | 讀 Prometheus 的 token（選填） | 依公司 Prometheus 的驗證方式核發 |
 | `AIOPS_VICTORIAMETRICS_TOKEN` | 讀 VictoriaMetrics 的 token（選填） | 同上 |
 | `AIOPS_ALERTMANAGER_TOKEN` | 推送通知到 Alertmanager 的 token（選填） | Alertmanager 前面有加驗證才需要 |
 | `AIOPS_FALLBACK_WEBHOOK` | 資料庫掛掉時直接打的備援 webhook | webhook URL 本身就是憑證，正式值放 Secret |
+
+#### 建立平台的唯讀 ES key
+
+**這一步要由有 ES 管理員權限的人做，平台與 AI 助理都不做**（建立金鑰等於新增憑證，平台程式也不准有任何寫入 ES 的路徑，見 [deploy/elasticsearch/README.md](deploy/elasticsearch/README.md)）。
+
+1. 在 Kibana Dev Tools 用管理員身分執行，範例在 [deploy/elasticsearch/README.md](deploy/elasticsearch/README.md#為-grafana-或平台建唯讀-key範例)。只給 `metrics-apm.transaction.1m-*`、`traces-apm-*`、`logs-apm.*` 的 `read` 與 `view_index_metadata`，不要給寫入權限，也不要共用 Grafana 的 key 或 `elastic` 超級帳號。
+2. 回傳的 `encoded` 值就是 `AIOPS_ES_API_KEY`。**本機驗證**設成環境變數（只存在這個終端機視窗，不會寫進檔案）：
+
+```powershell
+$env:AIOPS_ES_URL = "http://127.0.0.1:19200"
+$env:AIOPS_ES_API_KEY = "<encoded 值>"
+```
+
+   ES 在叢集裡，本機要先開 port-forward（維持開著）：
+
+```bash
+kubectl --context rancher-desktop -n es-test port-forward svc/elasticsearch 19200:9200
+```
+
+3. **上叢集**時把值放進 Secret，用 `existingSecret` 帶進平台（見「Kubernetes：平台本身」），不要寫進 values 或這個 repo。
+4. 這把 key 是開發階段用的，跟上表其他憑證一樣，**上正式環境前要撤銷重發**。
 
 ### 本平台的部署設定
 
@@ -261,6 +282,14 @@ helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiop
 ## 目前狀態
 
 已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、11 個偵測算子（見上表，含 168 時段基準線、同比／環比、分位數漂移、動態同儕、多偵測器裁決）、工廠 Lot 收斂、RCA（可抽換的根因演算法：拓撲、PageRank、時序互相關；9 個段落含歷史相似案例）、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、規則升級器、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
+
+**演算法還沒在真實資料上驗證過**，還沒有任何誤報率或根因準確度的數字；先別把「測試全過」當成「演算法有用」。計畫中的真實資料驗收有三項：
+
+1. 168 時段基準線 vs 舊 zscore：同一段真實時序整週回放，比較尖峰時段與離峰時段各跳幾次。
+2. 多偵測器裁決：聯集 vs 多數決濾掉多少單一算法的毛刺，留下的是不是大尖峰。
+3. RCA：拓撲 vs 時序互相關，對一次真實發生的延遲尖峰各自排出的第一候選，以及互相關的領先點數與相關係數有沒有意義（同時有流量不等於因果）。
+
+這三項卡在上面的唯讀 ES key 還沒建。ES 裡實際有哪些服務、多少筆資料、涵蓋哪幾天，也還沒有確認過，以查到的為準。
 
 演算法的效果只用合成資料（mock）驗證過：`seasonal:` 開頭的 mock query 會產生依時間戳決定、有日週期與週末效應的資料，其他 mock query 是一段雜訊加一個尖峰。在真實指標上的誤報率、互相關排出的根因準不準，都還沒驗證。
 
