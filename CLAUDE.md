@@ -246,8 +246,10 @@ POST /api/v1/alerts/process
 > 目前狀態（2026-11-08）：**平台 -> aiops-alertmanager 已在本機 rancher-desktop 端對端驗證成功**：三個部門各推一則，依 `dept` 分到正確的 receiver，沒帶部門的進 `unrouted`；同一批再跑一次全部被 `dedup` 擋下。
 > 還沒做的：
 > - **Grafana 顯示已接上並驗證**：Grafana 13 經資料源讀到 Alertmanager 的告警，標籤（`dept`、`severity`）與 receiver 都正確。Grafana 內建的資料源健康檢查端點對 alertmanager 型回 500（`plugin unavailable`），這是該資料源型別本來就不支援，不是連線失敗，實際讀取以 `/api/datasources/proxy/uid/aiops-alertmanager/api/v2/alerts` 為準。
-> - **叢集上跑著的 Grafana 還是舊 chart 部署的**，仍掛著舊的 alert rules／contact points／policies（`grafana-alerting`），與「Grafana 只顯示」相反，可能和平台的通知重複。本 repo 的 `aiops-grafana` 已不含這些，但**還沒拿它去 `helm upgrade` 接手叢集上的 release**；接手後那些告警設定會被一併移除。
-> - 舊引擎（`aiops` 命名空間）已從叢集移除，舊 Grafana 的 `aiops-db` 資料源因此失效；`aiops-grafana` 不含它。
+> - **叢集上的 Grafana 已改由本 repo 的 `aiops-grafana` 部署**（release `grafana`，revision 5）。舊的 alert rules／contact points／policies（`grafana-alerting`）與 `aiops-db` 資料源已隨接手移除。實測：4 個資料源、1 張儀表板、0 條告警規則、0 個 provisioning 錯誤；三個 ES 資料源用真的唯讀 key 讀得到資料；`APM 總覽` 5 張面板在 11/2～11/3 的範圍畫得出真實的 metrics、trace、log。
+> - 舊引擎（`aiops` 命名空間）已從叢集移除。
+> - **Secret `grafana-env` 裡還留著舊引擎的鍵**（`AIOPS_PG_*`、`GRAFANA_PG_*`、`NOTIFY_*_URL`），已沒有任何東西使用，要手動刪掉（見 README）。這個 Secret 帶 `helm.sh/resource-policy: keep`，是舊 chart 建的，新 chart 不管它。
+> - 「③ Trace：最慢的請求」那張面板只列 `transaction.duration.us >= 1000000`（超過 1 秒）的請求；資料範圍內最慢的只有 0.59 秒，所以顯示 No data 是正確的。
 > - **真的通道還沒設**：驗證時 receiver 都沒有 `*_configs`，收下但不送出。
 > - **平台的部署**：`Dockerfile`、`docker-compose.yaml`、`deploy/helm/aiops-platform`（API 是 Deployment、排程是 CronJob 跑 `run-once`、機密只從 Secret 進來）。
 
