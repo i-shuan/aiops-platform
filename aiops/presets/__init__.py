@@ -4,6 +4,9 @@ from aiops.presets.base import Preset
 
 _IT_SECTIONS = ("summary", "timeline", "affected_entities", "golden_signals")
 _BASIC_SECTIONS = ("summary", "timeline", "affected_entities")
+# 有拓撲的場景才做同根因抑制；靜音／排除時段一定排第一
+_IT_SUPPRESSORS = ("silence_window", "same_root_cause", "dedup")
+_BASIC_SUPPRESSORS = ("silence_window", "dedup")
 
 PRESETS: dict[str, Preset] = {
     p.name: p
@@ -15,6 +18,7 @@ PRESETS: dict[str, Preset] = {
             groupers=("same_entity", "topology_chain"),
             scorers=("golden_signals", "p0_boost"),
             rca_sections=_IT_SECTIONS,
+            suppressors=_IT_SUPPRESSORS,
         ),
         Preset(
             name="it_apm",
@@ -23,6 +27,7 @@ PRESETS: dict[str, Preset] = {
             groupers=("same_entity", "topology_chain"),
             scorers=("golden_signals", "p0_boost"),
             rca_sections=_IT_SECTIONS,
+            suppressors=_IT_SUPPRESSORS,
         ),
         Preset(
             name="factory",
@@ -31,6 +36,7 @@ PRESETS: dict[str, Preset] = {
             groupers=("same_entity",),
             scorers=("p0_boost",),
             rca_sections=_BASIC_SECTIONS,
+            suppressors=_BASIC_SUPPRESSORS,
         ),
         Preset(
             name="metrics_only",
@@ -39,6 +45,7 @@ PRESETS: dict[str, Preset] = {
             groupers=("same_entity",),
             scorers=(),
             rca_sections=_BASIC_SECTIONS,
+            suppressors=_BASIC_SUPPRESSORS,
         ),
     )
 }

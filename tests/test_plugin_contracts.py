@@ -6,7 +6,13 @@ import pytest
 
 from aiops.initialization import init_plugins
 from aiops.plugins.base import AnomalyEvent, AnomalyResult, Incident, ReportSection
-from aiops.plugins.registry import DetectorRegistry, GrouperRegistry, ScorerRegistry, SectionRegistry
+from aiops.plugins.registry import (
+    DetectorRegistry,
+    GrouperRegistry,
+    ScorerRegistry,
+    SectionRegistry,
+    SuppressorRegistry,
+)
 
 init_plugins()
 
@@ -50,6 +56,17 @@ def test_scorer_returns_float_without_mutating(name):
     before = inc.to_dict()
     assert isinstance(ScorerRegistry.get(name)().score(inc, CTX), float)
     assert inc.to_dict() == before
+
+
+@pytest.mark.parametrize("name", SuppressorRegistry.names())
+def test_suppressor_returns_reason_or_none_without_mutating(name):
+    batch = _incidents()
+    ctx = {**CTX, "batch": batch, "silences": [], "recent_notifications": []}
+    before = [i.to_dict() for i in batch]
+    for inc in batch:
+        reason = SuppressorRegistry.get(name)().suppress(inc, ctx)
+        assert reason is None or (isinstance(reason, str) and reason)
+    assert [i.to_dict() for i in batch] == before
 
 
 @pytest.mark.parametrize("name", SectionRegistry.names())

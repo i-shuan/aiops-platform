@@ -7,12 +7,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import pandas as pd
 
 GOLDEN_SIGNALS = ("latency", "errors", "traffic", "saturation")
+
+
+def as_utc(dt: datetime) -> datetime:
+    """比較時間前統一成 UTC；沒帶時區的視為 UTC，避免 naive／aware 混用直接報錯。"""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
 class _Plugin:
@@ -89,6 +94,16 @@ class Incident:
         return sorted({e.entity for e in self.events})
 
     @property
+    def depts(self) -> list[str]:
+        """事件 attrs["dept"] 帶進來的部門（給通知路由用）。"""
+        return sorted({str(e.attrs["dept"]) for e in self.events if e.attrs.get("dept")})
+
+    @property
+    def fingerprint(self) -> str:
+        """同一組實體視為同一件事，用來判斷是否重複通知。"""
+        return "|".join(self.entities)
+
+    @property
     def start(self) -> datetime:
         return min(e.ts for e in self.events)
 
@@ -160,6 +175,12 @@ class BaseScorer(_Plugin, ABC):
     @abstractmethod
     def score(self, incident: Incident, context: dict[str, Any]) -> float:
         """回傳調整後的分數，不得修改 incident。"""
+
+
+class BaseSuppressor(_Plugin, ABC):
+    @abstractmethod
+    def suppress(self, incident: Incident, context: dict[str, Any]) -> str | None:
+        """回傳抑制原因（字串）；None 表示不抑制。不得修改 incident。"""
 
 
 # ── RCA 報告段落 ──

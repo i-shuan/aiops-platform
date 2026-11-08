@@ -15,12 +15,13 @@
 | 資料表 | `models/` | 資料形狀與存放（目前是記憶體表，之後換 SQLAlchemy） | — |
 | 零件 | `plugins/<kind>/` | 純運算：偵測、收斂、計分、報告段落、LLM | 認識任何領域、碰 DB、碰外部服務 |
 | 資料源 | `datasource_specs/` | 連線、查詢、轉成 `DataFrame(ts, value)` | 審核狀態、業務合成（trace 合成、Lot 履歷） |
-| 場景 | `presets/` | 每個場景啟用哪些外掛（只寫名字） | import 外掛或領域 |
+| 場景 | `presets/` | 每個場景啟用哪些外掛（只寫名字）與場景參數（嚴重度門檻） | import 外掛或領域 |
+| 出口 | `notifiers/` | 把平台決定要發的通知送出去（Alertmanager v2、log） | 判斷要不要發、碰資料表、認識領域 |
 | 基礎設施 | `infrastructure/` | 故障看守（本機日誌、webhook）、基礎設施錯誤 | 業務邏輯 |
 
 以下全部由 `tests/test_architecture.py` 機械式檢查，**違規 = 測試紅燈**：
 
-1. `plugins/` 不得 import `domains`、`models`、`infrastructure`、`datasource_specs`、`presets`、`initialization`。
+1. `plugins/` 不得 import `domains`、`models`、`infrastructure`、`datasource_specs`、`presets`、`initialization`、`notifiers`。
 2. `datasource_specs/` 不得 import `domains`、`models`、`plugins`。
 3. `presets/` 不得 import `domains`、`plugins`、`models`、`datasource_specs`。
 4. **領域之間不得互相 import。** 跨領域資料只能走共用的 `models/` 資料表，且遵守下面「跨領域資料讀取規範」。
@@ -35,6 +36,8 @@
 13. 每張資料表都要在 `models/core.py` 的 `TABLE_OWNERS` 登記擁有者領域。
 14. 非擁有者領域讀別人的資料表，類別名稱必須以 `ReadDAO` 結尾，且只能呼叫讀取方法。
 15. 任何 `*ReadDAO` 不得有 insert／update／delete／set／create／save／add／remove／clear 類的呼叫或方法。
+16. `notifiers/` 不得 import `domains`、`models`、`plugins`、`presets`、`datasource_specs`。
+17. 領域層不得直接 import 具體通知出口（如 `notifiers.alertmanager`），一律 `get_notifier()`，型別只能用 `notifiers.base`。
 
 ### 跨領域資料讀取規範
 
@@ -52,6 +55,7 @@
 | 收資料、訓練、偵測、調參、回測、核准 | zscore、shift、peer、rules、chronic…（偵測演算法） |
 | trace 合成、Lot 履歷合成、外部異常匯入、欄位對照審核 | same_entity、topology_chain、lot_path_chain…（收斂 Grouper） |
 | 告警收斂管線、產生 RCA 報告 | golden_signals、p0_boost…（計分 Scorer） |
+| 建立靜音／維護窗口／排除時段、產生通知 payload、推送 | silence_window、same_root_cause、dedup…（抑制 Suppressor） |
 | | summary、timeline、golden_signals…（報告段落 Section Builder） |
 
 - **偵測器契約只有兩個方法：`fit(df) -> self`、`detect(df) -> AnomalyResult`。** 「train」「tune」「collect」不是外掛名字，是領域 Command。
@@ -66,6 +70,7 @@
 | 偵測器 `BaseDetector` | `fit(df) -> self`；`detect(df) -> AnomalyResult` | 先 fit 才能 detect |
 | 收斂 `BaseGrouper` | `group(incidents, context) -> list[Incident]` | 不得丟掉任何事件；合併用 `merge_incidents()` |
 | 計分 `BaseScorer` | `score(incident, context) -> float` | 回傳新分數，不得修改 incident |
+| 抑制 `BaseSuppressor` | `suppress(incident, context) -> str \| None` | 回傳抑制原因；`None` 表示照發。靜音、近期通知、同批事件群由 Command 放進 `context` |
 | 報告段落 `BaseSectionBuilder` | `applies(incident, context) -> bool`；`build(incident, context) -> ReportSection` | 資料不足時 `applies` 回 `False`，不輸出空殼 |
 | LLM `BaseLLMProvider` | `complete(prompt) -> str` | |
 
@@ -81,8 +86,12 @@
 - **新偵測演算法** → 繼承 `BaseDetector`，放 `plugins/detectors/<algo>.py`，加 `@DetectorRegistry.register`。
 - **新收斂規則** → 繼承 `BaseGrouper`，放 `plugins/groupers/`，加 `@GrouperRegistry.register`。合併一律用 `merge_incidents()`。
 - **新計分規則** → 繼承 `BaseScorer`，放 `plugins/scorers/`，加 `@ScorerRegistry.register`。回傳新分數，不得修改 incident。
+- **新抑制規則** → 繼承 `BaseSuppressor`，放 `plugins/suppressors/`，加 `@SuppressorRegistry.register`，再加進 preset 的 `suppressors`（依序比對，第一個回傳原因的就抑制，所以 `silence_window` 排第一）。
+- **靜音、維護窗口、人工排除時段** → 資料存在 alerts 的 `silences` 表，用 `POST /api/v1/alerts/silences` 建立。只有這一份，接收端不另設靜音。
+- **通知內容（嚴重度、標題、路由標籤）** → `domains/alerts/commands/payload.py`。嚴重度門檻是 preset 的 `severity_thresholds`。一個部門一則通知，部門取自事件 `attrs["dept"]`，沒有就是 `unassigned`。
+- **新通知出口（例如另一種接收端）** → 繼承 `BaseNotifier`，放 `notifiers/<name>.py`，在 `notifiers/__init__.py` 的 `get_notifier()` 加分支。只負責傳送，送不出去丟 `InfrastructureError`。
 - **新 RCA 報告段落** → 繼承 `BaseSectionBuilder`，放 `plugins/rca_sections/`，加 `@SectionRegistry.register`。資料不足時讓 `applies()` 回 `False`，不要輸出空殼。
-- **新場景或調整場景用的零件** → 改 `presets/__init__.py`，只寫名字。
+- **新場景或調整場景用的零件** → 改 `presets/__init__.py`，只寫外掛名字與場景參數。
 - **任何改偵測參數的需求（自動調優、LLM 從回饋抽規則、人工調整）** → 一律 `CreateProposalCommand`（`source` 填 `auto`／`llm`／`manual`），再走 `BacktestProposalCommand` -> `ApproveTuningCommand`。**不准另開路徑直接寫參數。**
 - **資料表** → `models/core.py`，並在 `TABLE_OWNERS` 登記擁有者；存取寫在各領域 `dao.py`。別的領域要讀就寫 `*ReadDAO`。
 - **DB／ES 連不上** → DAO／Spec 丟 `InfrastructureError`。`initialization` 會統一回 503，並呼叫 `infrastructure.fallback.report_failure`（寫本機日誌，設了 `AIOPS_FALLBACK_WEBHOOK` 就直接打 webhook）。不要在業務 Command 或外掛裡自己做備援。
@@ -113,7 +122,24 @@ LLM 回饋  ─┼─> 提案(pending) ─> 回測(backtested) ─> 核准(appro
   - **不得在 Grafana 建立 alert rule 二次判斷要不要發。** 否則會出現「平台已因排除時段或抑制而不發，Grafana 的規則卻照樣呼叫」的不一致。靜音、夜間、排除時段的設定只有一份，在平台。
 - **舊 repo `aiops-data-foundation/grafana/` 不動。** 新的 helm chart 在本 repo 另建；舊檔只當參考。
 
-> 目前狀態：這一節是規則，**尚未實作**。`domains/alerts` 目前只有收斂與計分，**還沒有**抑制、靜音、維護窗口、排除時段與通知 payload，要先在平台補齊，Grafana 才能退成純路由。Grafana 實際讀取方式（例如 Infinity 資料源讀 JSON 端點，或平台把事件群推到 webhook）、helm chart 的位置、各端點的最終 JSON 形狀都還沒定，定案時回頭補在這裡。
+### 已定案：平台主動推
+
+```
+POST /api/v1/alerts/process
+  收斂 -> 計分 -> 抑制（silence_window -> same_root_cause -> dedup）-> 產生通知（一個部門一則）
+  -> notifiers.get_notifier().send() -> POST {AIOPS_ALERTMANAGER_URL}/api/v2/alerts
+  -> 接收端只依 labels 分流到 Contact Point
+```
+
+- 通知是 Alertmanager v2 格式：`labels`（`alertname=aiops_incident`、`incident_id`、`severity`、`preset`、`dept`、`entities`）、`annotations`（`summary`、`description`）、`startsAt`。
+- **接收端的路由只准用 labels 比對**（例如 `dept`、`severity`），不得依 `annotations` 內容判斷。
+- 設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL`、選填 `AIOPS_ALERTMANAGER_TOKEN`（Bearer）。預設是 `log`，只寫日誌、不真的送。
+- 推送失敗會丟 `InfrastructureError`：API 回 503，並走看守機制（本機日誌、`AIOPS_FALLBACK_WEBHOOK`）。
+
+> 目前狀態：平台側（抑制、靜音、payload、推送）**已實作並有測試**，但**還沒對真的接收端驗證過**。尚未決定、也還沒做的：
+> - 接收端用哪一個：Grafana 內建的 Alertmanager 能不能直接收外部推送的告警，要實際部署確認；不行的話，就在 helm chart 另外部署一台 Alertmanager，Grafana 只負責顯示。
+> - 恢復通知：目前只送 `startsAt`、不送 `endsAt`。Alertmanager 在 `resolve_timeout`（預設 5 分鐘）後會自動當作已恢復，接收端若開了恢復通知會誤發，要在 helm chart 關掉，或之後由平台補送 `endsAt`。
+> - helm chart 的位置。
 
 ## 6. 標準樣板
 

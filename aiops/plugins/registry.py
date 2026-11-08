@@ -1,4 +1,11 @@
-from aiops.plugins.base import BaseDetector, BaseGrouper, BaseLLMProvider, BaseScorer, BaseSectionBuilder
+from aiops.plugins.base import (
+    BaseDetector,
+    BaseGrouper,
+    BaseLLMProvider,
+    BaseScorer,
+    BaseSectionBuilder,
+    BaseSuppressor,
+)
 
 
 class _Registry:
@@ -44,6 +51,10 @@ class GrouperRegistry(_Registry):
 
 class ScorerRegistry(_Registry):
     base = BaseScorer
+
+
+class SuppressorRegistry(_Registry):
+    base = BaseSuppressor
 
 
 class SectionRegistry(_Registry):

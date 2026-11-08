@@ -3,7 +3,13 @@ import ast
 from pathlib import Path
 
 from aiops.initialization import init_plugins
-from aiops.plugins.registry import DetectorRegistry, GrouperRegistry, ScorerRegistry, SectionRegistry
+from aiops.plugins.registry import (
+    DetectorRegistry,
+    GrouperRegistry,
+    ScorerRegistry,
+    SectionRegistry,
+    SuppressorRegistry,
+)
 from aiops.presets import PRESETS
 
 ROOT = Path(__file__).resolve().parents[1] / "aiops"
@@ -41,8 +47,21 @@ def _starts(m: str, *prefixes: str) -> bool:
 def test_plugins_are_pure_parts():
     """外掛不認識業務、不碰 DB、不碰基礎設施與資料源。"""
     banned = ("aiops.domains", "aiops.models", "aiops.infrastructure", "aiops.datasource_specs",
-              "aiops.presets", "aiops.initialization")
+              "aiops.presets", "aiops.initialization", "aiops.notifiers")
     assert not _violations("plugins/**/*.py", lambda f, m: _starts(m, *banned))
+
+
+def test_notifiers_only_transport():
+    """通知出口只負責傳送：不認識領域、外掛與場景，也不碰資料表。"""
+    banned = ("aiops.domains", "aiops.models", "aiops.plugins", "aiops.presets", "aiops.datasource_specs")
+    assert not _violations("notifiers/**/*.py", lambda f, m: _starts(m, *banned))
+
+
+def test_domains_do_not_import_concrete_notifiers():
+    """只能用 aiops.notifiers 的 get_notifier() 與 notifiers.base。"""
+    assert not _violations(
+        "domains/**/*.py", lambda f, m: m.startswith("aiops.notifiers.") and m != "aiops.notifiers.base"
+    )
 
 
 def test_datasource_specs_do_not_know_domains():
@@ -186,6 +205,7 @@ def test_presets_reference_only_registered_plugins():
         ("groupers", GrouperRegistry),
         ("scorers", ScorerRegistry),
         ("rca_sections", SectionRegistry),
+        ("suppressors", SuppressorRegistry),
     )
     missing = [
         f"{p.name}.{field}: {n}"
