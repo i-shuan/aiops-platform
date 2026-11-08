@@ -38,39 +38,32 @@ AIOps 平台：從監控指標抓異常、收斂成事件群、抑制與分送�
 ## 架構一覽
 
 ```
-                    ┌─────────────── tasks/（排程：python -m aiops.tasks）────────────────┐
-                    │                                                                      │
-監控資料源 ──► datasource_specs ──► detection ──► anomalies 表                                │
-(Prometheus／VM／ES)                 (訓練、偵測)        │                                    │
-外部系統 ──────────────────────► ingestion ──► external_anomalies 表                         │
-(工廠 FDC 等)                                           │                                    │
-                                                        ▼                                    │
-                                          alerts（收斂 → 計分 → 抑制 → 產生通知）◄────────────┘
-                                                        │
-                                                        ▼
-                                notifiers ──► aiops-alertmanager ──► Slack／Teams／PagerDuty
-                                                        │
-                                                        └──► Grafana（只顯示，不發通知）
-rca：依 preset 組裝根因報告　　tuning：調參只能走「提案 → 回測 → 核准」
+Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流過 YAML 宣告的算子
+
+  抓取(fetch) → 偵測(detector.*) → 只留新異常 → 心跳／恢復 → 收斂 → 計分 → 抑制 → 通知內容 → 通知(notifier.*) → 寫入
+       ▲                                                                                              │
+  datasource_specs                                                           只有「最終結果」進資料庫（Incident、通知紀錄、模型狀態）
+  (Prometheus／VM／ES)                                    節點之間不透過資料庫傳資料；管線前後由 storage/hooks.py 一次載入／一次寫入
+                                                                             通知 ──► aiops-alertmanager ──► Slack／Teams／PagerDuty
+                                                                                  └──► Grafana（只顯示，不發通知）
 ```
 
 | 目錄 | 是什麼 |
 |---|---|
-| `aiops/domains/` | 業務領域：`detection`、`alerts`、`rca`、`ingestion`、`tuning`。每個領域有 `api.py`、`commands/`、`schemas.py`、`dao.py`，領域之間互不 import |
-| `aiops/plugins/` | 可抽換零件：偵測器、收斂、計分、抑制、報告段落、LLM |
-| `aiops/presets/` | 場景組態：`it_otel`、`it_apm`、`factory`、`metrics_only` |
+| `aiops/core/` | `PipelineContext`（強型別）、Pipeline 引擎、算子註冊中心、錯誤型別、請求模型 |
+| `aiops/operators/` | 可抽換算子：`detectors`、`alerts`（收斂／計分／抑制／恢復）、`rca`、`llm`（含 `noop`）、`notifiers`、`fetch`、`admin`（手動動作） |
+| `aiops/workflows/` | 管線 YAML：`it_otel`、`it_apm`、`factory`、`metrics_only`、`rca_report` 與各 `admin_*` 手動動作。調整流程只改這裡 |
+| `aiops/storage/` | SQLAlchemy 資料表、repository、`hooks.py`（管線前後的載入／寫入） |
+| `aiops/api/` | 薄薄一層 HTTP：把請求交給 `aiops/runner.py`，不含業務邏輯 |
 | `aiops/datasource_specs/` | 資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch` |
 | `aiops/metric_query/` | 查詢語法解析與時間窗對齊（不連線） |
-| `aiops/models/` | SQLAlchemy 資料表與存取 |
-| `aiops/tasks/` | 排程與管線調度 |
-| `aiops/notifiers/` | 通知出口：Alertmanager v2、log |
+| `aiops/tasks/` | 排程入口（`python -m aiops.tasks`），只負責呼叫 Pipeline |
 | `aiops/security/` | API token 驗證 |
 | `aiops/infrastructure/` | 故障看守（本機日誌、備援 webhook） |
 | `deploy/helm/aiops-alertmanager/` | 接收本平台通知的 Alertmanager chart |
 | `deploy/helm/aiops-grafana/` | 只顯示的 Grafana chart：APM（讀 ES）與平台告警（讀 Alertmanager），不發通知 |
 | `deploy/helm/aiops-platform/` | 平台本身：API（Deployment）與排程（CronJob） |
 | `deploy/elasticsearch/` | ES 說明與去機密的快照（chart 原始碼不在本機，見該資料夾 README） |
-| `configs/jobs.example.yaml` | 排程工作範例 |
 
 ## 本機開發
 
@@ -115,16 +108,16 @@ PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後�
 ### 跑排程
 
 ```bash
-.venv/Scripts/python -m aiops.tasks run-once -c configs/jobs.example.yaml
+.venv/Scripts/python -m aiops.tasks run-once -w it_otel
 ```
 
 | 指令 | 用途 |
 |---|---|
-| `run-once -c <jobs.yaml> [--job 名稱]` | 跑一輪就結束（適合 K8s CronJob）。任一 job 失敗則結束碼非 0 |
-| `loop -c <jobs.yaml> --interval 60` | 常駐，每隔 N 秒跑一輪（只適合單一副本） |
+| `run-once -w <workflow>` | 跑一輪就結束（適合 K8s CronJob）。`-w` 可以是 `aiops/workflows/` 的名稱或自己的 YAML 路徑；有任何一條序列失敗則結束碼非 0 |
+| `loop -w <workflow> --interval 60` | 常駐，每隔 N 秒跑一輪（只適合單一副本） |
 | `source-check` | 檢查每個資料源有沒有設定、連不連得上 |
 
-每一輪：模型過期才重訓 → 偵測並只寫入新異常 → 告警管線處理還沒處理過的異常。同一段時間重跑不會重複寫入或重複通知。
+每一輪就是跑一次 Pipeline：模型過期才重訓 → 偵測並只留新異常 → 收斂、計分、抑制 → 通知 → 寫入結果。同一段時間重跑不會重複開單或重複通知（第二輪只會多一則「恢復」通知）。
 
 ## 設定（環境變數）
 

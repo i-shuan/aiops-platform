@@ -2,7 +2,7 @@
 import pytest
 
 from aiops.app import create_app
-from aiops.models import core, db
+from aiops.storage import db, models
 
 SILENCE = {"kind": "maintenance", "start": "2026-11-08T04:00:00+08:00", "end": "2026-11-08T06:00:00+08:00",
            "entity": "svc-a", "reason": "換硬碟", "created_by": "amy"}
@@ -21,7 +21,7 @@ def file_db(tmp_path, monkeypatch):
     monkeypatch.setenv("AIOPS_API_TOKEN", "test-token")
     url = f"sqlite:///{(tmp_path / 'aiops.db').as_posix()}"
     db.configure(url)
-    core.reset_all()
+    models.reset_all()
     yield url
     db.configure("sqlite://")
 
@@ -43,8 +43,8 @@ def test_times_are_stored_as_utc(file_db):
 def test_startup_waits_for_database_then_gives_up(monkeypatch):
     """資料庫比平台晚就緒時，啟動要等它；等超過時限才放棄。"""
     from aiops import initialization
-    from aiops.infrastructure.errors import InfrastructureError
-    from aiops.models import db as db_module
+    from aiops.core.errors import InfrastructureError
+    from aiops.storage import db as db_module
 
     calls, now = [], [0.0]
 

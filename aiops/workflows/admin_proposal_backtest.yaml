@@ -1,0 +1,5 @@
+name: admin_proposal_backtest
+description: "手動動作：proposal_backtest"
+nodes:
+  - name: proposal_backtest
+    operator: admin.proposal_backtest

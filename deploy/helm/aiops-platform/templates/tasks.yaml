@@ -1,14 +1,4 @@
 {{- if .Values.tasks.enabled }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "aiops.fullname" . }}-jobs
-  labels:
-    {{- include "aiops.labels" . | nindent 4 }}
-data:
-  jobs.yaml: |
-    {{- toYaml .Values.tasks.jobs | nindent 4 }}
----
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -30,24 +20,18 @@ spec:
           labels:
             {{- include "aiops.labels" . | nindent 12 }}
             app.kubernetes.io/component: tasks
-          annotations:
-            checksum/jobs: {{ toYaml .Values.tasks.jobs | sha256sum }}
         spec:
           restartPolicy: Never
           containers:
             - name: tasks
               {{- include "aiops.container" . | nindent 14 }}
-              args: ["python", "-m", "aiops.tasks", "run-once", "-c", "/config/jobs.yaml"]
+              args: ["python", "-m", "aiops.tasks", "run-once", "-w", {{ .Values.tasks.workflow | quote }}]
               resources:
                 {{- toYaml .Values.tasks.resources | nindent 16 }}
               volumeMounts:
-                - {name: jobs, mountPath: /config, readOnly: true}
                 - {name: tmp, mountPath: /tmp}
                 - {name: data, mountPath: /data}
           volumes:
-            - name: jobs
-              configMap:
-                name: {{ include "aiops.fullname" . }}-jobs
             - {name: tmp, emptyDir: {}}
             - {name: data, emptyDir: {}}
 {{- end }}

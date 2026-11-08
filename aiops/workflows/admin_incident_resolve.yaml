@@ -1,0 +1,7 @@
+name: admin_incident_resolve
+description: "手動動作：incident_resolve"
+nodes:
+  - name: incident_resolve
+    operator: admin.incident_resolve
+  - name: auto
+    operator: notifier.auto

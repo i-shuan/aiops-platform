@@ -1,0 +1,5 @@
+name: admin_mapping_get_approved
+description: "手動動作：mapping_get_approved"
+nodes:
+  - name: mapping_get_approved
+    operator: admin.mapping_get_approved

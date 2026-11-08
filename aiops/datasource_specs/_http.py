@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from aiops.infrastructure.errors import InfrastructureError
+from aiops.core.errors import InfrastructureError
 
 
 def env_required(name: str) -> str:

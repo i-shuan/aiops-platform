@@ -9,7 +9,7 @@ from aiops.datasource_specs import check_sources, get_datasource_spec
 from aiops.datasource_specs.base import InvalidQueryError, NoDataError
 from aiops.datasource_specs.elasticsearch import ElasticsearchSpec
 from aiops.datasource_specs.prometheus import PrometheusSpec, VictoriaMetricsSpec
-from aiops.infrastructure.errors import InfrastructureError
+from aiops.core.errors import InfrastructureError
 from aiops.metric_query.elasticsearch import parse_es_query
 from aiops.metric_query.promql import validate_promql
 from aiops.metric_query.window import align_window
@@ -186,6 +186,6 @@ def test_source_check_api_and_unconfigured_source_returns_503(client, monkeypatc
         monkeypatch.delenv(var, raising=False)
     assert client.get("/api/v1/ingestion/sources/check").json()["result"]["ok"] is True
 
-    body = {"metric": {"source_type": "prometheus", "query": "up"},
-            "time_range": {"start": "2026-11-08T00:00:00", "end": "2026-11-08T01:00:00"}}
-    assert client.post("/api/v1/detection/run", json=body).status_code == 503
+    # 資料源沒設定是基礎設施問題，不是「這條序列沒資料」：整輪失敗回 503，而不是回 200 然後把錯誤藏在 errors 裡
+    body = {"workflow": "metrics_only", "targets": [{"source_type": "prometheus", "query": "up", "entity": "x"}]}
+    assert client.post("/api/v1/runs", json=body).status_code == 503

@@ -42,7 +42,7 @@ services:
 
   tasks:
     build: .
-    command: ["python", "-m", "aiops.tasks", "loop", "-c", "configs/jobs.example.yaml", "--interval", "300"]
+    command: ["python", "-m", "aiops.tasks", "loop", "-w", "it_otel", "--interval", "300"]
     environment: *platform-env
     depends_on:
       postgres:

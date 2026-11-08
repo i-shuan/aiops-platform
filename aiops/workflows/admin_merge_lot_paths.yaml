@@ -1,0 +1,5 @@
+name: admin_merge_lot_paths
+description: "手動動作：merge_lot_paths"
+nodes:
+  - name: merge_lot_paths
+    operator: admin.merge_lot_paths

@@ -1,0 +1,5 @@
+name: admin_silence_create
+description: "手動動作：silence_create"
+nodes:
+  - name: silence_create
+    operator: admin.silence_create

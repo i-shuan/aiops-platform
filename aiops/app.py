@@ -1,12 +1,12 @@
 from fastapi import FastAPI
 
-from aiops.initialization import init_error_handlers, init_infrastructure, init_plugins, init_routers
+from aiops.initialization import init_error_handlers, init_infrastructure, init_operators, init_routers
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AIOps Platform")
     init_infrastructure()
-    init_plugins()
+    init_operators()
     init_error_handlers(app)
     init_routers(app)
 

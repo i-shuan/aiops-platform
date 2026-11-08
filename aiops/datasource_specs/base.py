@@ -4,14 +4,14 @@ from typing import Any
 
 import pandas as pd
 
-from aiops.commands.base import CommandError, CommandNotFound
+from aiops.core.errors import BadRequest, NotFound
 
 
-class InvalidQueryError(CommandError):
+class InvalidQueryError(BadRequest):
     """查詢寫錯（語法、多條序列、索引不存在）：是使用者要改的，回 400。"""
 
 
-class NoDataError(CommandNotFound):
+class NoDataError(NotFound):
     """查詢合法但這段時間沒有資料：回 404。排程會把它當成這個 target 失敗回報。"""
 
 

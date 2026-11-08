@@ -1,0 +1,5 @@
+name: admin_mapping_submit
+description: "手動動作：mapping_submit"
+nodes:
+  - name: mapping_submit
+    operator: admin.mapping_submit

@@ -1,318 +1,197 @@
-# CLAUDE.md - AIOps 架構守則與開發規範
+# CLAUDE.md - AIOps Pipeline & Plugin 架構開發規範
 
-## 0. 一句話
+## 0. 核心設計哲學 (Core Philosophy)
+本平台採用 **「Pipeline 管線調度 + 可插拔算子 (Operator / Plugin)」** 架構：
+- **Pipeline 是固定骨架**：資料由記憶體內的 `PipelineContext` 順序流動（Pull -> Detect -> Group/Suppress -> RCA -> Notify -> Persist）。
+- **Operator 是可抽換零件**：演算法（MAD、Z-Score、Isolation Forest）與 LLM 供應商均為純算子，透過 `@OperatorRegistry.register` 登記，由 YAML 設定檔動態選用。
+- **資料庫只記最終結果**：節點之間嚴禁透過資料庫傳遞資料（徹底廢除 `*ReadDAO` 模式），DB 只負責寫入最終生成的 Incident、Audit Log 與模型持久化狀態。
 
-**Command 是固定流程，Plugin 是可抽換零件，Preset 決定這個場景用哪些零件。**
-換場景（IT／工廠／純指標）不另寫一套流程，只換 preset；換演算法不改流程，只換外掛名字。
+---
 
-## 1. 分層與硬性禁令
+## 1. 架構分層與不可違背的禁令 (Architecture Invariants)
 
-| 層 | 位置 | 職責 | 不准做的事 |
-|---|---|---|---|
-| 入口 | `domains/<d>/api.py` | 驗證請求 -> 呼叫 Command | 任何邏輯、import 自己領域 commands/schemas 以外的東西 |
-| 流程 | `domains/<d>/commands/` | 固定業務流程（validate -> run） | import 具體外掛、直接碰 models |
-| 存取 | `domains/<d>/dao.py` | 讀寫資料表 | 業務判斷 |
-| 資料表 | `models/` | SQLAlchemy ORM（`core.py`）、連線與 session（`db.py`）、DAO 共用存取（`crud.py`） | 業務判斷 |
-| 調度 | `tasks/` | 排程與管線：依序呼叫各領域 Command（訓練 -> 偵測 -> 告警） | 碰 DAO、資料表、外掛、資料源、通知出口 |
-| 零件 | `plugins/<kind>/` | 純運算：偵測、收斂、計分、抑制、報告段落 | 認識任何領域、碰 DB、碰外部服務（含 LLM） |
-| LLM 出口 | `llm/` | 呼叫模型（OpenAI 相容、Anthropic）；`get_llm()` 沒設定時回 None | 驗證輸出（在領域 Command 做）、認識領域 |
-| 資料源 | `datasource_specs/` | 連線、查詢、轉成 `DataFrame(ts, value)`、連線自檢 | 審核狀態、業務合成（trace 合成、Lot 履歷） |
-| 查詢語法 | `metric_query/` | 純解析：PromQL 檢查、ES 查詢 JSON 轉降採樣 search body、時間窗對齊 | 連線、碰平台其他層 |
-| 認證 | `security/` | API Bearer token 驗證（由 initialization 用 Depends 掛到每個領域 router） | 業務邏輯、在 api.py 驗證 |
-| 場景 | `presets/` | 每個場景啟用哪些外掛（只寫名字）與場景參數（嚴重度門檻） | import 外掛或領域 |
-| 出口 | `notifiers/` | 把平台決定要發的通知送出去（Alertmanager v2、log） | 判斷要不要發、碰資料表、認識領域 |
-| 基礎設施 | `infrastructure/` | 故障看守（本機日誌、webhook）、基礎設施錯誤 | 業務邏輯 |
+| 層次 | 所在位置 | 職責 | 嚴格禁止事項 |
+| :--- | :--- | :--- | :--- |
+| **資料流載體** | `core/context.py` | 貫穿整條 Pipeline 的強型別 `PipelineContext` | 嚴禁在節點間傳遞鬆散無型別的 `dict` |
+| **管線引擎** | `core/pipeline.py` | 讀取工作定義，按序實例化算子並調用 `.execute(ctx)` | 嚴禁在引擎內 hardcode 具體算子邏輯 |
+| **算子註冊** | `core/registry.py` | 算子註冊中心 (`OperatorRegistry`)，負責動態發現與驗證 | — |
+| **可抽換算子** | `operators/*` | 業務零件（Detector、Grouper、Suppressor、RCA、LLM、Notifier） | 嚴禁 import 具體資料表 ORM；嚴禁碰外網（LLM 與 Notifier 除外） |
+| **外部源適配** | `datasource_specs/*` | 外部資料庫語法轉換與連線（Prometheus, ES, OTel），輸出 DataFrame | 嚴禁 import `models` 或 `operators` |
+| **持久化層** | `storage/*` | 資料庫模型定義（SQLAlchemy）與 Repository | 嚴禁業務判斷邏輯 |
+| **排程入口** | `tasks/*` | 呼叫 Pipeline 執行（支援 K8s CronJob 或定時 Loop） | 嚴禁直接在排程中操作底層運算 |
+| **API 接口** | `api/*` | 外部查詢與手動觸發，掛載 Token 驗證 | 零業務邏輯（嚴禁 `if / for / try`），純調度 Pipeline 或查詢 Storage |
 
-以下全部由 `tests/test_architecture.py` 機械式檢查，**違規 = 測試紅燈**：
+### 🚫 架構自動化防禦（違規將導致 `test_architecture.py` 報錯）
+1. **嚴禁內部跨節點偷渡**：任何算子內部嚴禁出現 `ReadDAO` 去翻其他模組的表。所有上游資訊必須由 `ctx` 取得。
+2. **算子獨立性**：`operators/detectors/` 各演算法之間嚴禁互相 import。
+3. **可選能力無害化（LLM Degradation）**：`operators/llm/` 必須提供 `noop` 實作。未配置金鑰時管線必須平滑降級至模板，嚴禁阻斷 Pipeline。
 
-1. `plugins/` 不得 import `domains`、`models`、`infrastructure`、`datasource_specs`、`presets`、`initialization`、`notifiers`。
-2. `datasource_specs/` 不得 import `domains`、`models`、`plugins`。
-3. `presets/` 不得 import `domains`、`plugins`、`models`、`datasource_specs`。
-4. **領域之間不得互相 import。** 跨領域資料只能走共用的 `models/` 資料表，且遵守下面「跨領域資料讀取規範」。
-5. 領域內只有 `dao.py` 能 import `aiops.models`。
-6. `commands/` 只能從 `aiops.plugins.base`、`aiops.plugins.registry` 取用外掛；具體外掛一律 `XxxRegistry.get(name)`。
-7. 領域層不得直接 import 具體資料源（如 `datasource_specs.mock`），一律 `get_datasource_spec()`。
-8. `api.py` 只能 import `fastapi`、`typing`、`pydantic`、同領域的 `commands` 與 `schemas`；不得有 if／三元運算／for／while／try／with／推導式。
-9. 不得出現 `*_service.py` 或 `services/` 目錄。
-10. 每個 preset 引用的外掛名字都必須已註冊。
-11. 偵測器現行參數（`active_detector_configs`）只有 `domains/tuning/dao.py` 能寫。
-12. `aiops/` 底下不得有名稱含 `grafana` 的檔案或目錄（見第 5 節）。
-13. 每張資料表都要在 `models/core.py` 的 `TABLE_OWNERS` 登記擁有者領域（直接比對 SQLAlchemy 的 `Base.metadata`）。
-14. DAO 類別引用了別的領域擁有的 ORM 類別（如 `AnomalyRow`），類別名稱必須以 `ReadDAO` 結尾。
-15. 任何 `*ReadDAO` 不得呼叫寫入函式（`crud.create／create_many／update／upsert`、`write_session`、`Session.add／delete／merge／flush／commit／execute`、`setattr`），也不得有寫入類方法名。
-16. `notifiers/` 不得 import `domains`、`models`、`plugins`、`presets`、`datasource_specs`。
-17. 領域層不得直接 import 具體通知出口（如 `notifiers.alertmanager`），一律 `get_notifier()`，型別只能用 `notifiers.base`。
-18. `aiops/` 的 Python 不得出現 Alertmanager 設定語彙（路由、receiver、通道設定都只在 helm chart）。
-19. `aiops.models` 只准 `models/` 自己、各領域 `dao.py`、`initialization/` 匯入。
-20. `tasks/` 只能 import 各領域的 `commands` 與 `schemas`（加上 `aiops.schemas`、`initialization`、`infrastructure`），不得碰 DAO、`models`、`plugins`、`datasource_specs`、`notifiers`、`presets`。
-21. `metric_query/` 只能 import 自己，不得 import `httpx` 等連線套件。
-22. `security/` 不得 import `domains`、`models`、`plugins`、`datasource_specs`、`notifiers`。
-23. **每一個 `/api/` 端點都必須驗 token**：`tests/test_security.py` 逐一列舉 OpenAPI 上的所有端點，沒帶 token 必須回 401，並檢查每條路由都掛了 `require_token`。
-24. `llm/` 不得 import `domains`、`models`、`plugins`、`presets`、`datasource_specs`。
-25. 領域只能用 `aiops.llm`（`get_llm()`）與 `aiops.llm.base`，不得直接 import 具體供應商。
-26. `plugins/` 不得 import `aiops.llm` 或 `httpx`（外掛不連外部服務）。
-27. `aiops-grafana` chart 只顯示：沒有告警規則／Contact Point／Policy 檔或掛載；資料源只有 `apm-*` 三個 ES 與 `aiops-alertmanager`；不得有已移除的舊引擎參照；不得關閉 HTML 消毒。
-28. 平台對 ES 只讀：`datasource_specs/elasticsearch.py` 不得出現寫入或管理端點。
-29. 機密不進 repo：`deploy/`、`configs/`、`docker-compose.yaml` 不得有金鑰樣式字串；ES 快照不得有 Secret 資源；`values.yaml` 的 `devSecretEnv`、`secretData` 預設必須是空的。
-30. `deploy/helm/` 底下只能有一個 Grafana chart（`aiops-grafana`），`deploy/` 底下只能有一個 ES 目錄（`elasticsearch`）。
+---
 
-### LLM 使用守則
+## 2. 算子合約規範 (Operator Protocols)
 
-- **LLM 只能「提議」，平台「驗證」，不過就退回模板。** 沒設定 LLM、呼叫失敗、輸出不是 JSON、驗證不過，一律退回模板，功能照常，並在結果裡標 `generated_by`（`llm`／`template`）與 `rejected`（退回原因）。
-- RCA 總結敘述（`domains/rca/commands/narrative.py`）的依據驗證：每個結論要引用存在的報告段落、不得提到事件群以外的已知實體、出現的數字要能在證據原文找到。
-- 回饋抽調參規則（`domains/tuning/commands/rule_extraction.py`）的驗證：只能改偵測器宣告的 `tunable` 參數、要在範圍內、單次變動不超過 50%、方向要跟回饋一致（誤報只能調高 threshold、漏報只能調低）。
-- LLM 產出的調參**只是提案**（`source=llm`），仍要回測與核准才生效。
-- 設定：`AIOPS_LLM_PROVIDER`（none／openai／anthropic）、`AIOPS_LLM_MODEL`、`AIOPS_LLM_API_KEY`、`AIOPS_LLM_BASE_URL`。
-
-### 認證
-
-- 每個領域 router 由 `init_routers` 一律掛上 `Depends(require_token)`；**api.py 不寫任何驗證**，新增領域也不會漏掛。`/health` 公開。
-- `AIOPS_API_TOKEN`：必填，可逗號分隔多組（換 token 時新舊並存）。**沒設就全部拒絕**（fail closed）。
-- `AIOPS_AUTH_DISABLED=true`：只限本機開發，啟動時會寫警告。
-- 目前只有「有 token 就能做所有事」，還沒有角色（例如唯讀 vs 可核准調參）。
-
-### 跨領域資料讀取規範
-
-- 領域**嚴禁寫入**其他領域擁有的資料表。寫入只有擁有者領域的 DAO 能做（擁有者見 `TABLE_OWNERS`）。
-- 跨領域讀取必須在**自己領域的 `dao.py`** 獨立宣告 `*ReadDAO`（例：`rca/dao.py` 的 `IncidentReadDAO`、`detection/dao.py` 的 `DetectorConfigReadDAO`），內容只能是查詢。
-- 這樣表結構要改或要拆庫時，全域搜尋 `ReadDAO` 就能找到所有跨領域的消費端。
-- 檢查方式：在每個 `dao.py` 的類別裡，找出引用了哪些 ORM 類別（`XxxRow`）、呼叫了哪些函式。ORM 類別對資料表的對應直接取自 SQLAlchemy registry，新增資料表不用改測試。
-- DAO 一律用 `models/crud.py` 存取，回傳 dict；Command 不會拿到 ORM 物件，也不開 session。寫入用 `write_session`（會 commit），讀取用 `read_session`（一律 rollback）。
-
-### 持久化
-
-- 連線：`AIOPS_DATABASE_URL`，預設 `sqlite:///./aiops-local.db`；正式用 PostgreSQL，例如 `postgresql+psycopg://user:pass@host:5432/aiops`（要另裝 `psycopg`，目前還沒加進 requirements）。
-- 時間一律存成 UTC、不帶時區（`crud` 寫入時自動轉換）。讀出來的 naive datetime 就是 UTC。
-- 資料表結構目前由啟動時的 `create_all()` 建立，**只會新增表、不會改既有欄位**。上正式環境前要改用 Alembic migration。
-- 資料庫連不上會轉成 `InfrastructureError`（API 回 503 並走看守機制）。
-- 一個 Command 裡的多次 DAO 呼叫**不在同一個交易**（每次 DAO 呼叫各自 commit）。目前接受；需要原子性時再引入 unit of work。
-
-另外，`tests/test_plugin_contracts.py` 會自動對**每一個**已註冊外掛跑契約測試，新增外掛不必另寫契約測試。
-
-## 2. 動作 vs 零件：不要把動作當外掛
-
-| 是 Command（固定流程） | 是 Plugin（可抽換零件） |
-|---|---|
-| 收資料、訓練、偵測、調參、回測、核准 | zscore、shift、peer、rules、chronic…（偵測演算法） |
-| trace 合成、Lot 履歷合成、外部異常匯入、欄位對照審核 | same_entity、topology_chain、lot_path_chain…（收斂 Grouper） |
-| 告警收斂管線、產生 RCA 報告 | golden_signals、p0_boost…（計分 Scorer） |
-| 建立靜音／維護窗口／排除時段、產生通知 payload、推送 | silence_window、same_root_cause、dedup…（抑制 Suppressor） |
-| 收集回饋、從回饋抽調參規則 | summary、timeline、root_cause_candidates…（報告段落 Section Builder，共 8 種） |
-
-- **偵測器契約只有兩個方法：`fit(df) -> self`、`detect(df) -> AnomalyResult`。** 「train」「tune」「collect」不是外掛名字，是領域 Command。
-- **trace 不另開一套 train／detect。** `ingestion` 的 `MergeTracesCommand` 把 span 轉成標準時序，之後跟一般指標走同一個偵測器。
-
-### 各類外掛的單一契約（定義在 `plugins/base.py`）
-
-所有外掛都是純運算：輸入進來、結果出去，不連 DB、不改傳入的物件、不認識領域。需要的場景資料（拓撲、P0 清單等）只能從 `context` 取得，由 Command 傳入。
-
-| 外掛 | 契約 | 備註 |
-|---|---|---|
-| 偵測器 `BaseDetector` | `fit(df) -> self`；`detect(df) -> AnomalyResult`；`get_state() -> dict`；`load_state(state) -> self`；`validate_params()` | 先 fit（或 load_state）才能 detect；state 必須能 JSON 序列化，載回後偵測結果要一模一樣（契約測試檢查）。宣告 `tunable = {參數: (預設, 最小, 最大)}`，自動調參只能改這些；`requires_peers = True` 時 df 會帶 `peer_*` 欄位 |
-| 收斂 `BaseGrouper` | `group(incidents, context) -> list[Incident]` | 不得丟掉任何事件；合併用 `merge_incidents()` |
-| 計分 `BaseScorer` | `score(incident, context) -> float` | 回傳新分數，不得修改 incident |
-| 抑制 `BaseSuppressor` | `suppress(incident, context) -> str \| None` | 回傳抑制原因；`None` 表示照發。靜音、近期通知、同批事件群由 Command 放進 `context` |
-| 報告段落 `BaseSectionBuilder` | `applies(incident, context) -> bool`；`build(incident, context) -> ReportSection` | 資料不足時 `applies` 回 `False`，不輸出空殼 |
-
-**不要在外掛之外的地方偷渡這些邏輯**：收斂規則、計分規則、報告段落內容都不准寫進 Command 或 `api.py`，Command 只負責依 preset 依序呼叫外掛。
-
-## 3. 檔案歸屬決策樹
-
-- **新增 API 端點** → `domains/<domain>/api.py`；請求／回應規格放 `schemas.py`。跨領域共用的純資料型別（`MetricTarget`、`TimeRange`）放 `aiops/schemas.py`。
-- **新增領域** → 建 `domains/<domain>/`，放 `api.py`（定義 `router`）。`init_routers` 會自動掛載，**不要**手動註冊。
-- **業務流程** → 繼承 `BaseCommand`，放 `domains/<domain>/commands/<action>.py`。業務錯誤丟 `CommandError`／`CommandNotFound`（404）／`CommandConflict`（409）。
-- **資料進來之後的合成、匯入、欄位對照審核** → `domains/ingestion/commands/`（trace 合成、Lot 履歷合成、外部異常接收、欄位對照、資料源自檢）。
-- **外部系統推異常進來**（例如工廠 FDC）→ `POST /api/v1/ingestion/anomalies`，存進 ingestion 的 `external_anomalies`（同一 `source` 的 `external_id` 只收一次）。alerts 用 `ExternalAnomalyReadDAO` 讀，跟偵測到的異常一起進同一條管線（`pipeline` 名稱要跟排程 job 一致）。
-- **Lot 履歷** → `POST /api/v1/ingestion/lot-paths/merge` 回傳每個 Lot 的機台路徑與 `lot_edges`（機台流向），並存進 `lot_paths`。**Lot 流向一律放 `lot_edges`，不得塞進 `topology`**：`topology` 是 [caller, callee]（異常從 callee 傳到 caller），Lot 流向是上游 -> 下游，方向相反，放錯會讓根因推論整個反過來。
-- **trace** → `POST /api/v1/ingestion/traces/merge` 把 span 合成每服務時序存進 `trace_series`，並從父子 span（`span_id`／`parent_id`）推導服務呼叫關係存進 `service_edges`。之後：
-  - 偵測用 `source_type: "trace"`、query「服務/欄位」（欄位：`count`／`error_rate`／`p95_ms`）直接讀，跟一般指標走同一個偵測器。`trace` 是平台內部來源，不是 `datasource_specs` 裡的 Spec。
-  - RCA 的 `trace_evidence` 自動讀事件群前後 10 分鐘的 trace 時序。
-- **場景資料自動補上**：alerts 與 rca 在呼叫端**沒給** `topology`／`lot_edges`／`trace_series` 時，從 `service_edges`、`lot_paths`、`trace_series` 自動推導（`plugins.base.fill_context`）。呼叫端明確給的一律優先，給空清單代表「不要用」。
-- **新監控資料源** → 繼承 `BaseDataSourceSpec`，實作 `from_env`、`configured`、`fetch_data`、`check`，放 `datasource_specs/<name>.py`，在 `datasource_specs/__init__.py` 的 `_SPECS` 加一行。查詢語法解析放 `metric_query/`。
-- **欄位對照** → 只讀「已核准」版本，而且**資料源層不查資料庫**：領域 Command 用自己的 `FieldMappingReadDAO` 讀出，經 `fetch_frame(..., field_map_for=...)` 傳給 Spec 的 `fetch_data(..., field_map)`。對照格式是「來源欄位 -> 標準欄位」，標準欄位有 `ts`、`value`、`entity`。目前 Elasticsearch 會用它補 `time_field`、`value_field`，以及把查詢的 `"entity"` 轉成對應欄位的 term 篩選；PromQL 本來就指定好序列，不使用。
-  - 錯誤分工：查詢寫錯（語法、多條序列、索引不存在）丟 `InvalidQueryError`（400）；沒資料丟 `NoDataError`（404）；連不上、認證失敗、伺服器錯誤丟 `InfrastructureError`（503）。
-  - 現有：`mock`、`prometheus`（`AIOPS_PROMETHEUS_URL`／`_TOKEN`）、`victoriametrics`（`AIOPS_VICTORIAMETRICS_URL`／`_TOKEN`）、`elasticsearch`（`AIOPS_ES_URL`／`AIOPS_ES_API_KEY`，query 是 JSON，格式見 `metric_query/elasticsearch.py`）。
-  - Prometheus／VictoriaMetrics 查詢必須只回一條序列；多條請在 PromQL 裡 `sum`／`avg by` 聚合。
-- **資料源連線自檢** → `GET /api/v1/ingestion/sources/check` 或 `python -m aiops.tasks source-check`（有已設定但連不上的就非 0 結束）。
-- **新偵測演算法** → 繼承 `BaseDetector`，放 `plugins/detectors/<algo>.py`，加 `@DetectorRegistry.register`。
-- **新收斂規則** → 繼承 `BaseGrouper`，放 `plugins/groupers/`，加 `@GrouperRegistry.register`。合併一律用 `merge_incidents()`。
-- **新計分規則** → 繼承 `BaseScorer`，放 `plugins/scorers/`，加 `@ScorerRegistry.register`。回傳新分數，不得修改 incident。
-- **新抑制規則** → 繼承 `BaseSuppressor`，放 `plugins/suppressors/`，加 `@SuppressorRegistry.register`，再加進 preset 的 `suppressors`（依序比對，第一個回傳原因的就抑制，所以 `silence_window` 排第一）。
-- **靜音、維護窗口、人工排除時段** → 資料存在 alerts 的 `silences` 表，用 `POST /api/v1/alerts/silences` 建立。只有這一份，接收端不另設靜音。
-- **通知內容（嚴重度、標題、路由標籤）** → `domains/alerts/commands/payload.py`。嚴重度門檻是 preset 的 `severity_thresholds`。一個部門一則通知，部門取自事件 `attrs["dept"]`，沒有就是 `unassigned`。
-- **新通知出口（例如另一種接收端）** → 繼承 `BaseNotifier`，放 `notifiers/<name>.py`，在 `notifiers/__init__.py` 的 `get_notifier()` 加分支。只負責傳送，送不出去丟 `InfrastructureError`。
-- **新 RCA 報告段落** → 繼承 `BaseSectionBuilder`，放 `plugins/rca_sections/`，加 `@SectionRegistry.register`。資料不足時讓 `applies()` 回 `False`，不要輸出空殼。
-  - 拓撲一律用 `propagation_edges(context)` 取「異常傳播方向」：IT 的 `topology`（[caller, callee]）是 callee -> caller；工廠的 `lot_edges` 是上游 -> 下游。根因推論＝沒有異常上游的異常實體。
-- **回饋** → `POST /api/v1/tuning/feedback`（要指到真的 `incident_uid`），再 `POST /api/v1/tuning/feedback/{id}/propose` 轉成調參提案。
-- **新場景或調整場景用的零件** → 改 `presets/__init__.py`，只寫外掛名字與場景參數。
-- **任何改偵測參數的需求（自動調優、LLM 從回饋抽規則、人工調整）** → 一律 `CreateProposalCommand`（`source` 填 `auto`／`llm`／`manual`），再走 `BacktestProposalCommand` -> `ApproveTuningCommand`。**不准另開路徑直接寫參數。**
-- **資料表** → `models/core.py`，並在 `TABLE_OWNERS` 登記擁有者；存取寫在各領域 `dao.py`。別的領域要讀就寫 `*ReadDAO`。
-- **DB／ES 連不上** → DAO／Spec 丟 `InfrastructureError`。`initialization` 會統一回 503，並呼叫 `infrastructure.fallback.report_failure`（寫本機日誌，設了 `AIOPS_FALLBACK_WEBHOOK` 就直接打 webhook）。不要在業務 Command 或外掛裡自己做備援。
-- **排程／背景任務** → `aiops/tasks/`，任務內只呼叫 Command。工作設定是 YAML（範例 `configs/jobs.example.yaml`），一個 job = 一條管線。
-- **偵測結果要進告警** → 不准 detection 呼叫 alerts。`RunDetectionCommand` 帶 `pipeline` 就把新異常寫進 `anomalies`；`ProcessPendingAnomaliesCommand` 用 `AnomalyReadDAO` 讀、處理完把游標記在 alerts 自己的 `alert_watermarks`；兩者由 `tasks/pipeline.py` 串起來。
-- **批次訓練、保存基準線** → `TrainDetectorCommand` 把 `get_state()` 存進 `detector_models`；`RunDetectionCommand` 帶 `pipeline` 時優先 `load_state()`。
-
-### 偵測到告警的資料流
-
-```
-python -m aiops.tasks run-once -c jobs.yaml        （或 loop --interval 60）
-  每個 job、每個 target：
-    TrainDetectorCommand  模型超過 retrain_minutes 才重訓 -> detector_models
-    RunDetectionCommand   載入模型偵測 -> 只寫比上次新的異常 -> anomalies（標上 pipeline）
-  ProcessPendingAnomaliesCommand
-    AnomalyReadDAO（偵測的）+ ExternalAnomalyReadDAO（外部推來的），各自讀游標之後的異常
-    -> 收斂、計分、抑制、推送 -> 推進各自的 alert_watermarks
-```
-
-- 同一段時間重跑不會重複寫異常、不會重複處理（已有測試）。
-- 推送失敗時游標不前進，下一輪會重處理同一批；但已存檔的事件群會多一筆（目前接受）。
-- `loop` 只適合單一副本；多副本要改用 K8s CronJob 跑 `run-once`，或加分散式鎖。
-- **utils/** → 只放無業務語意的純函式；含業務判斷的回到 Command。
-
-## 4. 調參流程（防止多頭馬車）
-
-```
-自動 tune ─┐
-LLM 回饋  ─┼─> 提案(pending) ─> 回測(backtested) ─> 核准(approved) ─> 寫入現行參數(version+1)
-人工調整  ─┘                                      └─> 現行版本已變 -> stale（作廢，請重提）
-```
-
-提案建立時記下 `base_version`。核准時若現行參數版本已不同，代表期間有別的提案被核准（例如人工剛調好），舊提案自動作廢。這樣自動 tune 不會蓋掉人工設定，也不會有沒回測就套用的參數。
-
-## 5. Grafana 與通知整合守則
-
-**判斷與存放都在平台；Alertmanager 只做路由；Grafana 只做顯示（儀表板、告警清單）。兩者都不放業務邏輯。**
-
-- **要改 Grafana 或 Alertmanager，只能改 helm chart**（Grafana 的 datasource、dashboards；Alertmanager 的路由與 receiver）。不改 Grafana 本體、不自製外掛、不在 Grafana 裡寫查詢以外的邏輯。
-- **Alertmanager 的行為不准靠改程式碼調整。** 換通道、加部門、改分組時間、改重複提醒間隔，全部只改 `deploy/helm/aiops-alertmanager/values.yaml`（或部署時的 `-f` values），不碰 `aiops/` 底下的 Python。平台程式只能做兩件事：產生帶標籤的通知、用 `notifiers` 推送。
-  - `aiops/` 裡不得出現 Alertmanager 的設定語彙（`receivers`、`inhibit_rules`、`slack_configs`、`webhook_configs`、`pagerduty_configs`、`matchers` 等）。路由與通道是 chart 的事。
-  - 想讓接收端多一個可以路由的條件，是**平台多帶一個 label**（`payload.py`），再由 chart 的 `deptRoutes` 或路由規則去比對；不是在程式裡寫「這個部門送去哪」。
-  - chart 本身的 templates 只放固定結構，不放業務判斷；部門與通道一律由 values 決定。
-- **平台側不為 Grafana 開特例。** 不得有 `grafana` 領域、`*grafana*` 命名的模組或目錄、Grafana 專用外掛。Grafana 要讀的資料，就是各領域 `api.py` 的一般端點（例如 alerts 的事件群、rca 的報告），回傳固定的 JSON 形狀。
-- **端點對 Grafana 唯讀。** Grafana 需要的是讀取與接收通知，不得為它開寫入端點。寫入一律走既有的 Command 流程（例如調參只能走提案 -> 回測 -> 核准）。
-- **契約穩定優先。** Grafana 的面板與規則是照端點 JSON 欄位寫的。改 `schemas.py` 的回應欄位前，先確認 helm chart 裡引用該欄位的 provisioning 檔，要改就一起改，不要只改一邊。
-- **通知的分工：平台決定「要不要發、發什麼」，Alertmanager 只決定「送去哪個通道」，Grafana 只顯示。**
-  - 平台（`domains/alerts`）負責所有業務級判斷：何時算異常、怎麼收斂、分數與 P0 加權、同根因抑制、靜音與維護窗口、人工調整排除的時段，以及產出通知內容（payload）。
-  - Alertmanager（`deploy/helm/aiops-alertmanager`）只做純路由：依 `dept` label 送到哪個 Slack channel、Teams、PagerDuty。
-  - **不得在 Grafana 建立 alert rule、Contact Point 或 Notification Policy 來發這些通知，也不得在 Alertmanager 加 inhibit 或 silence。** 否則會出現「平台已因排除時段或抑制而不發，下游卻照樣呼叫」的不一致。靜音、夜間、排除時段的設定只有一份，在平台。
-- **舊 repo `aiops-data-foundation` 不動。** Grafana 與 ES 已搬進本 repo（見下面「Grafana 與 ES 在本 repo」）；舊 repo 的內容只當參考，不再修改。
-
-### Grafana 與 ES 在本 repo（已搬進來；由 `tests/test_helm_grafana.py`、`tests/test_deploy_secrets.py`、`tests/test_architecture.py` 檢查）
-
-**Grafana：`deploy/helm/aiops-grafana/`**
-
-- **只顯示。** 沒有告警規則、Contact Point、Notification Policy，沒有 alerting 的 ConfigMap 或掛載。通知由平台決定、經 Alertmanager 路由。
-- **資料源只有四個**：`apm-metrics`、`apm-traces`、`apm-logs`（Elasticsearch，只讀）與 `aiops-alertmanager`（`handleGrafanaManagedAlerts: false`）。網址與金鑰一律是 `${環境變數}`，來自 Secret。新增資料源要先改測試。
-- **儀表板只讀已定義的資料源**，不得內嵌 HTML／iframe，不得關閉 HTML 消毒（`GF_PANELS_DISABLE_SANITIZE_HTML`）。匿名存取只能是 Viewer，預設關。
-- **不得出現已移除的舊引擎參照**：`aiops-db`、`aiops_*` 資料表、`localhost:18080`、`aiops-api`、`grafana-postgresql-datasource`。
-- **機密只從 Secret（`envSecret`）進來。** `values.yaml` 與 `files/` 不得有金鑰或密碼；`devSecretEnv` 預設空，只限開發。
-- 資源名稱沿用舊 chart（`grafana`、`grafana-datasources`…），才能用 `helm upgrade` 接手叢集上已在跑的 release。
-- 沒搬過來的舊內容與原因見 `deploy/helm/aiops-grafana/README.md`。
-
-**Elasticsearch：`deploy/elasticsearch/`**
-
-- **平台與 Grafana 對 ES 只讀。** `ElasticsearchSpec` 只呼叫 `_search` 與根路徑 GET，不得出現 `_bulk`、`_doc`、`PUT`、`DELETE`、`_security` 等寫入或管理端點（測試檢查）。建索引、角色、API key 是 `es-setup` 與人工的事，平台不做。
-- **用各自的唯讀 API key**（`AIOPS_ES_API_KEY`、`GRAFANA_ES_API_KEY`），只給三個 APM 索引 pattern 的讀取權限；不得共用 `elastic` 超級帳號。
-- **這裡沒有 chart**：ES 與 es-setup 的原始 chart 不在任何本機 repo。`es-test.snapshot.yaml` 是從執行中的 release 匯出的快照（已去掉 Secret 與明文機密），只供重建參考。要讓本 repo 真的管理 ES，要先找回原始 chart 或整理快照，**這件事還沒做**。
-- 快照不得有 `Secret` 資源；與密碼有關的環境變數只能是 `valueFrom` 引用。
-
-**機密不進 repo**：`deploy/`、`configs/`、`docker-compose.yaml` 不得出現金鑰樣式的字串（OpenAI／Slack／長 base64），`docker-compose.yaml` 只能有標成 `dev-only` 的假值。
-
-### 已定案：平台主動推到獨立的 Alertmanager，Grafana 只顯示
-
-```
-POST /api/v1/alerts/process
-  收斂 -> 計分 -> 抑制（silence_window -> same_root_cause -> dedup）-> 產生通知（一個部門一則）
-  -> notifiers.get_notifier().send() -> POST {AIOPS_ALERTMANAGER_URL}/api/v2/alerts
-  -> aiops-alertmanager（helm chart）只依 dept label 分流到 receiver（Slack／Teams／PagerDuty）
-  -> Grafana 把 aiops-alertmanager 加成資料源，只「顯示」告警
-```
-
-- **不推到 Grafana 內建的 Alertmanager。** 實測 Grafana 13 要 `alert.instances.external:write` 權限才收得進外部告警；改用獨立的 Alertmanager，Grafana 就不需要任何寫入權限。
-- **Chart 位置：`deploy/helm/aiops-alertmanager/`。** 要改路由、receiver、資源，只改它的 values。
-  - 部門路由寫在 `deptRoutes`（`dept` -> `receiver`）；沒對到的進 `route.defaultReceiver`（預設 `unrouted`，不送任何地方）。
-  - `receivers` 原樣放進 alertmanager.yml，並存在 Secret（webhook URL 是機密）。路由引用了沒定義的 receiver，render 會直接失敗。
-  - **不得加 `inhibit_rules`、不得在 Alertmanager 設 silence。** 抑制與靜音只有平台一份（`tests/test_helm_alertmanager.py` 檢查）。
-  - **恢復通知由平台負責**：每輪排程 `SyncOpenIncidentsCommand` 對進行中的事件群心跳重送（不帶 `endsAt`），實體安靜超過 `resolve_after_minutes`（job 設定，預設 15）就帶 `endsAt` 重送一次結案。重送的 labels 由事件群內容重建，跟第一次一模一樣。receiver 可以開 `send_resolved: true`。
-  - `resolveTimeout`（預設 1h）只是保險：平台停擺、不再心跳時，告警最多掛這麼久。**排程間隔必須遠小於它**（CronJob 預設 5 分鐘）。
-  - 直接呼叫 `/alerts/process` 建立的事件群沒有排程心跳，要用 `POST /api/v1/alerts/incidents/{uid}/resolve` 人工結案，否則 1h 後由 Alertmanager 自己結案。
-  - Slack／Teams 寫法見 `values-channels.example.yaml`（已用 `amtool check-config` 驗過）。正式環境開 `persistence.enabled`，否則 pod 重建會清掉進行中的告警。
-- **Grafana 側只動 helm chart：** `aiops-alertmanager` 已在 `deploy/helm/aiops-grafana/files/datasource.yaml` 加成 `alertmanager` 型資料源（`implementation: prometheus`、`handleGrafanaManagedAlerts: false`），網址取自環境變數 `AIOPS_ALERTMANAGER_URL`（放 Grafana 的 Secret）。
-  - `aiops-alertmanager` chart 的 `displayDatasource`（帶 sidecar label 的 ConfigMap）給**有開 sidecar** 的 Grafana 用；本 repo 的 Grafana 沒有 sidecar，這個選項預設關閉、用不到。
-  - 部署：`helm upgrade --install grafana deploy/helm/aiops-grafana -n grafana-new`，Secret `grafana-env` 要先建好（鍵見該 chart 的 `values.yaml`）。
-- 平台設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.<namespace>.svc:9093`。
-
-- 通知是 Alertmanager v2 格式：`labels`（`alertname=aiops_incident`、`incident_uid`、`severity`、`preset`、`dept`、`entities`）、`annotations`（`summary`、`description`）、`startsAt`。
-- **接收端的路由只准用 labels 比對**（例如 `dept`、`severity`），不得依 `annotations` 內容判斷。
-- **對外識別一律用 `incident_uid`（`inc-<uuid>`），不得把事件群的整數 `id` 放進通知或任何外部系統。** 整數 id 在資料庫重建後會從 1 重來，曾實測造成 Alertmanager 把不相干的事件群併在同一組。整數 id 只在平台內部用（RCA 查詢、通知紀錄）。
-- 設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL`、選填 `AIOPS_ALERTMANAGER_TOKEN`（Bearer）。預設是 `log`，只寫日誌、不真的送。
-- 推送失敗會丟 `InfrastructureError`：API 回 503，並走看守機制（本機日誌、`AIOPS_FALLBACK_WEBHOOK`）。
-
-> 目前狀態（2026-11-08）：**平台 -> aiops-alertmanager 已在本機 rancher-desktop 端對端驗證成功**：三個部門各推一則，依 `dept` 分到正確的 receiver，沒帶部門的進 `unrouted`；同一批再跑一次全部被 `dedup` 擋下。
-> 還沒做的：
-> - **Grafana 顯示已接上並驗證**：Grafana 13 經資料源讀到 Alertmanager 的告警，標籤（`dept`、`severity`）與 receiver 都正確。Grafana 內建的資料源健康檢查端點對 alertmanager 型回 500（`plugin unavailable`），這是該資料源型別本來就不支援，不是連線失敗，實際讀取以 `/api/datasources/proxy/uid/aiops-alertmanager/api/v2/alerts` 為準。
-> - **叢集上的 Grafana 已改由本 repo 的 `aiops-grafana` 部署**（release `grafana`，revision 5）。舊的 alert rules／contact points／policies（`grafana-alerting`）與 `aiops-db` 資料源已隨接手移除。實測：4 個資料源、1 張儀表板、0 條告警規則、0 個 provisioning 錯誤；三個 ES 資料源用真的唯讀 key 讀得到資料；`APM 總覽` 5 張面板在 11/2～11/3 的範圍畫得出真實的 metrics、trace、log。
-> - 舊引擎（`aiops` 命名空間）已從叢集移除。
-> - **Secret `grafana-env` 裡還留著舊引擎的鍵**（`AIOPS_PG_*`、`GRAFANA_PG_*`、`NOTIFY_*_URL`），已沒有任何東西使用，要手動刪掉（見 README）。這個 Secret 帶 `helm.sh/resource-policy: keep`，是舊 chart 建的，新 chart 不管它。
-> - 「③ Trace：最慢的請求」那張面板只列 `transaction.duration.us >= 1000000`（超過 1 秒）的請求；資料範圍內最慢的只有 0.59 秒，所以顯示 No data 是正確的。
-> - **真的通道還沒設**：驗證時 receiver 都沒有 `*_configs`，收下但不送出。
-> - **平台的部署**：`Dockerfile`、`docker-compose.yaml`、`deploy/helm/aiops-platform`（API 是 Deployment、排程是 CronJob 跑 `run-once`、機密只從 Secret 進來）。
-
-## 6. 標準樣板
-
-### Command
+所有可插拔算子必須繼承 `BaseOperator` 並實作標準 `execute` 介面：
 
 ```python
-from aiops.commands.base import BaseCommand, CommandError
-from aiops.datasource_specs import get_datasource_spec
-from aiops.plugins.registry import DetectorRegistry
+from abc import ABC, abstractmethod
+from aiops.core.context import PipelineContext
 
-
-class ExampleActionCommand(BaseCommand):
-    def __init__(self, detector_name: str, params: dict):
-        self.detector_name = detector_name
-        self.params = params
-
-    def validate(self) -> None:
-        if not DetectorRegistry.has(self.detector_name):
-            raise CommandError(f"未知的檢測外掛: {self.detector_name}")
-
-    def run(self) -> dict:
-        self.validate()
-        # 1. 抓資料：get_datasource_spec(...).fetch_data(...)
-        # 2. 算結果：DetectorRegistry.get(...)(params).fit(train_df).detect(df)
-        # 3. 寫 DB：透過本領域 dao.py
-        return {"status": "success"}
+class BaseOperator(ABC):
+    @abstractmethod
+    def execute(self, ctx: PipelineContext) -> PipelineContext:
+        """接收 Context，計算後原地或賦值修改 Context，回傳 Context"""
+        pass
 ```
 
-### 偵測器外掛
+各類算子專屬契約：
+ * **Detector（異常偵測）**：
+   * 必須支援 `fit(df) -> self`（批次訓練）與 `detect(df) -> AnomalyResult`（即時推論）。
+   * 必須支援 `get_state() -> dict` 與 `load_state(state: dict)` 以供模型基準線持久化。
+ * **Grouper（事件收斂）**：
+   * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
+ * **Suppressor（告警抑制）**：
+   * 檢查靜音窗口（維護期）、冷卻時間（Dedup）、同根因；被抑制事件必須打上 `ctx.is_suppressed = True` 與具體原因。
+ * **LLM Provider（智慧診斷）**：
+   * 介面為 `complete(prompt: str) -> str`。
+   * 當設定為 `provider: noop` 時，直接跳過推論並填入結構化模板，不發出任何外部網路請求。
+
+---
+
+## 3. 標準算子實作範例
+
+### 範例一：可自由抽換的 MAD 檢測器 (`operators/detectors/mad.py`)
 
 ```python
+import numpy as np
 import pandas as pd
+from aiops.core.registry import OperatorRegistry
+from aiops.operators.base import BaseOperator
+from aiops.core.context import PipelineContext, AnomalyResult
 
-from aiops.plugins.base import AnomalyResult, BaseDetector
-from aiops.plugins.registry import DetectorRegistry
+@OperatorRegistry.register("detector.mad")
+class MADDetector(BaseOperator):
+    name = "mad"
 
+    def __init__(self, threshold: float = 3.5):
+        self.threshold = threshold
 
-@DetectorRegistry.register
-class MyDetector(BaseDetector):
-    name = "my_detector"
+    def execute(self, ctx: PipelineContext) -> PipelineContext:
+        if ctx.raw_df is None or ctx.raw_df.empty:
+            return ctx
 
-    def fit(self, df: pd.DataFrame) -> "MyDetector":
-        # 從訓練資料學狀態，存在 self 上
-        self.fitted = True
-        return self
+        values = ctx.raw_df["value"].values
+        median = np.median(values)
+        mad = np.median(np.abs(values - median))
+        mad = mad if mad != 0 else 1e-6
 
-    def detect(self, df: pd.DataFrame) -> AnomalyResult:
-        self._require_fitted()
-        # 輸入保證有 ts、value 兩欄；輸出必須是 AnomalyResult，長度與 df 相同
-        ...
+        # 計算 Modified Z-Score
+        mod_z_scores = 0.6745 * np.abs(values - median) / mad
+        is_anomaly = (mod_z_scores > self.threshold).tolist()
+
+        ctx.anomaly_result = AnomalyResult(
+            algorithm="mad",
+            is_anomaly=is_anomaly,
+            scores=mod_z_scores.tolist(),
+            latest_is_anomaly=bool(is_anomaly[-1]) if is_anomaly else False
+        )
+        return ctx
 ```
 
-## 7. 送出修改前的自檢
+### 範例二：可自由外接或中斷的 LLM 算子 (`operators/llm/summarizer.py`)
+
+```python
+from aiops.core.registry import OperatorRegistry
+from aiops.operators.base import BaseOperator
+from aiops.core.context import PipelineContext
+
+@OperatorRegistry.register("enrichment.llm_summary")
+class LLMSummarizer(BaseOperator):
+    def __init__(self, provider: str = "noop", **kwargs):
+        self.provider = provider
+        self.is_enabled = (provider != "noop")
+
+    def execute(self, ctx: PipelineContext) -> PipelineContext:
+        # 若未啟用 LLM 或無異常事件，直接降級為預設範本
+        if not self.is_enabled or not ctx.incidents:
+            ctx.llm_summary = "【自動診斷】未啟用 LLM，依據統計規則輸出摘要。"
+            return ctx
+
+        # 呼叫實際 Provider (OpenAI/Anthropic)
+        # 生成內容需符合依據驗證，若失敗亦退回安全範本
+        ctx.llm_summary = f"【AI 診斷】實體 {ctx.target_metric} 發生異常偏移..."
+        return ctx
+```
+
+---
+
+## 4. 管線配置宣告 (Workflow YAML)
+
+新增或調整場景流程時，**禁止修改 Python 流程代碼**，一律以 YAML 宣告節點流向：
+
+```yaml
+name: factory_lot_detection_pipeline
+description: "工廠履歷時序檢測流程 (自由抽換 MAD 與關閉 LLM)"
+nodes:
+  # 1. 抓取指標
+  - name: fetch_step
+    operator: ingestion.elasticsearch
+    params:
+      index: "factory-metrics-*"
+
+  # 2. 異常檢測 (隨時切換 detector.zscore / detector.mad / detector.isolation_forest)
+  - name: detect_step
+    operator: detector.mad
+    params:
+      threshold: 3.5
+
+  # 3. 告警收斂
+  - name: group_step
+    operator: alert.lot_path_chain
+    params:
+      time_window_minutes: 15
+
+  # 4. 告警抑制 (靜音/冷卻)
+  - name: suppress_step
+    operator: alert.suppress_window
+
+  # 5. 可選 AI 摘要 (設為 noop 即刻關閉，不花 Token)
+  - name: ai_step
+    operator: enrichment.llm_summary
+    params:
+      provider: "noop"
+
+  # 6. 發布與通知
+  - name: notify_step
+    operator: notifier.alertmanager
+    params:
+      endpoint: "http://alertmanager:9093"
+```
+
+---
+
+## 5. 檔案歸屬決策樹 (Where Does New Code Go?)
+
+ * **要寫新的異常檢測演算法（如 Isolation Forest）？**
+   👉 寫入 `aiops/operators/detectors/<name>.py`，掛上 `@OperatorRegistry.register("detector.<name>")`。
+ * **要新增監控指標或日誌連線源（如 InfluxDB）？**
+   👉 寫入 `aiops/datasource_specs/<name>.py`，繼承 `BaseDataSourceSpec`，輸出轉成標準 DataFrame。
+ * **要擴充新的收斂邏輯（如針對特定微服務呼叫鏈）？**
+   👉 寫入 `aiops/operators/alerts/groupers.py`，實作標準 `BaseOperator`。
+ * **要新增資料庫紀錄欄位？**
+   👉 寫入 `aiops/storage/models.py`，只能透過 `aiops/storage/repository.py` 操作讀寫。
+ * **要調整執行步驟與算法超參數？**
+   👉 寫入 `aiops/workflows/<scene>.yaml`，完全不改動任何 Python 程式碼。
+
+---
+
+## 6. 送出修改前的自動化驗證
 
 ```bash
+# 1. 執行單元與行為測試
 .venv/Scripts/python -m pytest tests/ -q
+
+# 2. 執行架構防禦測試 (確認無 ReadDAO 殘留、算子無違規跨層依賴)
+.venv/Scripts/python -m pytest tests/test_architecture.py -q
 ```
 
-必須全綠。新增架構規則時，先在 `tests/test_architecture.py` 補測試，再改本文件。
+全部綠燈後方可 Commit。

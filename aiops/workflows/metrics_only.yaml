@@ -1,0 +1,37 @@
+name: metrics_only
+description: "只有時序指標，沒有 trace 與拓撲"
+
+nodes:
+  - name: fetch
+    operator: ingestion.fetch
+    params: {lookback_minutes: 60, train_lookback_minutes: 1440, retrain_minutes: 1440}
+
+  # 異常檢測：隨時換成 detector.mad / detector.shift / detector.peer / detector.rules / detector.chronic
+  - name: detect
+    operator: detector.zscore
+  - name: new_only
+    operator: detector.new_only
+
+  # ── 以下是批次層（所有序列的異常合併後）──
+  # 進行中事件群的心跳與結案（恢復通知）
+  - name: heartbeat
+    operator: alert.heartbeat
+    params: {resolve_after_minutes: 15}
+  - name: group_entity
+    operator: alert.same_entity
+  - name: suppress_window
+    operator: alert.suppress_window
+  - name: suppress_dedup
+    operator: alert.suppress_dedup
+    params: {cooldown_minutes: 30}
+
+  # 定嚴重度、產生通知內容
+  - name: payload
+    operator: alert.notify_payload
+    params: {severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}}
+  # 依環境變數 AIOPS_NOTIFIER 選 log 或 alertmanager；要固定就改 notifier.alertmanager
+  - name: notify
+    operator: notifier.auto
+
+targets:
+  - {source_type: mock, query: 'metric_a', entity: metric_a}

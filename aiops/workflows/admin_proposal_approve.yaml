@@ -1,0 +1,5 @@
+name: admin_proposal_approve
+description: "手動動作：proposal_approve"
+nodes:
+  - name: proposal_approve
+    operator: admin.proposal_approve

@@ -4,41 +4,31 @@ import pkgutil
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from aiops import domains, plugins
-from aiops.commands.base import CommandError
-from aiops.infrastructure.errors import InfrastructureError
+from aiops import api
+from aiops.core.errors import InfrastructureError, PlatformError
 from aiops.infrastructure.fallback import init_fallback_logging, report_failure
+from aiops.operators import load_all
 from aiops.security.auth import require_token, warn_if_disabled
 
 
-def init_plugins() -> None:
-    """掃描 plugins/ 底下每個子套件的所有模組，載入即完成 @register。領域層不必 import 具體外掛。"""
-    for pkg in pkgutil.iter_modules(plugins.__path__):
-        if not pkg.ispkg:
-            continue
-        package = importlib.import_module(f"aiops.plugins.{pkg.name}")
-        for m in pkgutil.iter_modules(package.__path__):
-            importlib.import_module(f"aiops.plugins.{pkg.name}.{m.name}")
+def init_operators() -> None:
+    """掃描 operators/ 底下所有算子模組，載入即完成 @OperatorRegistry.register。"""
+    load_all()
 
 
 def init_routers(app: FastAPI) -> None:
-    """掃描 domains/ 下每個子套件，有 api.py 就自動掛載其 router，並一律掛上 token 驗證。新增領域不必改這裡。"""
+    """掃描 api/ 底下每個模組，有 router 就自動掛載，並一律掛上 token 驗證。新增端點模組不必改這裡。"""
     warn_if_disabled()
-    for m in pkgutil.iter_modules(domains.__path__):
-        if not m.ispkg:
-            continue
-        try:
-            api = importlib.import_module(f"aiops.domains.{m.name}.api")
-        except ModuleNotFoundError as e:
-            if e.name == f"aiops.domains.{m.name}.api":
-                continue  # 該領域還沒有 api.py
-            raise
-        app.include_router(api.router, dependencies=[Depends(require_token)])
+    for m in pkgutil.iter_modules(api.__path__):
+        module = importlib.import_module(f"aiops.api.{m.name}")
+        router = getattr(module, "router", None)
+        if router is not None:
+            app.include_router(router, dependencies=[Depends(require_token)])
 
 
 def init_error_handlers(app: FastAPI) -> None:
-    @app.exception_handler(CommandError)
-    async def _command_error(_: Request, exc: CommandError):
+    @app.exception_handler(PlatformError)
+    async def _platform_error(_: Request, exc: PlatformError):
         return JSONResponse(status_code=exc.status_code, content={"message": str(exc)})
 
     @app.exception_handler(InfrastructureError)
@@ -62,7 +52,7 @@ def init_db(sleep=None, clock=None) -> None:
     import os
     import time
 
-    from aiops.models.db import create_all
+    from aiops.storage.db import create_all
 
     sleep, clock = sleep or time.sleep, clock or time.monotonic
     deadline = clock() + float(os.environ.get("AIOPS_DB_STARTUP_TIMEOUT", "60"))

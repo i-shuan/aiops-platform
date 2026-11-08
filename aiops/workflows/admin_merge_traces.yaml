@@ -1,0 +1,5 @@
+name: admin_merge_traces
+description: "手動動作：merge_traces"
+nodes:
+  - name: merge_traces
+    operator: admin.merge_traces

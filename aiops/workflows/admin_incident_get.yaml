@@ -1,0 +1,5 @@
+name: admin_incident_get
+description: "手動動作：incident_get"
+nodes:
+  - name: incident_get
+    operator: admin.incident_get
