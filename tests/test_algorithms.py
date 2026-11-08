@@ -296,7 +296,9 @@ targets:
 
 
 def test_events_are_immutable():
-    with pytest.raises(Exception):
+    from dataclasses import FrozenInstanceError
+
+    with pytest.raises(FrozenInstanceError):  # 只接受「frozen 擋下修改」，別的例外不算
         _event("a", 1).score = 99  # type: ignore[misc]
 
 

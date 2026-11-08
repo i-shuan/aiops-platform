@@ -41,7 +41,7 @@ class _Frame(BaseOperator):
 def _wf(*nodes, targets=None, frame=None):
     specs = [NodeSpec(name="fetch", operator="test.frame", params=frame or {})]
     specs += [NodeSpec(name=n, operator=o, params=p) for n, o, p in nodes]
-    targets = targets if targets is not None else [{"query": "a", "entity": "a"}]
+    targets = targets if targets is not None else [{"source_type": "mock", "query": "a", "entity": "a"}]
     return Workflow(name="t", nodes=specs, targets=[TargetSpec(**t) for t in targets])
 
 
@@ -89,8 +89,8 @@ def test_without_detectors_every_detector_node_runs_like_before():
 
 
 def test_whitelist_by_node_name_runs_only_that_node_of_the_same_operator():
-    rec = _run(Z_LOW, Z_HIGH, targets=[{"query": "a", "entity": "a", "detectors": ["z_high"]},
-                                       {"query": "b", "entity": "b"}])
+    rec = _run(Z_LOW, Z_HIGH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_high"]},
+                                       {"source_type": "mock", "query": "b", "entity": "b"}])
     a, b = rec.contexts["a"], rec.contexts["b"]
     assert a.detector_runs == ["z_high"] and rec.loaded["a"] == ["z_high"]  # 沒選的節點也不載基準線、調參
     assert {e.detector_node for e in a.anomalies} == {"z_high"} and _minutes(a.anomalies) == [BIG]
@@ -99,7 +99,7 @@ def test_whitelist_by_node_name_runs_only_that_node_of_the_same_operator():
 
 
 def test_whitelist_by_operator_name_selects_all_nodes_of_that_operator():
-    rec = _run(Z_LOW, Z_HIGH, MAD, targets=[{"query": "a", "entity": "a", "detectors": ["detector.zscore"]}])
+    rec = _run(Z_LOW, Z_HIGH, MAD, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["detector.zscore"]}])
     assert rec.contexts["a"].detector_runs == ["z_low", "z_high"]
 
 
@@ -107,8 +107,8 @@ def test_exclude_beats_include_and_whitelist_and_include_limits_entities():
     excluded = ("z_low", "detector.zscore", {"threshold": 2.0, "include_entities": ["a", "b"], "exclude_entities": ["a"]})
     only_b = ("z_high", "detector.zscore", {"threshold": 5.0, "include_entities": ["b"]})
     rec = _run(excluded, only_b, MAD,
-               targets=[{"query": "a", "entity": "a", "detectors": ["z_low", "z_high", "mad"]},
-                        {"query": "b", "entity": "b"}])
+               targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_low", "z_high", "mad"]},
+                        {"source_type": "mock", "query": "b", "entity": "b"}])
     a, b = rec.contexts["a"], rec.contexts["b"]
     assert a.detector_runs == ["mad"]
     assert "z_low:skipped:excluded" in a.audit and "z_high:skipped:not-included" in a.audit
@@ -171,9 +171,9 @@ VOTE = ("vote", "detector.ensemble", {"strategy": "majority"})
 def test_ensemble_in_pipeline_skipped_and_empty_nodes_abstain():
     # 三個節點：z_low 抓 SMALL+BIG、z_high 只抓 BIG、mad（訓練段 MAD=1，修正 z 1.69 < 3.5）只抓 BIG
     rec = _run(Z_LOW, Z_HIGH, MAD, VOTE,
-               targets=[{"query": "a", "entity": "a"},
-                        {"query": "b", "entity": "b", "detectors": ["z_high"]},
-                        {"query": "c", "entity": "c"}],
+               targets=[{"source_type": "mock", "query": "a", "entity": "a"},
+                        {"source_type": "mock", "query": "b", "entity": "b", "detectors": ["z_high"]},
+                        {"source_type": "mock", "query": "c", "entity": "c"}],
                frame={"empty_for": ["c"]})
     a, b, c = rec.contexts["a"], rec.contexts["b"], rec.contexts["c"]
     assert any("voters=3:need=2" in line for line in a.audit)
@@ -212,8 +212,8 @@ def test_override_precedence_default_tuned_yaml_target():
 
 
 def test_override_changes_what_the_node_flags():
-    rec = _run(Z_LOW, targets=[{"query": "a", "entity": "a", "overrides": {"z_low": {"threshold": 5.0}}},
-                               {"query": "b", "entity": "b"}])
+    rec = _run(Z_LOW, targets=[{"source_type": "mock", "query": "a", "entity": "a", "overrides": {"z_low": {"threshold": 5.0}}},
+                               {"source_type": "mock", "query": "b", "entity": "b"}])
     assert _minutes(rec.contexts["a"].anomalies) == [BIG]
     assert _minutes(rec.contexts["b"].anomalies) == [SMALL, BIG]
 
@@ -226,12 +226,12 @@ def test_override_changes_what_the_node_flags():
 ])
 def test_bad_overrides_fail_at_load_time(override, message):
     with pytest.raises(WorkflowError, match=message):
-        Pipeline(_wf(Z_LOW, targets=[{"query": "a", "entity": "a", "overrides": override}]))
+        Pipeline(_wf(Z_LOW, targets=[{"source_type": "mock", "query": "a", "entity": "a", "overrides": override}]))
 
 
 def test_override_for_a_node_the_target_did_not_select_is_rejected():
     with pytest.raises(WorkflowError, match="沒有選它"):
-        Pipeline(_wf(Z_LOW, Z_HIGH, targets=[{"query": "a", "entity": "a", "detectors": ["z_high"],
+        Pipeline(_wf(Z_LOW, Z_HIGH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_high"],
                                               "overrides": {"z_low": {"threshold": 3}}}]))
 
 
@@ -240,16 +240,16 @@ def test_override_for_a_node_the_target_did_not_select_is_rejected():
 
 def test_unknown_detector_name_fails_at_load_and_lists_available_nodes():
     with pytest.raises(WorkflowError, match=r"z_lw.*z_low（detector.zscore）"):
-        Pipeline(_wf(Z_LOW, VOTE, targets=[{"query": "a", "entity": "a", "detectors": ["z_lw"]}]))
+        Pipeline(_wf(Z_LOW, VOTE, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_lw"]}]))
     with pytest.raises(WorkflowError):  # 裁決節點不是偵測節點
-        Pipeline(_wf(Z_LOW, VOTE, targets=[{"query": "a", "entity": "a", "detectors": ["vote"]}]))
+        Pipeline(_wf(Z_LOW, VOTE, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["vote"]}]))
 
 
 def test_api_targets_get_the_same_checks():
     pipe = Pipeline(_wf(Z_LOW, targets=[]))
     with pytest.raises(WorkflowError, match="z_lw"):
-        pipe.run(now=NOW, targets=[TargetSpec(query="a", detectors=["z_lw"])])
-    rec = _per_target(pipe, targets=[TargetSpec(query="a", detectors=["detector.zscore"])])
+        pipe.run(now=NOW, targets=[TargetSpec(source_type="mock", query="a", detectors=["z_lw"])])
+    rec = _per_target(pipe, targets=[TargetSpec(source_type="mock", query="a", detectors=["detector.zscore"])])
     assert rec.contexts["a"].detector_runs == ["z_low"]
 
 
@@ -266,9 +266,14 @@ def test_misspelled_target_field_and_empty_whitelist_fail(tmp_path):
 nodes:
   - {name: z, operator: detector.zscore}
 targets:
-  - {query: a, detector: [z]}
+  - {source_type: mock, query: a, detector: [z]}
 """, encoding="utf-8")
-    with pytest.raises(WorkflowError, match="detector"):
+    with pytest.raises(WorkflowError, match="detector") as e:
         load_workflow(path)
-    with pytest.raises(Exception):
-        TargetSpec(query="a", detectors=[])
+    # 要是因為拼錯欄位而失敗，不是別的欄位（例如少了 source_type）剛好讓它報錯
+    assert "Extra inputs are not permitted" in str(e.value) and "source_type" not in str(e.value)
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as e:
+        TargetSpec(source_type="mock", query="a", detectors=[])
+    assert [(err["loc"], err["type"]) for err in e.value.errors()] == [(("detectors",), "too_short")]

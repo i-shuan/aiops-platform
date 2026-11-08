@@ -16,7 +16,7 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / "aiops" / "pipelines"
 
 def _wf(*nodes: tuple[str, str, dict], targets=("a", "b")):
     return Workflow(name="t", nodes=[NodeSpec(name=n, operator=o, params=p) for n, o, p in nodes],
-                    targets=[TargetSpec(query=q, entity=q) for q in targets])
+                    targets=[TargetSpec(source_type="mock", query=q, entity=q) for q in targets])
 
 
 # ── 註冊中心 ──

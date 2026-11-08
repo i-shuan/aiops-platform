@@ -198,7 +198,7 @@ def test_proposals_for_different_layers_do_not_invalidate_each_other(now):
             entity=entity))["proposal"]["id"]
 
     def backtest(pid):
-        req = ProposalBacktest(proposal_id=pid, metric={"query": "cpu"}, train_ratio=0.3,
+        req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, train_ratio=0.3,
                                time_range={"start": now.replace(hour=0), "end": now})
         run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=now)
 
@@ -251,7 +251,7 @@ def _propose(detector=ZSCORE, params=None):
 
 
 def _backtest(pid, now, train_ratio, start=None):
-    req = ProposalBacktest(proposal_id=pid, metric={"query": "cpu"}, train_ratio=train_ratio,
+    req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, train_ratio=train_ratio,
                            time_range={"start": start or now.replace(hour=0), "end": now})
     return run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=now)["proposal"]["backtest"]
 

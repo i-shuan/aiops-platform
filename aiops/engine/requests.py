@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from aiops.engine.pipeline import PeerGroupSpec, PeerSpec, TargetSpec
+from aiops.engine.pipeline import PeerGroupSpec, PeerSpec, SourceType, TargetSpec
 
 
 class TimeRangeIn(BaseModel):
@@ -22,7 +22,7 @@ class TimeRangeIn(BaseModel):
 
 
 class MetricIn(BaseModel):
-    source_type: str = "mock"
+    source_type: SourceType  # 必填：漏寫回 400，不再默默退回 mock 假資料
     query: str
 
 

@@ -243,6 +243,12 @@ AIOPS_API_TOKEN=dev-only-token .venv/Scripts/python -m uvicorn aiops.interfaces.
 
 PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後到 http://127.0.0.1:8000/docs 看所有端點。資料預設存在 `./aiops-local.db`。
 
+**`source_type` 一律必填（API 合約變更）**：`POST /api/v1/runs` 的 `targets[].source_type`、`targets[].peers[].source_type`，以及 `POST /api/v1/tuning/proposals/backtest` 的 `metric.source_type`、`peers[].source_type`，都沒有預設值。以前漏寫會默默變成 `mock`（假資料），現在漏寫或只給空白回 **422**，`detail[].loc` 指出是哪一個 `source_type`；workflow YAML 的 target 漏寫則在載入時就失敗。要用模擬資料請明寫 `"source_type": "mock"`。`peer_group.source_type` 不受影響：空字串仍代表「跟 target 同一個資料源」。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_API_TOKEN" -H "Content-Type: application/json" -d '{"workflow": "it_otel", "targets": [{"source_type": "prometheus", "query": "up{job=\"cart\"}", "entity": "cart"}]}'
+```
+
 ### 跑排程
 
 ```bash

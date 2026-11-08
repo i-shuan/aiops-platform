@@ -12,18 +12,22 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
 from aiops.engine.errors import InfrastructureError, PlatformError, WorkflowError
 from aiops.engine.registry import OperatorRegistry
 
 
+# 資料源一律明寫、沒有預設值：漏寫時以前會默默退回 mock（假資料），監控平台寧可直接報錯（API 回 400、YAML 載入失敗）
+SourceType = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
 class PeerSpec(BaseModel):
-    source_type: str = "mock"
+    source_type: SourceType
     query: str
 
 
@@ -39,7 +43,7 @@ class TargetSpec(BaseModel):
     # 拼錯欄位（例如 detector: 少了 s）直接報錯；不然白名單會被默默忽略、變成全部偵測器都跑
     model_config = ConfigDict(extra="forbid")
 
-    source_type: str = "mock"
+    source_type: SourceType
     query: str
     entity: str | None = None
     attrs: dict[str, Any] = Field(default_factory=dict)

@@ -139,7 +139,7 @@ def test_concurrent_approvals_only_one_wins(now):
     def propose(threshold):
         pid = run("admin_proposal_create", request=ProposalCreate(
             source="manual", detector="detector.zscore", params={"threshold": threshold}, proposer="a"))["proposal"]["id"]
-        req = ProposalBacktest(proposal_id=pid, metric={"query": "cpu"}, time_range={
+        req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, time_range={
             "start": now.replace(hour=0), "end": now, "step_seconds": 60})
         run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=now)
         return pid

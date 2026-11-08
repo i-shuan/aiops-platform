@@ -25,7 +25,7 @@ from aiops.storage.repository import ActiveConfigs, Proposals
 
 def _backtest_req(pid, now, train_ratio=0.3):
     # mock 資料的尖峰在序列正中間：前 30% 當訓練段（乾淨），尖峰落在測試段，回測才看得到它
-    return ProposalBacktest(proposal_id=pid, metric={"query": "cpu"}, train_ratio=train_ratio, time_range={
+    return ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, train_ratio=train_ratio, time_range={
         "start": now.replace(hour=0), "end": now, "step_seconds": 60})
 
 
