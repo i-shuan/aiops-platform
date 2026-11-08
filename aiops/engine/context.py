@@ -183,13 +183,26 @@ class LogRecord:
 
 @dataclass
 class OpenIncident:
-    """已通知、還在進行中的事件群（心跳與結案用）。"""
+    """已通知、還在進行中的事件群（吸收新異常、升級、心跳與結案用）。
+
+    一場事故從頭到尾只有這一個 uid：後續的異常由 alert.absorb_open 併進 incident，嚴重度由 alert.notify_payload
+    只升不降地更新。previous 是這一輪第一次被改之前的 (事件群, 嚴重度)，心跳拿它重建上次送出的標籤：
+    標籤變了（嚴重度、等級、實體）就先對舊標籤送 endsAt 關掉，再送新標籤，Alertmanager 上不會兩張同時掛著。
+    """
 
     id: int
     uid: str
     preset: str
     severity: str
     incident: Incident
+    changed: bool = False  # 這一輪被更新過：持久化時寫回資料庫
+    previous: tuple[Incident, str] | None = None
+
+    def remember(self) -> None:
+        """第一次改之前留一份快照（同一輪改兩次也只留最早那份＝上次真的送出去的）。"""
+        if self.previous is None:
+            self.previous = (Incident.from_dict(self.incident.to_dict(), uid=self.uid), self.severity)
+        self.changed = True
 
 
 @dataclass
@@ -245,6 +258,7 @@ class PipelineContext:
     new_detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 這次新訓練的，最後才存
     anomalies: list[AnomalyEvent] = field(default_factory=list)
     incidents: list[Incident] = field(default_factory=list)
+    incidents_built: bool = False  # ensure_incidents 建過了：之後清單變空也不再從 anomalies 重建
     incident_ids: dict[str, int] = field(default_factory=dict)  # 事件群 fingerprint -> 已存的 id（持久化後填）
     rca_root_candidates: list[RootCandidate] = field(default_factory=list)  # 由 rca.root_cause.* 排序好
     rca_root_algorithm: str = ""

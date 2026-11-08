@@ -13,10 +13,6 @@ nodes:
     operator: detector.new_only
 
   # ── 以下是批次層（所有序列的異常合併後）──
-  # 進行中事件群的心跳與結案（恢復通知）
-  - name: heartbeat
-    operator: alert.heartbeat
-    params: {resolve_after_minutes: 15}
   - name: group_entity
     operator: alert.same_entity
   - name: group_topology
@@ -26,6 +22,9 @@ nodes:
   - name: score_p0
     operator: alert.p0_boost
     params: {entities: []}
+  # 進行中的事件群吸收這一輪的新異常：一場事故從頭到尾只有一個 incident_uid、一張卡（不再每 30 分鐘另開一張）
+  - name: absorb_open
+    operator: alert.absorb_open
   - name: suppress_window
     operator: alert.suppress_window
   - name: suppress_root_cause
@@ -38,6 +37,11 @@ nodes:
   - name: payload
     operator: alert.notify_payload
     params: {severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}}
+  # 進行中事件群：用最新內容續命、升級時先關舊標籤再送新的、安靜滿 resolve_after_minutes 才結案（防抖動）。
+  # 要排在 payload 之後（升級的嚴重度由 payload 算）
+  - name: heartbeat
+    operator: alert.heartbeat
+    params: {resolve_after_minutes: 15}
   # 依環境變數 AIOPS_NOTIFIER 選 log 或 alertmanager；要固定就改 notifier.alertmanager
   - name: notify
     operator: notifier.auto

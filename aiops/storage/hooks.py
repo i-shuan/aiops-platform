@@ -210,6 +210,11 @@ class StorageHooks:
             ctx.incident_ids[inc.fingerprint] = row["id"]
             if not inc.suppressed_by and sent.get(inc.uid):
                 Notifications.record(row["id"], inc.fingerprint, inc.severity, inc.end, sent[inc.uid])
+        for o in ctx.open_incidents:  # 吸收了新異常或升級的進行中事件群：快照寫回；冷卻從真正的最後一筆起算
+            if o.changed:
+                Incidents.update_snapshot(o.id, o.incident.to_dict(), o.severity)
+                if sent.get(o.uid):
+                    Notifications.record(o.id, o.incident.fingerprint, o.severity, o.incident.end, sent[o.uid])
         for incident_id in ctx.resolved_incident_ids:
             Incidents.mark_resolved(incident_id, ctx.now.replace(tzinfo=None))
         ExternalAnomalies.mark_processed(ctx.external_anomaly_ids)

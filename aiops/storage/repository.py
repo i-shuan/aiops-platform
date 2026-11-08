@@ -73,6 +73,11 @@ class Incidents:
         return crud.find_between(IncidentRow, "created_at", start, datetime(9999, 1, 1))
 
     @staticmethod
+    def update_snapshot(incident_id: int, incident: Row, severity: str) -> Row:
+        """進行中事件群吸收了新異常或升級：整份快照與嚴重度寫回（uid、建立時間不變）。"""
+        return crud.update(IncidentRow, incident_id, incident=incident, severity=severity)
+
+    @staticmethod
     def mark_resolved(incident_id: int, resolved_at: datetime) -> Row:
         return crud.update(IncidentRow, incident_id, status="resolved", resolved_at=resolved_at)
 

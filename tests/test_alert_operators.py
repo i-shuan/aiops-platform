@@ -159,13 +159,20 @@ def test_heartbeat_resends_with_identical_labels_then_resolves_when_quiet():
     assert first.notifications[0].labels["alertname"] == done.notifications[0].labels["alertname"]
 
 
-def test_new_anomalies_keep_an_incident_open_even_if_it_looks_old():
+def test_chained_anomalies_keep_an_incident_open_but_a_long_gap_ends_it():
+    """接得上的異常（跟前一筆相隔不到 resolve_after）一路續命；中間斷超過這麼久就是真的恢復，後來的屬於另一場。"""
     opened = _open()
-    stored = _run("alert.heartbeat", _ctx(open_incidents=[opened], entity_last_seen={"a": T0 + timedelta(minutes=25)},
-                                          now=T0 + timedelta(minutes=30)), resolve_after_minutes=15)
-    fresh = _run("alert.heartbeat", _ctx(_ev("a", 28), open_incidents=[opened], now=T0 + timedelta(minutes=30)),
+    stored = _run("alert.heartbeat", _ctx(open_incidents=[opened], entity_last_seen={"a": T0 + timedelta(minutes=10)},
+                                          now=T0 + timedelta(minutes=20)), resolve_after_minutes=15)
+    fresh = _run("alert.heartbeat", _ctx(_ev("a", 12), open_incidents=[opened], now=T0 + timedelta(minutes=20)),
                  resolve_after_minutes=15)
     assert stored.resolved_incident_ids == [] and fresh.resolved_incident_ids == []
+    chain = _run("alert.heartbeat", _ctx(open_incidents=[opened], entity_last_seen={"a": T0 + timedelta(minutes=10)},
+                                         now=T0 + timedelta(minutes=30)), resolve_after_minutes=15)
+    assert chain.resolved_incident_ids == [1]  # 0 -> 10 接得上，但 10 分之後已安靜 20 分鐘 >= 15：結案
+    gap = _run("alert.heartbeat", _ctx(open_incidents=[opened], entity_last_seen={"a": T0 + timedelta(minutes=25)},
+                                       now=T0 + timedelta(minutes=30)), resolve_after_minutes=15)
+    assert gap.resolved_incident_ids == [1]  # 0 -> 25 斷了 25 分鐘：舊事件群到 0 分就算結束，已超過 15 分鐘
 
 
 def test_heartbeat_with_nothing_open_is_a_noop():

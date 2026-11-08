@@ -72,6 +72,8 @@ class BaseOperator(ABC):
    * 繼承 `stages/rca/base.RcaSection`，寫 `applies()` 與 `build()`；資料不夠就讓 `applies()` 回 False（記進 `rca_skipped`），不准輸出空殼。
  * **Grouper（事件收斂）**：
    * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
+   * 進行中事件群（`ctx.open_incidents`）由 `alert.absorb_open` 吸收新異常：一場事故從初發到結案只有一個 `incident_uid`。`ensure_incidents` 只建一次（`ctx.incidents_built`），清單被吸收光之後不准重建。
+   * 順序鐵律：收斂 → 計分 → `absorb_open` → 抑制 → `notify_payload` → `heartbeat` → `notifier.*`。升級（嚴重度只升不降）改了 labels 時，`heartbeat` 負責對舊 labels 送 `endsAt` 再送新的；Alertmanager 用整組 labels 辨識告警。
  * **Suppressor（告警抑制）**：
    * 檢查靜音窗口（維護期）、冷卻時間（Dedup）、同根因；被抑制事件必須打上 `ctx.is_suppressed = True` 與具體原因。
  * **LLM Provider（智慧診斷）**：

@@ -438,6 +438,18 @@ receivers:
 
 > 實測（叢集裡的 Alertmanager，ttl 1 分鐘）：10:07:19 成功一輪 → `AIOpsWatchdog` active、endsAt 10:08:19；10:07:39 模擬 DB 寫入失敗的一輪 → 心跳沒送、endsAt 不變；10:08:20 從 active 清單消失（=resolved）。Alertmanager chart 已支援這條路由：values 設 `watchdogRoute.enabled: true` 與 `receiver`（預設關閉，範例見 `deploy/helm/aiops-alertmanager/values-channels.example.yaml`，做法 A／B 都有）。叢集上那台還沒套用。
 
+### 告警生命週期：一場事故一張動態卡
+
+偵測 workflow 的批次段順序是：收斂（`group_*`）→ 計分 → **`alert.absorb_open`** → 抑制（`suppress_*`）→ `alert.notify_payload` → **`alert.heartbeat`** → `notifier.auto`。
+
+- **吸收（`alert.absorb_open`）**：這一輪新組出的事件群只要跟某張進行中的卡有共同實體、且距離它的最後一筆不到 `resolve_after_minutes`（預設 15，要跟 heartbeat 的一樣），就併進那張卡（異常點去重、分數取大），不另開 `incident_uid`。寫回資料庫的是整份快照；事件群的統計都從記憶體裡的事件清單算，不重新聚合資料庫。事件清單隨持續時間線性成長（每分鐘一筆的 2 小時事故約 120 筆）。
+- **滾動摘要**：每輪重算 annotations——已持續分鐘數、累計筆數、起跳值 → 峰值（分數最高的那一點）→ 最新值、初發與最近時間。`startsAt` 鎖在初發。annotations 不影響 Alertmanager 辨識，labels 才影響。
+- **升級**：嚴重度只升不降（降級在門檻附近會來回跳）。升級或吸收了新實體讓 labels 變了，心跳先對**舊 labels** 送 `endsAt = now`，同一輪再送新 labels（同一個 `incident_uid`），標題加 `[Escalated from P2]`，tags 記 `escalated:P2>P0`。warning 變 anomaly 走同一條路。
+- **結案防抖動**：實體最後一個「接得上」的異常（跟前一筆相隔不到 15 分鐘）之後安靜滿 15 分鐘才送 `endsAt`。中間斷超過 15 分鐘就視為真的恢復，後來的異常是另一場。這是時間判斷，不是「連續 N 輪無異常」。
+- **冷卻只擋新卡**：`suppress_dedup` 只作用在這一輪新組出的事件群；進行中的卡由 heartbeat 每輪續命，不受冷卻影響，也不阻止異常點寫入資料庫。
+
+> 真實資料回放（cart-api 11/3，多數決異常點 91 個、14:50~16:20Z，每 5 分鐘一輪）：改版前 Alertmanager 上出現 3 張卡（14:50、15:25、16:00 各開一張，資料庫 19 筆事件群、16 筆被冷卻擋下），描述從頭到尾是「1 筆」；改版後只有 1 張卡（14:50 開、16:35 結案，續命 20 次），資料庫 1 筆事件群，15:30 的卡寫著「已持續 40 分鐘，累計 41 筆，起跳 37.51 → 峰值 42.38 → 最新 42.62」。
+
 ### 升級既有 PostgreSQL（沒有 Alembic，要手動做一次）
 
 全新資料庫由程式自動建表。**已經在跑的 PostgreSQL 必須依序執行 [migrations/postgres/](migrations/postgres/) 裡的 SQL**，否則新版程式會因為缺欄位而失敗：
