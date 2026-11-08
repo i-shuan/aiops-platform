@@ -12,7 +12,6 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY aiops ./aiops
-COPY configs ./configs
 
 # 非 root 執行；/data 給沒接 PostgreSQL 時的 SQLite 用
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin aiops \
