@@ -54,12 +54,36 @@ def test_channel_example_renders_and_routes_only_by_dept():
     cfg = _render("-f", str(CHART / "values-channels.example.yaml"))
     assert "inhibit_rules" not in cfg
     names = {r["name"] for r in cfg["receivers"]}
-    assert {r["receiver"] for r in cfg["route"]["routes"]} <= names
-    assert all(re.match(r"\s*dept\b", m) for r in cfg["route"]["routes"] for m in r["matchers"])
+    routes = cfg["route"]["routes"]
+    assert {r["receiver"] for r in routes} <= names
+    # 第一條是心跳路由，其餘只比對 dept
+    assert routes[0]["matchers"] == ['alertname = "AIOpsWatchdog"']
+    assert all(re.match(r"\s*dept\b", m) for r in routes[1:] for m in r["matchers"])
     channels = [c for r in cfg["receivers"] for key in ("slack_configs", "msteamsv2_configs") for c in r.get(key, [])]
     assert channels and all(c["send_resolved"] is True for c in channels)
+    hooks = [c for r in cfg["receivers"] for c in r.get("webhook_configs", [])]
     # 範例檔不能放真的 webhook
-    assert all("REPLACE_ME" in (c.get("api_url") or c.get("webhook_url")) for c in channels)
+    assert all("REPLACE_ME" in (c.get("api_url") or c.get("webhook_url") or c.get("url")) for c in channels + hooks)
+
+
+def test_watchdog_route_is_off_by_default_and_first_when_enabled():
+    assert all("AIOpsWatchdog" not in str(r) for r in _render()["route"].get("routes") or [])
+    cfg = _render(*ROUTED, "--set", "watchdogRoute.enabled=true,watchdogRoute.receiver=dms",
+                  "--set", "receivers[2].name=dms")
+    first, *rest = cfg["route"]["routes"]
+    assert first == {"receiver": "dms", "matchers": ['alertname = "AIOpsWatchdog"'], "group_by": ["alertname", "pipeline"],
+                     "group_wait": "0s", "group_interval": "1m", "repeat_interval": "5m", "continue": False}
+    assert rest == [{"receiver": "pay", "matchers": ['dept = "payments"']}]
+    # 只有心跳、沒有部門路由也要是合法 YAML
+    only = _render("--set", "watchdogRoute.enabled=true,watchdogRoute.receiver=dms",
+                   "--set", "receivers[0].name=unrouted,receivers[1].name=dms")
+    assert [r["receiver"] for r in only["route"]["routes"]] == ["dms"]
+
+
+def test_watchdog_route_with_undefined_receiver_fails_render():
+    r = subprocess.run(["helm", "template", "am", str(CHART), "--set", "watchdogRoute.enabled=true,watchdogRoute.receiver=ghost"],
+                       capture_output=True, text=True, encoding="utf-8")
+    assert r.returncode != 0 and "ghost" in r.stderr
 
 
 def test_persistence_uses_pvc_and_recreate_strategy():

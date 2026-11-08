@@ -35,6 +35,20 @@ route:
 #       receiver: payments-slack
 deptRoutes: []
 
+# 平台自我健康心跳（Dead Man's Snitch）的路由。平台每輪成功跑完會送 alertname=AIOpsWatchdog，
+# endsAt = 現在 + ttl；平台停了就沒人續命、告警過期。Alertmanager 本身不會因為告警消失而發新告警，
+# 所以 P0 要由接收端發：
+#   A（建議）receiver 指向外部死人開關服務（例如 Healthchecks.io 的 ping URL，send_resolved: false）：
+#      活著時每 repeatInterval 打卡一次，打卡停了超過寬限時間由外部服務發 P0；Alertmanager 或整個叢集掛了也抓得到。
+#   B receiver 指向自己的告警平台 webhook（send_resolved: true），把 status=resolved 當成「AIOps 停了」；
+#      會晚一個 groupInterval 才送，Alertmanager 自己掛了則完全不會送。
+# 完整範例見 values-channels.example.yaml。
+watchdogRoute:
+  enabled: false
+  receiver: aiops-deadman
+  groupInterval: 1m
+  repeatInterval: 5m
+
 # 原樣放進 alertmanager.yml 的 receivers。webhook URL 等機密會進 Secret，不進 ConfigMap。
 # Slack／Teams 的完整寫法見 values-channels.example.yaml。平台會送恢復通知，所以可以開 send_resolved。
 receivers:

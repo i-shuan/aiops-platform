@@ -351,7 +351,9 @@ targets:
 
 ### RCA：根因演算法與報告段落
 
-**拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才去 ES 撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`，用環境變數 `AIOPS_ES_TRACE_INDEX` 改；上限 `max_spans`（預設 20000），超過會截斷並在結果的 `trace_fetch.truncated` 註明。
+**拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才去 ES 撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`，用環境變數 `AIOPS_ES_TRACE_INDEX` 改；上限 `max_spans`（預設 20000）。區間內不超過上限就全部撈；超過時**不是取最早的 N 筆**（尖峰時那只是窗口開頭幾秒），而是把窗口切成最多 30 個時間桶、每桶用固定 seed 隨機挑 trace，輪流把**整條 trace** 撈回來直到湊滿上限（抽 span 會把父子拆斷），結果的 `trace_fetch.truncated` 為 true。記憶體：100 萬個 span 約 266 MB、聚合邊 0.7 秒，上限 2 萬時約 5 MB。
+
+> 真實 ES（11/3 13:50–16:20Z，共 11,283 span／3,761 條 trace）：上限 2000 時舊做法只涵蓋 13:50–14:16（10 分鐘格 3／15），新做法涵蓋整段（15／15，每 10 分鐘 129–138 個 span），抽到的 666 條 trace 全部完整；上限 5000 時舊做法 7／15、新做法 15／15。抽樣多花 0.7–1.1 秒（多了每桶一次候選查詢）。這批 trace 沒有跨服務呼叫，所以兩種做法的邊都是 0，邊的準確度要等有串 trace context 的資料才量得到。
 
 > 真實資料（11/3 事件，14:05–16:20Z）：撈到 10,167 個 span、3,389 條 trace，**跨服務呼叫 0 條**——這批 trace 每條都只在一個服務裡（下游只有 redis、postgresql、oracle、tax-gw），所以拓撲與 PageRank 仍排不出根因。機制本身是通的，缺的是有串接 trace context 的資料。
 
@@ -434,7 +436,7 @@ receivers:
         send_resolved: true
 ```
 
-> 實測（叢集裡的 Alertmanager，ttl 1 分鐘）：10:07:19 成功一輪 → `AIOpsWatchdog` active、endsAt 10:08:19；10:07:39 模擬 DB 寫入失敗的一輪 → 心跳沒送、endsAt 不變；10:08:20 從 active 清單消失（=resolved）。叢集上的 Alertmanager 還沒加上面那條路由（這次沒動部署設定），所以 resolved 目前不會送到任何通道。
+> 實測（叢集裡的 Alertmanager，ttl 1 分鐘）：10:07:19 成功一輪 → `AIOpsWatchdog` active、endsAt 10:08:19；10:07:39 模擬 DB 寫入失敗的一輪 → 心跳沒送、endsAt 不變；10:08:20 從 active 清單消失（=resolved）。Alertmanager chart 已支援這條路由：values 設 `watchdogRoute.enabled: true` 與 `receiver`（預設關閉，範例見 `deploy/helm/aiops-alertmanager/values-channels.example.yaml`，做法 A／B 都有）。叢集上那台還沒套用。
 
 ### 升級既有 PostgreSQL（沒有 Alembic，要手動做一次）
 
@@ -456,7 +458,9 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0003_artifacts_missed_f
 psql -h <host> -U <user> -d aiops -f migrations/postgres/0004_anomaly_level.sql
 ```
 
-執行前先停掉排程與 API。`0004` 加上異常的等級欄位（`anomaly`／`warning`），既有資料一律是 `anomaly`。`0002` 會把舊基準線掛到名為 `detect` 的節點（內建 workflow 的名稱），自己改過節點名稱的 workflow 第一次執行會重訓一次。`0003` 加上模型檔欄位、漏報補錄欄位、提案核准時間與經驗庫資料表；既有已核准的提案沒有核准時間，不會出現在調參成效報表。每個檔都可以重複執行。**這些 SQL 還沒有在真的 PostgreSQL 上跑過**（測試只用 SQLite），第一次請先在備份或測試庫上試。
+執行前先停掉排程與 API。`0004` 加上異常的等級欄位（`anomaly`／`warning`），既有資料一律是 `anomaly`。它帶 `lock_timeout = '5s'`：拿不到鎖就整個放棄（什麼都沒改），找空檔重跑；回滾 SQL 寫在檔案開頭的註解。
+
+> 實測（PostgreSQL 16.15 容器，`anomalies` 200 萬筆／266 MB）：沒人擋時 33 ms 跑完、filenode 不變（沒有整表重寫），200 萬筆都讀成 `anomaly`；重複執行只出 NOTICE；回滾 SQL 正常拿掉欄位。另開一個連線開著交易讀這張表時，migration 等滿 5 秒後報 `lock timeout` 放棄、欄位沒加；**等鎖這段時間，後面進來的一般讀取被卡了約 4 秒**——這是剩下的代價，尖峰時段不要跑。PostgreSQL 10 以下會整表重寫，沒測過。`0002` 會把舊基準線掛到名為 `detect` 的節點（內建 workflow 的名稱），自己改過節點名稱的 workflow 第一次執行會重訓一次。`0003` 加上模型檔欄位、漏報補錄欄位、提案核准時間與經驗庫資料表；既有已核准的提案沒有核准時間，不會出現在調參成效報表。每個檔都可以重複執行。**這些 SQL 還沒有在真的 PostgreSQL 上跑過**（測試只用 SQLite），第一次請先在備份或測試庫上試。
 
 `it_otel` 的偵測改成 `detector.hourly_baseline` 之後，舊的 `zscore` 基準線不會被沿用（演算法不同），第一次執行會抓 7 天資料重訓。
 

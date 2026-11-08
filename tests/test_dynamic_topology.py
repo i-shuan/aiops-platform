@@ -1,5 +1,6 @@
 """做法 B：RCA 時才隨需撈 trace、現場還原呼叫關係（ingestion.incident_traces + rca.build_dynamic_topology）。"""
 import json
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -86,6 +87,108 @@ def test_es_fetch_spans_stops_at_max_spans(monkeypatch):
     spec, seen = _es([_es_docs(), _es_docs()])
     spans, truncated = spec.fetch_spans(T, T, None, max_spans=2)
     assert truncated and len(spans) == 2 and seen[0][1] == "/traces-otel-*/_search" and seen[0][2]["size"] == 2
+
+
+def _iso(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+class _FakeES:
+    """會解讀查詢的假 ES：@timestamp 範圍、service.name／trace.id terms、random_score、track_total_hits、search_after。"""
+
+    def __init__(self, docs):
+        self.docs, self.bodies = docs, []
+
+    @staticmethod
+    def _match(doc, filters):
+        for f in filters:
+            if "range" in f:
+                r, ts = f["range"]["@timestamp"], _iso(doc["@timestamp"])
+                if not (_iso(r["gte"]) <= ts <= _iso(r["lte"])):
+                    return False
+            elif "service.name" in f.get("terms", {}):
+                if doc["service"]["name"] not in f["terms"]["service.name"]:
+                    return False
+            elif "trace.id" in f.get("terms", {}):
+                if doc["trace"]["id"] not in f["terms"]["trace.id"]:
+                    return False
+        return True
+
+    def handler(self, req):
+        body = json.loads(req.content)
+        self.bodies.append(body)
+        q = body["query"]
+        random_seed = None
+        if "function_score" in q:
+            random_seed, q = q["function_score"]["random_score"]["seed"], q["function_score"]["query"]
+        matched = [(i, d) for i, d in enumerate(self.docs) if self._match(d, q["bool"]["filter"])]
+        if random_seed is not None:
+            matched.sort(key=lambda p: hash((random_seed, p[0])) & 0xFFFFFFFF)
+        start = body["search_after"][0] + 1 if "search_after" in body else 0
+        page = matched[start:start + body["size"]]
+        hits = [{"_source": d, "sort": [start + k]} for k, (_, d) in enumerate(page)]
+        out = {"hits": {"hits": hits}}
+        if "track_total_hits" in body:
+            out["hits"]["total"] = {"value": min(len(matched), body["track_total_hits"]), "relation": "eq"}
+        return httpx.Response(200, json=out)
+
+
+def _traffic(minutes=15, traces_per_minute=200):
+    """每條 trace 4 個 span：cart-api tx -> span -> ord-svc tx -> span（跨服務一次）。時間依序排好，像真的 ES。"""
+    docs = []
+    for m in range(minutes):
+        for t in range(traces_per_minute):
+            ts = (T + timedelta(minutes=m, seconds=t * 60 / traces_per_minute)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            tid = f"t{m:02d}{t:04d}"
+            docs += [
+                {"@timestamp": ts, "trace": {"id": tid}, "service": {"name": "cart-api"}, "transaction": {"id": tid + "a"}},
+                {"@timestamp": ts, "trace": {"id": tid}, "service": {"name": "cart-api"}, "span": {"id": tid + "b"},
+                 "parent": {"id": tid + "a"}, "transaction": {"id": tid + "a"}},
+                {"@timestamp": ts, "trace": {"id": tid}, "service": {"name": "ord-svc"}, "transaction": {"id": tid + "c"},
+                 "parent": {"id": tid + "b"}},
+                {"@timestamp": ts, "trace": {"id": tid}, "service": {"name": "ord-svc"}, "span": {"id": tid + "d"},
+                 "parent": {"id": tid + "c"}, "transaction": {"id": tid + "c"}},
+            ]
+    return docs
+
+
+def _minutes_covered(spans):
+    return sorted({int((s["ts"] - T).total_seconds() // 60) for s in spans})
+
+
+def test_es_fetch_spans_samples_whole_traces_evenly_when_over_the_cap():
+    fake = _FakeES(_traffic())  # 15 分鐘 × 200 條 × 4 = 12000 span
+    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spans, truncated = spec.fetch_spans(T, T + timedelta(minutes=15), None, max_spans=2000)
+    assert truncated and 1900 <= len(spans) <= 2000
+    by_trace = {}
+    for s in spans:
+        by_trace.setdefault(s["trace_id"], []).append(s)
+    assert all(len(v) == 4 for v in by_trace.values())  # 只收整條 trace，父子接得起來
+    assert _minutes_covered(spans) == list(range(15))  # 整個窗口都有，不是只有開頭
+    per_minute = Counter(int((s["ts"] - T).total_seconds() // 60) for s in spans)
+    assert max(per_minute.values()) <= 2 * min(per_minute.values())
+    edges = service_edges(SpanRecord(**s) for s in spans)
+    assert edges == {("cart-api", "ord-svc"): len(by_trace)}
+    assert all("random_score" not in json.dumps(b) or b["_source"] == ["trace.id"] for b in fake.bodies)
+    # 固定 seed：重跑抽到一樣的 trace
+    again, _ = spec.fetch_spans(T, T + timedelta(minutes=15), None, max_spans=2000)
+    assert {s["trace_id"] for s in again} == set(by_trace)
+
+
+def test_es_fetch_spans_head_fetch_would_have_covered_only_the_start():
+    """對照組：舊做法（依時間取前 max_spans 筆）在同一份流量只涵蓋開頭 2～3 分鐘。"""
+    docs = _traffic()
+    head = docs[:2000]
+    assert _minutes_covered([{"ts": datetime.fromisoformat(d["@timestamp"].replace("Z", "+00:00"))} for d in head]) == [0, 1, 2]
+
+
+def test_es_fetch_spans_is_complete_when_under_the_cap():
+    fake = _FakeES(_traffic(minutes=2, traces_per_minute=10))
+    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spans, truncated = spec.fetch_spans(T, T + timedelta(minutes=2), None, max_spans=2000)
+    assert not truncated and len(spans) == 80
+    assert all("function_score" not in b["query"] for b in fake.bodies)  # 沒超過上限就不抽樣
 
 
 # ── 算子：降級，不擋報告 ──

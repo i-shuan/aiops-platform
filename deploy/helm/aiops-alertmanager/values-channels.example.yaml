@@ -12,7 +12,25 @@ deptRoutes:
   - dept: storage
     receiver: storage-slack
 
+# 平台自我健康心跳：排在部門路由前面（說明見 values.yaml 的 watchdogRoute）
+watchdogRoute:
+  enabled: true
+  receiver: aiops-deadman
+  groupInterval: 1m
+  repeatInterval: 5m   # 打卡間隔；外部服務的寬限時間設成 15～20 分鐘（大於平台心跳 ttl 15 分鐘）
+
 receivers:
+  # 做法 A：外部死人開關服務。活著時每 5 分鐘打卡，打卡停了由它發 P0（不要開 send_resolved，resolved 不是打卡）
+  - name: aiops-deadman
+    webhook_configs:
+      - url: https://hc-ping.com/REPLACE_ME
+        send_resolved: false
+  # 做法 B（二選一）：送到自己的告警平台，把 status=resolved 翻成「AIOps 平台停了」：
+  #   - name: aiops-deadman
+  #     webhook_configs:
+  #       - url: https://pager.example.com/REPLACE_ME
+  #         send_resolved: true
+
   # 沒對到部門的通知：先送到維運總頻道，避免漏看
   - name: unrouted
     slack_configs:
