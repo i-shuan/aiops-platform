@@ -34,7 +34,7 @@ def test_first_run_detects_groups_notifies_and_persists(now, sent):
     row = Incidents.get(result["incidents"][0]["id"])
     assert row["status"] == "open" and row["uid"] == result["incidents"][0]["uid"]
     assert sent[0].labels["incident_uid"] == row["uid"]  # 通知帶的就是存起來的那個 uid
-    assert DetectorModels.get(WF, "metric_a", "metric_a", "detector.zscore")["points"] > 0  # 基準線有存
+    assert DetectorModels.get(WF, "metric_a", "metric_a", "detector.zscore", "detect")["points"] > 0  # 基準線有存
     assert Notifications.since(now.replace(tzinfo=None) - timedelta(days=1))
 
 

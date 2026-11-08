@@ -4,9 +4,9 @@ import os
 
 import httpx
 
+from aiops.operators.llm import registry
 from aiops.operators.llm.base import BaseLLM, LLMError
-
-PROVIDERS = ("noop", "openai", "anthropic")
+from aiops.operators.llm.registry import register
 
 
 def _post(client: httpx.Client, url: str, headers: dict, body: dict) -> dict:
@@ -68,23 +68,33 @@ class AnthropicLLM(BaseLLM):
             raise LLMError("LLM 回應缺少 content") from e
 
 
+@register("noop", requires_model=False)
+def _noop(_model: str, _base_url: str, _api_key: str | None) -> None:
+    return None  # 完全不連外，呼叫端直接用模板
+
+
+@register("openai")
+def _openai(model: str, base_url: str, api_key: str | None) -> BaseLLM:
+    # OpenAI 相容端點（內網閘道、vLLM、Ollama 的 /v1）可以沒有金鑰
+    return OpenAICompatibleLLM(api_key, model, base_url or "https://api.openai.com")
+
+
+@register("anthropic")
+def _anthropic(model: str, base_url: str, api_key: str | None) -> BaseLLM:
+    if not api_key:
+        raise LLMError("provider=anthropic 需要環境變數 AIOPS_LLM_API_KEY")
+    return AnthropicLLM(api_key, model, base_url or "https://api.anthropic.com")
+
+
 def build_llm(provider: str, model: str | None = None, base_url: str | None = None) -> BaseLLM | None:
     """provider=noop 回傳 None（完全不連外）。金鑰只從環境變數 AIOPS_LLM_API_KEY 讀，不寫在 YAML。
     設定不全丟 LLMError，由呼叫端退回模板，不阻斷管線。
-    環境變數預設值：AIOPS_LLM_MODEL、AIOPS_LLM_BASE_URL。
+    環境變數預設值：AIOPS_LLM_MODEL、AIOPS_LLM_BASE_URL。供應商清單來自 registry（自動掃描本資料夾）。
     """
     provider = (provider or "noop").lower()
-    if provider == "noop":
-        return None
-    if provider not in PROVIDERS:
-        raise LLMError(f"未知的 LLM provider：{provider}（可用：{', '.join(PROVIDERS)}）")
-    model = model or os.environ.get("AIOPS_LLM_MODEL", "").strip()
-    key = os.environ.get("AIOPS_LLM_API_KEY", "").strip() or None
-    base = base_url or os.environ.get("AIOPS_LLM_BASE_URL", "").strip()
-    if not model:
-        raise LLMError(f"provider={provider} 但沒有指定模型（YAML 的 model 或環境變數 AIOPS_LLM_MODEL）")
-    if provider == "openai":
-        return OpenAICompatibleLLM(key, model, base or "https://api.openai.com")
-    if not key:
-        raise LLMError("provider=anthropic 需要環境變數 AIOPS_LLM_API_KEY")
-    return AnthropicLLM(key, model, base or "https://api.anthropic.com")
+    return registry.build(
+        provider,
+        model or os.environ.get("AIOPS_LLM_MODEL", "").strip(),
+        base_url or os.environ.get("AIOPS_LLM_BASE_URL", "").strip(),
+        os.environ.get("AIOPS_LLM_API_KEY", "").strip() or None,
+    )

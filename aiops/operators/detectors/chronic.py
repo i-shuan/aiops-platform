@@ -33,6 +33,9 @@ class ChronicDetector(DetectorOperator):
         self.fitted = True
         return self
 
+    def warmup_points(self) -> int:
+        return int(self.param("window")) - 1  # 滾動平均要湊滿 window 個點才有值
+
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
         window = int(self.param("window"))

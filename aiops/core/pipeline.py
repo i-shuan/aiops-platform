@@ -77,7 +77,7 @@ class Hooks(Protocol):
 
     def load_batch(self, ctx: PipelineContext) -> None: ...
 
-    def load_target(self, ctx: PipelineContext, detector_ops: list[str]) -> None: ...
+    def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None: ...
 
     def persist_target(self, ctx: PipelineContext) -> None: ...
 
@@ -87,7 +87,7 @@ class Hooks(Protocol):
 class NullHooks:
     def load_batch(self, ctx: PipelineContext) -> None: ...
 
-    def load_target(self, ctx: PipelineContext, detector_ops: list[str]) -> None: ...
+    def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None: ...
 
     def persist_target(self, ctx: PipelineContext) -> None: ...
 
@@ -116,13 +116,16 @@ class Pipeline:
         self.hooks: Hooks = hooks or NullHooks()
         # 實例化時就驗證：未註冊的算子、拼錯的參數、節點順序，在啟動時擋下，不是跑到一半才發現
         self.nodes = [(n, OperatorRegistry.create(n.operator, n.params)) for n in workflow.nodes]
+        for n, op in self.nodes:
+            op.node_name = n.name
         scopes = [getattr(op, "scope", "target") for _, op in self.nodes]
         if "batch" in scopes and "target" in scopes[scopes.index("batch"):]:
             raise WorkflowError(f"Workflow {workflow.name}：scope=target 的節點必須全部排在 scope=batch 之前")
         self.target_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "target"]
         self.batch_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "batch"]
-        self.detector_ops = sorted({n.operator for n, _ in self.target_nodes
-                                    if n.operator.startswith("detector.") and n.operator != "detector.new_only"})
+        # (節點名稱, 算子名稱)：基準線與調參都以節點區分，同一個演算法掛兩次也不會互相覆蓋
+        self.detector_nodes = [(n.name, n.operator) for n, _ in self.target_nodes
+                               if n.operator.startswith("detector.") and n.operator != "detector.new_only"]
 
     def run(self, *, now: datetime | None = None, targets: list[TargetSpec] | None = None,
             incident_id: int | None = None, request: BaseModel | None = None,
@@ -141,7 +144,7 @@ class Pipeline:
             for spec in (targets if targets is not None else self.workflow.targets):
                 ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request)
                 try:
-                    self.hooks.load_target(ctx, self.detector_ops)
+                    self.hooks.load_target(ctx, self.detector_nodes)
                     for node, op in self.target_nodes:
                         ctx = _run_node(node, op, ctx)
                     self.hooks.persist_target(ctx)

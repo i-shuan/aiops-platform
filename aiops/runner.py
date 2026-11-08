@@ -18,32 +18,44 @@ from aiops.operators import load_all
 from aiops.storage.hooks import StorageHooks
 
 WORKFLOW_DIR = Path(__file__).parent / "workflows"
-_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
+# 白名單：只准英數、底線、連字號。fullmatch 一次擋掉 /、\、..、空字串、換行與 \x00
+WORKFLOW_NAME = r"[A-Za-z0-9_-]+"
+_NAME = re.compile(WORKFLOW_NAME)
 
 
-def workflow_path(name_or_path: str) -> Path:
-    """內建 workflow 用名字（例如 it_otel）；自己的檔案用路徑。名字只准英數底線，避免被當成路徑穿越。"""
-    if name_or_path.endswith((".yaml", ".yml")) or "/" in name_or_path or "\\" in name_or_path:
-        path = Path(name_or_path)
-    elif _NAME.match(name_or_path):
-        path = WORKFLOW_DIR / f"{name_or_path}.yaml"
-    else:
-        raise BadRequest(f"不合法的 workflow 名稱：{name_or_path}")
+def workflow_path(name: str, *, allow_file: bool = False) -> Path:
+    """依名稱找內建 workflow（aiops/workflows/<名稱>.yaml）。
+
+    allow_file=True 只給排程 CLI 用：維運人員在自己機器上指定自己的 YAML 檔。API 一律不開放，
+    否則拿到 token 的人就能讓伺服器載入任意位置的檔案。
+    """
+    if allow_file and name.endswith((".yaml", ".yml")):
+        path = Path(name)
+        if not path.is_file():
+            raise NotFound(f"找不到 workflow 檔：{name}")
+        return path
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        raise BadRequest(f"不合法的 workflow 名稱：{name!r}（只能是英數、底線、連字號）")
+    path = WORKFLOW_DIR / f"{name}.yaml"
+    if path.is_symlink():  # workflows/ 裡被放了指向外部的軟連結
+        raise BadRequest(f"workflow {name} 是軟連結，拒絕載入")
     if not path.is_file():
-        raise NotFound(f"找不到 workflow：{name_or_path}")
+        raise NotFound(f"找不到 workflow：{name}")
+    if not path.resolve().is_relative_to(WORKFLOW_DIR.resolve()):
+        raise BadRequest(f"workflow {name} 不在 {WORKFLOW_DIR} 底下，拒絕載入")
     return path
 
 
-def build_pipeline(name_or_path: str) -> Pipeline:
+def build_pipeline(name: str, *, allow_file: bool = False) -> Pipeline:
     load_all()
-    return Pipeline(load_workflow(workflow_path(name_or_path)), StorageHooks())
+    return Pipeline(load_workflow(workflow_path(name, allow_file=allow_file)), StorageHooks())
 
 
 def run_context(workflow: str, *, request: BaseModel | None = None, incident_id: int | None = None,
                 targets: list[TargetSpec] | None = None, now: datetime | None = None,
-                strict: bool = True) -> PipelineContext:
-    return build_pipeline(workflow).run(now=now, targets=targets, incident_id=incident_id, request=request,
-                                        strict=strict)
+                strict: bool = True, allow_file: bool = False) -> PipelineContext:
+    return build_pipeline(workflow, allow_file=allow_file).run(now=now, targets=targets, incident_id=incident_id,
+                                                               request=request, strict=strict)
 
 
 def run(workflow: str, **kwargs: Any) -> dict[str, Any]:

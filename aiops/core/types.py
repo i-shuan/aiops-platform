@@ -29,15 +29,19 @@ class AnomalyEvent:
     score: float
     attrs: dict[str, Any] = field(default_factory=dict)
     value: float | None = None
+    # 資料血緣：哪個演算法（算子名，例如 detector.zscore）、哪個 Workflow 節點抓到的。外部匯入的異常留空
+    detector: str = ""
+    detector_node: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"entity": self.entity, "metric": self.metric, "ts": self.ts.isoformat(),
-                "score": self.score, "attrs": self.attrs, "value": self.value}
+                "score": self.score, "attrs": self.attrs, "value": self.value,
+                "detector": self.detector, "detector_node": self.detector_node}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AnomalyEvent:
         return cls(d["entity"], d["metric"], datetime.fromisoformat(d["ts"]), d["score"], d.get("attrs", {}),
-                   d.get("value"))
+                   d.get("value"), d.get("detector", ""), d.get("detector_node", ""))
 
 
 @dataclass

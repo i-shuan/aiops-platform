@@ -90,20 +90,24 @@ class AnomalyRow(Base):
     ts: Mapped[datetime] = mapped_column(DateTime)
     value: Mapped[float] = mapped_column(Float)
     score: Mapped[float] = mapped_column(Float)
-    detector_name: Mapped[str] = mapped_column(String(64))
+    detector_name: Mapped[str] = mapped_column(String(64))  # 算子名，例如 detector.zscore（外部匯入的異常不經這裡）
+    detector_node: Mapped[str] = mapped_column(String(128), default="", server_default="")  # Workflow 節點名稱
     attrs: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class DetectorModelRow(Base):
-    """批次訓練後保存的偵測器狀態（基準線參數）。一條管線 × 實體 × 指標 × 偵測器一筆。"""
+    """批次訓練後保存的偵測器狀態（基準線參數）。一條管線 × 實體 × 指標 × 偵測器 × 節點一筆。
+    同一個演算法在同一條管線掛兩次（例如短窗、長窗）各自有自己的基準線。"""
 
     __tablename__ = "detector_models"
-    __table_args__ = (UniqueConstraint("pipeline", "entity", "metric", "detector_name"),)
+    __table_args__ = (UniqueConstraint("pipeline", "entity", "metric", "detector_name", "node",
+                                       name="uq_detector_models_key"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pipeline: Mapped[str] = mapped_column(String(128))
     entity: Mapped[str] = mapped_column(String(256))
     metric: Mapped[str] = mapped_column(String(512))
     detector_name: Mapped[str] = mapped_column(String(64))
+    node: Mapped[str] = mapped_column(String(128), default="", server_default="")
     state: Mapped[dict] = mapped_column(JSON)
     train_start: Mapped[datetime] = mapped_column(DateTime)
     train_end: Mapped[datetime] = mapped_column(DateTime)
@@ -196,6 +200,9 @@ class TuningProposalRow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source: Mapped[str] = mapped_column(String(16))
     detector_name: Mapped[str] = mapped_column(String(64))
+    # 提案要改哪一層的設定（"*" = 不限定）。核准時寫進同一層
+    pipeline: Mapped[str] = mapped_column(String(128), default="*", server_default="*")
+    entity: Mapped[str] = mapped_column(String(256), default="*", server_default="*")
     params: Mapped[dict] = mapped_column(JSON)
     reason: Mapped[str] = mapped_column(String(2048), default="")
     proposer: Mapped[str] = mapped_column(String(128))
@@ -220,9 +227,16 @@ class FeedbackRow(Base):
 
 
 class ActiveDetectorConfigRow(Base):
+    """偵測器現行參數，分層：(偵測器, 管線, 實體)，"*" = 不限定。
+    三個獨立欄位組成唯一鍵（不組字串），實體名稱裡有冒號也不會歧義。
+    套用時取最具體的一層：管線×實體 > 管線 > 實體 > 全域（core/params.pick_most_specific）。"""
+
     __tablename__ = "active_detector_configs"
+    __table_args__ = (UniqueConstraint("detector_name", "pipeline", "entity", name="uq_active_detector_configs_scope"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    detector_name: Mapped[str] = mapped_column(String(64), unique=True)
+    detector_name: Mapped[str] = mapped_column(String(64))
+    pipeline: Mapped[str] = mapped_column(String(128), default="*", server_default="*")
+    entity: Mapped[str] = mapped_column(String(256), default="*", server_default="*")
     version: Mapped[int] = mapped_column(Integer)
     params: Mapped[dict] = mapped_column(JSON)
     source: Mapped[str] = mapped_column(String(16))

@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from aiops.core.params import ANY
 from aiops.storage import crud
 from aiops.storage.models import (
     ActiveDetectorConfigRow,
@@ -121,16 +122,20 @@ class ExternalAnomalies:
 
 
 class DetectorModels:
+    """基準線以 (管線, 實體, 指標, 偵測器, 節點) 區分。node 是 Workflow 節點名稱。"""
+
     @staticmethod
-    def get(pipeline: str, entity: str, metric: str, detector: str) -> Row | None:
-        return crud.find_one(DetectorModelRow, pipeline=pipeline, entity=entity, metric=metric, detector_name=detector)
+    def get(pipeline: str, entity: str, metric: str, detector: str, node: str = "") -> Row | None:
+        return crud.find_one(DetectorModelRow, pipeline=pipeline, entity=entity, metric=metric, detector_name=detector,
+                             node=node)
 
     @staticmethod
     def save(pipeline: str, entity: str, metric: str, detector: str, state: Row, train_start: datetime,
-             train_end: datetime, points: int, *, expected_version: int, trained_at: datetime | None = None) -> Row | None:
+             train_end: datetime, points: int, *, expected_version: int, node: str = "",
+             trained_at: datetime | None = None) -> Row | None:
         """樂觀鎖寫入。expected_version 是讀取當時的版本（0 = 當時還沒有這一筆）。
         別人已經先寫了就回傳 None，不覆蓋對方較新的基準線。"""
-        key = {"pipeline": pipeline, "entity": entity, "metric": metric, "detector_name": detector}
+        key = {"pipeline": pipeline, "entity": entity, "metric": metric, "detector_name": detector, "node": node}
         fields = {"state": state, "train_start": train_start, "train_end": train_end, "points": points,
                   "trained_at": trained_at or utc_now()}
         if expected_version == 0:
@@ -139,25 +144,35 @@ class DetectorModels:
 
 
 class ActiveConfigs:
-    """偵測器現行參數。整個系統只有 admin.tuning.approve 會呼叫 set()。"""
+    """偵測器現行參數，分層存放：(偵測器, 管線, 實體)，"*" = 不限定。整個系統只有 admin.tuning.approve 會呼叫 set()。
+    要「套用哪一筆」的優先序規則不在這裡（core/params.pick_most_specific），這裡只負責撈資料。"""
 
     @staticmethod
-    def get(detector: str) -> Row | None:
-        return crud.find_one(ActiveDetectorConfigRow, detector_name=detector)
+    def get(detector: str, pipeline: str = ANY, entity: str = ANY) -> Row | None:
+        """恰好這一層的設定（不往上找）。"""
+        return crud.find_one(ActiveDetectorConfigRow, detector_name=detector, pipeline=pipeline, entity=entity)
 
     @staticmethod
-    def version(detector: str) -> int:
-        row = ActiveConfigs.get(detector)
+    def candidates(detector: str, pipeline: str, entity: str) -> list[Row]:
+        """所有可能適用的層級，一次查詢撈出：pipeline ∈ {pipeline, *}、entity ∈ {entity, *}。"""
+        return crud.find_matching(ActiveDetectorConfigRow, {"detector_name": detector},
+                                  {"pipeline": sorted({pipeline, ANY}), "entity": sorted({entity, ANY})})
+
+    @staticmethod
+    def version(detector: str, pipeline: str = ANY, entity: str = ANY) -> int:
+        row = ActiveConfigs.get(detector, pipeline, entity)
         return row["version"] if row else 0
 
     @staticmethod
-    def set(detector: str, params: Row, source: str, proposal_id: int, *, expected_version: int) -> Row | None:
-        """樂觀鎖寫入。expected_version 是核准當下提案的基準版本（0 = 還沒有現行參數）。
-        現行參數已被別人推進就回傳 None，不覆蓋。"""
+    def set(detector: str, params: Row, source: str, proposal_id: int, *, expected_version: int,
+            pipeline: str = ANY, entity: str = ANY) -> Row | None:
+        """樂觀鎖寫入恰好這一層。expected_version 是核准當下提案的基準版本（0 = 這一層還沒有設定）。
+        這一層已被別人推進就回傳 None，不覆蓋。"""
+        key = {"detector_name": detector, "pipeline": pipeline, "entity": entity}
         fields = {"params": params, "source": source, "proposal_id": proposal_id}
         if expected_version == 0:
-            return crud.insert_if_absent(ActiveDetectorConfigRow, detector_name=detector, version=1, **fields)
-        return crud.update_if_version(ActiveDetectorConfigRow, {"detector_name": detector}, expected_version, **fields)
+            return crud.insert_if_absent(ActiveDetectorConfigRow, **key, version=1, **fields)
+        return crud.update_if_version(ActiveDetectorConfigRow, key, expected_version, **fields)
 
 
 class Mappings:

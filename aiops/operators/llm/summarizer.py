@@ -6,7 +6,8 @@ from aiops.core.topology import propagation_edges
 from aiops.operators.base import BaseOperator
 from aiops.operators.llm import narrative
 from aiops.operators.llm.base import LLMError, parse_json_reply
-from aiops.operators.llm.providers import PROVIDERS, build_llm
+from aiops.operators.llm import registry
+from aiops.operators.llm.providers import build_llm
 
 
 @OperatorRegistry.register("enrichment.llm_summary")
@@ -19,8 +20,8 @@ class LLMSummarizer(BaseOperator):
     scope = "batch"
 
     def __init__(self, provider: str = "noop", model: str | None = None, base_url: str | None = None):
-        if provider not in PROVIDERS:
-            raise TypeError(f"provider 只能是 {', '.join(PROVIDERS)}，不是 {provider!r}")
+        if provider not in registry.names():
+            raise TypeError(f"provider 只能是 {', '.join(registry.names())}，不是 {provider!r}")
         self.provider, self.model, self.base_url = provider, model, base_url
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:

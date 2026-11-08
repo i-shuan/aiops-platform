@@ -47,6 +47,8 @@ class BaseOperator(ABC):
  * **Detector（異常偵測）**：
    * 必須支援 `fit(df) -> self`（批次訓練）與 `detect(df) -> AnomalyResult`（即時推論）。
    * 必須支援 `get_state() -> dict` 與 `load_state(state: dict)` 以供模型基準線持久化。
+   * 偵測用到滾動窗時覆寫 `warmup_points() -> int`（需要前面幾個點才算得出分數），回測切測試段時會多帶這些點讓窗口湊滿（不計分）。
+   * 基準線、調參、異常血緣都以 **Workflow 節點名稱**（`self.state_key`）為準，同一個演算法可以在同一條管線掛多次。
  * **Grouper（事件收斂）**：
    * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
  * **Suppressor（告警抑制）**：
@@ -170,6 +172,10 @@ nodes:
 
 **節點失敗怎麼處理**：預設任何節點出錯都讓這一輪（或這條序列）失敗。旁路裝飾節點（LLM 摘要等）加上 `optional: true`，失敗時只記進 `errors`（實體名為 `node:<節點名>`）並跳過，後面的節點與最終寫入照常執行。`InfrastructureError`（DB、資料源連不上）不受 `optional` 影響，一律讓整輪失敗。**不要把 fetch、detector、group、suppress、payload、notify 標成 optional。**
 
+**參數優先序**：演算法預設值 ← 後台核准的調參 ← YAML `params`，逐鍵合併（`core/params.deep_merge`）；YAML 寫了的鍵鎖定、不被調參覆蓋。調參分層 (偵測器, 管線, 實體)，取最具體的一層（管線×實體 > 管線 > 實體 > 全域）。
+
+**workflow 只能用名稱**：API 的 `workflow` 欄位只接受 `[A-Za-z0-9_-]+` 的內建名稱（`runner.workflow_path`），絕不接受路徑；只有排程 CLI 可以用 `allow_file=True` 載入自己的 YAML 檔。
+
 **並發安全**：偵測器基準線（`detector_models`）與現行參數（`active_detector_configs`）用 `version` 欄位做樂觀鎖，寫入必須帶讀取當時的版本；版本已被別人推進就不覆蓋（基準線記在 audit，調參核准回 409 並把提案標成 stale）。
 
 ---
@@ -178,12 +184,14 @@ nodes:
 
  * **要寫新的異常檢測演算法（如 Isolation Forest）？**
    👉 寫入 `aiops/operators/detectors/<name>.py`，掛上 `@OperatorRegistry.register("detector.<name>")`。
+ * **要新增 LLM 供應商（如 Mistral、內部私有模型）？**
+   👉 在 `aiops/operators/llm/` 放一個檔案，用 `@register("<name>")`（`operators/llm/registry.py`）登記 factory，啟動時自動掃描載入；不用改 `providers.py`、也不用改引擎。
  * **要新增監控指標或日誌連線源（如 InfluxDB）？**
    👉 寫入 `aiops/datasource_specs/<name>.py`，繼承 `BaseDataSourceSpec`，輸出轉成標準 DataFrame。
  * **要擴充新的收斂邏輯（如針對特定微服務呼叫鏈）？**
    👉 寫入 `aiops/operators/alerts/groupers.py`，實作標準 `BaseOperator`。
  * **要新增資料庫紀錄欄位？**
-   👉 寫入 `aiops/storage/models.py`，只能透過 `aiops/storage/repository.py` 操作讀寫。
+   👉 寫入 `aiops/storage/models.py`，只能透過 `aiops/storage/repository.py` 操作讀寫；並在 `migrations/postgres/` 補一支可重複執行的 SQL（沒有 Alembic，既有 PostgreSQL 靠它升級）。
  * **要調整執行步驟與算法超參數？**
    👉 寫入 `aiops/workflows/<scene>.yaml`，完全不改動任何 Python 程式碼。
 

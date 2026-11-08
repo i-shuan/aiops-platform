@@ -29,8 +29,12 @@ class MetricIn(BaseModel):
 # ── 執行 workflow ──
 
 
+# API 只能用內建 workflow 的名稱（不能給路徑）；runner.workflow_path 會再檢查一次
+WorkflowName = Field(pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
+
+
 class RunWorkflowRequest(BaseModel):
-    workflow: str
+    workflow: str = WorkflowName
     # 不給就用 workflow 檔裡的 targets
     targets: list[TargetSpec] | None = None
     # 回放用：不給就用現在
@@ -39,7 +43,7 @@ class RunWorkflowRequest(BaseModel):
 
 class RcaRequest(BaseModel):
     incident_id: int
-    workflow: str = "rca_report"
+    workflow: str = Field("rca_report", pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
 
 
 class IdRef(BaseModel):
@@ -152,6 +156,9 @@ class ProposalCreate(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
     proposer: str
+    # 這個提案改哪一層："*" = 不限定。只給 pipeline = 這條管線的所有實體；兩個都給 = 只改這條管線的這個實體
+    pipeline: str = Field("*", min_length=1, max_length=128)
+    entity: str = Field("*", min_length=1, max_length=256)
 
 
 class ProposalBacktest(BaseModel):
@@ -159,6 +166,8 @@ class ProposalBacktest(BaseModel):
     metric: MetricIn
     time_range: TimeRangeIn
     peers: list[MetricIn] = Field(default_factory=list)
+    # 前面這個比例拿來訓練、後面拿來測試（只算測試段的異常），避免「用同一段資料訓練又評分」高估效果
+    train_ratio: float = Field(0.7, ge=0.1, le=0.9)
 
     def to_targets(self) -> list:
         """回測的 target（引擎載入欄位對照與 trace 時序用）。放在這裡，API 層就不必寫轉換邏輯。"""
@@ -183,3 +192,7 @@ class FeedbackPropose(BaseModel):
     feedback_id: int
     proposer: str
     detector: str | None = None
+    # 提案要改哪一層（管線取自事件群本身）：
+    # entity = 只改這條管線的這個實體（事件群只有一個實體時可省略 entity）；pipeline = 這條管線全部；global = 全平台
+    scope: Literal["entity", "pipeline", "global"] = "pipeline"
+    entity: str | None = None

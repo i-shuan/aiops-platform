@@ -24,7 +24,7 @@ from aiops.runner import run, run_context
 
 def run_once(workflow: str, now: datetime | None) -> int:
     try:
-        ctx = run_context(workflow, now=now, strict=False)
+        ctx = run_context(workflow, now=now, strict=False, allow_file=True)  # CLI 可以指定自己的 YAML 檔
     except PlatformError as e:
         report_failure(e, {"workflow": workflow})
         print(json.dumps({"workflow": workflow, "error": str(e)}, ensure_ascii=False), file=sys.stderr, flush=True)

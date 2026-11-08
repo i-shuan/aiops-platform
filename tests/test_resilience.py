@@ -112,12 +112,12 @@ def test_concurrent_first_training_in_the_pipeline_logs_a_conflict_and_keeps_the
 
     real_load = hooks.StorageHooks.load_target
 
-    def load_then_other_worker_wins(self, ctx, detector_ops):
-        real_load(self, ctx, detector_ops)
+    def load_then_other_worker_wins(self, ctx, detector_nodes):
+        real_load(self, ctx, detector_nodes)
         ctx.detector_states.clear()  # 這個 worker 讀的時候還沒有
         if not _all_models():
             DetectorModels.save(ctx.pipeline, ctx.target.entity, ctx.target.query, "detector.zscore", {"winner": True},
-                                T0, T0, 1, expected_version=0)  # 另一個 worker 在這個 worker 寫入前先寫了
+                                T0, T0, 1, expected_version=0, node="detect")  # 另一個 worker 在這個 worker 寫入前先寫了
 
     monkeypatch.setattr(hooks.StorageHooks, "load_target", load_then_other_worker_wins)
     from aiops.runner import run_context

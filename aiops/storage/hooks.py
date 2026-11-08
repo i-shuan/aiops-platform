@@ -17,6 +17,7 @@ from aiops.core.context import (
     Silence,
     TraceRow,
 )
+from aiops.core.params import pick_most_specific
 from aiops.core.topology import lot_edges_from_paths
 from aiops.core.types import AnomalyEvent, Incident, as_utc
 from aiops.storage.repository import (
@@ -86,7 +87,7 @@ class StorageHooks:
                     ctx.trace_rows.setdefault(r["service"], []).append(
                         TraceRow(r["service"], as_utc(r["ts"]), r["count"], r["error_rate"], r["p95_ms"]))
 
-    def load_target(self, ctx: PipelineContext, detector_ops: list[str]) -> None:
+    def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None:
         target = ctx.target
         assert target is not None
         for source_type in {target.source_type, *(p.source_type for p in target.peers)}:
@@ -102,15 +103,19 @@ class StorageHooks:
                 ctx.trace_rows.setdefault(r["service"], []).append(
                     TraceRow(r["service"], as_utc(r["ts"]), r["count"], r["error_rate"], r["p95_ms"]))
 
-        for op in detector_ops:
-            active = ActiveConfigs.get(op)
+        candidates: dict[str, list] = {}  # 同一個演算法掛兩個節點時只查一次
+        for node, op in detector_nodes:
+            if op not in candidates:
+                candidates[op] = ActiveConfigs.candidates(op, ctx.pipeline, target.entity)
+            active = pick_most_specific(candidates[op], ctx.pipeline, target.entity)
             if active:
-                ctx.detector_params[op] = active["params"]
-            model = DetectorModels.get(ctx.pipeline, target.entity, target.query, op)
+                ctx.detector_params[node] = active["params"]
+                ctx.log(f"params:{node}:{op}@{active['pipeline']}/{active['entity']}#v{active['version']}")
+            model = DetectorModels.get(ctx.pipeline, target.entity, target.query, op, node)
             if model:
-                ctx.detector_states[op] = DetectorState(model["state"], as_utc(model["trained_at"]),
-                                                        model["train_start"], model["train_end"], model["points"],
-                                                        model["version"])
+                ctx.detector_states[node] = DetectorState(model["state"], as_utc(model["trained_at"]),
+                                                          model["train_start"], model["train_end"], model["points"],
+                                                          model["version"], op)
         last = Anomalies.latest_ts(ctx.pipeline, target.entity, target.query)
         ctx.last_anomaly_ts = as_utc(last) if last else None
 
@@ -119,17 +124,17 @@ class StorageHooks:
     def persist_target(self, ctx: PipelineContext) -> None:
         target = ctx.target
         assert target is not None
-        for op, st in ctx.new_detector_states.items():
-            saved = DetectorModels.save(ctx.pipeline, target.entity, target.query, op, st.state,
+        for node, st in ctx.new_detector_states.items():
+            saved = DetectorModels.save(ctx.pipeline, target.entity, target.query, st.detector, st.state,
                                         st.train_start or ctx.now, st.train_end or ctx.now, st.points,
-                                        expected_version=st.version, trained_at=st.trained_at)
+                                        expected_version=st.version, node=node, trained_at=st.trained_at)
             if saved is None:  # 別的 worker 先寫了：保留它較新的基準線，這次的丟掉（不是錯誤）
-                ctx.log(f"baseline:{op}:{target.entity}:conflict-kept-newer")
-        algorithm = ctx.anomaly_result.algorithm if ctx.anomaly_result else ""
+                ctx.log(f"baseline:{node}:{target.entity}:conflict-kept-newer")
+        # 每筆異常帶著自己的偵測器與節點（不是用「最後一個跑的偵測器」一律蓋上）
         Anomalies.create_many([
             {"pipeline": ctx.pipeline, "entity": e.entity, "metric": e.metric, "ts": e.ts,
              "value": float(e.value) if e.value is not None else 0.0, "score": float(e.score),
-             "detector_name": algorithm, "attrs": e.attrs}
+             "detector_name": e.detector, "detector_node": e.detector_node, "attrs": e.attrs}
             for e in ctx.anomalies
         ])
 

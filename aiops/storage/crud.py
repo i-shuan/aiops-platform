@@ -112,6 +112,14 @@ def find_one(model: Any, **filters: Any) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def find_matching(model: Any, equals: dict[str, Any], any_of: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """一次查詢：equals 的欄位都相等、且 any_of 的每個欄位都落在給定的值之中（WHERE col IN (...)）。"""
+    stmt = select(model).where(*_where(model, equals),
+                               *(getattr(model, col).in_(values) for col, values in any_of.items()))
+    with read_session() as s:
+        return [row_to_dict(r) for r in s.scalars(stmt.order_by(model.id))]
+
+
 def find_in(model: Any, column: str, values: list[Any]) -> list[dict[str, Any]]:
     if not values:
         return []

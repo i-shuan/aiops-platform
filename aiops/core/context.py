@@ -64,6 +64,7 @@ class DetectorState:
     train_end: datetime | None = None
     points: int = 0
     version: int = 0  # 讀取當時的資料庫版本（0 = 資料庫還沒有這一筆）；寫回時用來偵測別人是否已經更新
+    detector: str = ""  # 算子名（例如 detector.zscore）。ctx 裡的 key 是節點名稱，寫回時兩個都要
 
 
 @dataclass
@@ -135,8 +136,9 @@ class PipelineContext:
     # ── 載入的輸入（引擎在跑之前載入；算子只讀）──
     field_maps: dict[str, dict[str, str]] = field(default_factory=dict)  # source_type -> 已核准對照（來源欄 -> 標準欄）
     trace_rows: dict[str, list[TraceRow]] = field(default_factory=dict)  # 服務 -> trace 合成時序
-    detector_params: dict[str, dict[str, float]] = field(default_factory=dict)  # 算子名 -> tuning 核准的現行參數
-    detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 算子名 -> 基準線
+    # 節點名稱 -> tuning 核准的現行參數（已依 管線×實體 > 管線 > 實體 > 全域 挑出最具體的一筆）
+    detector_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 基準線
     last_anomaly_ts: datetime | None = None  # 這條序列最後一筆已存的異常時間（只處理比它新的）
     silences: list[Silence] = field(default_factory=list)
     recent_notifications: list[RecentNotification] = field(default_factory=list)
@@ -153,7 +155,7 @@ class PipelineContext:
     raw_df: pd.DataFrame | None = None  # 欄位 ts、value（有同儕時再加 peer_0、peer_1…）
     train_df: pd.DataFrame | None = None
     anomaly_result: AnomalyResult | None = None
-    new_detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 這次新訓練的，最後才存
+    new_detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 這次新訓練的，最後才存
     anomalies: list[AnomalyEvent] = field(default_factory=list)
     incidents: list[Incident] = field(default_factory=list)
     incident_ids: dict[str, int] = field(default_factory=dict)  # 事件群 fingerprint -> 已存的 id（持久化後填）
