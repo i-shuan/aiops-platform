@@ -143,7 +143,10 @@ POST /api/v1/alerts/process
   - `receivers` 原樣放進 alertmanager.yml，並存在 Secret（webhook URL 是機密）。路由引用了沒定義的 receiver，render 會直接失敗。
   - **不得加 `inhibit_rules`、不得在 Alertmanager 設 silence。** 抑制與靜音只有平台一份（`tests/test_helm_alertmanager.py` 檢查）。
   - receiver 一律 `send_resolved: false`；`resolveTimeout` 預設 24h。原因是平台還不送 `endsAt`，見下方待辦。
-- **Grafana 側只動 helm chart：** 把 aiops-alertmanager 加成 `alertmanager` 型資料源（`implementation: prometheus`、`handleGrafanaManagedAlerts: false`）。本 chart 的 `displayDatasource.enabled` 可產生帶 sidecar label 的 ConfigMap；Grafana 沒開 sidecar 的話，就把同樣內容交給管 Grafana 的人放進它的 provisioning。
+- **Grafana 側只動 helm chart：** 把 aiops-alertmanager 加成 `alertmanager` 型資料源（`implementation: prometheus`、`handleGrafanaManagedAlerts: false`）。
+  - **目前 `grafana-new` 的 Grafana 沒有 sidecar**，資料源只來自它自己 chart 的 `files/datasource.yaml`，所以本 chart 的 `displayDatasource`（帶 sidecar label 的 ConfigMap）在這台**不會生效**，預設保持關閉。
+  - 已在舊 repo `aiops-data-foundation` 的 branch `feature/grafana-alertmanager-datasource` 加了 `aiops-alertmanager` 資料源（網址取自環境變數 `AIOPS_ALERTMANAGER_URL`，放在 Grafana 的 Secret `secretData`）。這是對「舊 repo 不動」的**一次例外**，經使用者同意，只限這一個資料源；其餘舊 repo 內容仍不動。
+  - 部署：`helm upgrade grafana <舊 repo>/grafana/helmchart -n grafana-new --reuse-values --set secretData.AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.aiops-platform.svc:9093`。
 - 平台設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.<namespace>.svc:9093`。
 
 - 通知是 Alertmanager v2 格式：`labels`（`alertname=aiops_incident`、`incident_id`、`severity`、`preset`、`dept`、`entities`）、`annotations`（`summary`、`description`）、`startsAt`。
@@ -153,7 +156,8 @@ POST /api/v1/alerts/process
 
 > 目前狀態（2026-11-08）：**平台 -> aiops-alertmanager 已在本機 rancher-desktop 端對端驗證成功**：三個部門各推一則，依 `dept` 分到正確的 receiver，沒帶部門的進 `unrouted`；同一批再跑一次全部被 `dedup` 擋下。
 > 還沒做的：
-> - **Grafana 顯示還沒接上**：資料源還沒加進 Grafana（`grafana-new` 是否用 sidecar 也還沒確認）。
+> - **Grafana 顯示已接上並驗證**：Grafana 13 經資料源讀到 Alertmanager 的告警，標籤（`dept`、`severity`）與 receiver 都正確。Grafana 內建的資料源健康檢查端點對 alertmanager 型回 500（`plugin unavailable`），這是該資料源型別本來就不支援，不是連線失敗，實際讀取以 `/api/datasources/proxy/uid/aiops-alertmanager/api/v2/alerts` 為準。
+> - **舊 Grafana 仍掛著自己的 alert rules／contact points／policies**（`grafana-alerting`），與「Grafana 只顯示、不發通知」相反，兩邊同時開可能重複通知。尚未處理，需要決定是否關掉。
 > - **真的通道還沒設**：驗證時 receiver 都沒有 `*_configs`，收下但不送出。
 > - **恢復通知**：平台只送 `startsAt`、不送 `endsAt`。之後由平台補送 `endsAt`，才能開恢復通知、把 `resolveTimeout` 改回合理值。
 > - **平台本身的 helm chart** 還沒建（平台目前不在叢集裡跑）。
