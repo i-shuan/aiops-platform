@@ -4,16 +4,20 @@ import pkgutil
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from aiops import domains
+from aiops import domains, plugins
 from aiops.commands.base import CommandError
+from aiops.infrastructure.errors import InfrastructureError
+from aiops.infrastructure.fallback import init_fallback_logging, report_failure
 
 
 def init_plugins() -> None:
-    """自動掃描 plugins/，載入即完成 @register，領域層不必 import 具體外掛。"""
-    for pkg in ("detectors", "llm"):
-        mod = importlib.import_module(f"aiops.plugins.{pkg}")
-        for m in pkgutil.iter_modules(mod.__path__):
-            importlib.import_module(f"aiops.plugins.{pkg}.{m.name}")
+    """掃描 plugins/ 底下每個子套件的所有模組，載入即完成 @register。領域層不必 import 具體外掛。"""
+    for pkg in pkgutil.iter_modules(plugins.__path__):
+        if not pkg.ispkg:
+            continue
+        package = importlib.import_module(f"aiops.plugins.{pkg.name}")
+        for m in pkgutil.iter_modules(package.__path__):
+            importlib.import_module(f"aiops.plugins.{pkg.name}.{m.name}")
 
 
 def init_routers(app: FastAPI) -> None:
@@ -25,7 +29,7 @@ def init_routers(app: FastAPI) -> None:
             api = importlib.import_module(f"aiops.domains.{m.name}.api")
         except ModuleNotFoundError as e:
             if e.name == f"aiops.domains.{m.name}.api":
-                continue  # 該領域還沒有 api.py（例如空殼領域）
+                continue  # 該領域還沒有 api.py
             raise
         app.include_router(api.router)
 
@@ -34,3 +38,12 @@ def init_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(CommandError)
     async def _command_error(_: Request, exc: CommandError):
         return JSONResponse(status_code=exc.status_code, content={"message": str(exc)})
+
+    @app.exception_handler(InfrastructureError)
+    async def _infrastructure_error(request: Request, exc: InfrastructureError):
+        report_failure(exc, {"method": request.method, "path": request.url.path})
+        return JSONResponse(status_code=503, content={"message": "基礎設施暫時無法使用，已通報"})
+
+
+def init_infrastructure() -> None:
+    init_fallback_logging()

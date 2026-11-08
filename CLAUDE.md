@@ -1,34 +1,121 @@
 # CLAUDE.md - AIOps 架構守則與開發規範
 
-## 1. 核心架構哲學
+## 0. 一句話
 
-本專案採用「DDD 垂直領域（domains）+ 可插拔能力（plugins）+ 資料源適配（datasource_specs）」架構。
-所有新功能、Bug 修復與重構，必須服從下列硬性禁令。**這些禁令由 `tests/test_architecture.py` 機械式檢查，違規 = 測試紅燈。**
+**Command 是固定流程，Plugin 是可抽換零件，Preset 決定這個場景用哪些零件。**
+換場景（IT／工廠／純指標）不另寫一套流程，只換 preset；換演算法不改流程，只換外掛名字。
 
-### 絕對禁止事項
+## 1. 分層與硬性禁令
 
-1. **嚴禁反向與跨層依賴**
-   - `aiops/plugins/` 不得 import 任何 `aiops.domains`（外掛是純零件，不認識業務）。
-   - `aiops/domains/*/api.py` 只能 import：`fastapi`、`typing`、`pydantic`、同領域的 `commands/` 與 `schemas`。不得 import `plugins`、`datasource_specs`、`models`。
-   - `aiops/domains/*/commands/` 只能從 `aiops.plugins.base` 與 `aiops.plugins.registry` 取用外掛抽象；具體演算法（`plugins/detectors/*`、`plugins/llm/*`）一律 `DetectorRegistry.get()` 動態取得。
-   - 領域層不得直接 import 具體資料源實作（如 `datasource_specs.mock`），一律走 `get_datasource_spec()`。
-2. **嚴禁建立 Service 雜物箱**：不得出現 `*_service.py` 或 `services/` 目錄。業務邏輯一律寫在對應領域的 `commands/*.py`。
-3. **api.py 零邏輯**：只做 (1) 用 Schema 驗證請求、(2) 實例化 Command 並呼叫 `.run()`。不得有 if / for / while / try / with / 推導式。連「列出外掛」這種小事也要包成 Command。
-4. **utils/ 不是雜物箱**：只放無業務語意的純函式（時間戳轉換、矩陣工具）。含業務判斷的程式碼一律回到 Command。
+| 層 | 位置 | 職責 | 不准做的事 |
+|---|---|---|---|
+| 入口 | `domains/<d>/api.py` | 驗證請求 -> 呼叫 Command | 任何邏輯、import 自己領域 commands/schemas 以外的東西 |
+| 流程 | `domains/<d>/commands/` | 固定業務流程（validate -> run） | import 具體外掛、直接碰 models |
+| 存取 | `domains/<d>/dao.py` | 讀寫資料表 | 業務判斷 |
+| 資料表 | `models/` | 資料形狀與存放（目前是記憶體表，之後換 SQLAlchemy） | — |
+| 零件 | `plugins/<kind>/` | 純運算：偵測、收斂、計分、報告段落、LLM | 認識任何領域、碰 DB、碰外部服務 |
+| 資料源 | `datasource_specs/` | 連線、查詢、轉成 `DataFrame(ts, value)` | 審核狀態、業務合成（trace 合成、Lot 履歷） |
+| 場景 | `presets/` | 每個場景啟用哪些外掛（只寫名字） | import 外掛或領域 |
+| 基礎設施 | `infrastructure/` | 故障看守（本機日誌、webhook）、基礎設施錯誤 | 業務邏輯 |
 
-## 2. 檔案歸屬決策樹
+以下全部由 `tests/test_architecture.py` 機械式檢查，**違規 = 測試紅燈**：
 
-- **新增 API 端點** → `aiops/domains/<domain>/api.py`；請求/回應規格放 `schemas.py`。
-- **新增領域** → 建 `aiops/domains/<domain>/`，放 `api.py`（需定義 `router`）。`initialization.init_routers` 會自動掛載，**不要**手動去 import 註冊。
-- **系統業務流程**（檢測後是否發警報、審核調優參數…）→ 繼承 `BaseCommand`，放 `aiops/domains/<domain>/commands/<action>.py`。
-- **串接新監控資料源**（Prometheus、VictoriaMetrics、ES、ClickHouse…）→ 繼承 `BaseDataSourceSpec`，放 `aiops/datasource_specs/<name>.py`，並在 `datasource_specs/__init__.py` 的 `_SPECS` 加一行。輸出固定為 `DataFrame(ts, value)`。
-- **新增異常檢測演算法** → 繼承 `BaseDetector`，放 `aiops/plugins/detectors/<algo>.py`，用 `@DetectorRegistry.register` 註冊（啟動時自動掃描，不需改其他檔案）。
-- **新增 LLM 供應商** → 繼承 `BaseLLMProvider`，放 `aiops/plugins/llm/`。
-- **資料庫存取（CRUD）** → `aiops/domains/<domain>/dao.py`（尚未建立，第一個需要落庫的領域建立時一併定義）。Command 內不得散落原生 SQL 或 ORM session 操作。
-- **ORM 模型** → `aiops/models/`。
-- **排程 / 背景任務** → `aiops/tasks/`，任務內只呼叫 Command，不寫邏輯。
+1. `plugins/` 不得 import `domains`、`models`、`infrastructure`、`datasource_specs`、`presets`、`initialization`。
+2. `datasource_specs/` 不得 import `domains`、`models`、`plugins`。
+3. `presets/` 不得 import `domains`、`plugins`、`models`、`datasource_specs`。
+4. **領域之間不得互相 import。** 跨領域資料只能走共用的 `models/` 資料表，且遵守下面「跨領域資料讀取規範」。
+5. 領域內只有 `dao.py` 能 import `aiops.models`。
+6. `commands/` 只能從 `aiops.plugins.base`、`aiops.plugins.registry` 取用外掛；具體外掛一律 `XxxRegistry.get(name)`。
+7. 領域層不得直接 import 具體資料源（如 `datasource_specs.mock`），一律 `get_datasource_spec()`。
+8. `api.py` 只能 import `fastapi`、`typing`、`pydantic`、同領域的 `commands` 與 `schemas`；不得有 if／三元運算／for／while／try／with／推導式。
+9. 不得出現 `*_service.py` 或 `services/` 目錄。
+10. 每個 preset 引用的外掛名字都必須已註冊。
+11. 偵測器現行參數（`active_detector_configs`）只有 `domains/tuning/dao.py` 能寫。
+12. `aiops/` 底下不得有名稱含 `grafana` 的檔案或目錄（見第 5 節）。
+13. 每張資料表都要在 `models/core.py` 的 `TABLE_OWNERS` 登記擁有者領域。
+14. 非擁有者領域讀別人的資料表，類別名稱必須以 `ReadDAO` 結尾，且只能呼叫讀取方法。
+15. 任何 `*ReadDAO` 不得有 insert／update／delete／set／create／save／add／remove／clear 類的呼叫或方法。
 
-## 3. 標準樣板
+### 跨領域資料讀取規範
+
+- 領域**嚴禁寫入**其他領域擁有的資料表。寫入只有擁有者領域的 DAO 能做（擁有者見 `TABLE_OWNERS`）。
+- 跨領域讀取必須在**自己領域的 `dao.py`** 獨立宣告 `*ReadDAO`（例：`rca/dao.py` 的 `IncidentReadDAO`、`detection/dao.py` 的 `DetectorConfigReadDAO`），內容只能是查詢。
+- 這樣表結構要改或要拆庫時，全域搜尋 `ReadDAO` 就能找到所有跨領域的消費端。
+- 目前的檢查範圍：`dao.py` 裡直接使用 `core.<table>` 的類別。若之後改用 SQLAlchemy，要同步調整 `tests/test_architecture.py` 的偵測方式。
+
+另外，`tests/test_plugin_contracts.py` 會自動對**每一個**已註冊外掛跑契約測試，新增外掛不必另寫契約測試。
+
+## 2. 動作 vs 零件：不要把動作當外掛
+
+| 是 Command（固定流程） | 是 Plugin（可抽換零件） |
+|---|---|
+| 收資料、訓練、偵測、調參、回測、核准 | zscore、shift、peer、rules、chronic…（偵測演算法） |
+| trace 合成、Lot 履歷合成、外部異常匯入、欄位對照審核 | same_entity、topology_chain、lot_path_chain…（收斂 Grouper） |
+| 告警收斂管線、產生 RCA 報告 | golden_signals、p0_boost…（計分 Scorer） |
+| | summary、timeline、golden_signals…（報告段落 Section Builder） |
+
+- **偵測器契約只有兩個方法：`fit(df) -> self`、`detect(df) -> AnomalyResult`。** 「train」「tune」「collect」不是外掛名字，是領域 Command。
+- **trace 不另開一套 train／detect。** `ingestion` 的 `MergeTracesCommand` 把 span 轉成標準時序，之後跟一般指標走同一個偵測器。
+
+### 各類外掛的單一契約（定義在 `plugins/base.py`）
+
+所有外掛都是純運算：輸入進來、結果出去，不連 DB、不改傳入的物件、不認識領域。需要的場景資料（拓撲、P0 清單等）只能從 `context` 取得，由 Command 傳入。
+
+| 外掛 | 契約 | 備註 |
+|---|---|---|
+| 偵測器 `BaseDetector` | `fit(df) -> self`；`detect(df) -> AnomalyResult` | 先 fit 才能 detect |
+| 收斂 `BaseGrouper` | `group(incidents, context) -> list[Incident]` | 不得丟掉任何事件；合併用 `merge_incidents()` |
+| 計分 `BaseScorer` | `score(incident, context) -> float` | 回傳新分數，不得修改 incident |
+| 報告段落 `BaseSectionBuilder` | `applies(incident, context) -> bool`；`build(incident, context) -> ReportSection` | 資料不足時 `applies` 回 `False`，不輸出空殼 |
+| LLM `BaseLLMProvider` | `complete(prompt) -> str` | |
+
+**不要在外掛之外的地方偷渡這些邏輯**：收斂規則、計分規則、報告段落內容都不准寫進 Command 或 `api.py`，Command 只負責依 preset 依序呼叫外掛。
+
+## 3. 檔案歸屬決策樹
+
+- **新增 API 端點** → `domains/<domain>/api.py`；請求／回應規格放 `schemas.py`。跨領域共用的純資料型別（`MetricTarget`、`TimeRange`）放 `aiops/schemas.py`。
+- **新增領域** → 建 `domains/<domain>/`，放 `api.py`（定義 `router`）。`init_routers` 會自動掛載，**不要**手動註冊。
+- **業務流程** → 繼承 `BaseCommand`，放 `domains/<domain>/commands/<action>.py`。業務錯誤丟 `CommandError`／`CommandNotFound`（404）／`CommandConflict`（409）。
+- **資料進來之後的合成、匯入、欄位對照審核** → `domains/ingestion/commands/`。
+- **新監控資料源** → 繼承 `BaseDataSourceSpec`，放 `datasource_specs/<name>.py`，在 `datasource_specs/__init__.py` 的 `_SPECS` 加一行。欄位對照只讀「已核准」版本，由 Command 傳入，Spec 自己不查審核狀態。
+- **新偵測演算法** → 繼承 `BaseDetector`，放 `plugins/detectors/<algo>.py`，加 `@DetectorRegistry.register`。
+- **新收斂規則** → 繼承 `BaseGrouper`，放 `plugins/groupers/`，加 `@GrouperRegistry.register`。合併一律用 `merge_incidents()`。
+- **新計分規則** → 繼承 `BaseScorer`，放 `plugins/scorers/`，加 `@ScorerRegistry.register`。回傳新分數，不得修改 incident。
+- **新 RCA 報告段落** → 繼承 `BaseSectionBuilder`，放 `plugins/rca_sections/`，加 `@SectionRegistry.register`。資料不足時讓 `applies()` 回 `False`，不要輸出空殼。
+- **新場景或調整場景用的零件** → 改 `presets/__init__.py`，只寫名字。
+- **任何改偵測參數的需求（自動調優、LLM 從回饋抽規則、人工調整）** → 一律 `CreateProposalCommand`（`source` 填 `auto`／`llm`／`manual`），再走 `BacktestProposalCommand` -> `ApproveTuningCommand`。**不准另開路徑直接寫參數。**
+- **資料表** → `models/core.py`，並在 `TABLE_OWNERS` 登記擁有者；存取寫在各領域 `dao.py`。別的領域要讀就寫 `*ReadDAO`。
+- **DB／ES 連不上** → DAO／Spec 丟 `InfrastructureError`。`initialization` 會統一回 503，並呼叫 `infrastructure.fallback.report_failure`（寫本機日誌，設了 `AIOPS_FALLBACK_WEBHOOK` 就直接打 webhook）。不要在業務 Command 或外掛裡自己做備援。
+- **排程／背景任務** → `aiops/tasks/`，任務內只呼叫 Command。
+- **utils/** → 只放無業務語意的純函式；含業務判斷的回到 Command。
+
+## 4. 調參流程（防止多頭馬車）
+
+```
+自動 tune ─┐
+LLM 回饋  ─┼─> 提案(pending) ─> 回測(backtested) ─> 核准(approved) ─> 寫入現行參數(version+1)
+人工調整  ─┘                                      └─> 現行版本已變 -> stale（作廢，請重提）
+```
+
+提案建立時記下 `base_version`。核准時若現行參數版本已不同，代表期間有別的提案被核准（例如人工剛調好），舊提案自動作廢。這樣自動 tune 不會蓋掉人工設定，也不會有沒回測就套用的參數。
+
+## 5. Grafana 整合守則
+
+**Grafana 只負責「接收」：顯示、通知、儀表板。判斷與存放都在平台，Grafana 不放任何業務邏輯。**
+
+- **要改 Grafana 側，只能改 helm chart**（datasource、dashboards、alert rules、contact points 等 provisioning 檔）。不改 Grafana 本體、不自製外掛、不在 Grafana 裡寫查詢以外的邏輯。
+- **平台側不為 Grafana 開特例。** 不得有 `grafana` 領域、`*grafana*` 命名的模組或目錄、Grafana 專用外掛。Grafana 要讀的資料，就是各領域 `api.py` 的一般端點（例如 alerts 的事件群、rca 的報告），回傳固定的 JSON 形狀。
+- **端點對 Grafana 唯讀。** Grafana 需要的是讀取與接收通知，不得為它開寫入端點。寫入一律走既有的 Command 流程（例如調參只能走提案 -> 回測 -> 核准）。
+- **契約穩定優先。** Grafana 的面板與規則是照端點 JSON 欄位寫的。改 `schemas.py` 的回應欄位前，先確認 helm chart 裡引用該欄位的 provisioning 檔，要改就一起改，不要只改一邊。
+- **通知的分工：平台決定「要不要發、發什麼」，Grafana 只決定「送去哪個通道」。**
+  - 平台（`domains/alerts`）負責所有業務級判斷：何時算異常、怎麼收斂、分數與 P0 加權、同根因抑制、靜音與維護窗口、人工調整排除的時段，以及產出通知內容（payload）。
+  - Grafana 只做純路由：這包訊息送到哪個 Slack channel、Teams、PagerDuty（Contact Points／Notification Policies 依部門分流）。
+  - **不得在 Grafana 建立 alert rule 二次判斷要不要發。** 否則會出現「平台已因排除時段或抑制而不發，Grafana 的規則卻照樣呼叫」的不一致。靜音、夜間、排除時段的設定只有一份，在平台。
+- **舊 repo `aiops-data-foundation/grafana/` 不動。** 新的 helm chart 在本 repo 另建；舊檔只當參考。
+
+> 目前狀態：這一節是規則，**尚未實作**。`domains/alerts` 目前只有收斂與計分，**還沒有**抑制、靜音、維護窗口、排除時段與通知 payload，要先在平台補齊，Grafana 才能退成純路由。Grafana 實際讀取方式（例如 Infinity 資料源讀 JSON 端點，或平台把事件群推到 webhook）、helm chart 的位置、各端點的最終 JSON 形狀都還沒定，定案時回頭補在這裡。
+
+## 6. 標準樣板
 
 ### Command
 
@@ -50,17 +137,16 @@ class ExampleActionCommand(BaseCommand):
     def run(self) -> dict:
         self.validate()
         # 1. 抓資料：get_datasource_spec(...).fetch_data(...)
-        # 2. 算結果：DetectorRegistry.get(...)(params).detect(df)
-        # 3. 寫 DB：透過 DAO
+        # 2. 算結果：DetectorRegistry.get(...)(params).fit(train_df).detect(df)
+        # 3. 寫 DB：透過本領域 dao.py
         return {"status": "success"}
 ```
 
-業務錯誤一律丟 `CommandError`（或子類別，如 `CommandNotFound`），由 `initialization` 統一轉成 HTTP 4xx，不要在 api.py 自己 try/except。
-
-### Detector 外掛
+### 偵測器外掛
 
 ```python
 import pandas as pd
+
 from aiops.plugins.base import AnomalyResult, BaseDetector
 from aiops.plugins.registry import DetectorRegistry
 
@@ -69,17 +155,21 @@ from aiops.plugins.registry import DetectorRegistry
 class MyDetector(BaseDetector):
     name = "my_detector"
 
+    def fit(self, df: pd.DataFrame) -> "MyDetector":
+        # 從訓練資料學狀態，存在 self 上
+        self.fitted = True
+        return self
+
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
-        # 輸入保證有 ts 與 value 兩欄；輸出必須是 AnomalyResult
+        self._require_fitted()
+        # 輸入保證有 ts、value 兩欄；輸出必須是 AnomalyResult，長度與 df 相同
         ...
 ```
 
-外掛必須是無副作用的純運算：不連 DB、不打外部服務、不讀全域設定。
-
-## 4. 送出修改前的自檢
+## 7. 送出修改前的自檢
 
 ```bash
 .venv/Scripts/python -m pytest tests/ -q
 ```
 
-必須全綠，其中 `tests/test_architecture.py` 負責第 1 節的所有依賴禁令。新增一條架構規則時，先在該檔補測試，再改本文件。
+必須全綠。新增架構規則時，先在 `tests/test_architecture.py` 補測試，再改本文件。
