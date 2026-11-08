@@ -77,74 +77,91 @@ class BaseOperator(ABC):
  * **Suppressor（告警抑制）**：
    * 檢查靜音窗口（維護期）、冷卻時間（Dedup）、同根因；被抑制事件必須打上 `ctx.is_suppressed = True` 與具體原因。
  * **LLM Provider（智慧診斷）**：
-   * 介面為 `complete(prompt: str) -> str`。
+   * 介面為 `BaseLLM.complete(system: str, prompt: str) -> str`（`stages/enrichment/base.py`），失敗丟 `LLMError`；供應商用 `stages/enrichment/registry.register` 登記 factory（見範例二）。
    * 當設定為 `provider: noop` 時，直接跳過推論並填入結構化模板，不發出任何外部網路請求。
 
 ---
 
 ## 3. 標準算子實作範例
 
-### 範例一：可自由抽換的 MAD 檢測器 (`stages/detectors/mad.py`)
+兩個範例都是可以直接執行的真實程式碼；`tests/test_claude_md_examples.py` 會檢查範例一跟 `aiops/stages/detectors/mad.py` 逐字相同、範例二能在乾淨的行程裡跑起來，範例過期測試就會紅。
+
+### 範例一：偵測器（`stages/detectors/mad.py`，原檔全文）
+
+偵測器繼承 `DetectorOperator`，只寫演算法的四個方法；`execute`（載入或訓練基準線、套用調參與 overrides、產生 `AnomalyEvent`、warning 兩級、訓練排除事故窗）全部由基底處理，演算法不要自己寫 `execute`。
 
 ```python
-import numpy as np
 import pandas as pd
+
+from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.operator import BaseOperator
-from aiops.engine.context import PipelineContext, AnomalyResult
+from aiops.stages.detectors.base import DetectorOperator
+
+_CONSISTENCY = 0.6745  # 讓 MAD 在常態分布下跟標準差同尺度的常數
+
 
 @OperatorRegistry.register("detector.mad")
-class MADDetector(BaseOperator):
-    name = "mad"
+class MADDetector(DetectorOperator):
+    """Modified Z-Score（中位數與 MAD）：離群值不會把基準線拉歪，比 zscore 耐尖峰。params: threshold。
 
-    def __init__(self, threshold: float = 3.5):
-        self.threshold = threshold
+    跟 zscore 一樣先 fit 再 detect：基準線來自訓練期，而不是這一輪資料自己（否則異常本身會被當成常態）。
+    """
 
-    def execute(self, ctx: PipelineContext) -> PipelineContext:
-        if ctx.raw_df is None or ctx.raw_df.empty:
-            return ctx
+    algorithm = "mad"
+    tunable = {"threshold": (3.5, 1.0, 20.0)}
 
-        values = ctx.raw_df["value"].values
-        median = np.median(values)
-        mad = np.median(np.abs(values - median))
-        mad = mad if mad != 0 else 1e-6
+    def fit(self, df: pd.DataFrame) -> "MADDetector":
+        values = df["value"]
+        self.median_ = float(values.median())
+        mad = float((values - self.median_).abs().median())
+        self.mad_ = mad if mad != 0 else 1e-6  # 訓練期完全不變時避免除以 0
+        self.fitted = True
+        return self
 
-        # 計算 Modified Z-Score
-        mod_z_scores = 0.6745 * np.abs(values - median) / mad
-        is_anomaly = (mod_z_scores > self.threshold).tolist()
+    def get_state(self) -> dict:
+        self._require_fitted()
+        return {"median": self.median_, "mad": self.mad_}
 
-        ctx.anomaly_result = AnomalyResult(
-            algorithm="mad",
-            is_anomaly=is_anomaly,
-            scores=mod_z_scores.tolist(),
-            latest_is_anomaly=bool(is_anomaly[-1]) if is_anomaly else False
-        )
-        return ctx
+    def load_state(self, state: dict) -> "MADDetector":
+        self.median_, self.mad_ = float(state["median"]), float(state["mad"])
+        self.fitted = True
+        return self
+
+    def detect(self, df: pd.DataFrame) -> AnomalyResult:
+        self._require_fitted()
+        scores = _CONSISTENCY * (df["value"] - self.median_).abs() / self.mad_
+        return self._result(df, scores, scores > self.param("threshold"))
 ```
 
-### 範例二：可自由外接或中斷的 LLM 算子 (`stages/enrichment/summarizer.py`)
+### 範例二：新增一個 LLM 供應商（放在 `stages/enrichment/` 底下的新檔案）
+
+不用改 `enrichment.llm_summary` 算子、也不用改 `providers.py`：用 `stages/enrichment/registry.register` 登記一個 factory，回傳實作 `complete(system, prompt) -> str` 的物件；`provider: noop` 永遠回傳 `None`、完全不連外。呼叫失敗丟 `LLMError`，算子會退回模板，不會讓 RCA 報告失敗。下面的 `echo` 供應商不連外，只示範介面：
 
 ```python
-from aiops.engine.registry import OperatorRegistry
-from aiops.engine.operator import BaseOperator
-from aiops.engine.context import PipelineContext
+from aiops.stages.enrichment.base import BaseLLM, LLMError
+from aiops.stages.enrichment.registry import build, register
 
-@OperatorRegistry.register("enrichment.llm_summary")
-class LLMSummarizer(BaseOperator):
-    def __init__(self, provider: str = "noop", **kwargs):
-        self.provider = provider
-        self.is_enabled = (provider != "noop")
 
-    def execute(self, ctx: PipelineContext) -> PipelineContext:
-        # 若未啟用 LLM 或無異常事件，直接降級為預設範本
-        if not self.is_enabled or not ctx.incidents:
-            ctx.llm_summary = "【自動診斷】未啟用 LLM，依據統計規則輸出摘要。"
-            return ctx
+class EchoLLM(BaseLLM):
+    name = "echo"
 
-        # 呼叫實際 Provider (OpenAI/Anthropic)
-        # 生成內容需符合依據驗證，若失敗亦退回安全範本
-        ctx.llm_summary = f"【AI 診斷】實體 {ctx.target_metric} 發生異常偏移..."
-        return ctx
+    def __init__(self, model: str):
+        self.model = model
+
+    def complete(self, system: str, prompt: str) -> str:
+        if not prompt:
+            raise LLMError("prompt 是空的")  # 失敗一律丟 LLMError，呼叫端退回模板
+        return '{"summary": "echo", "claims": []}'
+
+
+@register("echo")
+def _echo(model: str, base_url: str, api_key: str | None) -> BaseLLM:
+    return EchoLLM(model)
+
+
+llm = build("echo", "echo-1", "", None)
+assert llm.complete("你是 SRE", "事件摘要").startswith("{")
+assert build("noop", "", "", None) is None  # noop 完全不連外
 ```
 
 ---
