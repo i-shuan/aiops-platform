@@ -21,10 +21,11 @@ def check_preset(preset: Preset) -> None:
 
 
 class AlertPipeline:
-    def __init__(self, preset: Preset, context: dict, plugin_params: dict[str, dict]):
+    def __init__(self, preset: Preset, context: dict, plugin_params: dict[str, dict], pipeline: str | None = None):
         self.preset = preset
         self.context = context
         self.plugin_params = plugin_params
+        self.pipeline = pipeline
 
     def _params(self, name: str) -> dict:
         return self.plugin_params.get(name, {})
@@ -50,7 +51,7 @@ class AlertPipeline:
         for inc in incidents:
             reason = next((r for s in suppressors if (r := s.suppress(inc, ctx))), None)
             severity = severity_for(inc.score, self.preset.severity_thresholds)
-            row = IncidentDAO.create(self.preset.name, inc.to_dict(), severity, reason)
+            row = IncidentDAO.create(self.preset.name, inc.to_dict(), severity, reason, self.pipeline)
             notes = [] if reason else build_notifications(row["uid"], inc, self.preset.name, severity)
             if notes:
                 outgoing += notes

@@ -32,6 +32,12 @@ class ProcessPendingRequest(BaseModel):
     limit: int = Field(1000, gt=0, le=10000)
 
 
+class SyncIncidentsRequest(BaseModel):
+    pipeline: str
+    # 事件群的實體安靜（沒有新異常）超過這麼久就結案，送出恢復通知
+    resolve_after_minutes: int = Field(15, gt=0)
+
+
 class SilenceCreateRequest(BaseModel):
     # mute：臨時靜音；maintenance：維護窗口；exclusion：人工排除時段（回饋調整）
     kind: Literal["mute", "maintenance", "exclusion"]

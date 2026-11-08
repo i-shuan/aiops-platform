@@ -12,9 +12,10 @@ service:
   type: ClusterIP
   port: 9093
 
-# 平台目前只送 startsAt、不送 endsAt。預設 5m 會讓告警 5 分鐘後被當成已恢復，
-# 所以拉長；receiver 也請一律 send_resolved: false，避免誤發「已恢復」。
-resolveTimeout: 24h
+# 平台每輪排程會重送進行中的事件群（心跳），安靜夠久就補送 endsAt 結案。
+# 這個時限只是保險：平台當掉、不再心跳時，告警最多掛這麼久就自己結案。
+# 必須比平台排程間隔長很多（排程 5 分鐘一輪 -> 1h 綽綽有餘）。
+resolveTimeout: 1h
 
 route:
   # 平台送來的一則通知 = 一個事件群 × 一個部門，不再二次分組。
@@ -35,16 +36,15 @@ route:
 deptRoutes: []
 
 # 原樣放進 alertmanager.yml 的 receivers。webhook URL 等機密會進 Secret，不進 ConfigMap。
-# 例：
-#   receivers:
-#     - name: unrouted
-#     - name: payments-slack
-#       slack_configs:
-#         - api_url: https://hooks.slack.com/services/XXX
-#           channel: "#payments-oncall"
-#           send_resolved: false
+# Slack／Teams 的完整寫法見 values-channels.example.yaml。平台會送恢復通知，所以可以開 send_resolved。
 receivers:
   - name: unrouted
+
+# 告警狀態（進行中的告警、通知紀錄）存放。關閉時用 emptyDir，pod 重建就會清空；正式環境請開啟。
+persistence:
+  enabled: false
+  size: 1Gi
+  storageClass: ""
 
 resources:
   requests:

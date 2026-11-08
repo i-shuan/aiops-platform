@@ -1,0 +1,52 @@
+# 本機整套：PostgreSQL + Alertmanager + API + 排程。只給開發用，帳密都是開發用的假值。
+#   docker compose up --build        （Rancher Desktop containerd：nerdctl compose up --build）
+# API：http://localhost:8000/docs（token 見下方 AIOPS_API_TOKEN）；Alertmanager：http://localhost:9093
+name: aiops-platform
+
+x-platform-env: &platform-env
+  AIOPS_DATABASE_URL: postgresql+psycopg://aiops:aiops-dev-only@postgres:5432/aiops
+  AIOPS_API_TOKEN: ${AIOPS_API_TOKEN:-dev-only-token}
+  AIOPS_NOTIFIER: alertmanager
+  AIOPS_ALERTMANAGER_URL: http://alertmanager:9093
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aiops
+      POSTGRES_PASSWORD: aiops-dev-only
+      POSTGRES_DB: aiops
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiops -d aiops"]
+      interval: 5s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  alertmanager:
+    image: quay.io/prometheus/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./deploy/compose/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+
+  api:
+    build: .
+    environment: *platform-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  tasks:
+    build: .
+    command: ["python", "-m", "aiops.tasks", "loop", "-c", "configs/jobs.example.yaml", "--interval", "300"]
+    environment: *platform-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

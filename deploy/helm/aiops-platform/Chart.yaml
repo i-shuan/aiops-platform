@@ -1,0 +1,6 @@
+apiVersion: v2
+name: aiops-platform
+description: aiops-platform 的 API（Deployment）與排程（CronJob）
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

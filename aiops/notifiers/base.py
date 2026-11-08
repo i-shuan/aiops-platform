@@ -10,6 +10,8 @@ class Notification:
     labels: dict[str, str]
     annotations: dict[str, str]
     starts_at: datetime
+    # 有值 = 結案（恢復通知）；None = 仍在發生
+    ends_at: datetime | None = None
 
 
 class BaseNotifier(ABC):

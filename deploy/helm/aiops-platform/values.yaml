@@ -1,0 +1,42 @@
+image:
+  repository: aiops-platform
+  tag: dev
+  pullPolicy: IfNotPresent
+
+api:
+  replicas: 1
+  port: 8000
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+# 不是機密的設定（機密一律放 existingSecret）
+env:
+  AIOPS_NOTIFIER: alertmanager
+  AIOPS_ALERTMANAGER_URL: http://aiops-alertmanager.aiops-platform.svc:9093
+
+# 放機密環境變數的 Secret（chart 不建）：AIOPS_API_TOKEN（必填）、AIOPS_DATABASE_URL（正式必填）、
+# AIOPS_ES_API_KEY、AIOPS_PROMETHEUS_TOKEN、AIOPS_ALERTMANAGER_TOKEN、AIOPS_LLM_API_KEY、AIOPS_FALLBACK_WEBHOOK…
+existingSecret: ""
+
+# 只限開發：直接在 values 裡給機密，chart 幫你建 Secret。正式環境不要用（會留在 helm release 紀錄裡）。
+devSecretEnv: {}
+
+# 排程：K8s CronJob 每次跑一輪 run-once（多副本也不會重複跑）。
+# schedule 間隔要遠小於 Alertmanager 的 resolveTimeout（預設 1h），心跳才不會斷。
+tasks:
+  enabled: true
+  schedule: "*/5 * * * *"
+  # 跟 configs/jobs.example.yaml 同格式
+  jobs:
+    jobs: []
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+# 只限開發：一起裝一台沒有持久儲存的 PostgreSQL（pod 重建資料就沒了）。
+# 開啟時若沒有另外給 AIOPS_DATABASE_URL，平台會自動連這台。
+devPostgres:
+  enabled: false
+  image: postgres:16-alpine
+  password: aiops-dev-only

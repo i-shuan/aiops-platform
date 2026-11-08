@@ -3,7 +3,13 @@ from fastapi import APIRouter
 from aiops.domains.alerts.commands.process import ProcessAlertsCommand
 from aiops.domains.alerts.commands.process_pending import ProcessPendingAnomaliesCommand
 from aiops.domains.alerts.commands.silences import CreateSilenceCommand, ListSilencesCommand
-from aiops.domains.alerts.schemas import ProcessAlertsRequest, ProcessPendingRequest, SilenceCreateRequest
+from aiops.domains.alerts.commands.sync import ResolveIncidentCommand, SyncOpenIncidentsCommand
+from aiops.domains.alerts.schemas import (
+    ProcessAlertsRequest,
+    ProcessPendingRequest,
+    SilenceCreateRequest,
+    SyncIncidentsRequest,
+)
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
@@ -16,6 +22,16 @@ def process_alerts(req: ProcessAlertsRequest):
 @router.post("/process-pending")
 def process_pending(req: ProcessPendingRequest):
     return {"result": ProcessPendingAnomaliesCommand(req).run()}
+
+
+@router.post("/sync")
+def sync_open_incidents(req: SyncIncidentsRequest):
+    return {"result": SyncOpenIncidentsCommand(req).run()}
+
+
+@router.post("/incidents/{uid}/resolve")
+def resolve_incident(uid: str):
+    return {"result": ResolveIncidentCommand(uid).run()}
 
 
 @router.post("/silences")

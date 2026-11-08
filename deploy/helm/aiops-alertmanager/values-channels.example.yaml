@@ -1,0 +1,51 @@
+# Slack／Teams 通道範例。複製一份成不進 git 的檔案，把 REPLACE_ME 換成真的 webhook 再部署：
+#   helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiops-platform -f my-channels.yaml
+# webhook URL 本身就是憑證：不要 commit 真的值；chart 會把整份設定放進 Secret。
+#
+# 原則：路由只比對 labels（dept），要不要發由平台決定；這裡不加 inhibit_rules、不設靜音。
+
+deptRoutes:
+  - dept: payments
+    receiver: payments-slack
+  - dept: platform
+    receiver: platform-teams
+  - dept: storage
+    receiver: storage-slack
+
+receivers:
+  # 沒對到部門的通知：先送到維運總頻道，避免漏看
+  - name: unrouted
+    slack_configs:
+      - api_url: https://hooks.slack.com/services/REPLACE_ME
+        channel: "#aiops-unrouted"
+        send_resolved: true
+        title: '{{ .CommonAnnotations.summary }}'
+        text: '{{ .CommonAnnotations.description }}'
+
+  - name: payments-slack
+    slack_configs:
+      - api_url: https://hooks.slack.com/services/REPLACE_ME
+        channel: "#payments-oncall"
+        send_resolved: true
+        title: '{{ if eq .Status "resolved" }}[已恢復] {{ end }}{{ .CommonAnnotations.summary }}'
+        text: '{{ .CommonAnnotations.description }}'
+
+  - name: storage-slack
+    slack_configs:
+      - api_url: https://hooks.slack.com/services/REPLACE_ME
+        channel: "#storage-oncall"
+        send_resolved: true
+        title: '{{ if eq .Status "resolved" }}[已恢復] {{ end }}{{ .CommonAnnotations.summary }}'
+        text: '{{ .CommonAnnotations.description }}'
+
+  # Microsoft Teams：Teams 的 Workflows（Power Automate）webhook 用 msteamsv2_configs
+  - name: platform-teams
+    msteamsv2_configs:
+      - webhook_url: https://example.webhook.office.com/REPLACE_ME
+        send_resolved: true
+        title: '{{ if eq .Status "resolved" }}[已恢復] {{ end }}{{ .CommonAnnotations.summary }}'
+        text: '{{ .CommonAnnotations.description }}'
+
+persistence:
+  enabled: true
+  size: 1Gi

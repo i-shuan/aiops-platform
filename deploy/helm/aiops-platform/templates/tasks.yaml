@@ -1,0 +1,53 @@
+{{- if .Values.tasks.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aiops.fullname" . }}-jobs
+  labels:
+    {{- include "aiops.labels" . | nindent 4 }}
+data:
+  jobs.yaml: |
+    {{- toYaml .Values.tasks.jobs | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "aiops.fullname" . }}-tasks
+  labels:
+    {{- include "aiops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tasks
+spec:
+  schedule: {{ .Values.tasks.schedule | quote }}
+  # 上一輪還沒跑完就不開新的一輪，避免同一批異常被兩個 pod 同時處理
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "aiops.labels" . | nindent 12 }}
+            app.kubernetes.io/component: tasks
+          annotations:
+            checksum/jobs: {{ toYaml .Values.tasks.jobs | sha256sum }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: tasks
+              {{- include "aiops.container" . | nindent 14 }}
+              args: ["python", "-m", "aiops.tasks", "run-once", "-c", "/config/jobs.yaml"]
+              resources:
+                {{- toYaml .Values.tasks.resources | nindent 16 }}
+              volumeMounts:
+                - {name: jobs, mountPath: /config, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
+                - {name: data, mountPath: /data}
+          volumes:
+            - name: jobs
+              configMap:
+                name: {{ include "aiops.fullname" . }}-jobs
+            - {name: tmp, emptyDir: {}}
+            - {name: data, emptyDir: {}}
+{{- end }}

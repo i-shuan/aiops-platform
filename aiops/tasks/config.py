@@ -6,11 +6,18 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 
+class JobPeer(BaseModel):
+    source_type: str = "mock"
+    query: str
+
+
 class JobTarget(BaseModel):
     source_type: str = "mock"
     query: str
     entity: str | None = None
     attrs: dict[str, Any] = Field(default_factory=dict)
+    # peer 偵測器用的同儕序列
+    peers: list[JobPeer] = Field(default_factory=list)
 
 
 class Job(BaseModel):
@@ -26,6 +33,8 @@ class Job(BaseModel):
     train_lookback_minutes: int = Field(1440, gt=0)
     # 模型超過這麼久才重訓
     retrain_minutes: int = Field(1440, gt=0)
+    # 事件群的實體安靜超過這麼久就結案（送恢復通知）；必須比排程間隔長
+    resolve_after_minutes: int = Field(15, gt=0)
     targets: list[JobTarget] = Field(min_length=1)
     context: dict[str, Any] = Field(default_factory=dict)
     plugin_params: dict[str, dict[str, Any]] = Field(default_factory=dict)

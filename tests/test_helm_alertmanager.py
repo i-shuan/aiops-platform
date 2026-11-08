@@ -45,8 +45,29 @@ def test_groups_by_globally_unique_incident_uid():
     assert _render()["route"]["group_by"] == ["incident_uid", "dept"]
 
 
-def test_resolve_timeout_is_long_because_platform_sends_no_ends_at():
-    assert _render()["global"]["resolve_timeout"] == "24h"
+def test_resolve_timeout_is_a_safety_net_longer_than_heartbeat():
+    """平台每輪心跳重送、安靜就送 endsAt；這個時限只在平台停擺時才用得到，要比排程間隔長很多。"""
+    assert _render()["global"]["resolve_timeout"] == "1h"
+
+
+def test_channel_example_renders_and_routes_only_by_dept():
+    cfg = _render("-f", str(CHART / "values-channels.example.yaml"))
+    assert "inhibit_rules" not in cfg
+    names = {r["name"] for r in cfg["receivers"]}
+    assert {r["receiver"] for r in cfg["route"]["routes"]} <= names
+    assert all(re.match(r"\s*dept\b", m) for r in cfg["route"]["routes"] for m in r["matchers"])
+    channels = [c for r in cfg["receivers"] for key in ("slack_configs", "msteamsv2_configs") for c in r.get(key, [])]
+    assert channels and all(c["send_resolved"] is True for c in channels)
+    # 範例檔不能放真的 webhook
+    assert all("REPLACE_ME" in (c.get("api_url") or c.get("webhook_url")) for c in channels)
+
+
+def test_persistence_uses_pvc_and_recreate_strategy():
+    out = subprocess.run(["helm", "template", "am", str(CHART), "--set", "persistence.enabled=true"],
+                         capture_output=True, text=True, encoding="utf-8", check=True).stdout
+    docs = {d["kind"]: d for d in yaml.safe_load_all(out) if d}
+    assert docs["PersistentVolumeClaim"]["spec"]["resources"]["requests"]["storage"] == "1Gi"
+    assert docs["Deployment"]["spec"]["strategy"]["type"] == "Recreate"
 
 
 def test_undefined_receiver_fails_render():

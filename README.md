@@ -78,8 +78,10 @@ python -m venv .venv
 ```
 
 ```bash
-.venv/Scripts/python -m pip install -r requirements.txt
+.venv/Scripts/python -m pip install -r requirements-dev.txt
 ```
+
+`requirements.txt` 是執行時需要的（映像檔只裝這個），`requirements-dev.txt` 再加上測試工具。
 
 macOS／Linux 把 `.venv/Scripts/python` 換成 `.venv/bin/python`。
 
@@ -137,22 +139,47 @@ PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後�
 | `AIOPS_FALLBACK_LOG` | （無，寫 stderr） | 備援日誌檔路徑 |
 | `AIOPS_FALLBACK_WEBHOOK` | （無） | 資料庫或推送失敗時直接打的 webhook |
 
-## 部署 Alertmanager
+## 容器與部署
+
+### 本機整套（docker compose）
+
+```bash
+docker compose up --build
+```
+
+Rancher Desktop 用 containerd 時改成 `nerdctl compose up --build`。會起 PostgreSQL、Alertmanager（只收不送）、API、排程（每 5 分鐘一輪）。帳密都是開發用的假值。
+
+### Kubernetes：平台本身
+
+```bash
+helm upgrade --install aiops-platform deploy/helm/aiops-platform -n aiops-platform --create-namespace --set existingSecret=<你的 Secret 名稱> -f <放排程工作的 values 檔>
+```
+
+- API 是 Deployment，排程是 CronJob（每次跑一輪 `run-once`，`concurrencyPolicy: Forbid` 不會重疊）。
+- **機密只能從 Secret 進來**：`existingSecret` 指向一個含 `AIOPS_API_TOKEN`、`AIOPS_DATABASE_URL` 等的 Secret。沒給 chart 會拒絕產生。
+- `devSecretEnv`、`devPostgres` 只限開發（機密會留在 helm 紀錄、PostgreSQL 沒有持久儲存）。
+- 排程工作寫在 values 的 `tasks.jobs`，格式同 `configs/jobs.example.yaml`。
+
+### Kubernetes：Alertmanager
 
 ```bash
 helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiops-platform --create-namespace -f <你的 values 檔>
 ```
 
-部門路由寫在 values 的 `deptRoutes`，通道寫在 `receivers`。**不要在 Alertmanager 設靜音或 inhibit_rules**，靜音只在平台設一份（`POST /api/v1/alerts/silences`）。Grafana 把它加成資料源只用來顯示告警。
+部門路由寫在 values 的 `deptRoutes`，通道寫在 `receivers`，Slack／Teams 寫法見 `deploy/helm/aiops-alertmanager/values-channels.example.yaml`。平台會送恢復通知，receiver 可以開 `send_resolved: true`。正式環境請開 `persistence.enabled`。**不要在 Alertmanager 設靜音或 inhibit_rules**，靜音只在平台設一份（`POST /api/v1/alerts/silences`）。Grafana 把它加成資料源只用來顯示告警。
 
 ## 目前狀態
 
-已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、通知抑制與 Alertmanager 推送（已在本機叢集實測）、Grafana 顯示（已實測）。
+已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、5 種偵測器（zscore、shift、peer、rules、chronic）、工廠 Lot 收斂、8 段 RCA 與拓撲根因推論、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
+
+已在本機 rancher-desktop 叢集實測：平台（容器）跑在 K8s、資料存在 PostgreSQL、CronJob 排程、Alertmanager 分流與結案、Grafana 顯示、API 等待資料庫啟動。
 
 還沒做或還沒驗證：
 
 - 資料源只用模擬伺服器測過；還沒對真的 Prometheus、VictoriaMetrics、Elasticsearch 取過數。
-- 只在 SQLite 測過，還沒對真的 PostgreSQL 跑；資料表結構還沒改用 Alembic migration。
+- LLM 只用假的模型回應測過，沒有呼叫過真的模型。
+- Slack／Teams 通道只驗過設定格式（`amtool check-config`），沒有真的送出訊息。
+- 資料表結構還沒改用 Alembic migration（`create_all` 只會新增表、不會改欄位）。
 - API token 沒有角色區分（有 token 就能做所有事）。
-- 偵測器只有 `zscore`、`shift`；RCA 報告只有 4 段；還沒有 LLM。
-- 恢復通知、新平台自己的儀表板、本平台的 Dockerfile 與 helm chart 都還沒做。
+- 新平台自己的 Grafana 儀表板沒做：Grafana 的儀表板設定在舊 repo 的 chart 裡，要動舊 repo 才放得進去。
+- 開發用 PostgreSQL（`devPostgres`）沒有持久儲存，pod 重建後資料表要等平台下次啟動才會重建。

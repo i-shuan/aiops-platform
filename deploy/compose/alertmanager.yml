@@ -1,0 +1,12 @@
+# docker-compose 本機用：只收不送（receiver 沒有任何通道），到 http://localhost:9093 看收到什麼。
+# 正式環境請用 deploy/helm/aiops-alertmanager。
+global:
+  resolve_timeout: 1h
+route:
+  receiver: local-only
+  group_by: ["incident_uid", "dept"]
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 24h
+receivers:
+  - name: local-only

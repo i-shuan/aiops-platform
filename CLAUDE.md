@@ -203,7 +203,10 @@ POST /api/v1/alerts/process
   - 部門路由寫在 `deptRoutes`（`dept` -> `receiver`）；沒對到的進 `route.defaultReceiver`（預設 `unrouted`，不送任何地方）。
   - `receivers` 原樣放進 alertmanager.yml，並存在 Secret（webhook URL 是機密）。路由引用了沒定義的 receiver，render 會直接失敗。
   - **不得加 `inhibit_rules`、不得在 Alertmanager 設 silence。** 抑制與靜音只有平台一份（`tests/test_helm_alertmanager.py` 檢查）。
-  - receiver 一律 `send_resolved: false`；`resolveTimeout` 預設 24h。原因是平台還不送 `endsAt`，見下方待辦。
+  - **恢復通知由平台負責**：每輪排程 `SyncOpenIncidentsCommand` 對進行中的事件群心跳重送（不帶 `endsAt`），實體安靜超過 `resolve_after_minutes`（job 設定，預設 15）就帶 `endsAt` 重送一次結案。重送的 labels 由事件群內容重建，跟第一次一模一樣。receiver 可以開 `send_resolved: true`。
+  - `resolveTimeout`（預設 1h）只是保險：平台停擺、不再心跳時，告警最多掛這麼久。**排程間隔必須遠小於它**（CronJob 預設 5 分鐘）。
+  - 直接呼叫 `/alerts/process` 建立的事件群沒有排程心跳，要用 `POST /api/v1/alerts/incidents/{uid}/resolve` 人工結案，否則 1h 後由 Alertmanager 自己結案。
+  - Slack／Teams 寫法見 `values-channels.example.yaml`（已用 `amtool check-config` 驗過）。正式環境開 `persistence.enabled`，否則 pod 重建會清掉進行中的告警。
 - **Grafana 側只動 helm chart：** 把 aiops-alertmanager 加成 `alertmanager` 型資料源（`implementation: prometheus`、`handleGrafanaManagedAlerts: false`）。
   - **目前 `grafana-new` 的 Grafana 沒有 sidecar**，資料源只來自它自己 chart 的 `files/datasource.yaml`，所以本 chart 的 `displayDatasource`（帶 sidecar label 的 ConfigMap）在這台**不會生效**，預設保持關閉。
   - 已在舊 repo `aiops-data-foundation` 的 branch `feature/grafana-alertmanager-datasource` 加了 `aiops-alertmanager` 資料源（網址取自環境變數 `AIOPS_ALERTMANAGER_URL`，放在 Grafana 的 Secret `secretData`）。這是對「舊 repo 不動」的**一次例外**，經使用者同意，只限這一個資料源；其餘舊 repo 內容仍不動。
@@ -221,8 +224,7 @@ POST /api/v1/alerts/process
 > - **Grafana 顯示已接上並驗證**：Grafana 13 經資料源讀到 Alertmanager 的告警，標籤（`dept`、`severity`）與 receiver 都正確。Grafana 內建的資料源健康檢查端點對 alertmanager 型回 500（`plugin unavailable`），這是該資料源型別本來就不支援，不是連線失敗，實際讀取以 `/api/datasources/proxy/uid/aiops-alertmanager/api/v2/alerts` 為準。
 > - **舊 Grafana 仍掛著自己的 alert rules／contact points／policies**（`grafana-alerting`），與「Grafana 只顯示、不發通知」相反，兩邊同時開可能重複通知。尚未處理，需要決定是否關掉。
 > - **真的通道還沒設**：驗證時 receiver 都沒有 `*_configs`，收下但不送出。
-> - **恢復通知**：平台只送 `startsAt`、不送 `endsAt`。之後由平台補送 `endsAt`，才能開恢復通知、把 `resolveTimeout` 改回合理值。
-> - **平台本身的 helm chart** 還沒建（平台目前不在叢集裡跑）。
+> - **平台的部署**：`Dockerfile`、`docker-compose.yaml`、`deploy/helm/aiops-platform`（API 是 Deployment、排程是 CronJob 跑 `run-once`、機密只從 Secret 進來）。
 
 ## 6. 標準樣板
 

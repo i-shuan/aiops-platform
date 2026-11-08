@@ -25,10 +25,13 @@ class AlertmanagerNotifier(BaseNotifier):
         self.timeout = timeout
 
     def to_body(self, notifications: list[Notification]) -> list[dict]:
-        return [
-            {"labels": n.labels, "annotations": n.annotations, "startsAt": _iso_utc(n.starts_at)}
-            for n in notifications
-        ]
+        body = []
+        for n in notifications:
+            alert = {"labels": n.labels, "annotations": n.annotations, "startsAt": _iso_utc(n.starts_at)}
+            if n.ends_at is not None:
+                alert["endsAt"] = _iso_utc(n.ends_at)
+            body.append(alert)
+        return body
 
     def send(self, notifications: list[Notification]) -> None:
         if not notifications:

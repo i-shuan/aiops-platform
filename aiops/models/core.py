@@ -45,6 +45,11 @@ class IncidentRow(Base):
     severity: Mapped[str] = mapped_column(String(8))
     suppressed_by: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    # 來自哪條排程管線（直接呼叫 /alerts/process 的為 None，不會自動心跳與結案）
+    pipeline: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    # open：已通知、還在發生；resolved：已結案（送過 endsAt）；suppressed：被抑制、沒通知
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SilenceRow(Base):

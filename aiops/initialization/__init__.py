@@ -52,8 +52,26 @@ def init_infrastructure() -> None:
     init_db()
 
 
-def init_db() -> None:
-    """建立還不存在的資料表。上正式環境前要改用 Alembic migration。"""
+def init_db(sleep=None, clock=None) -> None:
+    """建立還不存在的資料表。上正式環境前要改用 Alembic migration。
+
+    資料庫可能比平台晚就緒（K8s 同時啟動、資料庫重啟中）：最多等 AIOPS_DB_STARTUP_TIMEOUT 秒（預設 60），
+    每 2 秒重試一次，超過才放棄（丟 InfrastructureError，讓 K8s 重啟）。
+    """
+    import logging
+    import os
+    import time
+
     from aiops.models.db import create_all
 
-    create_all()
+    sleep, clock = sleep or time.sleep, clock or time.monotonic
+    deadline = clock() + float(os.environ.get("AIOPS_DB_STARTUP_TIMEOUT", "60"))
+    while True:
+        try:
+            create_all()
+            return
+        except InfrastructureError as e:
+            if clock() >= deadline:
+                raise
+            logging.getLogger("aiops.startup").warning("等待資料庫就緒：%s", e)
+            sleep(2)

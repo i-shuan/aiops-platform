@@ -38,7 +38,7 @@ class ProcessPendingAnomaliesCommand(BaseCommand):
         if not events:
             return {"pipeline": self.req.pipeline, "processed_anomalies": 0, **counts, "incidents": []}
 
-        incidents = AlertPipeline(self.preset, self.req.context, self.req.plugin_params).run(events)
+        incidents = AlertPipeline(self.preset, self.req.context, self.req.plugin_params, self.req.pipeline).run(events)
         for _, consumer, rows in batches:
             if rows:
                 AlertWatermarkDAO.set(consumer, rows[-1]["id"])

@@ -6,6 +6,10 @@ metadata:
     {{- include "aiops-am.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicas }}
+  {{- if .Values.persistence.enabled }}
+  strategy:
+    type: Recreate  # PVC 是 ReadWriteOnce，新舊 pod 不能同時掛
+  {{- end }}
   selector:
     matchLabels:
       {{- include "aiops-am.selector" . | nindent 6 }}
@@ -47,4 +51,9 @@ spec:
           secret:
             secretName: {{ include "aiops-am.fullname" . }}-config
         - name: storage
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "aiops-am.fullname" . }}-storage
+          {{- else }}
           emptyDir: {}
+          {{- end }}

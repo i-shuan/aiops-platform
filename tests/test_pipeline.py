@@ -74,11 +74,54 @@ def test_run_job_trains_detects_and_notifies(client, sent):
 
 
 def test_rerunning_same_window_is_idempotent(client, sent):
-    run_job(_job(), now=NOW)
-    n = len(sent)
-    r = run_job(_job(), now=NOW)
-    assert (r["trained"], r["persisted_anomalies"], r["processed_anomalies"]) == (0, 0, 0)
-    assert len(sent) == n
+    # mock 尖峰在偵測窗中間（窗結束前 30 分鐘），結案門檻要大於 30 分鐘才會是「進行中」
+    run_job(_job(resolve_after_minutes=60), now=NOW)
+    first = [(n.labels, n.ends_at) for n in sent]
+    r = run_job(_job(resolve_after_minutes=60), now=NOW)
+    assert (r["trained"], r["persisted_anomalies"], r["processed_anomalies"], r["incidents"]) == (0, 0, 0, 0)
+    # 第二輪只有心跳：重送的通知跟第一輪 labels 完全相同、沒有結案
+    assert r["refreshed_incidents"] == 1
+    assert [(n.labels, n.ends_at) for n in sent[len(first):]] == first
+
+
+# ── 恢復通知 ──
+
+
+def test_incident_resolves_after_quiet_period_with_same_labels(client, sent):
+    from aiops.domains.alerts.commands.sync import SyncOpenIncidentsCommand
+    from aiops.domains.alerts.schemas import SyncIncidentsRequest
+
+    run_job(_job(resolve_after_minutes=60), now=NOW)
+    opened = sent[0]
+    # 最後一筆異常（11:35）距離 12:05 只有 30 分鐘 -> 只心跳
+    assert run_job(_job(resolve_after_minutes=60), now=NOW + timedelta(minutes=5))["resolved_incidents"] == 0
+    # 之後不再偵測，2 小時後同步 -> 安靜夠久，結案
+    r = SyncOpenIncidentsCommand(SyncIncidentsRequest(pipeline="cpu", resolve_after_minutes=60),
+                                 now=NOW + timedelta(hours=2)).run()
+    assert r["resolved"] == 1
+    closing = sent[-1]
+    assert closing.labels == opened.labels and closing.ends_at is not None
+    assert SyncOpenIncidentsCommand(SyncIncidentsRequest(pipeline="cpu"), now=NOW + timedelta(hours=3)).run() == {
+        "pipeline": "cpu", "refreshed": 0, "resolved": 0, "resolved_uids": []}
+
+
+def test_new_anomalies_keep_incident_open(client, sent):
+    """實體後來又有異常（即使被 dedup 抑制、沒開新事件群），舊事件群也不能被誤判成結束。"""
+    # 第一輪尖峰在 11:30；第二輪（12:50）的新尖峰在 12:20。
+    # 只看事件群本身：11:30 到 12:50 已安靜 80 分鐘 > 45 -> 會被誤判結案
+    # 看到新異常：12:20 到 12:50 只安靜 30 分鐘 < 45 -> 正確地保持進行中
+    run_job(_job(resolve_after_minutes=45), now=NOW)
+    later = run_job(_job(resolve_after_minutes=45), now=NOW + timedelta(minutes=50))
+    assert later["persisted_anomalies"] >= 1
+    assert later["resolved_incidents"] == 0
+
+
+def test_manual_resolve_sends_ends_at(client, sent):
+    r = client.post("/api/v1/alerts/process", json={"preset": "metrics_only", "events": [
+        {"entity": "x", "metric": "cpu", "ts": "2026-11-08T00:00:00", "score": 2}]}).json()["result"][0]
+    resolved = client.post(f"/api/v1/alerts/incidents/{r['uid']}/resolve").json()["result"]
+    assert resolved["status"] == "resolved" and sent[-1].ends_at is not None
+    assert client.post(f"/api/v1/alerts/incidents/{r['uid']}/resolve").status_code == 409
 
 
 def test_model_retrains_only_after_retrain_minutes(client):
