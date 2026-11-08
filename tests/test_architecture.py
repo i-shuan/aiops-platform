@@ -279,6 +279,26 @@ def test_no_grafana_specific_code():
     assert not bad, bad
 
 
+def test_platform_only_reads_elasticsearch():
+    """平台對 ES 只讀：只能呼叫 _search 與 GET 根路徑，不得出現寫入或管理端點。建索引、角色、key 是 es-setup 的事。"""
+    text = (ROOT / "datasource_specs" / "elasticsearch.py").read_text(encoding="utf-8")
+    assert re.search(r"/_search\b", text)
+    forbidden = re.findall(r"_bulk|_doc\b|_create\b|_update\b|_delete_by_query|_security|_ilm|_template|"
+                           r"\"PUT\"|\"DELETE\"|\.put\(|\.delete\(", text)
+    assert not forbidden, forbidden
+    posts = re.findall(r"\"(POST|GET|PUT|DELETE|PATCH)\"", text)
+    assert set(posts) <= {"POST"}, posts  # POST 只用在 _search（查詢用 body）
+
+
+def test_only_one_grafana_and_one_es_directory_under_deploy():
+    """搬進來的 Grafana 與 ES 只能放在約定位置，不得在 deploy/ 底下再冒出第二份。"""
+    deploy = ROOT.parent / "deploy"
+    charts = {p.parent.name for p in (deploy / "helm").glob("*/Chart.yaml")}
+    assert {"aiops-alertmanager", "aiops-platform", "aiops-grafana"} <= charts
+    assert not [c for c in charts if "grafana" in c and c != "aiops-grafana"]
+    assert not [p.name for p in deploy.iterdir() if p.is_dir() and "elastic" in p.name.lower() and p.name != "elasticsearch"]
+
+
 def test_presets_reference_only_registered_plugins():
     init_plugins()
     checks = (

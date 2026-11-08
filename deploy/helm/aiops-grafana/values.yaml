@@ -1,0 +1,34 @@
+# Grafana 只負責「顯示」（CLAUDE.md 第 5 節）：資料源、儀表板；不放告警規則、Contact Point、Notification Policy。
+# 通知一律由平台決定、經 aiops-alertmanager 路由；這裡不得設任何會「發出通知」的東西。
+
+image: grafana/grafana:13.0.7                              # 正式環境換成公司 registry 的路徑
+
+service:
+  type: ClusterIP
+  port: 3000
+
+# 機密與環境相關的值一律來自這個 Secret（chart 不建，除非用 devSecretEnv 只限開發）：
+#   ES_URL                    Elasticsearch 位址（例：http://elasticsearch.es-test.svc:9200）
+#   GRAFANA_ES_API_KEY        **唯讀** API key，只給三個 APM 索引 pattern 的讀取權限
+#   AIOPS_ALERTMANAGER_URL    aiops-alertmanager 的位址（只用來顯示告警）
+#   GF_SECURITY_ADMIN_PASSWORD
+envSecret: grafana-env
+
+# 只限開發：直接在 values 給機密，chart 幫你建 Secret（會留在 helm release 紀錄裡）。正式環境不要用。
+devSecretEnv: {}
+
+env:
+  GF_PLUGINS_PREINSTALL_DISABLED: "true"                  # 不讓 Grafana 自己連外網裝預設外掛
+
+# 不登入也能看（唯讀 Viewer）。預設關；內網 demo 才開
+anonymousViewer: false
+
+# 各資料源讀的 ES 索引 pattern
+esIndices:
+  metrics: "metrics-apm.transaction.1m-*"
+  traces: "traces-apm-*"
+  logs: "logs-apm.*"
+
+resources:
+  requests: {cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi}
+  limits: {memory: 1Gi, ephemeral-storage: 1Gi}           # 沒掛 PVC：設定全由 provisioning 來，pod 重建不會丟

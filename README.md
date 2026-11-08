@@ -67,6 +67,9 @@ rca：依 preset 組裝根因報告　　tuning：調參只能走「提案 → �
 | `aiops/security/` | API token 驗證 |
 | `aiops/infrastructure/` | 故障看守（本機日誌、備援 webhook） |
 | `deploy/helm/aiops-alertmanager/` | 接收本平台通知的 Alertmanager chart |
+| `deploy/helm/aiops-grafana/` | 只顯示的 Grafana chart：APM（讀 ES）與平台告警（讀 Alertmanager），不發通知 |
+| `deploy/helm/aiops-platform/` | 平台本身：API（Deployment）與排程（CronJob） |
+| `deploy/elasticsearch/` | ES 說明與去機密的快照（chart 原始碼不在本機，見該資料夾 README） |
 | `configs/jobs.example.yaml` | 排程工作範例 |
 
 ## 本機開發
@@ -159,6 +162,14 @@ helm upgrade --install aiops-platform deploy/helm/aiops-platform -n aiops-platfo
 - **機密只能從 Secret 進來**：`existingSecret` 指向一個含 `AIOPS_API_TOKEN`、`AIOPS_DATABASE_URL` 等的 Secret。沒給 chart 會拒絕產生。
 - `devSecretEnv`、`devPostgres` 只限開發（機密會留在 helm 紀錄、PostgreSQL 沒有持久儲存）。
 - 排程工作寫在 values 的 `tasks.jobs`，格式同 `configs/jobs.example.yaml`。
+
+### Kubernetes：Grafana 與 Elasticsearch
+
+```bash
+helm upgrade --install grafana deploy/helm/aiops-grafana -n grafana-new --create-namespace
+```
+
+Grafana 只顯示，不發通知；Secret `grafana-env` 要先建好（鍵見 `deploy/helm/aiops-grafana/values.yaml`）。**ES 還沒有 chart**：原始 chart 不在本機，`deploy/elasticsearch/` 只有說明與去機密的快照。舊引擎已從開發叢集移除；舊 Grafana 的告警規則會在用本 chart 接手 release 時一併移除。
 
 ### Kubernetes：Alertmanager
 

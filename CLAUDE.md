@@ -51,6 +51,10 @@
 24. `llm/` 不得 import `domains`、`models`、`plugins`、`presets`、`datasource_specs`。
 25. 領域只能用 `aiops.llm`（`get_llm()`）與 `aiops.llm.base`，不得直接 import 具體供應商。
 26. `plugins/` 不得 import `aiops.llm` 或 `httpx`（外掛不連外部服務）。
+27. `aiops-grafana` chart 只顯示：沒有告警規則／Contact Point／Policy 檔或掛載；資料源只有 `apm-*` 三個 ES 與 `aiops-alertmanager`；不得有已移除的舊引擎參照；不得關閉 HTML 消毒。
+28. 平台對 ES 只讀：`datasource_specs/elasticsearch.py` 不得出現寫入或管理端點。
+29. 機密不進 repo：`deploy/`、`configs/`、`docker-compose.yaml` 不得有金鑰樣式字串；ES 快照不得有 Secret 資源；`values.yaml` 的 `devSecretEnv`、`secretData` 預設必須是空的。
+30. `deploy/helm/` 底下只能有一個 Grafana chart（`aiops-grafana`），`deploy/` 底下只能有一個 ES 目錄（`elasticsearch`）。
 
 ### LLM 使用守則
 
@@ -186,7 +190,28 @@ LLM 回饋  ─┼─> 提案(pending) ─> 回測(backtested) ─> 核准(appro
   - 平台（`domains/alerts`）負責所有業務級判斷：何時算異常、怎麼收斂、分數與 P0 加權、同根因抑制、靜音與維護窗口、人工調整排除的時段，以及產出通知內容（payload）。
   - Alertmanager（`deploy/helm/aiops-alertmanager`）只做純路由：依 `dept` label 送到哪個 Slack channel、Teams、PagerDuty。
   - **不得在 Grafana 建立 alert rule、Contact Point 或 Notification Policy 來發這些通知，也不得在 Alertmanager 加 inhibit 或 silence。** 否則會出現「平台已因排除時段或抑制而不發，下游卻照樣呼叫」的不一致。靜音、夜間、排除時段的設定只有一份，在平台。
-- **舊 repo `aiops-data-foundation/grafana/` 不動。** 新的 helm chart 在本 repo 的 `deploy/helm/` 下；舊檔只當參考。
+- **舊 repo `aiops-data-foundation` 不動。** Grafana 與 ES 已搬進本 repo（見下面「Grafana 與 ES 在本 repo」）；舊 repo 的內容只當參考，不再修改。
+
+### Grafana 與 ES 在本 repo（已搬進來；由 `tests/test_helm_grafana.py`、`tests/test_deploy_secrets.py`、`tests/test_architecture.py` 檢查）
+
+**Grafana：`deploy/helm/aiops-grafana/`**
+
+- **只顯示。** 沒有告警規則、Contact Point、Notification Policy，沒有 alerting 的 ConfigMap 或掛載。通知由平台決定、經 Alertmanager 路由。
+- **資料源只有四個**：`apm-metrics`、`apm-traces`、`apm-logs`（Elasticsearch，只讀）與 `aiops-alertmanager`（`handleGrafanaManagedAlerts: false`）。網址與金鑰一律是 `${環境變數}`，來自 Secret。新增資料源要先改測試。
+- **儀表板只讀已定義的資料源**，不得內嵌 HTML／iframe，不得關閉 HTML 消毒（`GF_PANELS_DISABLE_SANITIZE_HTML`）。匿名存取只能是 Viewer，預設關。
+- **不得出現已移除的舊引擎參照**：`aiops-db`、`aiops_*` 資料表、`localhost:18080`、`aiops-api`、`grafana-postgresql-datasource`。
+- **機密只從 Secret（`envSecret`）進來。** `values.yaml` 與 `files/` 不得有金鑰或密碼；`devSecretEnv` 預設空，只限開發。
+- 資源名稱沿用舊 chart（`grafana`、`grafana-datasources`…），才能用 `helm upgrade` 接手叢集上已在跑的 release。
+- 沒搬過來的舊內容與原因見 `deploy/helm/aiops-grafana/README.md`。
+
+**Elasticsearch：`deploy/elasticsearch/`**
+
+- **平台與 Grafana 對 ES 只讀。** `ElasticsearchSpec` 只呼叫 `_search` 與根路徑 GET，不得出現 `_bulk`、`_doc`、`PUT`、`DELETE`、`_security` 等寫入或管理端點（測試檢查）。建索引、角色、API key 是 `es-setup` 與人工的事，平台不做。
+- **用各自的唯讀 API key**（`AIOPS_ES_API_KEY`、`GRAFANA_ES_API_KEY`），只給三個 APM 索引 pattern 的讀取權限；不得共用 `elastic` 超級帳號。
+- **這裡沒有 chart**：ES 與 es-setup 的原始 chart 不在任何本機 repo。`es-test.snapshot.yaml` 是從執行中的 release 匯出的快照（已去掉 Secret 與明文機密），只供重建參考。要讓本 repo 真的管理 ES，要先找回原始 chart 或整理快照，**這件事還沒做**。
+- 快照不得有 `Secret` 資源；與密碼有關的環境變數只能是 `valueFrom` 引用。
+
+**機密不進 repo**：`deploy/`、`configs/`、`docker-compose.yaml` 不得出現金鑰樣式的字串（OpenAI／Slack／長 base64），`docker-compose.yaml` 只能有標成 `dev-only` 的假值。
 
 ### 已定案：平台主動推到獨立的 Alertmanager，Grafana 只顯示
 
@@ -207,10 +232,9 @@ POST /api/v1/alerts/process
   - `resolveTimeout`（預設 1h）只是保險：平台停擺、不再心跳時，告警最多掛這麼久。**排程間隔必須遠小於它**（CronJob 預設 5 分鐘）。
   - 直接呼叫 `/alerts/process` 建立的事件群沒有排程心跳，要用 `POST /api/v1/alerts/incidents/{uid}/resolve` 人工結案，否則 1h 後由 Alertmanager 自己結案。
   - Slack／Teams 寫法見 `values-channels.example.yaml`（已用 `amtool check-config` 驗過）。正式環境開 `persistence.enabled`，否則 pod 重建會清掉進行中的告警。
-- **Grafana 側只動 helm chart：** 把 aiops-alertmanager 加成 `alertmanager` 型資料源（`implementation: prometheus`、`handleGrafanaManagedAlerts: false`）。
-  - **目前 `grafana-new` 的 Grafana 沒有 sidecar**，資料源只來自它自己 chart 的 `files/datasource.yaml`，所以本 chart 的 `displayDatasource`（帶 sidecar label 的 ConfigMap）在這台**不會生效**，預設保持關閉。
-  - 已在舊 repo `aiops-data-foundation` 的 branch `feature/grafana-alertmanager-datasource` 加了 `aiops-alertmanager` 資料源（網址取自環境變數 `AIOPS_ALERTMANAGER_URL`，放在 Grafana 的 Secret `secretData`）。這是對「舊 repo 不動」的**一次例外**，經使用者同意，只限這一個資料源；其餘舊 repo 內容仍不動。
-  - 部署：`helm upgrade grafana <舊 repo>/grafana/helmchart -n grafana-new --reuse-values --set secretData.AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.aiops-platform.svc:9093`。
+- **Grafana 側只動 helm chart：** `aiops-alertmanager` 已在 `deploy/helm/aiops-grafana/files/datasource.yaml` 加成 `alertmanager` 型資料源（`implementation: prometheus`、`handleGrafanaManagedAlerts: false`），網址取自環境變數 `AIOPS_ALERTMANAGER_URL`（放 Grafana 的 Secret）。
+  - `aiops-alertmanager` chart 的 `displayDatasource`（帶 sidecar label 的 ConfigMap）給**有開 sidecar** 的 Grafana 用；本 repo 的 Grafana 沒有 sidecar，這個選項預設關閉、用不到。
+  - 部署：`helm upgrade --install grafana deploy/helm/aiops-grafana -n grafana-new`，Secret `grafana-env` 要先建好（鍵見該 chart 的 `values.yaml`）。
 - 平台設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.<namespace>.svc:9093`。
 
 - 通知是 Alertmanager v2 格式：`labels`（`alertname=aiops_incident`、`incident_uid`、`severity`、`preset`、`dept`、`entities`）、`annotations`（`summary`、`description`）、`startsAt`。
@@ -222,7 +246,8 @@ POST /api/v1/alerts/process
 > 目前狀態（2026-11-08）：**平台 -> aiops-alertmanager 已在本機 rancher-desktop 端對端驗證成功**：三個部門各推一則，依 `dept` 分到正確的 receiver，沒帶部門的進 `unrouted`；同一批再跑一次全部被 `dedup` 擋下。
 > 還沒做的：
 > - **Grafana 顯示已接上並驗證**：Grafana 13 經資料源讀到 Alertmanager 的告警，標籤（`dept`、`severity`）與 receiver 都正確。Grafana 內建的資料源健康檢查端點對 alertmanager 型回 500（`plugin unavailable`），這是該資料源型別本來就不支援，不是連線失敗，實際讀取以 `/api/datasources/proxy/uid/aiops-alertmanager/api/v2/alerts` 為準。
-> - **舊 Grafana 仍掛著自己的 alert rules／contact points／policies**（`grafana-alerting`），與「Grafana 只顯示、不發通知」相反，兩邊同時開可能重複通知。尚未處理，需要決定是否關掉。
+> - **叢集上跑著的 Grafana 還是舊 chart 部署的**，仍掛著舊的 alert rules／contact points／policies（`grafana-alerting`），與「Grafana 只顯示」相反，可能和平台的通知重複。本 repo 的 `aiops-grafana` 已不含這些，但**還沒拿它去 `helm upgrade` 接手叢集上的 release**；接手後那些告警設定會被一併移除。
+> - 舊引擎（`aiops` 命名空間）已從叢集移除，舊 Grafana 的 `aiops-db` 資料源因此失效；`aiops-grafana` 不含它。
 > - **真的通道還沒設**：驗證時 receiver 都沒有 `*_configs`，收下但不送出。
 > - **平台的部署**：`Dockerfile`、`docker-compose.yaml`、`deploy/helm/aiops-platform`（API 是 Deployment、排程是 CronJob 跑 `run-once`、機密只從 Secret 進來）。
 
