@@ -3,3 +3,4 @@ values-local.yaml
 __pycache__/
 *.pyc
 .pytest_cache/
+*.db

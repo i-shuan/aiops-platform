@@ -48,7 +48,10 @@ class AnomalyResult:
 
 
 class BaseDetector(_Plugin, ABC):
-    """輸入固定為 DataFrame(ts, value)。fit 回傳 self，detect 前必須先 fit。"""
+    """輸入固定為 DataFrame(ts, value)。fit 回傳 self，detect 前必須先 fit（或 load_state）。
+
+    get_state／load_state 讓批次訓練的結果能保存到 DB、下次直接載入，不用每次重新 fit。
+    """
 
     fitted: bool = False
 
@@ -57,6 +60,14 @@ class BaseDetector(_Plugin, ABC):
 
     @abstractmethod
     def detect(self, df: pd.DataFrame) -> AnomalyResult: ...
+
+    @abstractmethod
+    def get_state(self) -> dict[str, Any]:
+        """fit 學到的狀態（基準線參數），必須能 JSON 序列化。"""
+
+    @abstractmethod
+    def load_state(self, state: dict[str, Any]) -> BaseDetector:
+        """還原 get_state() 的結果，之後視同已 fit。回傳 self。"""
 
     def _require_fitted(self) -> None:
         if not self.fitted:

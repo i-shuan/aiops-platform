@@ -16,6 +16,15 @@ class ZScoreDetector(BaseDetector):
         self.fitted = True
         return self
 
+    def get_state(self) -> dict:
+        self._require_fitted()
+        return {"mean": self.mean_, "std": self.std_}
+
+    def load_state(self, state: dict) -> "ZScoreDetector":
+        self.mean_, self.std_ = float(state["mean"]), float(state["std"])
+        self.fitted = True
+        return self
+
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
         threshold = float(self.params.get("threshold", 3.0))

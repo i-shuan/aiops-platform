@@ -1,40 +1,57 @@
 from datetime import datetime
 from typing import Any
 
-from aiops.models import core
+from aiops.models import crud
+from aiops.models.core import AlertWatermarkRow, AnomalyRow, IncidentRow, NotificationRow, SilenceRow
 
 
 class IncidentDAO:
     @staticmethod
     def create(preset: str, incident: dict[str, Any], severity: str, suppressed_by: str | None) -> dict[str, Any]:
-        return core.incidents.insert(
-            {"preset": preset, "incident": incident, "severity": severity, "suppressed_by": suppressed_by}
-        )
+        return crud.create(IncidentRow, preset=preset, incident=incident, severity=severity, suppressed_by=suppressed_by)
 
 
 class SilenceDAO:
     @staticmethod
-    def create(row: dict[str, Any]) -> dict[str, Any]:
-        return core.silences.insert(row)
+    def create(fields: dict[str, Any]) -> dict[str, Any]:
+        return crud.create(SilenceRow, **fields)
 
     @staticmethod
     def list_all() -> list[dict[str, Any]]:
-        return core.silences.list()
+        return crud.find(SilenceRow)
 
 
 class NotificationDAO:
     @staticmethod
     def record(incident_id: int, fingerprint: str, severity: str, last_event_ts: datetime, count: int) -> dict:
-        return core.notifications.insert(
-            {
-                "incident_id": incident_id,
-                "fingerprint": fingerprint,
-                "severity": severity,
-                "last_event_ts": last_event_ts,
-                "count": count,
-            }
+        return crud.create(
+            NotificationRow,
+            incident_id=incident_id,
+            fingerprint=fingerprint,
+            severity=severity,
+            last_event_ts=last_event_ts,
+            count=count,
         )
 
     @staticmethod
-    def list_all() -> list[dict[str, Any]]:
-        return core.notifications.list()
+    def list_for(fingerprints: list[str]) -> list[dict[str, Any]]:
+        return crud.find_in(NotificationRow, "fingerprint", fingerprints)
+
+
+class AlertWatermarkDAO:
+    @staticmethod
+    def get(consumer: str) -> int:
+        row = crud.get(AlertWatermarkRow, consumer)
+        return row["last_anomaly_id"] if row else 0
+
+    @staticmethod
+    def set(consumer: str, last_anomaly_id: int) -> dict[str, Any]:
+        return crud.upsert(AlertWatermarkRow, {"consumer": consumer}, last_anomaly_id=last_anomaly_id)
+
+
+class AnomalyReadDAO:
+    """跨領域唯讀：anomalies 屬於 detection。alerts 只依 id 往後讀，讀到哪記在自己的 alert_watermarks。"""
+
+    @staticmethod
+    def list_after(pipeline: str, last_id: int, limit: int) -> list[dict[str, Any]]:
+        return crud.find(AnomalyRow, after_id=last_id, limit=limit, pipeline=pipeline)

@@ -43,6 +43,18 @@ def test_detector_contract(name):
     assert len(result.is_anomaly) == len(result.scores) == len(DF)
 
 
+@pytest.mark.parametrize("name", DetectorRegistry.names())
+def test_detector_state_round_trips_through_json(name):
+    """批次訓練的狀態要能存進 DB（JSON）再載回，載回後偵測結果必須一模一樣。"""
+    import json
+
+    trained = DetectorRegistry.get(name)({}).fit(DF)
+    state = json.loads(json.dumps(trained.get_state()))
+    restored = DetectorRegistry.get(name)({}).load_state(state)
+    assert restored.fitted
+    assert restored.detect(DF).to_dict() == trained.detect(DF).to_dict()
+
+
 @pytest.mark.parametrize("name", GrouperRegistry.names())
 def test_grouper_keeps_every_event(name):
     out = GrouperRegistry.get(name)().group(_incidents(), CTX)

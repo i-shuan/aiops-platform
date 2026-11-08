@@ -1,13 +1,18 @@
-import pytest
-from fastapi.testclient import TestClient
+import os
 
-from aiops.app import create_app
-from aiops.models import core
-from aiops.notifiers.log import LogNotifier
+os.environ["AIOPS_DATABASE_URL"] = "sqlite://"  # 測試一律用記憶體 SQLite，必須在載入 app 之前設定
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from aiops.app import create_app  # noqa: E402
+from aiops.models import core, db  # noqa: E402
+from aiops.notifiers.log import LogNotifier  # noqa: E402
 
 
 @pytest.fixture
 def client(monkeypatch):
+    db.configure("sqlite://")
     core.reset_all()
     LogNotifier.sent.clear()
     for var in ("AIOPS_NOTIFIER", "AIOPS_ALERTMANAGER_URL", "AIOPS_ALERTMANAGER_TOKEN", "AIOPS_FALLBACK_WEBHOOK"):

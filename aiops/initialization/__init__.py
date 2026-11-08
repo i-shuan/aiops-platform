@@ -47,3 +47,11 @@ def init_error_handlers(app: FastAPI) -> None:
 
 def init_infrastructure() -> None:
     init_fallback_logging()
+    init_db()
+
+
+def init_db() -> None:
+    """建立還不存在的資料表。上正式環境前要改用 Alembic migration。"""
+    from aiops.models.db import create_all
+
+    create_all()

@@ -22,6 +22,16 @@ class ProcessAlertsRequest(BaseModel):
     plugin_params: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
+class ProcessPendingRequest(BaseModel):
+    # 只處理這條管線（RunDetectionCommand 的 pipeline）寫進 anomalies 的異常
+    pipeline: str
+    preset: str
+    context: dict[str, Any] = Field(default_factory=dict)
+    plugin_params: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # 一次最多處理幾筆，其餘留給下一輪
+    limit: int = Field(1000, gt=0, le=10000)
+
+
 class SilenceCreateRequest(BaseModel):
     # mute：臨時靜音；maintenance：維護窗口；exclusion：人工排除時段（回饋調整）
     kind: Literal["mute", "maintenance", "exclusion"]

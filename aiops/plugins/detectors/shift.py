@@ -15,6 +15,15 @@ class ShiftDetector(BaseDetector):
         self.fitted = True
         return self
 
+    def get_state(self) -> dict:
+        self._require_fitted()
+        return {"diff_std": self.diff_std_}
+
+    def load_state(self, state: dict) -> "ShiftDetector":
+        self.diff_std_ = float(state["diff_std"])
+        self.fitted = True
+        return self
+
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
         threshold = float(self.params.get("threshold", 4.0))

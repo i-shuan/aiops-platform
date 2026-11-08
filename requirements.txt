@@ -5,4 +5,5 @@ pandas
 numpy
 httpx
 pyyaml
+sqlalchemy>=2.0
 pytest

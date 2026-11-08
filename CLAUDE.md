@@ -12,7 +12,8 @@
 | 入口 | `domains/<d>/api.py` | 驗證請求 -> 呼叫 Command | 任何邏輯、import 自己領域 commands/schemas 以外的東西 |
 | 流程 | `domains/<d>/commands/` | 固定業務流程（validate -> run） | import 具體外掛、直接碰 models |
 | 存取 | `domains/<d>/dao.py` | 讀寫資料表 | 業務判斷 |
-| 資料表 | `models/` | 資料形狀與存放（目前是記憶體表，之後換 SQLAlchemy） | — |
+| 資料表 | `models/` | SQLAlchemy ORM（`core.py`）、連線與 session（`db.py`）、DAO 共用存取（`crud.py`） | 業務判斷 |
+| 調度 | `tasks/` | 排程與管線：依序呼叫各領域 Command（訓練 -> 偵測 -> 告警） | 碰 DAO、資料表、外掛、資料源、通知出口 |
 | 零件 | `plugins/<kind>/` | 純運算：偵測、收斂、計分、報告段落、LLM | 認識任何領域、碰 DB、碰外部服務 |
 | 資料源 | `datasource_specs/` | 連線、查詢、轉成 `DataFrame(ts, value)` | 審核狀態、業務合成（trace 合成、Lot 履歷） |
 | 場景 | `presets/` | 每個場景啟用哪些外掛（只寫名字）與場景參數（嚴重度門檻） | import 外掛或領域 |
@@ -33,19 +34,30 @@
 10. 每個 preset 引用的外掛名字都必須已註冊。
 11. 偵測器現行參數（`active_detector_configs`）只有 `domains/tuning/dao.py` 能寫。
 12. `aiops/` 底下不得有名稱含 `grafana` 的檔案或目錄（見第 5 節）。
-13. 每張資料表都要在 `models/core.py` 的 `TABLE_OWNERS` 登記擁有者領域。
-14. 非擁有者領域讀別人的資料表，類別名稱必須以 `ReadDAO` 結尾，且只能呼叫讀取方法。
-15. 任何 `*ReadDAO` 不得有 insert／update／delete／set／create／save／add／remove／clear 類的呼叫或方法。
+13. 每張資料表都要在 `models/core.py` 的 `TABLE_OWNERS` 登記擁有者領域（直接比對 SQLAlchemy 的 `Base.metadata`）。
+14. DAO 類別引用了別的領域擁有的 ORM 類別（如 `AnomalyRow`），類別名稱必須以 `ReadDAO` 結尾。
+15. 任何 `*ReadDAO` 不得呼叫寫入函式（`crud.create／create_many／update／upsert`、`write_session`、`Session.add／delete／merge／flush／commit／execute`、`setattr`），也不得有寫入類方法名。
 16. `notifiers/` 不得 import `domains`、`models`、`plugins`、`presets`、`datasource_specs`。
 17. 領域層不得直接 import 具體通知出口（如 `notifiers.alertmanager`），一律 `get_notifier()`，型別只能用 `notifiers.base`。
 18. `aiops/` 的 Python 不得出現 Alertmanager 設定語彙（路由、receiver、通道設定都只在 helm chart）。
+19. `aiops.models` 只准 `models/` 自己、各領域 `dao.py`、`initialization/` 匯入。
+20. `tasks/` 只能 import 各領域的 `commands` 與 `schemas`（加上 `aiops.schemas`、`initialization`、`infrastructure`），不得碰 DAO、`models`、`plugins`、`datasource_specs`、`notifiers`、`presets`。
 
 ### 跨領域資料讀取規範
 
 - 領域**嚴禁寫入**其他領域擁有的資料表。寫入只有擁有者領域的 DAO 能做（擁有者見 `TABLE_OWNERS`）。
 - 跨領域讀取必須在**自己領域的 `dao.py`** 獨立宣告 `*ReadDAO`（例：`rca/dao.py` 的 `IncidentReadDAO`、`detection/dao.py` 的 `DetectorConfigReadDAO`），內容只能是查詢。
 - 這樣表結構要改或要拆庫時，全域搜尋 `ReadDAO` 就能找到所有跨領域的消費端。
-- 目前的檢查範圍：`dao.py` 裡直接使用 `core.<table>` 的類別。若之後改用 SQLAlchemy，要同步調整 `tests/test_architecture.py` 的偵測方式。
+- 檢查方式：在每個 `dao.py` 的類別裡，找出引用了哪些 ORM 類別（`XxxRow`）、呼叫了哪些函式。ORM 類別對資料表的對應直接取自 SQLAlchemy registry，新增資料表不用改測試。
+- DAO 一律用 `models/crud.py` 存取，回傳 dict；Command 不會拿到 ORM 物件，也不開 session。寫入用 `write_session`（會 commit），讀取用 `read_session`（一律 rollback）。
+
+### 持久化
+
+- 連線：`AIOPS_DATABASE_URL`，預設 `sqlite:///./aiops-local.db`；正式用 PostgreSQL，例如 `postgresql+psycopg://user:pass@host:5432/aiops`（要另裝 `psycopg`，目前還沒加進 requirements）。
+- 時間一律存成 UTC、不帶時區（`crud` 寫入時自動轉換）。讀出來的 naive datetime 就是 UTC。
+- 資料表結構目前由啟動時的 `create_all()` 建立，**只會新增表、不會改既有欄位**。上正式環境前要改用 Alembic migration。
+- 資料庫連不上會轉成 `InfrastructureError`（API 回 503 並走看守機制）。
+- 一個 Command 裡的多次 DAO 呼叫**不在同一個交易**（每次 DAO 呼叫各自 commit）。目前接受；需要原子性時再引入 unit of work。
 
 另外，`tests/test_plugin_contracts.py` 會自動對**每一個**已註冊外掛跑契約測試，新增外掛不必另寫契約測試。
 
@@ -68,7 +80,7 @@
 
 | 外掛 | 契約 | 備註 |
 |---|---|---|
-| 偵測器 `BaseDetector` | `fit(df) -> self`；`detect(df) -> AnomalyResult` | 先 fit 才能 detect |
+| 偵測器 `BaseDetector` | `fit(df) -> self`；`detect(df) -> AnomalyResult`；`get_state() -> dict`；`load_state(state) -> self` | 先 fit（或 load_state）才能 detect；state 必須能 JSON 序列化，載回後偵測結果要一模一樣（契約測試檢查） |
 | 收斂 `BaseGrouper` | `group(incidents, context) -> list[Incident]` | 不得丟掉任何事件；合併用 `merge_incidents()` |
 | 計分 `BaseScorer` | `score(incident, context) -> float` | 回傳新分數，不得修改 incident |
 | 抑制 `BaseSuppressor` | `suppress(incident, context) -> str \| None` | 回傳抑制原因；`None` 表示照發。靜音、近期通知、同批事件群由 Command 放進 `context` |
@@ -96,7 +108,24 @@
 - **任何改偵測參數的需求（自動調優、LLM 從回饋抽規則、人工調整）** → 一律 `CreateProposalCommand`（`source` 填 `auto`／`llm`／`manual`），再走 `BacktestProposalCommand` -> `ApproveTuningCommand`。**不准另開路徑直接寫參數。**
 - **資料表** → `models/core.py`，並在 `TABLE_OWNERS` 登記擁有者；存取寫在各領域 `dao.py`。別的領域要讀就寫 `*ReadDAO`。
 - **DB／ES 連不上** → DAO／Spec 丟 `InfrastructureError`。`initialization` 會統一回 503，並呼叫 `infrastructure.fallback.report_failure`（寫本機日誌，設了 `AIOPS_FALLBACK_WEBHOOK` 就直接打 webhook）。不要在業務 Command 或外掛裡自己做備援。
-- **排程／背景任務** → `aiops/tasks/`，任務內只呼叫 Command。
+- **排程／背景任務** → `aiops/tasks/`，任務內只呼叫 Command。工作設定是 YAML（範例 `configs/jobs.example.yaml`），一個 job = 一條管線。
+- **偵測結果要進告警** → 不准 detection 呼叫 alerts。`RunDetectionCommand` 帶 `pipeline` 就把新異常寫進 `anomalies`；`ProcessPendingAnomaliesCommand` 用 `AnomalyReadDAO` 讀、處理完把游標記在 alerts 自己的 `alert_watermarks`；兩者由 `tasks/pipeline.py` 串起來。
+- **批次訓練、保存基準線** → `TrainDetectorCommand` 把 `get_state()` 存進 `detector_models`；`RunDetectionCommand` 帶 `pipeline` 時優先 `load_state()`。
+
+### 偵測到告警的資料流
+
+```
+python -m aiops.tasks run-once -c jobs.yaml        （或 loop --interval 60）
+  每個 job、每個 target：
+    TrainDetectorCommand  模型超過 retrain_minutes 才重訓 -> detector_models
+    RunDetectionCommand   載入模型偵測 -> 只寫比上次新的異常 -> anomalies（標上 pipeline）
+  ProcessPendingAnomaliesCommand
+    AnomalyReadDAO 讀游標之後的異常 -> 收斂、計分、抑制、推送 -> 推進 alert_watermarks
+```
+
+- 同一段時間重跑不會重複寫異常、不會重複處理（已有測試）。
+- 推送失敗時游標不前進，下一輪會重處理同一批；但已存檔的事件群會多一筆（目前接受）。
+- `loop` 只適合單一副本；多副本要改用 K8s CronJob 跑 `run-once`，或加分散式鎖。
 - **utils/** → 只放無業務語意的純函式；含業務判斷的回到 Command。
 
 ## 4. 調參流程（防止多頭馬車）

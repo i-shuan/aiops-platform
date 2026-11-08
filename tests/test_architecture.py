@@ -1,5 +1,6 @@
 """架構守則的機械式檢查（對應 CLAUDE.md 第 1 節）。違規就讓 pytest 變紅。"""
 import ast
+import re
 from pathlib import Path
 
 from aiops.initialization import init_plugins
@@ -103,64 +104,99 @@ def test_only_dao_touches_models():
     assert not _violations("domains/**/*.py", lambda f, m: _starts(m, "aiops.models") and f.name != "dao.py")
 
 
-_MUTATORS = {"insert", "update", "delete", "remove", "clear", "set", "create", "save", "add"}
+# ── 資料表擁有權（SQLAlchemy）：靠 DAO 類別裡引用了哪些 ORM 類別、呼叫了哪些寫入函式判斷 ──
+
+# crud 的寫入函式、Session 的寫入方法、write_session，都算「寫」
+_WRITE_CALLS = {"create", "create_many", "update", "upsert", "add", "add_all", "delete", "merge", "flush",
+                "commit", "write_session", "execute", "bulk_save_objects", "setattr", "insert"}
+_MUTATING_METHOD_PREFIXES = {"insert", "update", "delete", "remove", "clear", "set", "create", "save", "add", "upsert"}
 
 
-def _table_access(dao: Path):
-    """回傳 [(類別名, 資料表, 呼叫的方法或 None)]：dao.py 內每一處 core.<table> 的使用。"""
+def _model_tables() -> dict[str, str]:
+    """ORM 類別名 -> 資料表名，直接從 SQLAlchemy 的 registry 取，新增資料表不用改這裡。"""
+    from aiops.models.db import Base
+
+    return {m.class_.__name__: m.class_.__tablename__ for m in Base.registry.mappers}
+
+
+def _dao_classes(dao: Path) -> list[tuple[str, set[str], set[str], list[str]]]:
+    """[(類別名, 用到的資料表, 呼叫過的函式名, 方法名)]"""
+    models = _model_tables()
     tree = ast.parse(dao.read_text(encoding="utf-8"))
-    def is_core_table(n) -> bool:
-        return isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "core"
-
     out = []
     for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
-        called = set()  # 已被「core.<table>.method()」涵蓋的 core.<table> 節點，不重複記成裸存取
+        tables = set()
+        calls = set()
         for node in ast.walk(cls):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and is_core_table(node.func.value):
-                called.add(id(node.func.value))
-                out.append((cls.name, node.func.value.attr, node.func.attr))
-        for node in ast.walk(cls):
-            if is_core_table(node) and id(node) not in called:
-                out.append((cls.name, node.attr, None))
+            if isinstance(node, ast.Name) and node.id in models:
+                tables.add(models[node.id])
+            elif isinstance(node, ast.Attribute) and node.attr in models:
+                tables.add(models[node.attr])
+            if isinstance(node, ast.Call):
+                func = node.func
+                calls.add(func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", ""))
+        methods = [fn.name for fn in cls.body if isinstance(fn, ast.FunctionDef)]
+        out.append((cls.name, tables, calls, methods))
     return out
 
 
 def test_every_table_has_an_owner():
     from aiops.models import core
+    from aiops.models.db import Base
 
-    tables = {k for k, v in vars(core).items() if isinstance(v, core.InMemoryTable)}
+    tables = set(Base.metadata.tables)
     assert tables == set(core.TABLE_OWNERS), tables ^ set(core.TABLE_OWNERS)
 
 
-def test_cross_domain_table_access_is_read_only_read_dao():
-    """非擁有者領域讀別人的資料表：類別必須叫 *ReadDAO，且不得有任何變更操作。"""
+def test_cross_domain_table_access_is_read_dao():
+    """非擁有者領域讀別人的資料表：類別必須叫 *ReadDAO（是否唯讀由下一條檢查）。"""
     from aiops.models import core
 
     bad = []
     for dao in _py_files("domains/*/dao.py"):
         domain = dao.parent.name
-        for cls, table, method in _table_access(dao):
-            if table not in core.TABLE_OWNERS:
-                bad.append(f"{_rel(dao)}:{cls} 使用了未登記擁有者的資料表 {table}")
-            elif core.TABLE_OWNERS[table] != domain:
-                if not cls.endswith("ReadDAO"):
-                    bad.append(f"{_rel(dao)}:{cls} 跨領域讀 {table}，類別必須以 ReadDAO 結尾")
-                if method is None or method in _MUTATORS:
-                    bad.append(f"{_rel(dao)}:{cls} 對別的領域的 {table} 做 {method or '非方法呼叫的存取'}")
+        for cls, tables, _calls, _methods in _dao_classes(dao):
+            for table in sorted(tables):
+                owner = core.TABLE_OWNERS.get(table)
+                if owner is None:
+                    bad.append(f"{_rel(dao)}:{cls} 使用了未登記擁有者的資料表 {table}")
+                elif owner != domain and not cls.endswith("ReadDAO"):
+                    bad.append(f"{_rel(dao)}:{cls} 跨領域碰 {table}（屬於 {owner}），類別必須以 ReadDAO 結尾且只讀")
     assert not bad, bad
 
 
-def test_read_dao_has_no_mutating_methods():
-    """任何 *ReadDAO（即使讀自己的表）都不得有變更資料的呼叫或方法名稱。"""
+def test_read_dao_is_read_only():
+    """任何 *ReadDAO 都不得呼叫寫入函式（crud.create／update／upsert、write_session、Session.add…），也不得有寫入類方法名。"""
     bad = []
     for dao in _py_files("domains/*/dao.py"):
-        tree = ast.parse(dao.read_text(encoding="utf-8"))
-        for cls in (n for n in tree.body if isinstance(n, ast.ClassDef) and n.name.endswith("ReadDAO")):
-            for fn in (n for n in cls.body if isinstance(n, ast.FunctionDef)):
-                if fn.name.split("_")[0] in _MUTATORS:
-                    bad.append(f"{_rel(dao)}:{cls.name}.{fn.name}")
-            bad += [f"{_rel(dao)}:{cls.name} 呼叫 {m}" for c, t, m in _table_access(dao) if c == cls.name and m in _MUTATORS]
+        for cls, _tables, calls, methods in _dao_classes(dao):
+            if not cls.endswith("ReadDAO"):
+                continue
+            bad += [f"{_rel(dao)}:{cls} 呼叫 {c}" for c in sorted(calls & _WRITE_CALLS)]
+            bad += [f"{_rel(dao)}:{cls}.{m}" for m in methods if m.split("_")[0] in _MUTATING_METHOD_PREFIXES]
     assert not bad, bad
+
+
+def test_models_only_imported_by_dao_and_init():
+    """資料庫只能經 DAO 碰：aiops.models 只准 models 自己、各領域 dao.py、initialization 匯入。"""
+    def bad(f: Path, m: str) -> bool:
+        rel = _rel(f)
+        allowed = rel.startswith("aiops/models/") or rel.startswith("aiops/initialization/") or f.name == "dao.py"
+        return _starts(m, "aiops.models") and not allowed
+
+    assert not _violations("**/*.py", bad)
+
+
+def test_tasks_only_orchestrate_commands():
+    """tasks 只負責依序呼叫各領域的 Command；不得碰 DAO、資料表、外掛、資料源、通知出口、preset。"""
+    def bad(f: Path, m: str) -> bool:
+        if _starts(m, "aiops.models", "aiops.plugins", "aiops.datasource_specs", "aiops.notifiers", "aiops.presets"):
+            return True
+        if m.startswith("aiops.domains."):
+            return not re.match(r"aiops\.domains\.\w+\.(commands(\.\w+)*|schemas)$", m)
+        return False
+
+    assert not _violations("tasks/**/*.py", bad)
 
 
 def test_commands_only_use_plugin_abstractions():
@@ -235,12 +271,15 @@ def test_presets_reference_only_registered_plugins():
 
 
 def test_only_tuning_writes_active_detector_config():
-    """現行偵測參數只能經 tuning 的提案 -> 回測 -> 核准寫入。"""
+    """現行偵測參數只能經 tuning 的提案 -> 回測 -> 核准寫入：tuning 以外碰這張表的類別都必須是 *ReadDAO。"""
+    from aiops.models.core import TABLE_OWNERS
+
+    assert TABLE_OWNERS["active_detector_configs"] == "tuning"
     bad = [
-        _rel(f)
-        for f in _py_files("**/*.py")
-        if "active_detector_configs.insert" in f.read_text(encoding="utf-8")
-        or "active_detector_configs.update" in f.read_text(encoding="utf-8")
-        if _rel(f) != "aiops/domains/tuning/dao.py"
+        f"{_rel(dao)}:{cls}"
+        for dao in _py_files("domains/*/dao.py")
+        if dao.parent.name != "tuning"
+        for cls, tables, _calls, _methods in _dao_classes(dao)
+        if "active_detector_configs" in tables and not cls.endswith("ReadDAO")
     ]
     assert not bad, bad

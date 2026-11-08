@@ -1,20 +1,21 @@
 from typing import Any
 
-from aiops.models import core
+from aiops.models import crud
+from aiops.models.core import ActiveDetectorConfigRow, TuningProposalRow
 
 
 class ProposalDAO:
     @staticmethod
     def create(row: dict[str, Any]) -> dict[str, Any]:
-        return core.tuning_proposals.insert(row)
+        return crud.create(TuningProposalRow, **row)
 
     @staticmethod
     def get(proposal_id: int) -> dict[str, Any] | None:
-        return core.tuning_proposals.get(proposal_id)
+        return crud.get(TuningProposalRow, proposal_id)
 
     @staticmethod
     def update(proposal_id: int, **fields: Any) -> dict[str, Any]:
-        return core.tuning_proposals.update(proposal_id, **fields)
+        return crud.update(TuningProposalRow, proposal_id, **fields)
 
 
 class ActiveConfigDAO:
@@ -22,8 +23,7 @@ class ActiveConfigDAO:
 
     @staticmethod
     def get(detector_name: str) -> dict[str, Any] | None:
-        rows = core.active_detector_configs.list(detector_name=detector_name)
-        return rows[0] if rows else None
+        return crud.find_one(ActiveDetectorConfigRow, detector_name=detector_name)
 
     @staticmethod
     def version(detector_name: str) -> int:
@@ -32,8 +32,11 @@ class ActiveConfigDAO:
 
     @staticmethod
     def set(detector_name: str, params: dict[str, Any], source: str, proposal_id: int) -> dict[str, Any]:
-        fields = {"params": params, "source": source, "proposal_id": proposal_id}
-        row = ActiveConfigDAO.get(detector_name)
-        if row is None:
-            return core.active_detector_configs.insert({"detector_name": detector_name, "version": 1, **fields})
-        return core.active_detector_configs.update(row["id"], version=row["version"] + 1, **fields)
+        return crud.upsert(
+            ActiveDetectorConfigRow,
+            {"detector_name": detector_name},
+            version=ActiveConfigDAO.version(detector_name) + 1,
+            params=params,
+            source=source,
+            proposal_id=proposal_id,
+        )
