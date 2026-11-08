@@ -13,16 +13,12 @@ KEY_LIKE = re.compile(r"sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-
                       r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{48,}={0,2}(?![A-Za-z0-9+/])")
 # 這些檔是整份讀進測試的樣板或 JSON 儀表板，不是機密（儀表板裡的長 base64 不在範圍內）
 SKIP_SUFFIX = {".json"}
-# 唯一允許放開發用金鑰的檔案。它自己有另一組檢查（見下面），不走上面的長字串掃描
-DEV_VALUES = ROOT / "deploy" / "helm" / "aiops-platform" / "values-dev.yaml"
-DEV_ALLOWED_SECRET_KEYS = {"AIOPS_API_TOKEN", "AIOPS_ES_API_KEY"}
-DEV_ALLOWED_TOP_LEVEL = {"env", "devSecretEnv"}
 
 
 def test_no_key_like_strings_in_deploy_and_configs():
     bad = []
     for p in SCAN:
-        if p.suffix in SKIP_SUFFIX or not p.exists() or p == DEV_VALUES:
+        if p.suffix in SKIP_SUFFIX or not p.exists():
             continue
         for n, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
             if KEY_LIKE.search(line):
@@ -48,22 +44,6 @@ def test_compose_credentials_are_labeled_dev_only():
     assert "dev-only" in text and "只給開發用" in text
     for secret in re.findall(r"(?:PASSWORD|TOKEN)[:=]\s*(\S+)", text):
         assert "dev-only" in secret or secret.startswith("${"), secret
-
-
-def test_dev_values_is_the_only_place_with_keys_and_is_labeled_dev_only():
-    """values-dev.yaml 可以放開發用金鑰，但只限：標明 dev-only、只有 env 與 devSecretEnv、金鑰名單固定。
-    其他 values 檔照舊不准有 devSecretEnv；有人想把別的金鑰（OpenAI、Slack…）塞進來會在這裡被擋下。"""
-    text = DEV_VALUES.read_text(encoding="utf-8")
-    assert "dev-only" in text.splitlines()[0] and "正式環境不要用" in text
-    data = yaml.safe_load(text)
-    assert set(data) <= DEV_ALLOWED_TOP_LEVEL, set(data)
-    assert set(data["devSecretEnv"]) <= DEV_ALLOWED_SECRET_KEYS, set(data["devSecretEnv"])
-    assert not re.search(r"sk-|xox[bp]-|hooks\.slack\.com", text), "values-dev.yaml 不得放 OpenAI／Slack 金鑰"
-    es_key = data["devSecretEnv"].get("AIOPS_ES_API_KEY")
-    assert es_key is None or (es_key and "<" not in es_key), "AIOPS_ES_API_KEY 要嘛不設，要嘛填真的值"
-    others = [p for p in (ROOT / "deploy" / "helm").rglob("values*.yaml") if p != DEV_VALUES and p.name != "values-local.yaml"]
-    for p in others:
-        assert not (yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("devSecretEnv"), p.name
 
 
 def test_values_files_do_not_default_real_secrets():

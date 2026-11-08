@@ -58,17 +58,6 @@ def test_cronjob_runs_once_per_tick_without_overlap():
     assert tasks["args"] == ["python", "-m", "aiops.tasks", "run-once", "-w", "metrics_only"]
 
 
-def test_values_dev_renders_a_dev_secret_and_the_es_url():
-    out = subprocess.run(["helm", "template", "p", str(CHART), "-f", str(CHART / "values-dev.yaml")],
-                         capture_output=True, text=True, encoding="utf-8", check=True).stdout
-    docs = [d for d in yaml.safe_load_all(out) if d]
-    secret = next(d for d in docs if d["kind"] == "Secret")
-    assert secret["metadata"]["annotations"]["aiops/warning"] and "AIOPS_API_TOKEN" in secret["stringData"]
-    deployment = next(d for d in docs if d["kind"] == "Deployment")
-    env = {e["name"]: e.get("value") for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert env["AIOPS_ES_URL"] == "http://elasticsearch.es-test.svc:9200"
-
-
 def test_dev_postgres_wires_database_url_automatically():
     docs = _render("devSecretEnv.AIOPS_API_TOKEN=x", "devPostgres.enabled=true")
     for c in _containers(docs):

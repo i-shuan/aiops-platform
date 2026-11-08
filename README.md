@@ -14,7 +14,7 @@ AIOps 平台：從監控指標抓異常、收斂成事件群、抑制與分送�
 
 | 環境變數 | 用途 | 要怎麼換 |
 |---|---|---|
-| `AIOPS_API_TOKEN` | 呼叫本平台 API 的 Bearer token | 產生隨機長字串（例如 `openssl rand -hex 32`）。可用逗號同時放新舊兩組，等呼叫端都換完再拿掉舊的。**開發用的值在 `deploy/helm/aiops-platform/values-dev.yaml`**，換掉時也要改那個檔 |
+| `AIOPS_API_TOKEN` | 呼叫本平台 API 的 Bearer token | 產生隨機長字串（例如 `openssl rand -hex 32`）。可用逗號同時放新舊兩組，等呼叫端都換完再拿掉舊的 |
 | `AIOPS_DATABASE_URL` | 資料庫連線（含帳密） | 正式 PostgreSQL 開專用帳號與密碼，只給本平台的資料庫權限 |
 | `AIOPS_ES_API_KEY` | 讀 Elasticsearch 的 key | 在 ES 建**唯讀**的 API key，只給需要的索引 pattern 讀取權限。建法見下面「建立平台的唯讀 ES key」。**目前還沒建**，所以平台連不上叢集的 ES（回 401）；真實資料驗收（見「目前狀態」）卡在這裡 |
 | `AIOPS_PROMETHEUS_TOKEN` | 讀 Prometheus 的 token（選填） | 依公司 Prometheus 的驗證方式核發 |
@@ -24,33 +24,17 @@ AIOps 平台：從監控指標抓異常、收斂成事件群、抑制與分送�
 
 #### 建立平台的唯讀 ES key
 
-**這一步要由有 ES 管理員權限的人做，平台與 AI 助理都不做**（建立金鑰等於新增憑證，平台程式也不准有任何寫入 ES 的路徑，見 [deploy/elasticsearch/README.md](deploy/elasticsearch/README.md)）。
+**本機開發的金鑰統一放在 `secrets.local.yaml`**（repo 根目錄，已被 `.gitignore` 擋住，不會進 git）。格式見 [secrets.local.example.yaml](secrets.local.example.yaml)，複製一份改名填值即可。換電腦要自己把這個檔搬過去；repo 裡永遠看不到值。這個檔不給 Helm 用，部署到叢集仍然走 `existingSecret`。
 
-1. 在 Kibana Dev Tools 用管理員身分執行，範例在 [deploy/elasticsearch/README.md](deploy/elasticsearch/README.md#為-grafana-或平台建唯讀-key範例)。只給 `metrics-apm.transaction.1m-*`、`traces-apm-*`、`logs-apm.*` 的 `read` 與 `view_index_metadata`，不要給寫入權限，也不要共用 Grafana 的 key 或 `elastic` 超級帳號。
-2. 回傳的 `encoded` 值**填進 [deploy/helm/aiops-platform/values-dev.yaml](deploy/helm/aiops-platform/values-dev.yaml) 的 `devSecretEnv.AIOPS_ES_API_KEY`**（把那一行開頭的 `#` 拿掉）。開發叢集的整套設定與開發用金鑰都留在這個檔案裡，換電腦、換環境才查得到值，**不要只放在某個人的環境變數**。這個檔案是整個 repo 裡唯一允許放金鑰的地方（`tests/test_deploy_secrets.py` 只放行它，而且只放行 `AIOPS_API_TOKEN`、`AIOPS_ES_API_KEY` 兩個鍵）。
-3. 部署到開發叢集：
+ES 的 `elastic` 超級帳號密碼存在叢集 Secret `es-test/es-elastic`，**不進 repo**。叢集上沒有 Kibana，所以用一支腳本直接呼叫 ES 的 API 建唯讀 key（只給 `metrics-apm.transaction.1m-*`、`traces-apm-*`、`logs-apm.*` 的 `read` 與 `view_index_metadata`）：
 
 ```bash
-helm upgrade --install aiops-platform deploy/helm/aiops-platform -n aiops-platform -f deploy/helm/aiops-platform/values-dev.yaml --set devPostgres.enabled=true
+python scripts/dev_es_key.py
 ```
 
-4. 本機直接跑平台或驗證腳本時，ES 在叢集裡，要先開 port-forward（維持開著），並把 `AIOPS_ES_URL` 指向它、`AIOPS_ES_API_KEY` 用 `values-dev.yaml` 裡的值：
+它會自己開 port-forward、讀 `es-elastic` 密碼、建 key，再把 key 寫進 `secrets.local.yaml` 的 `es.AIOPS_ES_API_KEY`（只換那一行，其他內容不動；`secrets.local.yaml` 沒被 `.gitignore` 擋住就拒絕寫）。畫面上只印 key 的 id，不印密碼或 key。**要建 key 得用管理員密碼，所以這支要由有叢集權限的人自己跑**；每跑一次多一把新 key，舊的不會自動撤銷。
 
-```bash
-kubectl --context rancher-desktop -n es-test port-forward svc/elasticsearch 19200:9200
-```
-
-5. 正式環境**不要用** `values-dev.yaml`：金鑰放 Kubernetes Secret，用 `existingSecret` 帶入。這把 key 與檔案裡的 `AIOPS_API_TOKEN` 都是開發階段用的，**上正式環境前要撤銷重發**。
-
-#### ES 管理員（elastic）密碼
-
-這個密碼**不寫進 repo**，也不是平台要用的（平台只用上面那把唯讀 key）。它存在叢集的 Secret `es-elastic`（namespace `es-test`），需要時由有叢集權限的人自己取：
-
-```powershell
-[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((kubectl --context rancher-desktop -n es-test get secret es-elastic -o go-template='{{range .data}}{{.}}{{end}}')))
-```
-
-換新叢集時，這個 Secret 由建立 ES 的 helm release 產生；新叢集上要自己確認 Secret 名稱。
+這把 key 是開發階段用的，跟上表其他憑證一樣，**上正式環境前要撤銷重發**。
 
 ### 本平台的部署設定
 
