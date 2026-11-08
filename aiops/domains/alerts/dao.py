@@ -7,9 +7,27 @@ from aiops.models.core import (
     AnomalyRow,
     ExternalAnomalyRow,
     IncidentRow,
+    LotPathRow,
     NotificationRow,
+    ServiceEdgeRow,
     SilenceRow,
 )
+
+
+class ServiceEdgeReadDAO:
+    """跨領域唯讀：從 trace 推導出的服務呼叫關係（屬於 ingestion）。沒給 topology 時自動補。"""
+
+    @staticmethod
+    def all() -> list[dict[str, Any]]:
+        return crud.find(ServiceEdgeRow)
+
+
+class LotPathReadDAO:
+    """跨領域唯讀：已合成的 Lot 路徑（屬於 ingestion）。沒給 lot_edges 時自動推導。"""
+
+    @staticmethod
+    def paths() -> list[list[str]]:
+        return [r["path"] for r in crud.find(LotPathRow)]
 
 
 class IncidentDAO:

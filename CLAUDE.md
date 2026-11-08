@@ -123,8 +123,13 @@
 - **業務流程** → 繼承 `BaseCommand`，放 `domains/<domain>/commands/<action>.py`。業務錯誤丟 `CommandError`／`CommandNotFound`（404）／`CommandConflict`（409）。
 - **資料進來之後的合成、匯入、欄位對照審核** → `domains/ingestion/commands/`（trace 合成、Lot 履歷合成、外部異常接收、欄位對照、資料源自檢）。
 - **外部系統推異常進來**（例如工廠 FDC）→ `POST /api/v1/ingestion/anomalies`，存進 ingestion 的 `external_anomalies`（同一 `source` 的 `external_id` 只收一次）。alerts 用 `ExternalAnomalyReadDAO` 讀，跟偵測到的異常一起進同一條管線（`pipeline` 名稱要跟排程 job 一致）。
-- **Lot 履歷** → `POST /api/v1/ingestion/lot-paths/merge` 回傳每個 Lot 的機台路徑與機台間流向；`topology` 欄位可直接當告警的 `context.topology`。
-- **新監控資料源** → 繼承 `BaseDataSourceSpec`，實作 `from_env`、`configured`、`fetch_data`、`check`，放 `datasource_specs/<name>.py`，在 `datasource_specs/__init__.py` 的 `_SPECS` 加一行。查詢語法解析放 `metric_query/`。欄位對照只讀「已核准」版本，由 Command 傳入，Spec 自己不查審核狀態。
+- **Lot 履歷** → `POST /api/v1/ingestion/lot-paths/merge` 回傳每個 Lot 的機台路徑與 `lot_edges`（機台流向），並存進 `lot_paths`。**Lot 流向一律放 `lot_edges`，不得塞進 `topology`**：`topology` 是 [caller, callee]（異常從 callee 傳到 caller），Lot 流向是上游 -> 下游，方向相反，放錯會讓根因推論整個反過來。
+- **trace** → `POST /api/v1/ingestion/traces/merge` 把 span 合成每服務時序存進 `trace_series`，並從父子 span（`span_id`／`parent_id`）推導服務呼叫關係存進 `service_edges`。之後：
+  - 偵測用 `source_type: "trace"`、query「服務/欄位」（欄位：`count`／`error_rate`／`p95_ms`）直接讀，跟一般指標走同一個偵測器。`trace` 是平台內部來源，不是 `datasource_specs` 裡的 Spec。
+  - RCA 的 `trace_evidence` 自動讀事件群前後 10 分鐘的 trace 時序。
+- **場景資料自動補上**：alerts 與 rca 在呼叫端**沒給** `topology`／`lot_edges`／`trace_series` 時，從 `service_edges`、`lot_paths`、`trace_series` 自動推導（`plugins.base.fill_context`）。呼叫端明確給的一律優先，給空清單代表「不要用」。
+- **新監控資料源** → 繼承 `BaseDataSourceSpec`，實作 `from_env`、`configured`、`fetch_data`、`check`，放 `datasource_specs/<name>.py`，在 `datasource_specs/__init__.py` 的 `_SPECS` 加一行。查詢語法解析放 `metric_query/`。
+- **欄位對照** → 只讀「已核准」版本，而且**資料源層不查資料庫**：領域 Command 用自己的 `FieldMappingReadDAO` 讀出，經 `fetch_frame(..., field_map_for=...)` 傳給 Spec 的 `fetch_data(..., field_map)`。對照格式是「來源欄位 -> 標準欄位」，標準欄位有 `ts`、`value`、`entity`。目前 Elasticsearch 會用它補 `time_field`、`value_field`，以及把查詢的 `"entity"` 轉成對應欄位的 term 篩選；PromQL 本來就指定好序列，不使用。
   - 錯誤分工：查詢寫錯（語法、多條序列、索引不存在）丟 `InvalidQueryError`（400）；沒資料丟 `NoDataError`（404）；連不上、認證失敗、伺服器錯誤丟 `InfrastructureError`（503）。
   - 現有：`mock`、`prometheus`（`AIOPS_PROMETHEUS_URL`／`_TOKEN`）、`victoriametrics`（`AIOPS_VICTORIAMETRICS_URL`／`_TOKEN`）、`elasticsearch`（`AIOPS_ES_URL`／`AIOPS_ES_API_KEY`，query 是 JSON，格式見 `metric_query/elasticsearch.py`）。
   - Prometheus／VictoriaMetrics 查詢必須只回一條序列；多條請在 PromQL 裡 `sum`／`avg by` 聚合。

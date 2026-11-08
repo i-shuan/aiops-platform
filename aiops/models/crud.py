@@ -98,6 +98,19 @@ def find_in(model: Any, column: str, values: list[Any]) -> list[dict[str, Any]]:
         return [row_to_dict(r) for r in s.scalars(stmt)]
 
 
+def find_between(model: Any, column: str, start: Any, end: Any, *, in_column: str | None = None,
+                 in_values: list[Any] | None = None) -> list[dict[str, Any]]:
+    """column 落在 [start, end] 的列（依 column 排序）；可再限定 in_column 屬於 in_values。"""
+    col = getattr(model, column)
+    stmt = select(model).where(col >= utc_naive(start), col <= utc_naive(end))
+    if in_column is not None:
+        if not in_values:
+            return []
+        stmt = stmt.where(getattr(model, in_column).in_(in_values))
+    with read_session() as s:
+        return [row_to_dict(r) for r in s.scalars(stmt.order_by(col))]
+
+
 def max_of(model: Any, column: str, **filters: Any) -> Any:
     stmt = select(func.max(getattr(model, column))).where(*_where(model, filters))
     with read_session() as s:

@@ -231,6 +231,34 @@ class BaseSectionBuilder(_Plugin, ABC):
     def build(self, incident: Incident, context: dict[str, Any]) -> ReportSection: ...
 
 
+# ── 場景資料：從已合成的 trace／Lot 履歷自動補進 context（呼叫端明確給的優先）──
+
+
+def lot_edges_from_paths(paths: list[list[str]]) -> list[dict[str, Any]]:
+    """Lot 路徑 -> 機台流向：每條相鄰的 (上游, 下游) 被幾個不同的 Lot 走過。"""
+    lots_per_edge: dict[tuple[str, str], int] = {}
+    for path in paths:
+        for edge in {(a, b) for a, b in zip(path, path[1:]) if a != b}:
+            lots_per_edge[edge] = lots_per_edge.get(edge, 0) + 1
+    return [{"from": a, "to": b, "lots": n}
+            for (a, b), n in sorted(lots_per_edge.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def fill_context(context: dict[str, Any], *, service_edges: Callable[[], list[dict]],
+                 lot_paths: Callable[[], list[list[str]]]) -> dict[str, Any]:
+    """context 沒給 topology／lot_edges 時，從已存的推導資料補上。讀取函式由各領域用自己的 *ReadDAO 傳入。"""
+    filled = dict(context)
+    if "topology" not in filled:
+        edges = service_edges()
+        if edges:
+            filled["topology"] = [[e["caller"], e["callee"]] for e in edges]
+    if "lot_edges" not in filled:
+        edges = lot_edges_from_paths(lot_paths())
+        if edges:
+            filled["lot_edges"] = edges
+    return filled
+
+
 # ── 拓撲：統一成「異常會從 A 傳到 B」的有向邊 ──
 
 

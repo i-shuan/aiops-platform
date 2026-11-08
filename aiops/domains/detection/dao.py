@@ -2,7 +2,31 @@ from datetime import datetime
 from typing import Any
 
 from aiops.models import crud
-from aiops.models.core import ActiveDetectorConfigRow, AnomalyRow, DetectorModelRow, utc_now
+from aiops.models.core import (
+    ActiveDetectorConfigRow,
+    AnomalyRow,
+    DetectorModelRow,
+    FieldMappingRow,
+    TraceSeriesRow,
+    utc_now,
+)
+
+
+class FieldMappingReadDAO:
+    """跨領域唯讀：已核准的欄位對照屬於 ingestion。偵測時讀出來傳給資料源（資料源自己不查資料庫）。"""
+
+    @staticmethod
+    def approved_fields(source_type: str) -> dict[str, str] | None:
+        row = crud.find_one(FieldMappingRow, source_type=source_type, status="approved")
+        return row["fields"] if row else None
+
+
+class TraceSeriesReadDAO:
+    """跨領域唯讀：trace 合成出的時序屬於 ingestion。source_type=trace 時用。"""
+
+    @staticmethod
+    def window(service: str, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return crud.find_between(TraceSeriesRow, "ts", start, end, in_column="service", in_values=[service])
 
 
 class DetectorConfigReadDAO:

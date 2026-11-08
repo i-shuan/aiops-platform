@@ -34,9 +34,10 @@ class ElasticsearchSpec(BaseDataSourceSpec):
     def configured(cls) -> bool:
         return bool(os.environ.get("AIOPS_ES_URL", "").strip())
 
-    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int) -> pd.DataFrame:
+    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int,
+                   field_map: dict[str, str] | None = None) -> pd.DataFrame:
         try:
-            q = parse_es_query(query)
+            q = parse_es_query(query, field_map)
         except ValueError as e:
             raise InvalidQueryError(str(e)) from e
         s, e = align_window(start, end, step_seconds)

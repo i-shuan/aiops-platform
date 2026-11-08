@@ -33,7 +33,10 @@ class BaseDataSourceSpec(ABC):
         return True
 
     @abstractmethod
-    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int) -> pd.DataFrame: ...
+    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int,
+                   field_map: dict[str, str] | None = None) -> pd.DataFrame:
+        """field_map：已核准的欄位對照（來源欄位 -> 標準欄位），由領域 Command 讀出後傳入；資料源自己不查資料庫。
+        用不到對照的資料源（例如 PromQL 本來就指定好序列）可以忽略它。"""
 
     @abstractmethod
     def check(self) -> dict[str, Any]:

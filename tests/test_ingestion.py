@@ -38,8 +38,9 @@ def test_lot_paths_are_ordered_and_edges_counted(client):
     assert l1["path"] == ["LITHO-02", "ETCH-01"]  # 依時間排序，不是依輸入順序
     assert l1["total_minutes"] == 90 and l1["overlapping_steps"] == 0
     assert l2["overlapping_steps"] == 1  # 前一站沒結束下一站就開始
-    assert r["edges"] == [{"from": "LITHO-02", "to": "ETCH-01", "lots": 2}]
-    assert r["topology"] == [["LITHO-02", "ETCH-01"]]
+    assert r["lot_edges"] == [{"from": "LITHO-02", "to": "ETCH-01", "lots": 2}]
+    # 不再輸出 topology：Lot 流向（上游 -> 下游）跟 IT topology（[caller, callee]）方向相反，放進去會讓根因推論反過來
+    assert "topology" not in r
 
 
 def test_lot_step_with_end_before_start_is_rejected(client):
@@ -81,8 +82,8 @@ def test_trace_merge_outputs_standard_series(client):
         {"trace_id": "t2", "service": "cart", "start": "2026-11-08T00:00:40", "duration_ms": 300, "error": True},
         {"trace_id": "t3", "service": "cart", "start": "2026-11-08T00:01:05", "duration_ms": 50},
     ]
-    rows = client.post("/api/v1/ingestion/traces/merge", json={"spans": spans}).json()["result"]
+    rows = client.post("/api/v1/ingestion/traces/merge", json={"spans": spans}).json()["result"]["series"]
     assert [(r["ts"], r["count"], r["error_rate"]) for r in rows] == [
-        ("2026-11-08T00:00:00", 2, 0.5),
-        ("2026-11-08T00:01:00", 1, 0.0),
+        ("2026-11-08T00:00:00+00:00", 2, 0.5),
+        ("2026-11-08T00:01:00+00:00", 1, 0.0),
     ]

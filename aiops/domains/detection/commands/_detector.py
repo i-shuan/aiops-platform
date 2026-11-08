@@ -1,8 +1,9 @@
-"""detection 內部共用：建立偵測器並檢查參數、準備資料（含同儕序列）。"""
+"""detection 內部共用：建立偵測器並檢查參數、準備資料（含同儕序列、欄位對照、trace 來源）。"""
 import pandas as pd
 
 from aiops.commands.base import CommandError
 from aiops.datasource_specs import fetch_frame
+from aiops.domains.detection.dao import FieldMappingReadDAO, TraceSeriesReadDAO
 from aiops.plugins.base import BaseDetector
 from aiops.plugins.registry import DetectorRegistry
 from aiops.schemas import MetricTarget, TimeRange
@@ -24,5 +25,8 @@ def build_detector(name: str, params: dict, peers: list[MetricTarget], check_par
 
 
 def load_frame(metric: MetricTarget, peers: list[MetricTarget], tr: TimeRange) -> pd.DataFrame:
+    """已核准的欄位對照、trace 時序都由這裡用 *ReadDAO 讀出，再交給資料源層；資料源層自己不碰資料庫。"""
     return fetch_frame(metric.source_type, metric.query, tr.start, tr.end, tr.step_seconds,
-                       [(p.source_type, p.query) for p in peers])
+                       [(p.source_type, p.query) for p in peers],
+                       field_map_for=FieldMappingReadDAO.approved_fields,
+                       trace_rows=TraceSeriesReadDAO.window)

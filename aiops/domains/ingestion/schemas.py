@@ -21,11 +21,16 @@ class SpanIn(BaseModel):
     start: datetime
     duration_ms: float = Field(ge=0)
     error: bool = False
+    # 有父子關係才推得出服務呼叫拓撲（父 span 的服務呼叫了這個 span 的服務）
+    span_id: str | None = None
+    parent_id: str | None = None
 
 
 class TraceMergeRequest(BaseModel):
     spans: list[SpanIn] = Field(min_length=1)
     step_seconds: int = Field(60, gt=0)
+    # True：合成結果存起來（偵測的 trace 來源、RCA 的 trace 佐證、自動拓撲都讀這裡）
+    persist: bool = True
 
 
 # ── 工廠 Lot 履歷 ──
@@ -48,6 +53,8 @@ class LotStepIn(BaseModel):
 
 class LotPathsMergeRequest(BaseModel):
     steps: list[LotStepIn] = Field(min_length=1, max_length=50000)
+    # True：路徑存起來（alerts 的 lot_path_chain、rca 的根因推論會自動讀）
+    persist: bool = True
 
 
 # ── 外部異常接收 ──

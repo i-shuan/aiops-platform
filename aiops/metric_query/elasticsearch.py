@@ -5,6 +5,12 @@ query 範例（就是 MetricTarget.query 的內容）：
    "agg": "avg", "filter": {"term": {"service.name": "cart"}}}
 
 agg：avg／max／min／sum／count（文件數）／p95／p99。count 不需要 value_field。
+
+有核准的欄位對照（field_map：來源欄位 -> 標準欄位）時，查詢可以省略欄位名稱：
+- 標準欄位 ts    -> 補成 time_field
+- 標準欄位 value -> 補成 value_field
+- 標準欄位 entity -> 查詢寫 "entity": "cart"，自動加上 {"term": {<對到 entity 的欄位>: "cart"}}
+查詢裡明確寫的欄位一律優先，對照只補沒寫的。
 """
 import json
 from datetime import datetime
@@ -32,9 +38,30 @@ class EsMetricQuery(BaseModel):
         return self
 
 
-def parse_es_query(query: str) -> EsMetricQuery:
+def _apply_field_map(raw: dict[str, Any], field_map: dict[str, str] | None) -> dict[str, Any]:
+    standard_to_source = {std: src for src, std in (field_map or {}).items()}
+    raw = dict(raw)
+    if "time_field" not in raw and "ts" in standard_to_source:
+        raw["time_field"] = standard_to_source["ts"]
+    if "value_field" not in raw and "value" in standard_to_source:
+        raw["value_field"] = standard_to_source["value"]
+    entity = raw.pop("entity", None)
+    if entity is not None:
+        entity_field = raw.pop("entity_field", None) or standard_to_source.get("entity")
+        if not entity_field:
+            raise ValueError("查詢給了 entity，但沒有 entity_field，也沒有核准的欄位對照把某個欄位對到 entity")
+        existing = raw.get("filter")
+        filters = existing if isinstance(existing, list) else ([existing] if existing else [])
+        raw["filter"] = filters + [{"term": {entity_field: entity}}]
+    return raw
+
+
+def parse_es_query(query: str, field_map: dict[str, str] | None = None) -> EsMetricQuery:
     try:
-        return EsMetricQuery.model_validate(json.loads(query))
+        raw = json.loads(query)
+        if not isinstance(raw, dict):
+            raise ValueError("查詢必須是 JSON 物件")
+        return EsMetricQuery.model_validate(_apply_field_map(raw, field_map))
     except (json.JSONDecodeError, ValidationError) as e:
         raise ValueError(f"Elasticsearch 查詢格式錯誤：{e}") from e
 

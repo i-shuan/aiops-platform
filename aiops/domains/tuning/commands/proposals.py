@@ -6,7 +6,7 @@
 """
 from aiops.commands.base import BaseCommand, CommandConflict, CommandError, CommandNotFound
 from aiops.datasource_specs import fetch_frame
-from aiops.domains.tuning.dao import ActiveConfigDAO, ProposalDAO
+from aiops.domains.tuning.dao import ActiveConfigDAO, FieldMappingReadDAO, ProposalDAO, TraceSeriesReadDAO
 from aiops.domains.tuning.schemas import BacktestRequest, ProposalCreateRequest
 from aiops.plugins.registry import DetectorRegistry
 
@@ -76,7 +76,8 @@ class BacktestProposalCommand(BaseCommand):
         name = self.row["detector_name"]
         m, tr = self.req.metric, self.req.time_range
         df = fetch_frame(m.source_type, m.query, tr.start, tr.end, tr.step_seconds,
-                         [(p.source_type, p.query) for p in self.req.peers])
+                         [(p.source_type, p.query) for p in self.req.peers],
+                         field_map_for=FieldMappingReadDAO.approved_fields, trace_rows=TraceSeriesReadDAO.window)
         current_params = (ActiveConfigDAO.get(name) or {}).get("params", {})
         detector_cls = DetectorRegistry.get(name)
         current = detector_cls(current_params).fit(df).detect(df)

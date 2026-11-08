@@ -1,11 +1,16 @@
+from datetime import timedelta
+
 from aiops.commands.base import BaseCommand, CommandError, CommandNotFound
 from aiops.domains.rca.commands import narrative
-from aiops.domains.rca.dao import IncidentReadDAO
+from aiops.domains.rca.dao import IncidentReadDAO, LotPathReadDAO, ServiceEdgeReadDAO, TraceSeriesReadDAO
 from aiops.domains.rca.schemas import GenerateRCARequest
 from aiops.infrastructure.errors import InfrastructureError
 from aiops.llm import get_llm
 from aiops.llm.base import LLMError, parse_json_reply
-from aiops.plugins.base import Incident, propagation_edges
+from aiops.plugins.base import Incident, fill_context, propagation_edges
+
+# trace 佐證看事件群前後多久的 trace 時序（跟 trace_evidence 段落的範圍一致）
+_TRACE_MARGIN = timedelta(minutes=10)
 from aiops.plugins.registry import SectionRegistry
 from aiops.presets import get_preset
 
@@ -28,7 +33,20 @@ class GenerateRCACommand(BaseCommand):
         if self.row is None:
             raise CommandNotFound(f"找不到 incident {self.req.incident_id}")
 
-    def _narrative(self, incident: Incident, sections: list[dict]) -> dict:
+    def _context(self, incident: Incident) -> dict:
+        """呼叫端沒給的場景資料，從已存的推導資料補上（呼叫端明確給的一律優先）。"""
+        ctx = fill_context(self.req.context, service_edges=ServiceEdgeReadDAO.all, lot_paths=LotPathReadDAO.paths)
+        if "trace_series" not in ctx:
+            rows = TraceSeriesReadDAO.for_services(incident.entities, incident.start - _TRACE_MARGIN,
+                                                   incident.end + _TRACE_MARGIN)
+            if rows:
+                ctx["trace_series"] = [
+                    {"service": r["service"], "ts": r["ts"].isoformat(), "count": r["count"],
+                     "error_rate": r["error_rate"], "p95_ms": r["p95_ms"]} for r in rows
+                ]
+        return ctx
+
+    def _narrative(self, incident: Incident, sections: list[dict], ctx: dict) -> dict:
         result = {**narrative.template(sections), "generated_by": "template", "rejected": None}
         if not self.req.narrative:
             return result
@@ -42,7 +60,6 @@ class GenerateRCACommand(BaseCommand):
             reply = parse_json_reply(llm.complete(narrative.SYSTEM, narrative.build_prompt(sections)))
         except LLMError as e:
             return {**result, "rejected": str(e)}
-        ctx = self.req.context
         known = set(incident.entities) | {n for edge in propagation_edges(ctx) for n in edge}
         known |= set(ctx.get("p0_entities", []))
         reason = narrative.validate(reply, sections, set(incident.entities), known)
@@ -53,7 +70,7 @@ class GenerateRCACommand(BaseCommand):
     def run(self) -> dict:
         self.validate()
         incident = Incident.from_dict(self.row["incident"])
-        ctx = self.req.context
+        ctx = self._context(incident)
         sections, skipped = [], []
         for name in self.preset.rca_sections:
             builder = SectionRegistry.get(name)()
@@ -62,4 +79,4 @@ class GenerateRCACommand(BaseCommand):
             else:
                 skipped.append(name)
         return {"incident_id": self.req.incident_id, "incident_uid": self.row["uid"], "preset": self.preset.name,
-                "sections": sections, "skipped": skipped, "narrative": self._narrative(incident, sections)}
+                "sections": sections, "skipped": skipped, "narrative": self._narrative(incident, sections, ctx)}

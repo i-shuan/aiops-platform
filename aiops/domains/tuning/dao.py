@@ -1,7 +1,33 @@
 from typing import Any
 
 from aiops.models import crud
-from aiops.models.core import ActiveDetectorConfigRow, FeedbackRow, IncidentRow, TuningProposalRow
+from datetime import datetime
+
+from aiops.models.core import (
+    ActiveDetectorConfigRow,
+    FeedbackRow,
+    FieldMappingRow,
+    IncidentRow,
+    TraceSeriesRow,
+    TuningProposalRow,
+)
+
+
+class FieldMappingReadDAO:
+    """跨領域唯讀：回測抓資料時用已核准的欄位對照（屬於 ingestion）。"""
+
+    @staticmethod
+    def approved_fields(source_type: str) -> dict[str, str] | None:
+        row = crud.find_one(FieldMappingRow, source_type=source_type, status="approved")
+        return row["fields"] if row else None
+
+
+class TraceSeriesReadDAO:
+    """跨領域唯讀：回測 trace 來源時用（屬於 ingestion）。"""
+
+    @staticmethod
+    def window(service: str, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return crud.find_between(TraceSeriesRow, "ts", start, end, in_column="service", in_values=[service])
 
 
 class FeedbackDAO:

@@ -5,9 +5,9 @@
 """
 from aiops.commands.base import CommandError
 from aiops.domains.alerts.commands.payload import build_notifications, severity_for
-from aiops.domains.alerts.dao import IncidentDAO, NotificationDAO, SilenceDAO
+from aiops.domains.alerts.dao import IncidentDAO, LotPathReadDAO, NotificationDAO, ServiceEdgeReadDAO, SilenceDAO
 from aiops.notifiers import get_notifier
-from aiops.plugins.base import AnomalyEvent, Incident
+from aiops.plugins.base import AnomalyEvent, Incident, fill_context
 from aiops.plugins.registry import GrouperRegistry, ScorerRegistry, SuppressorRegistry
 from aiops.presets.base import Preset
 
@@ -23,7 +23,8 @@ def check_preset(preset: Preset) -> None:
 class AlertPipeline:
     def __init__(self, preset: Preset, context: dict, plugin_params: dict[str, dict], pipeline: str | None = None):
         self.preset = preset
-        self.context = context
+        # 呼叫端沒給的 topology／lot_edges，從已合成的 trace 呼叫關係與 Lot 路徑自動補上
+        self.context = fill_context(context, service_edges=ServiceEdgeReadDAO.all, lot_paths=LotPathReadDAO.paths)
         self.plugin_params = plugin_params
         self.pipeline = pipeline
 

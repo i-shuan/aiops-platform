@@ -151,6 +151,45 @@ class ExternalAnomalyRow(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class TraceSeriesRow(Base):
+    """trace 合成出的每服務時序（MergeTracesCommand 寫入）。偵測用 source_type=trace 讀，RCA 的 trace_evidence 自動讀。
+
+    同一個服務、同一個時間格只有一筆；同一格再合成一次會被最新一批覆蓋。
+    """
+
+    __tablename__ = "trace_series"
+    __table_args__ = (UniqueConstraint("service", "ts"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    service: Mapped[str] = mapped_column(String(256), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime)
+    count: Mapped[int] = mapped_column(Integer)
+    error_rate: Mapped[float] = mapped_column(Float)
+    p95_ms: Mapped[float] = mapped_column(Float)
+
+
+class ServiceEdgeRow(Base):
+    """從 trace 的父子 span 推導出的服務呼叫關係（caller 呼叫 callee）。alerts、rca 自動拿來當 topology。"""
+
+    __tablename__ = "service_edges"
+    __table_args__ = (UniqueConstraint("caller", "callee"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    caller: Mapped[str] = mapped_column(String(256))
+    callee: Mapped[str] = mapped_column(String(256))
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    last_seen: Mapped[datetime] = mapped_column(DateTime)
+
+
+class LotPathRow(Base):
+    """每個 Lot 依時間排好的機台路徑（MergeLotPathsCommand 寫入）。alerts、rca 從這裡推導機台間流向（lot_edges）。"""
+
+    __tablename__ = "lot_paths"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lot_id: Mapped[str] = mapped_column(String(128), unique=True)
+    path: Mapped[list] = mapped_column(JSON)
+    start: Mapped[datetime] = mapped_column(DateTime)
+    end: Mapped[datetime] = mapped_column(DateTime)
+
+
 # ── tuning ──
 
 
@@ -202,6 +241,9 @@ TABLE_OWNERS = {
     "detector_models": "detection",
     "field_mappings": "ingestion",
     "external_anomalies": "ingestion",
+    "trace_series": "ingestion",
+    "service_edges": "ingestion",
+    "lot_paths": "ingestion",
     "tuning_proposals": "tuning",
     "feedback": "tuning",
     "active_detector_configs": "tuning",

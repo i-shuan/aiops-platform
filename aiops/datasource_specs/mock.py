@@ -12,7 +12,8 @@ class MockSpec(BaseDataSourceSpec):
 
     source_type = "mock"
 
-    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int) -> pd.DataFrame:
+    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int,
+                   field_map: dict[str, str] | None = None) -> pd.DataFrame:
         ts = pd.date_range(start, end, freq=f"{step_seconds}s")
         rng = np.random.default_rng(zlib.crc32(query.encode()))
         values = rng.normal(50, 2, len(ts))

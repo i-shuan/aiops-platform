@@ -36,7 +36,9 @@ class PrometheusSpec(BaseDataSourceSpec):
     def configured(cls) -> bool:
         return bool(os.environ.get(f"{cls.env_prefix}_URL", "").strip())
 
-    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int) -> pd.DataFrame:
+    def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int,
+                   field_map: dict[str, str] | None = None) -> pd.DataFrame:
+        # PromQL 本身就指定好序列與標籤，不需要欄位對照；收下但不使用
         try:
             q = validate_promql(query)
         except ValueError as e:
