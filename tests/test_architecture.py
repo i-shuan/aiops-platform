@@ -57,6 +57,23 @@ def test_notifiers_only_transport():
     assert not _violations("notifiers/**/*.py", lambda f, m: _starts(m, *banned))
 
 
+def test_alertmanager_behavior_lives_only_in_helm_chart():
+    """路由、receiver、通道設定只能在 deploy/helm；aiops/ 的程式碼不得寫 Alertmanager 設定。"""
+    import re
+
+    terms = re.compile(
+        r"\b(receivers?|inhibit_rules|route_matchers|matchers|group_by|group_wait|group_interval|repeat_interval"
+        r"|slack_configs|webhook_configs|pagerduty_configs|msteams_configs|email_configs|resolve_timeout)\b"
+    )
+    bad = [
+        f"{_rel(f)}:{n} {line.strip()[:60]}"
+        for f in _py_files("**/*.py")
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1)
+        if terms.search(line)
+    ]
+    assert not bad, bad
+
+
 def test_domains_do_not_import_concrete_notifiers():
     """只能用 aiops.notifiers 的 get_notifier() 與 notifiers.base。"""
     assert not _violations(

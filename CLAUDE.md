@@ -38,6 +38,7 @@
 15. 任何 `*ReadDAO` 不得有 insert／update／delete／set／create／save／add／remove／clear 類的呼叫或方法。
 16. `notifiers/` 不得 import `domains`、`models`、`plugins`、`presets`、`datasource_specs`。
 17. 領域層不得直接 import 具體通知出口（如 `notifiers.alertmanager`），一律 `get_notifier()`，型別只能用 `notifiers.base`。
+18. `aiops/` 的 Python 不得出現 Alertmanager 設定語彙（路由、receiver、通道設定都只在 helm chart）。
 
 ### 跨領域資料讀取規範
 
@@ -108,38 +109,54 @@ LLM 回饋  ─┼─> 提案(pending) ─> 回測(backtested) ─> 核准(appro
 
 提案建立時記下 `base_version`。核准時若現行參數版本已不同，代表期間有別的提案被核准（例如人工剛調好），舊提案自動作廢。這樣自動 tune 不會蓋掉人工設定，也不會有沒回測就套用的參數。
 
-## 5. Grafana 整合守則
+## 5. Grafana 與通知整合守則
 
-**Grafana 只負責「接收」：顯示、通知、儀表板。判斷與存放都在平台，Grafana 不放任何業務邏輯。**
+**判斷與存放都在平台；Alertmanager 只做路由；Grafana 只做顯示（儀表板、告警清單）。兩者都不放業務邏輯。**
 
-- **要改 Grafana 側，只能改 helm chart**（datasource、dashboards、alert rules、contact points 等 provisioning 檔）。不改 Grafana 本體、不自製外掛、不在 Grafana 裡寫查詢以外的邏輯。
+- **要改 Grafana 或 Alertmanager，只能改 helm chart**（Grafana 的 datasource、dashboards；Alertmanager 的路由與 receiver）。不改 Grafana 本體、不自製外掛、不在 Grafana 裡寫查詢以外的邏輯。
+- **Alertmanager 的行為不准靠改程式碼調整。** 換通道、加部門、改分組時間、改重複提醒間隔，全部只改 `deploy/helm/aiops-alertmanager/values.yaml`（或部署時的 `-f` values），不碰 `aiops/` 底下的 Python。平台程式只能做兩件事：產生帶標籤的通知、用 `notifiers` 推送。
+  - `aiops/` 裡不得出現 Alertmanager 的設定語彙（`receivers`、`inhibit_rules`、`slack_configs`、`webhook_configs`、`pagerduty_configs`、`matchers` 等）。路由與通道是 chart 的事。
+  - 想讓接收端多一個可以路由的條件，是**平台多帶一個 label**（`payload.py`），再由 chart 的 `deptRoutes` 或路由規則去比對；不是在程式裡寫「這個部門送去哪」。
+  - chart 本身的 templates 只放固定結構，不放業務判斷；部門與通道一律由 values 決定。
 - **平台側不為 Grafana 開特例。** 不得有 `grafana` 領域、`*grafana*` 命名的模組或目錄、Grafana 專用外掛。Grafana 要讀的資料，就是各領域 `api.py` 的一般端點（例如 alerts 的事件群、rca 的報告），回傳固定的 JSON 形狀。
 - **端點對 Grafana 唯讀。** Grafana 需要的是讀取與接收通知，不得為它開寫入端點。寫入一律走既有的 Command 流程（例如調參只能走提案 -> 回測 -> 核准）。
 - **契約穩定優先。** Grafana 的面板與規則是照端點 JSON 欄位寫的。改 `schemas.py` 的回應欄位前，先確認 helm chart 裡引用該欄位的 provisioning 檔，要改就一起改，不要只改一邊。
-- **通知的分工：平台決定「要不要發、發什麼」，Grafana 只決定「送去哪個通道」。**
+- **通知的分工：平台決定「要不要發、發什麼」，Alertmanager 只決定「送去哪個通道」，Grafana 只顯示。**
   - 平台（`domains/alerts`）負責所有業務級判斷：何時算異常、怎麼收斂、分數與 P0 加權、同根因抑制、靜音與維護窗口、人工調整排除的時段，以及產出通知內容（payload）。
-  - Grafana 只做純路由：這包訊息送到哪個 Slack channel、Teams、PagerDuty（Contact Points／Notification Policies 依部門分流）。
-  - **不得在 Grafana 建立 alert rule 二次判斷要不要發。** 否則會出現「平台已因排除時段或抑制而不發，Grafana 的規則卻照樣呼叫」的不一致。靜音、夜間、排除時段的設定只有一份，在平台。
-- **舊 repo `aiops-data-foundation/grafana/` 不動。** 新的 helm chart 在本 repo 另建；舊檔只當參考。
+  - Alertmanager（`deploy/helm/aiops-alertmanager`）只做純路由：依 `dept` label 送到哪個 Slack channel、Teams、PagerDuty。
+  - **不得在 Grafana 建立 alert rule、Contact Point 或 Notification Policy 來發這些通知，也不得在 Alertmanager 加 inhibit 或 silence。** 否則會出現「平台已因排除時段或抑制而不發，下游卻照樣呼叫」的不一致。靜音、夜間、排除時段的設定只有一份，在平台。
+- **舊 repo `aiops-data-foundation/grafana/` 不動。** 新的 helm chart 在本 repo 的 `deploy/helm/` 下；舊檔只當參考。
 
-### 已定案：平台主動推
+### 已定案：平台主動推到獨立的 Alertmanager，Grafana 只顯示
 
 ```
 POST /api/v1/alerts/process
   收斂 -> 計分 -> 抑制（silence_window -> same_root_cause -> dedup）-> 產生通知（一個部門一則）
   -> notifiers.get_notifier().send() -> POST {AIOPS_ALERTMANAGER_URL}/api/v2/alerts
-  -> 接收端只依 labels 分流到 Contact Point
+  -> aiops-alertmanager（helm chart）只依 dept label 分流到 receiver（Slack／Teams／PagerDuty）
+  -> Grafana 把 aiops-alertmanager 加成資料源，只「顯示」告警
 ```
+
+- **不推到 Grafana 內建的 Alertmanager。** 實測 Grafana 13 要 `alert.instances.external:write` 權限才收得進外部告警；改用獨立的 Alertmanager，Grafana 就不需要任何寫入權限。
+- **Chart 位置：`deploy/helm/aiops-alertmanager/`。** 要改路由、receiver、資源，只改它的 values。
+  - 部門路由寫在 `deptRoutes`（`dept` -> `receiver`）；沒對到的進 `route.defaultReceiver`（預設 `unrouted`，不送任何地方）。
+  - `receivers` 原樣放進 alertmanager.yml，並存在 Secret（webhook URL 是機密）。路由引用了沒定義的 receiver，render 會直接失敗。
+  - **不得加 `inhibit_rules`、不得在 Alertmanager 設 silence。** 抑制與靜音只有平台一份（`tests/test_helm_alertmanager.py` 檢查）。
+  - receiver 一律 `send_resolved: false`；`resolveTimeout` 預設 24h。原因是平台還不送 `endsAt`，見下方待辦。
+- **Grafana 側只動 helm chart：** 把 aiops-alertmanager 加成 `alertmanager` 型資料源（`implementation: prometheus`、`handleGrafanaManagedAlerts: false`）。本 chart 的 `displayDatasource.enabled` 可產生帶 sidecar label 的 ConfigMap；Grafana 沒開 sidecar 的話，就把同樣內容交給管 Grafana 的人放進它的 provisioning。
+- 平台設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL=http://aiops-alertmanager.<namespace>.svc:9093`。
 
 - 通知是 Alertmanager v2 格式：`labels`（`alertname=aiops_incident`、`incident_id`、`severity`、`preset`、`dept`、`entities`）、`annotations`（`summary`、`description`）、`startsAt`。
 - **接收端的路由只准用 labels 比對**（例如 `dept`、`severity`），不得依 `annotations` 內容判斷。
 - 設定：`AIOPS_NOTIFIER=alertmanager`、`AIOPS_ALERTMANAGER_URL`、選填 `AIOPS_ALERTMANAGER_TOKEN`（Bearer）。預設是 `log`，只寫日誌、不真的送。
 - 推送失敗會丟 `InfrastructureError`：API 回 503，並走看守機制（本機日誌、`AIOPS_FALLBACK_WEBHOOK`）。
 
-> 目前狀態：平台側（抑制、靜音、payload、推送）**已實作並有測試**，但**還沒對真的接收端驗證過**。尚未決定、也還沒做的：
-> - 接收端用哪一個：Grafana 內建的 Alertmanager 能不能直接收外部推送的告警，要實際部署確認；不行的話，就在 helm chart 另外部署一台 Alertmanager，Grafana 只負責顯示。
-> - 恢復通知：目前只送 `startsAt`、不送 `endsAt`。Alertmanager 在 `resolve_timeout`（預設 5 分鐘）後會自動當作已恢復，接收端若開了恢復通知會誤發，要在 helm chart 關掉，或之後由平台補送 `endsAt`。
-> - helm chart 的位置。
+> 目前狀態（2026-11-08）：**平台 -> aiops-alertmanager 已在本機 rancher-desktop 端對端驗證成功**：三個部門各推一則，依 `dept` 分到正確的 receiver，沒帶部門的進 `unrouted`；同一批再跑一次全部被 `dedup` 擋下。
+> 還沒做的：
+> - **Grafana 顯示還沒接上**：資料源還沒加進 Grafana（`grafana-new` 是否用 sidecar 也還沒確認）。
+> - **真的通道還沒設**：驗證時 receiver 都沒有 `*_configs`，收下但不送出。
+> - **恢復通知**：平台只送 `startsAt`、不送 `endsAt`。之後由平台補送 `endsAt`，才能開恢復通知、把 `resolveTimeout` 改回合理值。
+> - **平台本身的 helm chart** 還沒建（平台目前不在叢集裡跑）。
 
 ## 6. 標準樣板
 

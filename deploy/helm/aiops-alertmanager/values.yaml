@@ -1,0 +1,60 @@
+# 這台 Alertmanager 只做「純路由」：要不要發、發什麼都由 aiops-platform 決定好才推過來。
+# 守則（CLAUDE.md 第 5 節）：這裡不設 silence、不設 inhibit_rules、路由只比對 labels。
+
+image:
+  repository: quay.io/prometheus/alertmanager
+  tag: v0.28.1
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+service:
+  type: ClusterIP
+  port: 9093
+
+# 平台目前只送 startsAt、不送 endsAt。預設 5m 會讓告警 5 分鐘後被當成已恢復，
+# 所以拉長；receiver 也請一律 send_resolved: false，避免誤發「已恢復」。
+resolveTimeout: 24h
+
+route:
+  # 平台送來的一則通知 = 一個事件群 × 一個部門，不再二次分組
+  groupBy: ["incident_id", "dept"]
+  groupWait: 10s
+  groupInterval: 5m
+  # 平台已做 dedup；這裡只是保險，避免同一則被反覆提醒
+  repeatInterval: 24h
+  # 沒對到任何部門的通知送到這裡（預設不送任何地方）
+  defaultReceiver: unrouted
+
+# 依部門分流：dept label 等於 dept 就送到 receiver
+# 例：
+#   deptRoutes:
+#     - dept: payments
+#       receiver: payments-slack
+deptRoutes: []
+
+# 原樣放進 alertmanager.yml 的 receivers。webhook URL 等機密會進 Secret，不進 ConfigMap。
+# 例：
+#   receivers:
+#     - name: unrouted
+#     - name: payments-slack
+#       slack_configs:
+#         - api_url: https://hooks.slack.com/services/XXX
+#           channel: "#payments-oncall"
+#           send_resolved: false
+receivers:
+  - name: unrouted
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# 給管 Grafana 的人用：Grafana 只把這台 Alertmanager 加成資料源來「顯示」。
+# 若 Grafana 用 sidecar 自動載入資料源，開啟後會建一個帶 sidecar label 的 ConfigMap。
+displayDatasource:
+  enabled: false
+  sidecarLabel: grafana_datasource
+  sidecarLabelValue: "1"
