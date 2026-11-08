@@ -42,6 +42,16 @@ def fresh_db(monkeypatch):
     return recorded
 
 
+@pytest.fixture(autouse=True)
+def retry_waits(monkeypatch):
+    """資料源重試（sources/_http）的等待不要真的睡：改成記下每次要等幾秒，測試可以檢查重試了幾次、間隔對不對。"""
+    from aiops.sources import _http
+
+    waits: list[float] = []
+    monkeypatch.setattr(_http.time, "sleep", waits.append)
+    return waits
+
+
 @pytest.fixture
 def client():
     return TestClient(create_app(), headers=AUTH)

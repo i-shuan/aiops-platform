@@ -193,7 +193,7 @@ nodes:
       endpoint: "http://alertmanager:9093"
 ```
 
-**節點失敗怎麼處理**：預設任何節點出錯都讓這一輪（或這條序列）失敗。旁路裝飾節點（LLM 摘要等）加上 `optional: true`，失敗時只記進 `errors`（實體名為 `node:<節點名>`）並跳過，後面的節點與最終寫入照常執行。`InfrastructureError`（DB、資料源連不上）不受 `optional` 影響，一律讓整輪失敗。**不要把 fetch、detector、group、suppress、payload、notify 標成 optional。**
+**節點失敗怎麼處理**：預設任何節點出錯都讓這一輪（或這條序列）失敗。旁路裝飾節點（LLM 摘要等）加上 `optional: true`，失敗時只記進 `errors`（實體名為 `node:<節點名>`）並跳過，後面的節點與最終寫入照常執行。`InfrastructureError`（DB、資料源連不上）不受 `optional` 影響，一律讓整輪失敗。**不要把 fetch、detector、group、suppress、payload、notify 標成 optional。** 例外只有 RCA 的旁路證據撈取（`ingestion.incident_series`／`incident_traces`／`incident_logs`）：它們自己接住資料源連不上，寫進 `errors` 後略過，報告照出；偵測流程的 `ingestion.fetch` 不准這樣做。資料源的短暫抖動（連線失敗、逾時、429／502／503／504）由 `sources/_http.request` 重試 2 次。
 
 **參數優先序**：演算法預設值 ← 後台核准的調參 ← YAML `params`，逐鍵合併（`engine/params.deep_merge`）；YAML 寫了的鍵鎖定、不被調參覆蓋。調參分層 (偵測器, 管線, 實體)，取最具體的一層（管線×實體 > 管線 > 實體 > 全域）。
 

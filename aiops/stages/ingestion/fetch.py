@@ -145,8 +145,11 @@ class FetchOperator(BaseOperator):
 class IncidentSeriesFetch(BaseOperator):
     """RCA 用：依事件群每筆異常的 (資料源, 指標) 重抓 [開始 - before, 結束 + after] 的原始時序放進 ctx.rca_series。
 
-    外部匯入或舊版沒記資料源的異常略過；某條抓不到（沒資料、查詢錯）只記在 audit 並略過，
-    資料源連不上（InfrastructureError）照常往上丟（要不阻斷報告就在 YAML 把這個節點標 optional）。
+    外部匯入或舊版沒記資料源的異常略過；某條抓不到（沒資料、查詢錯）列在 result["series_fetch"]["skipped"] 並略過。
+    資料源連不上（InfrastructureError，已在 sources/_http 重試過）也只略過、寫進 errors，不讓整份 RCA 報告失敗：
+    跟 incident_traces、incident_logs 一樣，這是 RCA 的旁路證據，拿不到就少一段，報告照出（傳播路徑、時間軸用既有資料）。
+    同一個資料源連不上一次後，剩下用它的序列直接略過，不再一條條等逾時。
+    （偵測流程的 ingestion.fetch 不在此列：拿不到資料就判斷不了，那一輪照規則失敗，由 notifier.watchdog 的心跳斷掉來通知。）
     params: before_minutes、after_minutes、step_seconds、max_series（避免一個大事件群把資料源打爆）。
     """
 
@@ -171,9 +174,19 @@ class IncidentSeriesFetch(BaseOperator):
             ctx.log(f"incident_series:truncated:{len(wanted)}->{self.max_series}")
             wanted = wanted[: self.max_series]
         skipped = []
+        down: dict[str, str] = {}  # 這一次已確認連不上的資料源 -> 原因
         for source_type, metric, entity in wanted:
+            if source_type in down:
+                skipped.append({"entity": entity, "metric": metric, "reason": f"{source_type} 連不上（同一資料源前面已失敗）"})
+                continue
             try:
                 ctx.rca_series[(entity, metric)] = fetch_series(ctx, source_type, metric, start, end, self.step)
+            except InfrastructureError as e:
+                down[source_type] = str(e)
+                logger.warning("incident_series：%s 連不上，略過用它的時序：%s", source_type, e)
+                skipped.append({"entity": entity, "metric": metric, "reason": str(e)})
+                ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_series'}",
+                                              f"{source_type} 連不上，RCA 不含用它的時序（互相關根因可能排不出來）：{e}"))
             except (NotFound, BadRequest) as e:
                 # 少一條序列，根因演算法就可能排錯：一律列在報告裡；查詢不合法是設定錯誤，另外記進 errors
                 ctx.log(f"incident_series:skip:{entity}:{e}")
