@@ -62,6 +62,9 @@ class BaseOperator(ABC):
    * 參數優先序：演算法預設值 ← 後台核准調參（`ctx.detector_params`）← 節點 YAML `params` ← target `overrides[節點名稱]`（`effective_params`，逐鍵 `deep_merge`）。overrides 在載入期用 `check_override` 檢查參數名與範圍。
    * `ctx.detector_runs` 只記「真的評估過資料」的節點（沒資料就 return 的不算）。`detector.ensemble` 的分母 = 參與者數；棄權不是反對票。`hourly_baseline` 資料不足時退回全段統計，仍算參與者——新偵測器若「資料不足就不判」，要在加入 `detector_runs` 之前 return。
    * target 的 `detectors`／`overrides` 寫錯、節點的 include／exclude 寫了 workflow targets 裡沒有的實體，都在 `Pipeline.__init__`（API 傳入的 targets 在 `run()` 開頭）丟 `WorkflowError`，不准延到執行期。
+   * `exclude_incidents`（預設 true）、`warning_ratio`（預設關）是基底層的節點行為參數（`NODE_PARAMS`）：同樣不進 `self.params`、target `overrides` 不能寫。訓練排除窗由 `StorageHooks` 放進 `ctx.training_exclusions`，基底 `_training_frame` 統一套用——演算法的 `fit` 不准自己去查事故或維護窗。
+   * 事件等級只有 `ANOMALY`／`WARNING`（`engine/types.py`）。warning 由基底依 `threshold × warning_ratio` 產生，演算法只管回傳分數與越線旗標。
+ * **節點 scope**：`target`（逐序列）→ `batch`（所有序列合併後）→ `after_persist`（資料庫寫入成功後才跑，例如 `notifier.watchdog` 心跳）。順序錯在 `Pipeline.__init__` 報錯。寫入失敗時 `after_persist` 節點不執行，所以心跳停了 = 整輪沒成功。
  * **RCA 根因演算法（`rca.root_cause.*`）**：
    * 繼承 `stages/rca/base.RootCauseOperator`，只寫 `rank(incident, ctx) -> list[RootCandidate]`（由可能到不可能排好；資料不足回空清單，段落會略過）。
    * 需要原始時序時，在它前面放 `ingestion.incident_series`（讀 `ctx.rca_series`），不准自己連資料源。

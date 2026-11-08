@@ -10,6 +10,11 @@ nodes:
   - name: build_topology
     operator: rca.build_dynamic_topology
     params: {mode: merge, min_calls: 1}
+  # 隨需撈事件期間與事件前 60 分鐘的錯誤日誌（只撈事件裡的服務），給 log_patterns 段落比對哪種例外暴增；
+  # 一樣是沒設定就略過、連不上就記進 errors，報告照出
+  - name: fetch_logs
+    operator: ingestion.incident_logs
+    params: {source_type: elasticsearch, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
   # 根因演算法：換成 rca.root_cause.pagerank，或用 rca_report_correlation（時序互相關）
   - name: root_cause
     operator: rca.root_cause.topological
@@ -17,7 +22,7 @@ nodes:
     operator: rca.report
     params:
       sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
-                 propagation_path, trace_evidence, similar_cases, suggested_actions]
+                 propagation_path, trace_evidence, log_patterns, similar_cases, suggested_actions]
   # 可選 AI 總結：provider 設為 noop 即完全不連外、直接用模板；金鑰只從環境變數 AIOPS_LLM_API_KEY 讀
   - name: summary
     operator: enrichment.llm_summary

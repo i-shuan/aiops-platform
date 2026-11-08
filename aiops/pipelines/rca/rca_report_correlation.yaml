@@ -14,6 +14,9 @@ nodes:
   - name: build_topology
     operator: rca.build_dynamic_topology
     params: {mode: merge, min_calls: 1}
+  - name: fetch_logs
+    operator: ingestion.incident_logs
+    params: {source_type: elasticsearch, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
   # preprocess：diff（一階差分）或 hybrid（只在異常時段保留穩健 z 分數、其他歸零）。
   # 目前刻意維持 diff：在產生器的兩套標準答案上，hybrid 能把高原型事件的相關性救回來（r 0.98），
   # 但兩個劇本的第一候選都排錯（同一分鐘一起變慢的服務只差 ±1 點，它照樣挑一個當「領先者」），
@@ -25,7 +28,7 @@ nodes:
     operator: rca.report
     params:
       sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
-                 propagation_path, trace_evidence, similar_cases, suggested_actions]
+                 propagation_path, trace_evidence, log_patterns, similar_cases, suggested_actions]
   - name: summary
     operator: enrichment.llm_summary
     optional: true

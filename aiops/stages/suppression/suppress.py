@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from aiops.engine.context import PipelineContext, Silence
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.types import AnomalyEvent, Incident, as_utc, gap_seconds
+from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, Incident, as_utc, gap_seconds
 from aiops.stages._common import ensure_incidents
 from aiops.engine.operator import BaseOperator
 
@@ -96,6 +96,8 @@ class DedupSuppressor(BaseOperator):
             for sent in ctx.recent_notifications:
                 if sent.fingerprint != inc.fingerprint:
                     continue
+                if sent.severity == WARNING and inc.level == ANOMALY:
+                    continue  # 上次只是預警、這次真的越線：升級，一定要發，不被冷卻擋掉
                 if (as_utc(inc.start) - as_utc(sent.last_event_ts)).total_seconds() <= self.cooldown:
                     inc.suppressed_by = f"dedup：{self.cooldown / 60:g} 分鐘內已通知過"
                     break

@@ -143,10 +143,16 @@ class Pipeline:
         for n, op in self.nodes:
             op.node_name = n.name
         scopes = [getattr(op, "scope", "target") for _, op in self.nodes]
-        if "batch" in scopes and "target" in scopes[scopes.index("batch"):]:
-            raise WorkflowError(f"Workflow {workflow.name}：scope=target 的節點必須全部排在 scope=batch 之前")
+        order = {"target": 0, "batch": 1, "after_persist": 2}
+        unknown = sorted({s for s in scopes if s not in order})
+        if unknown:
+            raise WorkflowError(f"Workflow {workflow.name}：未知的節點 scope {unknown}")
+        if [order[s] for s in scopes] != sorted(order[s] for s in scopes):
+            raise WorkflowError(f"Workflow {workflow.name}：節點順序必須是 scope=target → batch → after_persist")
         self.target_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "target"]
         self.batch_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "batch"]
+        # 寫入成功之後才跑（例如自我健康心跳）：資料庫寫不進去時整輪失敗，這些節點不會執行
+        self.after_persist_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "after_persist"]
         # (節點名稱, 算子名稱)：基準線與調參都以節點區分，同一個演算法掛兩次也不會互相覆蓋
         # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only、ensemble 這類不需要）
         self.detector_nodes = [(n.name, n.operator) for n, op in self.target_nodes if getattr(op, "has_baseline", False)]
@@ -259,6 +265,8 @@ class Pipeline:
         for node, op in self.batch_nodes:
             batch = _run_node(node, op, batch)
         self.hooks.persist_batch(batch)
+        for node, op in self.after_persist_nodes:
+            batch = _run_node(node, op, batch)
         return batch
 
 

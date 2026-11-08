@@ -93,11 +93,59 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             after = hits[-1]["sort"]
         return spans[:max_spans], True
 
+    def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
+                   max_logs: int = 5000) -> tuple[list[dict[str, Any]], bool]:
+        """APM 錯誤日誌（processor.event = error）。訊息依序取：error.exception（陣列或單一物件都可）的 message、
+        error.log.message、頂層 message。索引用 AIOPS_ES_LOG_INDEX 改。只呼叫 _search。"""
+        index = os.environ.get("AIOPS_ES_LOG_INDEX", "").strip() or DEFAULT_LOG_INDEX
+        filters: list[dict[str, Any]] = [{"range": {"@timestamp": {"gte": start.isoformat(), "lte": end.isoformat()}}}]
+        if services:
+            filters.append({"terms": {"service.name": list(services)}})
+        logs: list[dict[str, Any]] = []
+        after = None
+        while len(logs) < max_logs:
+            body: dict[str, Any] = {
+                "size": min(5000, max_logs - len(logs)), "query": {"bool": {"filter": filters}},
+                "_source": ["@timestamp", "service.name", "trace.id", "message", "error.exception", "error.log", "error.culprit"],
+                # 分頁要穩定的排序：時間＋每筆唯一的 error.id（不用 _doc，跨分片沒有 PIT 時不保證順序）
+                "sort": [{"@timestamp": "asc"}, {"error.id": {"order": "asc", "missing": "_last"}}],
+            }
+            if after is not None:
+                body["search_after"] = after
+            resp = _http.request(self.client, self.source_type, "POST", f"{self.base_url}/{index}/_search",
+                                 headers=self.headers, json=body)
+            payload = resp.json() if resp.content else {}
+            if not resp.is_success:
+                reason = (payload.get("error") or {}).get("reason") if isinstance(payload.get("error"), dict) else None
+                raise InvalidQueryError(f"elasticsearch 撈日誌失敗（HTTP {resp.status_code}）：{reason or resp.text[:200]}")
+            hits = payload.get("hits", {}).get("hits", [])
+            if not hits:
+                return logs, False
+            logs += [r for r in (_log(h["_source"]) for h in hits) if r is not None]
+            after = hits[-1]["sort"]
+        return logs[:max_logs], True
+
     def check(self) -> dict[str, Any]:
         return _http.check(self.client, self.source_type, f"{self.base_url}/", headers=self.headers)
 
 
 DEFAULT_TRACE_INDEX = "traces-apm-*"
+DEFAULT_LOG_INDEX = "logs-apm.*"
+
+
+def _log(src: dict[str, Any]) -> dict[str, Any] | None:
+    service = (src.get("service") or {}).get("name")
+    if not service or "@timestamp" not in src:
+        return None
+    error = src.get("error") or {}
+    exc = error.get("exception")
+    first = (exc[0] if exc else {}) if isinstance(exc, list) else (exc or {})
+    message = first.get("message") or (error.get("log") or {}).get("message") or src.get("message") or ""
+    if not message:
+        return None
+    return {"ts": pd.Timestamp(src["@timestamp"]).tz_convert("UTC").to_pydatetime(), "service": service,
+            "message": str(message), "error_type": str(first.get("type") or ""),
+            "trace_id": str((src.get("trace") or {}).get("id") or "")}
 
 
 def _span(src: dict[str, Any]) -> dict[str, Any] | None:

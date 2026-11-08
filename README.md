@@ -156,7 +156,7 @@ aiops/
 │   └── notification/                9. 通知
 │       ├── payload.py               alert.notify_payload：定嚴重度、產生通知內容（一個部門一則，路由標籤由平台決定）
 │       ├── heartbeat.py             alert.heartbeat：進行中事件群的心跳重送與結案（恢復通知）
-│       ├── notifiers.py             notifier.log／alertmanager／auto（依 AIOPS_NOTIFIER 選）
+│       ├── notifiers.py             notifier.log／alertmanager／auto（依 AIOPS_NOTIFIER 選）、notifier.watchdog（自我健康心跳）
 │       └── transport.py             實際傳輸：AlertmanagerTransport（v2 API）、LogTransport（只寫日誌）
 ├── control_plane/                   控制面手動動作（唯一可以用 storage.repository 的算子）
 │   ├── learning/                    學習閉環
@@ -385,6 +385,57 @@ targets:
 | 調參成效報表 | `GET /api/v1/tuning/metrics?window_days=7`：每個核准的調參，前後各 N 天同一層的事件群數與誤報／確認／漏報數。依偵測器血緣歸屬，是前後對照不是因果證明 |
 | 規則升級器 | `POST /api/v1/tuning/rules/promote`（或排程 `run-once -w admin_rule_promote`）：同一層（管線 × 實體）N 天內被調參太多次，就用它的基準線換算出 `detector.rules` 上下限提案。目前支援 `zscore`、`mad` |
 
+### 訓練排除、兩級告警、日誌比對、自我健康心跳
+
+**訓練時排除歷史事故窗（預設開）**：重訓基準線前，`StorageHooks` 會把這個實體近 35 天的事件群（扣掉被標成 `false_positive` 的）前後各擴 10 分鐘，加上 `kind: maintenance` 的靜音窗，放進 `ctx.training_exclusions`；偵測節點訓練時把這些點拿掉。拿掉後剩不到原本一半或不到 30 點，就退回用全部資料（audit 記 `exclusion-skipped`）。節點設 `exclude_incidents: false` 可關閉，這是節點參數，target `overrides` 不能改。
+
+> 真實資料（scn 5 個服務，11/3 16:20Z 重訓 7 天、窗內含 11/3 事故）：在同一時段再發生一次時，事故 110 分鐘裡被抓到的分鐘數——
+>
+> | 服務 | 排除的點 | `hourly_baseline` 沒排除 → 有排除 | `mad` | `quantile_drift` | 多數決 |
+> |---|---|---|---|---|---|
+> | cart-api | 101 | 1 → 91 | 91 → 91 | 90 → 90 | 90 → 91 |
+> | bill-svc | 51 | 0 → 32 | 31 → 31 | 40 → 40 | 30 → 31 |
+> | ord-svc | 51 | 1 → 31 | 31 → 31 | 50 → 50 | 30 → 31 |
+>
+> 受害的是時段基準線：7 天訓練時那個時段只看過一次，那一次就是事故，所以下週同一時段再壞會完全抓不到。`mad`、`quantile_drift` 用全段穩健統計，100 點的污染影響不到。三選二多數決靠另外兩票撐住，最終結果幾乎一樣；單獨用 `hourly_baseline`（或 target 白名單只留它）時差別就是 1 分鐘 vs 91 分鐘。
+
+**warning／anomaly 兩級（預設關）**：偵測節點設 `warning_ratio`（0～1，例如 0.8）後，分數超過「門檻 × 比例」但沒越線的點記成 `level: warning`。`detector.ensemble` 越線票夠 → anomaly；不夠但越線＋預警票加起來夠 → warning。全部只是 warning 的事件群嚴重度固定 `warning`、通知帶 `level=warning` 標籤（`alert.notify_payload` 的 `notify_warnings: false` 改成只記錄不通知）。上一則是 warning、這次是 anomaly 時，`suppress_dedup` 不擋（升級一定發）。
+
+> 真實資料回放（10/31 13:20Z → 11/3 16:20Z，訓練前 7 天，it_otel 預設三個偵測器多數決）：
+>
+> | | 事故窗內 | 窗外（誤報） |
+> |---|---|---|
+> | anomaly（開不開 warning 都一樣） | 153 分鐘 | 64 分鐘（49 段） |
+> | warning，`warning_ratio: 0.8` | 2 分鐘 | 241 分鐘（167 段） |
+> | warning，`warning_ratio: 0.9` | 1 分鐘 | 74 分鐘（66 段） |
+>
+> 提前量只有 bill-svc 一個服務：15:18 先預警、15:40 才越線（早 22 分鐘），升級路徑也實際走過（warning 通知 → 22 分鐘後 anomaly 不被冷卻擋、發 P3）。其他服務在窗內一開始就直接越線，沒有「接近門檻」的階段。**在這批資料上預警的雜訊是正式告警的 1～4 倍，所以預設不開**；要開的話建議 `notify_warnings: false` 或在 Alertmanager 把 `level="warning"` 分到低優先通道。
+
+**Log 樣式比對（RCA 段落 `log_patterns`）**：`ingestion.incident_logs` 隨需撈事件期間（前後各 5 分鐘）與事件前 60 分鐘、事件裡那些服務的錯誤日誌（索引預設 `logs-apm.*`，用 `AIOPS_ES_LOG_INDEX` 改；只呼叫 `_search`）。段落把訊息裡的 UUID／長 id → `<ID>`、IP → `<IP>`、數字 → `<NUM>`，依（服務、例外類型、樣板）分組，列出新出現或頻率 ≥ 2 倍的前 3 名，附一筆 trace id 可以點進去看。沒撈到日誌就略過段落，不出空殼。
+
+> - **ES 真實資料，11/3 事故**：事件期間 68 筆、事件前 8 筆，列出 3 個樣板——cart-api `Unhandled exception in handler` 14.7 倍、ord-svc `ORA-<NUM>: TNS:Connect timeout occurred` 4.2 倍、bill-svc `Downstream tax-gw:<NUM> returned <NUM>` 2.5 倍。cart-api 排第一，跟資料本身最早起點（cart-api 14:46）一致。對照的 10/30、10/31、11/2 同時段與 11/3 事故前，這 3 個服務完全沒有錯誤日誌，段落正確略過。
+> - **產生器（有標準答案）**：`callee_slowdown` 根因 bill-svc 排第 1 ✓；`load_amplification` 根因 cart-api 排第 3 ✗（下游 bill-svc、ord-svc 的慢交易警告量更大）。安靜時段對照都回「沒有明顯暴增」。
+>
+> 結論：它回答「壞掉時噴了什麼錯、從哪條 trace 看」，**不是根因排名**——錯誤量最大的常常是被拖累的下游。
+
+**自我健康心跳（Dead Man's Snitch）**：偵測 workflow 最後一個節點是 `notifier.watchdog`（scope `after_persist`：引擎在資料庫寫入成功之後才跑它）。每輪送一則 `alertname=AIOpsWatchdog`、`endsAt = 現在 + ttl_minutes`（預設 15，設排程間隔的 2～3 倍）的告警。排程停了、Pod 掛了、資料源或 DB 讓整輪失敗，就沒人續命，ttl 一到 Alertmanager 把它標成 resolved。在 Alertmanager 給它一條獨立路由並開 `send_resolved: true`，「心跳恢復」就等於「AIOps 停了」；或接 Healthchecks.io 這類 DMS 服務（收不到心跳才叫）：
+
+```yaml
+route:
+  routes:
+    - matchers: ['alertname="AIOpsWatchdog"']
+      receiver: aiops-selfcheck
+      group_wait: 0s
+      repeat_interval: 5m
+receivers:
+  - name: aiops-selfcheck
+    webhook_configs:
+      - url: <值班通道或 DMS 的 webhook>
+        send_resolved: true
+```
+
+> 實測（叢集裡的 Alertmanager，ttl 1 分鐘）：10:07:19 成功一輪 → `AIOpsWatchdog` active、endsAt 10:08:19；10:07:39 模擬 DB 寫入失敗的一輪 → 心跳沒送、endsAt 不變；10:08:20 從 active 清單消失（=resolved）。叢集上的 Alertmanager 還沒加上面那條路由（這次沒動部署設定），所以 resolved 目前不會送到任何通道。
+
 ### 升級既有 PostgreSQL（沒有 Alembic，要手動做一次）
 
 全新資料庫由程式自動建表。**已經在跑的 PostgreSQL 必須依序執行 [migrations/postgres/](migrations/postgres/) 裡的 SQL**，否則新版程式會因為缺欄位而失敗：
@@ -401,7 +452,11 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0002_node_lineage_and_t
 psql -h <host> -U <user> -d aiops -f migrations/postgres/0003_artifacts_missed_feedback_knowledge.sql
 ```
 
-執行前先停掉排程與 API。`0002` 會把舊基準線掛到名為 `detect` 的節點（內建 workflow 的名稱），自己改過節點名稱的 workflow 第一次執行會重訓一次。`0003` 加上模型檔欄位、漏報補錄欄位、提案核准時間與經驗庫資料表；既有已核准的提案沒有核准時間，不會出現在調參成效報表。三個檔都可以重複執行。**這些 SQL 還沒有在真的 PostgreSQL 上跑過**（測試只用 SQLite），第一次請先在備份或測試庫上試。
+```bash
+psql -h <host> -U <user> -d aiops -f migrations/postgres/0004_anomaly_level.sql
+```
+
+執行前先停掉排程與 API。`0004` 加上異常的等級欄位（`anomaly`／`warning`），既有資料一律是 `anomaly`。`0002` 會把舊基準線掛到名為 `detect` 的節點（內建 workflow 的名稱），自己改過節點名稱的 workflow 第一次執行會重訓一次。`0003` 加上模型檔欄位、漏報補錄欄位、提案核准時間與經驗庫資料表；既有已核准的提案沒有核准時間，不會出現在調參成效報表。每個檔都可以重複執行。**這些 SQL 還沒有在真的 PostgreSQL 上跑過**（測試只用 SQLite），第一次請先在備份或測試庫上試。
 
 `it_otel` 的偵測改成 `detector.hourly_baseline` 之後，舊的 `zscore` 基準線不會被沿用（演算法不同），第一次執行會抓 7 天資料重訓。
 
@@ -505,6 +560,7 @@ SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
 | `AIOPS_PROMETHEUS_URL`／`AIOPS_PROMETHEUS_TOKEN` | （無） | Prometheus 位址與選填 token |
 | `AIOPS_VICTORIAMETRICS_URL`／`AIOPS_VICTORIAMETRICS_TOKEN` | （無） | VictoriaMetrics 位址與選填 token |
 | `AIOPS_ES_URL`／`AIOPS_ES_API_KEY` | （無） | Elasticsearch 位址與選填 API key |
+| `AIOPS_ES_TRACE_INDEX`／`AIOPS_ES_LOG_INDEX` | `traces-apm-*`／`logs-apm.*` | RCA 隨需撈 trace／錯誤日誌的索引 |
 | `AIOPS_FALLBACK_LOG` | （無，寫 stderr） | 備援日誌檔路徑 |
 | `AIOPS_FALLBACK_WEBHOOK` | （無） | 資料庫或推送失敗時直接打的 webhook |
 
@@ -553,7 +609,7 @@ helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiop
 
 ## 目前狀態
 
-已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、11 個偵測算子（見上表，含 168 時段基準線、同比／環比、分位數漂移、動態同儕、多偵測器裁決）、工廠 Lot 收斂、RCA（可抽換的根因演算法：拓撲、PageRank、時序互相關；9 個段落含歷史相似案例）、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、規則升級器、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
+已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、11 個偵測算子（見上表，含 168 時段基準線、同比／環比、分位數漂移、動態同儕、多偵測器裁決）、工廠 Lot 收斂、RCA（可抽換的根因演算法：拓撲、PageRank、時序互相關；10 個段落含歷史相似案例與錯誤日誌樣式比對）、訓練排除歷史事故窗、warning／anomaly 兩級告警、自我健康心跳、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、規則升級器、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
 
 **演算法還沒在真實資料上驗證過**，還沒有任何誤報率或根因準確度的數字；先別把「測試全過」當成「演算法有用」。計畫中的真實資料驗收有三項：
 

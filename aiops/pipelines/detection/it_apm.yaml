@@ -41,6 +41,10 @@ nodes:
   # 依環境變數 AIOPS_NOTIFIER 選 log 或 alertmanager；要固定就改 notifier.alertmanager
   - name: notify
     operator: notifier.auto
+  # 自我健康心跳（Dead Man's Snitch）：寫入成功才送；排程停了或整輪失敗，ttl 到期就會收到 resolved
+  - name: watchdog
+    operator: notifier.watchdog
+    params: {ttl_minutes: 15}
 
 targets:
   # 範例（mock 資料源）。正式使用請複製這個檔，改成自己的 targets

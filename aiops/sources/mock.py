@@ -88,5 +88,19 @@ class MockSpec(BaseDataSourceSpec):
                     return spans[:max_spans], True
         return spans, False
 
+    def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
+                   max_logs: int = 5000) -> tuple[list[dict], bool]:
+        """假的錯誤日誌：每個服務每 5 分鐘一筆快取未命中（平常就有的雜訊，數字每次不同）。
+        只提供管線打通用；要測「暴增」請用合成資料產生器的日誌，或測試裡自己塞 LogRecord。"""
+        logs = []
+        for i, ts in enumerate(pd.date_range(start, end, freq="300s")):
+            for svc in services or list(MOCK_TRACE_CHAIN):
+                logs.append({"ts": ts.to_pydatetime(), "service": svc, "error_type": "CacheMissWarning",
+                             "message": f"cache miss for key session:{1000 + i * 7} after {3 + i % 4} ms",
+                             "trace_id": f"t{i:06d}"})
+                if len(logs) >= max_logs:
+                    return logs, True
+        return logs, False
+
     def check(self) -> dict:
         return {"ok": True, "detail": "假資料，永遠可用"}

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timedelta, timezone
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.errors import InfrastructureError
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.operator import BaseOperator
-from aiops.stages.notification.transport import AlertmanagerTransport, LogTransport
+from aiops.engine.types import Notification
+from aiops.stages.notification.transport import AlertmanagerTransport, LogTransport, logger
 
 
 @OperatorRegistry.register("notifier.log")
@@ -34,6 +37,54 @@ class AutoNotifier(BaseOperator):
         if kind == "alertmanager":
             return AlertmanagerNotifier().execute(ctx)
         raise InfrastructureError(f"未知的 AIOPS_NOTIFIER：{kind}（可用：log、alertmanager）")
+
+
+WATCHDOG_ALERTNAME = "AIOpsWatchdog"
+
+
+@OperatorRegistry.register("notifier.watchdog")
+class WatchdogNotifier(BaseOperator):
+    """Dead Man's Snitch：每輪成功跑完（含資料庫寫入）就送一則「我還活著」的心跳告警，endsAt = 現在 + ttl。
+
+    排程停了、Pod 掛了、資料源或 DB 連不上讓整輪失敗 -> 沒有人再續命，ttl 一到 Alertmanager 把它標成 resolved；
+    在 Alertmanager 給 alertname=AIOpsWatchdog 一條 send_resolved: true 的路由（或接 Healthchecks 這類 DMS 服務），
+    「心跳恢復通知」就等於「AIOps 自己掛了」。設定方式見 README「自我健康心跳」。
+
+    params: ttl_minutes（預設 15；設成排程間隔的 2～3 倍，偶爾慢一輪不會誤報）。
+    出口跟 notifier.auto 一樣看 AIOPS_NOTIFIER：log 只寫日誌（不進 LogTransport.sent，不干擾事件通知的檢查）。
+    時間用牆上時鐘而不是 ctx.now：心跳是「程式現在活著」，回放舊資料時也一樣。
+    """
+
+    scope = "after_persist"
+
+    def __init__(self, ttl_minutes: float = 15):
+        if ttl_minutes <= 0:
+            raise ValueError("ttl_minutes 必須大於 0")
+        self.ttl = timedelta(minutes=float(ttl_minutes))
+
+    def heartbeat(self, ctx: PipelineContext, now: datetime) -> Notification:
+        return Notification(
+            labels={"alertname": WATCHDOG_ALERTNAME, "pipeline": ctx.pipeline, "severity": "none", "source": "aiops"},
+            annotations={"summary": f"AIOps 管線 {ctx.pipeline} 心跳（停止續命 = 管線沒在跑）",
+                         "last_run": now.isoformat(), "target_errors": str(len(ctx.errors)),
+                         "anomalies": str(len(ctx.anomalies)), "notifications": str(len(ctx.notifications))},
+            starts_at=now, ends_at=now + self.ttl)
+
+    def execute(self, ctx: PipelineContext) -> PipelineContext:
+        beat = self.heartbeat(ctx, datetime.now(timezone.utc))
+        kind = os.environ.get("AIOPS_NOTIFIER", "log").strip().lower() or "log"
+        if kind == "alertmanager":
+            url = os.environ.get("AIOPS_ALERTMANAGER_URL", "").strip()
+            if not url:
+                raise InfrastructureError("notifier.watchdog：AIOPS_NOTIFIER=alertmanager 但沒有設定 AIOPS_ALERTMANAGER_URL")
+            AlertmanagerTransport(url, os.environ.get("AIOPS_ALERTMANAGER_TOKEN") or None).send([beat])
+        elif kind == "log":
+            logger.info("heartbeat %s", json.dumps(beat.labels | beat.annotations, ensure_ascii=False))
+        else:
+            raise InfrastructureError(f"未知的 AIOPS_NOTIFIER：{kind}（可用：log、alertmanager）")
+        ctx.result["heartbeat"] = {"ends_at": beat.ends_at.isoformat()}
+        ctx.log(f"heartbeat:{kind}")
+        return ctx
 
 
 @OperatorRegistry.register("notifier.alertmanager")

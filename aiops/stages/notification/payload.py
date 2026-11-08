@@ -9,7 +9,7 @@ from datetime import datetime
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.types import Incident, Notification
+from aiops.engine.types import WARNING, Incident, Notification
 from aiops.stages._common import ensure_incidents
 from aiops.engine.operator import BaseOperator
 
@@ -35,7 +35,7 @@ def build_notifications(incident: Incident, preset: str, severity: str, ends_at:
     return [
         Notification(
             labels={"alertname": "aiops_incident", "incident_uid": incident.uid, "severity": severity,
-                    "preset": preset, "dept": dept, "entities": entities},
+                    "level": incident.level, "preset": preset, "dept": dept, "entities": entities},
             annotations={"summary": title, "description": description},
             starts_at=incident.start,
             ends_at=ends_at,
@@ -47,17 +47,25 @@ def build_notifications(incident: Incident, preset: str, severity: str, ends_at:
 @OperatorRegistry.register("alert.notify_payload")
 class NotifyPayload(BaseOperator):
     """替每個事件群定嚴重度，並為沒被抑制的事件群產生通知（放進 ctx.notifications，由 notifier 算子送出）。
-    params: severity_thresholds（分數 >= 門檻就是該等級，例如 {P0: 10, P1: 6, P2: 3, P3: 0}）。
+    params: severity_thresholds（分數 >= 門檻就是該等級，例如 {P0: 10, P1: 6, P2: 3, P3: 0}）、
+            notify_warnings（預設 true）：只有預警（每一筆都只是接近門檻）的事件群，嚴重度固定是 warning，
+            通知照發並帶 level=warning 標籤，讓 Alertmanager 分到比較輕的通道；設 false 就只記錄不通知。
     """
 
     scope = "batch"
 
-    def __init__(self, severity_thresholds: dict[str, float] | None = None):
+    def __init__(self, severity_thresholds: dict[str, float] | None = None, notify_warnings: bool = True):
         self.thresholds = {k: float(v) for k, v in (severity_thresholds or DEFAULT_SEVERITY).items()}
+        self.notify_warnings = bool(notify_warnings)
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         for inc in ensure_incidents(ctx):
-            inc.severity = severity_for(inc.score, self.thresholds)
+            if inc.level == WARNING:
+                inc.severity = WARNING
+                if not self.notify_warnings and not inc.suppressed_by:
+                    inc.suppressed_by = "warning_only：只是預警，這條管線設定不通知"
+            else:
+                inc.severity = severity_for(inc.score, self.thresholds)
             if not inc.suppressed_by:
                 ctx.notifications.extend(build_notifications(inc, ctx.pipeline, inc.severity))
         return ctx

@@ -43,7 +43,7 @@ def test_all_sections_present_when_data_is_there_and_missing_ones_are_skipped_no
     keys = [s["key"] for s in rca["sections"]]
     assert keys == ["summary", "timeline", "affected_entities", "golden_signals", "root_cause_candidates",
                     "propagation_path", "suggested_actions"]
-    assert rca["skipped"] == ["trace_evidence", "similar_cases"] and all(s["body"].strip() for s in rca["sections"])
+    assert rca["skipped"] == ["trace_evidence", "log_patterns", "similar_cases"] and all(s["body"].strip() for s in rca["sections"])
     assert rca["root_cause"]["algorithm"] == "rca.root_cause.topological"
 
 

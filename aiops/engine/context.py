@@ -128,6 +128,17 @@ class RecentNotification:
     fingerprint: str
     last_event_ts: datetime
     incident_uid: str = ""
+    severity: str = ""  # 上次送出的等級（warning 或 P0～P3）：warning 之後升級成異常要照發，不被冷卻擋掉
+
+
+@dataclass
+class TrainingExclusion:
+    """訓練基準線時要排除的時段（歷史事故、維護窗）。不排除的話，上週當機那幾小時會把基準線拉高，
+    之後同一個時段再出事就被吃掉。"""
+
+    start: datetime
+    end: datetime
+    reason: str
 
 
 @dataclass
@@ -157,6 +168,17 @@ class SpanRecord:
     ts: datetime
     duration_ms: float
     error: bool = False
+
+
+@dataclass
+class LogRecord:
+    """RCA 現抓的一筆錯誤日誌（只留比對樣板需要的欄位）。"""
+
+    ts: datetime
+    service: str
+    message: str
+    error_type: str = ""
+    trace_id: str = ""
 
 
 @dataclass
@@ -199,6 +221,8 @@ class PipelineContext:
     detector_params: dict[str, dict[str, Any]] = field(default_factory=dict)
     detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 基準線
     last_anomaly_ts: datetime | None = None  # 這條序列最後一筆已存的異常時間（只處理比它新的）
+    # 這條序列訓練基準線時要排除的時段（這個實體的歷史事故、維護窗；被標成誤報的事故不排除）
+    training_exclusions: list[TrainingExclusion] = field(default_factory=list)
     silences: list[Silence] = field(default_factory=list)
     recent_notifications: list[RecentNotification] = field(default_factory=list)
     topology: list[tuple[str, str]] = field(default_factory=list)  # (caller, callee)
@@ -228,6 +252,10 @@ class PipelineContext:
     rca_series: dict[tuple[str, str], pd.DataFrame] = field(default_factory=dict)
     # RCA 隨需現抓的事件前後 span（ingestion.incident_traces），給 rca.build_dynamic_topology 還原當下的呼叫關係
     rca_spans: list[SpanRecord] = field(default_factory=list)
+    # RCA 隨需現抓的錯誤日誌（ingestion.incident_logs）：事件期間與事件前的正常期間，給 rca.section.log_patterns 比對
+    rca_logs: list[LogRecord] = field(default_factory=list)
+    rca_logs_baseline: list[LogRecord] = field(default_factory=list)
+    rca_log_window_minutes: tuple[float, float] = (0.0, 0.0)  # (事件期間, 正常期間) 的長度，算每分鐘頻率用
     rca_sections: list[ReportSection] = field(default_factory=list)
     rca_skipped: list[str] = field(default_factory=list)
     llm_summary: str | None = None

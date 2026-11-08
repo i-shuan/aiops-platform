@@ -92,6 +92,8 @@ class AnomalyRow(Base):
     score: Mapped[float] = mapped_column(Float)
     detector_name: Mapped[str] = mapped_column(String(64))  # 算子名，例如 detector.zscore（外部匯入的異常不經這裡）
     detector_node: Mapped[str] = mapped_column(String(128), default="", server_default="")  # Workflow 節點名稱
+    # anomaly（越過門檻）或 warning（接近門檻的預警）
+    level: Mapped[str] = mapped_column(String(16), default="anomaly", server_default="anomaly")
     attrs: Mapped[dict] = mapped_column(JSON, default=dict)
 
 

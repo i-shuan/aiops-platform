@@ -17,7 +17,7 @@ from string import Template
 
 import pandas as pd
 
-from aiops.engine.context import PipelineContext, SpanRecord, TargetError
+from aiops.engine.context import LogRecord, PipelineContext, SpanRecord, TargetError
 from aiops.engine.errors import BadRequest, InfrastructureError, NotFound
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
@@ -215,4 +215,62 @@ class IncidentTracesFetch(BaseOperator):
                                      "truncated": truncated, "start": start.isoformat(), "end": end.isoformat(),
                                      "services": sorted({s.service for s in ctx.rca_spans})}
         ctx.log(f"incident_traces:{len(ctx.rca_spans)}{':truncated' if truncated else ''}")
+        return ctx
+
+
+@OperatorRegistry.register("ingestion.incident_logs")
+class IncidentLogsFetch(BaseOperator):
+    """RCA 用：隨需撈事件期間與事件前正常期間的錯誤日誌，給 rca.section.log_patterns 比對「哪種例外暴增」。
+
+    事件期間 = [事件開始 - before, 事件結束 + after]；正常期間 = 事件期間開始前 baseline_minutes 分鐘（不重疊）。
+    只撈事件裡的服務（日誌量大，撈全部沒意義）。跟 incident_traces 一樣是旁路佐證：
+    資料源沒設定 -> 略過；連不上、查詢錯 -> 記進 errors 並略過，報告照出。
+    params: source_type（預設 elasticsearch）、before_minutes（預設 5）、after_minutes（預設 5）、
+            baseline_minutes（預設 60）、max_logs（每段上限，預設 5000）。
+    """
+
+    scope = "batch"
+
+    def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 5, after_minutes: int = 5,
+                 baseline_minutes: int = 60, max_logs: int = 5000):
+        if min(before_minutes, after_minutes) < 0 or baseline_minutes <= 0 or max_logs <= 0:
+            raise ValueError("before／after_minutes 不能小於 0；baseline_minutes、max_logs 必須大於 0")
+        self.source_type = source_type
+        self.before, self.after = timedelta(minutes=before_minutes), timedelta(minutes=after_minutes)
+        self.baseline = timedelta(minutes=baseline_minutes)
+        self.max_logs = int(max_logs)
+
+    def _skip(self, ctx: PipelineContext, why: str, as_error: bool) -> PipelineContext:
+        ctx.log(f"incident_logs:skip:{why}")
+        ctx.result["log_fetch"] = {"source_type": self.source_type, "logs": 0, "skipped": why}
+        if as_error:
+            ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_logs'}", f"撈日誌失敗，報告不含日誌比對：{why}"))
+        return ctx
+
+    def execute(self, ctx: PipelineContext) -> PipelineContext:
+        if not ctx.incidents:
+            raise NotFound("沒有可以撈日誌的事件群")
+        incident = ctx.incidents[0]
+        if not is_configured(self.source_type):
+            return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
+        start, end = as_utc(incident.start) - self.before, as_utc(incident.end) + self.after
+        base_start = start - self.baseline
+        services = sorted(set(incident.entities))
+        try:
+            spec = get_datasource_spec(self.source_type)
+            during, cut1 = spec.fetch_logs(start, end, services, self.max_logs)
+            before, cut2 = spec.fetch_logs(base_start, start, services, self.max_logs)
+        except (InfrastructureError, BadRequest, NotFound) as e:
+            return self._skip(ctx, str(e), as_error=True)
+        ctx.rca_logs = [LogRecord(r["ts"], r["service"], r["message"], r.get("error_type", ""), r.get("trace_id", ""))
+                        for r in during]
+        # 正常期間的查詢區間跟事件期間在 start 那一刻相接，剛好落在 start 的那筆歸事件期間
+        ctx.rca_logs_baseline = [LogRecord(r["ts"], r["service"], r["message"], r.get("error_type", ""),
+                                           r.get("trace_id", "")) for r in before if as_utc(r["ts"]) < start]
+        ctx.rca_log_window_minutes = ((end - start).total_seconds() / 60, self.baseline.total_seconds() / 60)
+        ctx.result["log_fetch"] = {"source_type": self.source_type, "logs": len(ctx.rca_logs),
+                                   "baseline_logs": len(ctx.rca_logs_baseline), "truncated": cut1 or cut2,
+                                   "window": [start.isoformat(), end.isoformat()],
+                                   "baseline_window": [base_start.isoformat(), start.isoformat()]}
+        ctx.log(f"incident_logs:{len(ctx.rca_logs)}+{len(ctx.rca_logs_baseline)}baseline")
         return ctx

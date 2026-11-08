@@ -21,6 +21,10 @@ def as_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
+ANOMALY = "anomaly"
+WARNING = "warning"
+
+
 @dataclass(frozen=True)
 class AnomalyEvent:
     """一筆異常。建立後不可修改（frozen）：偵測器名稱、分數一旦產生，下游（收斂、計分、裁決）只能讀、不能改，
@@ -39,18 +43,20 @@ class AnomalyEvent:
     source_type: str = ""
     # 裁決事件（detector.ensemble）由哪些節點投票通過；一般偵測事件留空
     voted_by: tuple[str, ...] = ()
+    # anomaly（越過門檻）或 warning（接近門檻的預警，偵測節點設了 warning_ratio 才會有）
+    level: str = ANOMALY
 
     def to_dict(self) -> dict[str, Any]:
         return {"entity": self.entity, "metric": self.metric, "ts": self.ts.isoformat(),
                 "score": self.score, "attrs": self.attrs, "value": self.value,
                 "detector": self.detector, "detector_node": self.detector_node,
-                "source_type": self.source_type, "voted_by": list(self.voted_by)}
+                "source_type": self.source_type, "voted_by": list(self.voted_by), "level": self.level}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AnomalyEvent:
         return cls(d["entity"], d["metric"], datetime.fromisoformat(d["ts"]), d["score"], d.get("attrs", {}),
                    d.get("value"), d.get("detector", ""), d.get("detector_node", ""), d.get("source_type", ""),
-                   tuple(d.get("voted_by", ())))
+                   tuple(d.get("voted_by", ())), d.get("level", ANOMALY))
 
 
 @dataclass
@@ -71,6 +77,11 @@ class Incident:
     def depts(self) -> list[str]:
         """事件 attrs["dept"] 帶進來的部門（給通知路由用）。"""
         return sorted({str(e.attrs["dept"]) for e in self.events if e.attrs.get("dept")})
+
+    @property
+    def level(self) -> str:
+        """有任何一筆越過門檻就是 anomaly；全部都只是接近門檻才是 warning。"""
+        return ANOMALY if any(e.level == ANOMALY for e in self.events) else WARNING
 
     @property
     def fingerprint(self) -> str:

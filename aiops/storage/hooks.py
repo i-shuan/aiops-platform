@@ -17,6 +17,7 @@ from aiops.engine.context import (
     RecentNotification,
     Silence,
     TraceRow,
+    TrainingExclusion,
 )
 from aiops.engine.params import pick_most_specific
 from aiops.engine.topology import lot_edges_from_paths
@@ -26,6 +27,7 @@ from aiops.storage.repository import (
     Anomalies,
     DetectorModels,
     ExternalAnomalies,
+    Feedbacks,
     Incidents,
     Knowledge,
     LotPaths,
@@ -43,6 +45,9 @@ TRACE_LOOKBACK_DAYS = 7
 _RCA_TRACE_MARGIN = timedelta(minutes=10)
 # RCA 找相似事故時，最多拿最近幾筆經驗出來比（避免經驗庫很大時整包載入）
 KNOWLEDGE_POOL_SIZE = 500
+# 訓練基準線時往回看多久的事故（要涵蓋最長的訓練窗；168 時段基準線建議 3～4 週）與前後多排除幾分鐘
+EXCLUSION_LOOKBACK_DAYS = 35
+EXCLUSION_MARGIN = timedelta(minutes=10)
 
 
 def _trace_service(query: str) -> str:
@@ -56,7 +61,7 @@ class StorageHooks:
         ctx.silences = [Silence(r["id"], r["kind"], r["start"], r["end"], r["entity"], r["dept"])
                         for r in Silences.list_all()]
         cutoff = ctx.now - timedelta(days=RECENT_NOTIFICATION_DAYS)
-        ctx.recent_notifications = [RecentNotification(r["fingerprint"], r["last_event_ts"])
+        ctx.recent_notifications = [RecentNotification(r["fingerprint"], r["last_event_ts"], severity=r["severity"])
                                     for r in Notifications.since(cutoff.replace(tzinfo=None))]
         if not ctx.topology_explicit:
             ctx.topology = [(e["caller"], e["callee"]) for e in ServiceEdges.all()]
@@ -134,6 +139,36 @@ class StorageHooks:
                                                           model["artifact_format"])
         last = Anomalies.latest_ts(ctx.pipeline, target.entity, target.query)
         ctx.last_anomaly_ts = as_utc(last) if last else None
+        if detector_nodes:
+            ctx.training_exclusions = self._exclusions_for(ctx, target.entity, (target.attrs or {}).get("dept"))
+
+    def _exclusion_pool(self, ctx: PipelineContext):
+        """這一輪所有序列共用：這條管線近期的事故（扣掉被標成誤報的）與維護窗。一輪只查一次。"""
+        key = (ctx.pipeline, ctx.now)
+        if getattr(self, "_pool_key", None) != key:
+            since = ctx.now - timedelta(days=EXCLUSION_LOOKBACK_DAYS)
+            false_alarms = Feedbacks.incident_uids_with_verdict("false_positive")
+            incidents = []
+            # 先用建立時間粗篩（重放過去的時間時，建立時間是真實時鐘，一定比 since 晚，不會被誤篩），再用事件時間細篩
+            for row in Incidents.created_since(since.replace(tzinfo=None)):
+                if row["pipeline"] != ctx.pipeline or row["uid"] in false_alarms:
+                    continue
+                inc = Incident.from_dict(row["incident"], uid=row["uid"])
+                if as_utc(inc.end) >= since and as_utc(inc.start) <= ctx.now:
+                    incidents.append((as_utc(inc.start), as_utc(inc.end), set(inc.entities), row["uid"]))
+            maintenance = [Silence(r["id"], r["kind"], r["start"], r["end"], r["entity"], r["dept"])
+                           for r in Silences.list_all() if r["kind"] == "maintenance"]
+            self._pool_key, self._pool = key, (incidents, maintenance)
+        return self._pool
+
+    def _exclusions_for(self, ctx: PipelineContext, entity: str, dept: str | None) -> list[TrainingExclusion]:
+        incidents, maintenance = self._exclusion_pool(ctx)
+        out = [TrainingExclusion(start - EXCLUSION_MARGIN, end + EXCLUSION_MARGIN, f"incident {uid}")
+               for start, end, entities, uid in incidents if entity in entities]
+        for s in maintenance:
+            if (s.entity is None or s.entity == entity) and (s.dept is None or s.dept == dept):
+                out.append(TrainingExclusion(as_utc(s.start), as_utc(s.end), f"maintenance #{s.id}"))
+        return out
 
     # ── 寫入 ──
 
@@ -151,7 +186,7 @@ class StorageHooks:
         Anomalies.create_many([
             {"pipeline": ctx.pipeline, "entity": e.entity, "metric": e.metric, "ts": e.ts,
              "value": float(e.value) if e.value is not None else 0.0, "score": float(e.score),
-             "detector_name": e.detector, "detector_node": e.detector_node, "attrs": e.attrs}
+             "detector_name": e.detector, "detector_node": e.detector_node, "level": e.level, "attrs": e.attrs}
             for e in ctx.anomalies
         ])
 

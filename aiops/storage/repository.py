@@ -69,6 +69,10 @@ class Incidents:
         return crud.find_between(IncidentRow, "created_at", start, end)
 
     @staticmethod
+    def created_since(start: datetime) -> list[Row]:
+        return crud.find_between(IncidentRow, "created_at", start, datetime(9999, 1, 1))
+
+    @staticmethod
     def mark_resolved(incident_id: int, resolved_at: datetime) -> Row:
         return crud.update(IncidentRow, incident_id, status="resolved", resolved_at=resolved_at)
 
@@ -294,6 +298,10 @@ class Feedbacks:
     @staticmethod
     def created_between(start: datetime, end: datetime) -> list[Row]:
         return crud.find_between(FeedbackRow, "created_at", start, end)
+
+    @staticmethod
+    def incident_uids_with_verdict(verdict: str) -> set[str]:
+        return {r["incident_uid"] for r in crud.find(FeedbackRow, verdict=verdict) if r["incident_uid"]}
 
 
 class Knowledge:

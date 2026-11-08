@@ -52,6 +52,12 @@ class BaseDataSourceSpec(ABC):
         預設不支援；存 trace 的資料源（Elasticsearch APM）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
 
+    def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
+                   max_logs: int = 5000) -> tuple[list[dict[str, Any]], bool]:
+        """RCA 隨需撈錯誤日誌：[start, end] 內、services 給了就只撈這些服務。回傳 (logs, 是否因為 max_logs 被截斷)。
+        每筆是 dict：ts（UTC datetime）、service、message、error_type、trace_id。預設不支援。"""
+        raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈日誌")
+
     @abstractmethod
     def check(self) -> dict[str, Any]:
         """連線自我檢查：{"ok": bool, "detail": str}。不得丟例外。"""

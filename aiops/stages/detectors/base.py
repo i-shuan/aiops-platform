@@ -14,7 +14,7 @@ import pandas as pd
 from aiops.engine.context import AnomalyResult, DetectorState, PipelineContext
 from aiops.engine.errors import BadRequest
 from aiops.engine.params import deep_merge
-from aiops.engine.types import AnomalyEvent, as_utc
+from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, as_utc
 from aiops.engine.operator import BaseOperator
 
 
@@ -32,13 +32,24 @@ class DetectorOperator(BaseOperator):
 
     def __init__(self, **params: Any):
         routing = {k: params.pop(k) for k in ROUTING_PARAMS & set(params)}
+        behaviour = {k: params.pop(k) for k in NODE_PARAMS & set(params)}
         unknown = set(params) - set(self.tunable) - set(self.other_params)
         if unknown:
-            allowed = sorted({*self.tunable, *self.other_params, *ROUTING_PARAMS})
+            allowed = sorted({*self.tunable, *self.other_params, *ROUTING_PARAMS, *NODE_PARAMS})
             raise TypeError(f"{self.operator_name or type(self).__name__} 沒有參數 {sorted(unknown)}；可用：{allowed}")
         # 路由參數（這個節點對哪些實體跑）由引擎讀，不進 self.params：不會傳給演算法、也不在調參能改的範圍
         self.include_entities = _entity_set(routing, "include_entities")
         self.exclude_entities = _entity_set(routing, "exclude_entities") or frozenset()
+        # 節點行為參數：同樣不進演算法、調參改不到
+        self.exclude_incidents = bool(behaviour.get("exclude_incidents", True))
+        ratio = behaviour.get("warning_ratio")
+        if ratio is not None:
+            ratio = float(ratio)
+            if not 0 < ratio < 1:
+                raise TypeError("warning_ratio 必須在 0 到 1 之間（不含），例如 0.8 = 門檻的八成就先預警")
+            if "threshold" not in self.tunable:
+                raise TypeError(f"{self.operator_name or type(self).__name__} 沒有 threshold，不能設 warning_ratio")
+        self.warning_ratio = ratio
         self.params = params
         self.fitted = False
 
@@ -71,6 +82,9 @@ class DetectorOperator(BaseOperator):
         routing = sorted(ROUTING_PARAMS & set(override))
         if routing:
             raise TypeError(f"{routing} 是節點的路由參數，只能寫在節點 params；target 要選偵測器請用 detectors")
+        node_only = sorted(NODE_PARAMS & set(override))
+        if node_only:
+            raise TypeError(f"{node_only} 是節點的行為參數，只能寫在節點 params")
         type(self)(**deep_merge(self.params, override)).validate_params()
 
     def param(self, key: str) -> float:
@@ -112,28 +126,53 @@ class DetectorOperator(BaseOperator):
         state = ctx.detector_states.get(key)
         base_version = state.version if state else 0  # 寫回時帶上，資料庫才能偵測並發覆蓋
         if ctx.train_df is not None:  # 批次訓練：基準線過期或還沒有
-            algo.fit(ctx.train_df)
-            ctx.new_detector_states[key] = self._snapshot(algo, ctx, ctx.train_df, base_version)
+            train = self._training_frame(ctx, ctx.train_df)
+            algo.fit(train)
+            ctx.new_detector_states[key] = self._snapshot(algo, ctx, train, base_version)
         elif state is not None:
             algo.load_state(state.state)
             if state.artifact is not None:
                 algo.load_artifact(state.artifact_format, state.artifact)
         else:  # 第一次：用這一輪的資料學基準線並保存
-            algo.fit(df)
-            ctx.new_detector_states[key] = self._snapshot(algo, ctx, df, base_version)
+            train = self._training_frame(ctx, df)
+            algo.fit(train)
+            ctx.new_detector_states[key] = self._snapshot(algo, ctx, train, base_version)
 
         ctx.detector_runs.append(key)  # 真的評估過這段資料才算參與（沒抓到異常 = 反對票）
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
         # 每一筆都帶著自己是哪個演算法、哪個節點抓到的（要交集／多數決就接 detector.ensemble）
-        ctx.anomaly_result = algo.detect(df)
-        ctx.anomalies.extend(
-            AnomalyEvent(target.entity, target.query, as_utc(ts.to_pydatetime()), float(score),
-                         dict(target.attrs), float(value), self.operator_name, key, target.source_type)
-            for ts, value, score, flagged in zip(df["ts"], ctx.anomaly_result.values,
-                                                 ctx.anomaly_result.scores, ctx.anomaly_result.is_anomaly)
-            if flagged
-        )
+        result = ctx.anomaly_result = algo.detect(df)
+        warn_at = algo.param("threshold") * self.warning_ratio if self.warning_ratio else None
+        for ts, value, score, flagged in zip(df["ts"], result.values, result.scores, result.is_anomaly):
+            if flagged:
+                level = ANOMALY
+            elif warn_at is not None and score > warn_at:
+                level = WARNING  # 接近門檻：先預警，不等真的越線
+            else:
+                continue
+            ctx.anomalies.append(AnomalyEvent(target.entity, target.query, as_utc(ts.to_pydatetime()), float(score),
+                                              dict(target.attrs), float(value), self.operator_name, key,
+                                              target.source_type, (), level))
         return ctx
+
+    def _training_frame(self, ctx: PipelineContext, df: pd.DataFrame) -> pd.DataFrame:
+        """訓練前拿掉這個實體的歷史事故與維護窗（ctx.training_exclusions），避免基準線被當機污染。
+        拿掉後剩不到原本一半、或不到 MIN_TRAIN_POINTS 點，就退回用全部資料並記錄（資料太少時有偏的基準線好過沒有）。"""
+        if not self.exclude_incidents or not ctx.training_exclusions or df.empty:
+            return df
+        ts = pd.to_datetime(df["ts"], utc=True)
+        dirty = pd.Series(False, index=df.index)
+        for w in ctx.training_exclusions:
+            dirty |= (ts >= pd.Timestamp(w.start)) & (ts <= pd.Timestamp(w.end))
+        removed = int(dirty.sum())
+        if not removed:
+            return df
+        kept = df[~dirty].reset_index(drop=True)
+        if len(kept) < max(MIN_TRAIN_POINTS, len(df) // 2):
+            ctx.log(f"train:{self.state_key}:exclusion-skipped:{removed}/{len(df)}pts-would-leave-too-little")
+            return df
+        ctx.log(f"train:{self.state_key}:excluded:{removed}pts")
+        return kept
 
     def _snapshot(self, algo: DetectorOperator, ctx: PipelineContext, df: pd.DataFrame,
                   base_version: int) -> DetectorState:
@@ -196,6 +235,11 @@ SAFE_ARTIFACT_FORMATS = frozenset({"npz"})
 
 # 每個偵測節點都能寫的路由參數（緊急止血、灰度）：exclude 優先，再看 include（有寫才限制），最後才看 target 的 detectors
 ROUTING_PARAMS = frozenset({"include_entities", "exclude_entities"})
+# 每個偵測節點都能寫的行為參數：
+#   exclude_incidents（預設 true）：訓練基準線時排除這個實體的歷史事故與維護窗
+#   warning_ratio（預設不開）：分數超過「門檻 × 這個比例」但還沒越線時記成 warning（預警），例如 0.8
+NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio"})
+MIN_TRAIN_POINTS = 30
 
 
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:

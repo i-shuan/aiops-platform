@@ -17,6 +17,7 @@
   - 有評估但沒抓到異常的節點：算，等於投反對票
   - detector.hourly_baseline 時段資料不足時是「退回全段統計」繼續判斷，不是跳過，所以仍然算參與者
 只剩 1 個參與者時，它抓到就通過（任何策略都一樣）。
+兩級（偵測節點設了 warning_ratio 才會有 warning 票）：越線票夠 = anomaly；越線票不夠、但越線＋預警票加起來夠 = warning。
 
 「同一筆」= 同實體、同指標、同時間點（同一條序列跑多個偵測器，時間點本來就對齊）。
 通過的點產生新的裁決事件（detector=detector.ensemble、voted_by=投票節點，分數取各節點最高分），
@@ -27,7 +28,7 @@ from __future__ import annotations
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.types import AnomalyEvent
+from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent
 from aiops.engine.operator import BaseOperator
 
 STRATEGIES = ("union", "intersection", "majority", "at_least")
@@ -80,12 +81,18 @@ class EnsembleOperator(BaseOperator):
         needed = self._needed(len(participants))
         decided: list[AnomalyEvent] = []
         for (entity, metric, ts), events in sorted(votes.items(), key=lambda kv: kv[0][2]):
+            # 兩級：越線票（anomaly）夠就是 anomaly；不夠但「越線＋預警」票加起來夠，就是 warning
+            strong = tuple(sorted({e.detector_node for e in events if e.level == ANOMALY}))
             voters = tuple(sorted({e.detector_node for e in events}))
-            if len(voters) < needed:
+            if len(strong) >= needed:
+                level, voted = ANOMALY, strong
+            elif len(voters) >= needed:
+                level, voted = WARNING, voters
+            else:
                 continue
             top = max(events, key=lambda e: e.score)
             decided.append(AnomalyEvent(entity, metric, ts, top.score, dict(top.attrs), top.value,
-                                        self.operator_name, self.node_name, top.source_type, voters))
+                                        self.operator_name, self.node_name, top.source_type, voted, level))
         kept = [e for es in votes.values() for e in es] if self.keep_members else []
         ctx.log(f"ensemble:{self.node_name}:{self.strategy}:voters={len(participants)}:need={needed}:"
                 f"{len(votes)}->{len(decided)}")
