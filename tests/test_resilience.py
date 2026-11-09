@@ -65,8 +65,10 @@ def test_infrastructure_error_in_an_optional_node_still_fails_the_run(now, sent)
 
 def test_optional_summary_in_rca_report_workflow_is_marked_optional():
     wf = load_workflow(workflow_path("rca_report"))
+    # 兩個 LLM 旁路節點（summary／claims 總結、三行止血摘要）都是 optional：沒金鑰、連不上、驗證不過都不能擋報告
     assert {n.name: n.optional for n in wf.nodes} == {"fetch_traces": False, "build_topology": False,
-                                                       "fetch_logs": False, "root_cause": False, "report": False, "summary": True}
+                                                       "fetch_logs": False, "root_cause": False, "report": False,
+                                                       "summary": True, "briefing": True}
 
 
 # ── 偵測器基準線：樂觀鎖 ──

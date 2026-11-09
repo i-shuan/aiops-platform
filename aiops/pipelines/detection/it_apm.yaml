@@ -55,5 +55,6 @@ nodes:
 
 targets:
   # 範例（mock 資料源）。正式使用請複製這個檔，改成自己的 targets
-  - {source_type: mock, query: 'cpu{service="cart"}', entity: cart, attrs: {dept: payments}}
-  - {source_type: mock, query: 'cpu{service="redis"}', entity: redis, attrs: {dept: platform}}
+  # attrs.signal 讓黃金訊號加權與建議處置知道這條序列是哪一類（見 it_otel.yaml）
+  - {source_type: mock, query: 'cpu{service="cart"}', entity: cart, attrs: {dept: payments, signal: saturation}}
+  - {source_type: mock, query: 'cpu{service="redis"}', entity: redis, attrs: {dept: platform, signal: saturation}}

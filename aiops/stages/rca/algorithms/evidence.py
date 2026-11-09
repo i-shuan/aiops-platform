@@ -190,24 +190,49 @@ class EvidenceRootCause(RootCauseOperator):
             return self._insufficient(ctx, f"前幾名拉不開（第一名 < 第二名 × {self.min_dominance:g}）：{close}。"
                                            "幾個服務一起變慢且程度相近，常見於共同的外部因素，不指認單一服務")
         kinds = resource_kinds(spans)
-        return [RootCandidate(r["entity"], r["score"], self._reason(r, bursts, base_min, load, kinds),
-                              self._dependency(r, kinds)) for r in ordered_rows]
+        out = []
+        for r in ordered_rows:
+            dependency, attribution = self._dependency(r, kinds)
+            out.append(RootCandidate(r["entity"], r["score"], self._reason(r, bursts, base_min, load, kinds),
+                                     dependency, attribution))
+        return out
 
-    def _dependency(self, r, kinds: dict[str, str]) -> str:
+    def _dependency(self, r, kinds: dict[str, str]) -> tuple[str, dict]:
         """單一下游資源佔了這個服務自身耗時增量（或入口失敗）的 min_dependency_share 以上，就是下鑽歸因。
-        等待增量用 (事件期間 − 事件前) 的每請求 ms；失敗用事件期間「該資源失敗筆數 ÷ 入口失敗筆數」。兩個資源各佔一半就不填。"""
+        等待增量用 (事件期間 − 事件前) 的每請求 ms；失敗用事件期間「該資源失敗筆數 ÷ 入口失敗筆數」。兩個資源各佔一半就不填。
+        回 (報告用的字串, 結構化 attribution)：有資源葉節點就一定有 attribution（主導資源的數字），不夠主導時字串為空、by 為空。"""
         b, d = r["b"], r["d"]
-        if r["self_raw"] > 0:
-            inc = {res: ms - b.wait_ms_per_request.get(res, 0.0) for res, ms in d.wait_ms_per_request.items()}
-            res, ms = max(inc.items(), key=lambda kv: kv[1], default=(None, 0.0))
-            if res is not None and ms > 0 and ms / r["self_raw"] >= self.min_dependency_share:
-                return f"{res}（{kinds.get(res, '')}）" if kinds.get(res) else res
-        entry_failures = round(d.error_rate * d.requests)
-        if entry_failures and d.error_rate - b.error_rate >= self.min_error_increase:
-            res, n = max(d.wait_failures.items(), key=lambda kv: kv[1], default=(None, 0))
-            if res is not None and n / entry_failures >= self.min_dependency_share:
-                return f"{res}（{kinds.get(res, '')}）" if kinds.get(res) else res
-        return ""
+        resources = set(b.wait_ms_per_request) | set(d.wait_ms_per_request)
+        if not resources:
+            return "", {}
+        inc = {res: d.wait_ms_per_request.get(res, 0.0) - b.wait_ms_per_request.get(res, 0.0) for res in resources}
+        top_res, top_ms = max(inc.items(), key=lambda kv: kv[1])
+        by = ""
+        if r["self_raw"] > 0 and top_ms > 0 and top_ms / r["self_raw"] >= self.min_dependency_share:
+            by = "latency"
+        else:
+            entry_failures = round(d.error_rate * d.requests)
+            if entry_failures and d.error_rate - b.error_rate >= self.min_error_increase:
+                res, n = max(d.wait_failures.items(), key=lambda kv: kv[1], default=(None, 0))
+                if res is not None and n / entry_failures >= self.min_dependency_share:
+                    top_res, by = res, "errors"
+
+        def _kind(k: int) -> str:
+            parts = (kinds.get(top_res) or "").split("/")
+            return parts[k] if len(parts) > k else ""
+
+        attribution = {
+            "resource": top_res, "kind": _kind(0), "subtype": _kind(1), "by": by,
+            "self_ms": {"before": round(b.app_ms_per_request, 1), "during": round(d.app_ms_per_request, 1)},
+            "wait_ms": {"before": round(b.wait_ms_per_request.get(top_res, 0.0), 1),
+                        "during": round(d.wait_ms_per_request.get(top_res, 0.0), 1)},
+            "failures": {"before": int(b.wait_failures.get(top_res, 0)), "during": int(d.wait_failures.get(top_res, 0))},
+            "share": round(min(max(inc.get(top_res, 0.0) / r["self_raw"], 0.0), 1.0), 3) if r["self_raw"] > 0 else 0.0,
+        }
+        if not by:
+            return "", attribution
+        label = f"{top_res}（{kinds[top_res]}）" if kinds.get(top_res) else top_res
+        return label, attribution
 
     @staticmethod
     def _breakdown(r, kinds: dict[str, str]) -> str:
