@@ -39,7 +39,7 @@ def scenario_6() -> H.Result:
     from aiops.stages.enrichment import summarizer
     from aiops.stages.enrichment.base import BaseLLM
 
-    r = H.Result(6, "惡意 LLM 幻覺注入（白名單守門）",
+    r = H.Result(6, "惡意 LLM 幻覺注入（封閉詞表守門）",
                  "假模型回傳充滿幻覺的三行 JSON：『檢查 Kafka 佇列飽和度並重啟 k8s-node-99』（環境裡根本沒有）；另測只含虛構節點、虛構服務名、虛構數字、與合法回文各一組")
     end = INC + timedelta(minutes=45)
     w = World(T0, _mins(T0, end + timedelta(minutes=20)), [
@@ -65,9 +65,9 @@ def scenario_6() -> H.Result:
                  "verification_line": "【驗證與排除項】ord-svc 程式自身耗時沒有惡化，排除它本身的程式與機器"}
         variants = {
             "A 使用者原文（Kafka＋k8s-node-99）": {**valid, "action_line": "【立即止血動作】請立即檢查 Kafka 佇列飽和度並重啟 k8s-node-99"},
-            "A2 只有 Kafka（無數字，測黑名單）": {**valid, "action_line": "【立即止血動作】請立即檢查 Kafka 佇列飽和度並確認 ord-svc 逾時"},
+            "A2 只有 Kafka（無數字）": {**valid, "action_line": "【立即止血動作】請立即檢查 Kafka 佇列飽和度並確認 ord-svc 逾時"},
             "B 只有虛構節點 k8s-node-99（沒有 Kafka，帶數字）": {**valid, "action_line": "【立即止血動作】請立即重啟 k8s-node-99 並檢查 payment-gw:443"},
-            "B2 虛構節點 gpu-farm-prod（無數字、不在黑名單）": {**valid, "action_line": "【立即止血動作】請立即重啟 gpu-farm-prod 節點並檢查 payment-gw:443"},
+            "B2 虛構節點 gpu-farm-prod（無數字）": {**valid, "action_line": "【立即止血動作】請立即重啟 gpu-farm-prod 節點並檢查 payment-gw:443"},
             "C 虛構服務名 payment-gateway": {**valid, "action_line": "【立即止血動作】請檢查 payment-gateway 的設定並確認 ord-svc 逾時"},
             "D 虛構數字（失敗 99 次）": {**valid, "verification_line": "【驗證與排除項】payment-gw:443 失敗 99 次，排除 ord-svc 程式本身"},
             "E 合法回文（對照組）": valid,
@@ -110,14 +110,14 @@ def scenario_6() -> H.Result:
             summarizer.build_llm = original
     A, A2, B, B2, C, D, E = (rows[k] for k in variants)
     r.check("A 使用者原文被攔截（降級為模板）", "generated_by=template、有 rejected 原因", f"{A['by']}；{A['rejected']}", A["by"] == "template" and bool(A["rejected"]))
-    r.check("A2 只有 Kafka（無數字）被黑名單攔截", "template、原因含 kafka", f"{A2['by']}；{A2['rejected']}", A2["by"] == "template" and "kafka" in (A2["rejected"] or "").lower())
+    r.check("A2 只有 Kafka（無數字）被封閉詞表攔截", "template、原因含 kafka", f"{A2['by']}；{A2['rejected']}", A2["by"] == "template" and "kafka" in (A2["rejected"] or "").lower())
     r.check("A 降級後報告 errors 為空、三行仍由 Runbook 模板填好", "errors=[]、action 含 RB-01", f"errors={A['errors']}；{A['action'][:60]}", not A["errors"] and "RB-01" in A["action"])
-    r.check("A 日誌記錄 HallucinationBlocked", "日誌出現 HallucinationBlocked", f"日誌命中 {len(A['logged'])} 行（平台只寫 narrative.briefing_rejected，沒有日誌）", bool(A["logged"]))
+    r.check("A 日誌記錄 HallucinationBlocked", "日誌出現 HallucinationBlocked", f"日誌命中 {len(A['logged'])} 行：{(A['logged'] or ['（無）'])[0][:90]}", bool(A["logged"]))
     r.check("B 虛構節點 k8s-node-99 被攔截", "template", f"{B['by']}；{B['rejected']}", B["by"] == "template")
-    r.check("B2 虛構節點 gpu-farm-prod（無數字、不在黑名單）也必須攔截", "template", f"{B2['by']}；{B2['rejected']}", B2["by"] == "template")
+    r.check("B2 虛構節點 gpu-farm-prod（無數字）也必須攔截", "template", f"{B2['by']}；{B2['rejected']}", B2["by"] == "template")
     r.check("C 虛構服務名 payment-gateway 也必須攔截", "template", f"{C['by']}；{C['rejected']}", C["by"] == "template")
-    r.notes.append("A、B 被攔截的實際原因是『k8s-node-99』裡的數字 99 找不到證據（數字檢查），不是實體白名單；"
-                   "沒有數字、也不在黑名單的虛構名稱（B2、C）靠的是實體白名單，而白名單只擋『拓撲裡已知但不相干』的名字")
+    r.notes.append("封閉詞表（docs/HARDENING_DESIGN.md 第 3 節）：三行裡每個識別字 token 都要在 context 的值或通用技術詞表裡，"
+                   "所以沒有數字、不在任何黑名單的虛構名稱（B2、C）也擋得住；死區是不含識別字的中文幻覺（「請重啟資料庫主機」）")
     r.check("D 虛構數字被攔截（對照）", "template、數字不在證據裡", f"{D['by']}；{D['rejected']}", D["by"] == "template")
     r.check("E 合法回文被放行（守門不是全擋）", "llm", f"{E['by']}；{E['rejected']}", E["by"] == "llm")
     return r
