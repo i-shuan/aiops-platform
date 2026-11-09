@@ -82,7 +82,7 @@ BRIEFING_SYSTEM = (
 BRIEFING_KEYS = ("summary_line", "action_line", "verification_line")
 _PREFIX = {"summary_line": "【一句話根因】", "action_line": "【立即止血動作】", "verification_line": "【驗證與排除項】"}
 # 封閉世界詞表（docs/HARDENING_DESIGN.md 第 3 節）：三行裡每個「識別字 token」（含英數、可用 - _ . : / @ 連接的片段）
-# 都要出現在 context 的值裡，或在下面這份通用技術詞表裡；不在就退回模板。中文敘述不抽 token：
+# 都要出現在 context 的鍵名或值裡，或在下面這份通用技術詞表裡；不在就退回模板。中文敘述不抽 token：
 # 死區——「請重啟資料庫主機」這種不含識別字的中文幻覺，封閉詞表擋不到（報告靠 briefing_generated_by 標來源）。
 _IDENT = re.compile(r"[A-Za-z0-9]+(?:[-_.:/@][A-Za-z0-9]+)*")
 _SPLIT = re.compile(r"([-_.:/@])")
@@ -106,8 +106,9 @@ baseline threshold metric metrics alert alerts incident runbook ok e.g i.e vs
 """.split())
 
 
-def _value_tokens(obj: Any, out: set[str]) -> None:
-    """context 值（不含鍵名）裡的識別字 token，連同它們用連接符切開的每一段連續片段（java.lang.IllegalStateException → IllegalStateException）。"""
+def _context_tokens(obj: Any, out: set[str]) -> None:
+    """context 的鍵名與值裡的識別字 token，連同它們用連接符切開的每一段連續片段（java.lang.IllegalStateException → IllegalStateException）。
+    鍵名也收：prompt 就是整份 context JSON，模型照欄位名寫「trace_id …、status_code 500」是有據的。"""
     if isinstance(obj, str):
         for tok in _IDENT.findall(obj):
             parts = _SPLIT.split(tok.lower())  # 帶括號的 pattern：奇數位是連接符
@@ -119,17 +120,18 @@ def _value_tokens(obj: Any, out: set[str]) -> None:
                     piece += seps[j - 1] + words[j]
                     out.add(piece)
     elif isinstance(obj, dict):
-        for v in obj.values():
-            _value_tokens(v, out)
+        for k, v in obj.items():
+            _context_tokens(str(k), out)
+            _context_tokens(v, out)
     elif isinstance(obj, (list, tuple)):
         for v in obj:
-            _value_tokens(v, out)
+            _context_tokens(v, out)
 
 
 def briefing_lexicon(context: dict[str, Any]) -> set[str]:
-    """合法識別字（小寫）：context 值裡的全部 token ∪ 通用技術詞表。歸因的 kind/subtype 另外補成一個字（模板寫成 external/http）。"""
+    """合法識別字（小寫）：context 鍵名與值裡的全部 token ∪ 通用技術詞表。歸因的 kind/subtype 另外補成一個字（模板寫成 external/http）。"""
     words: set[str] = set(GENERIC_LEXICON)
-    _value_tokens(context, words)
+    _context_tokens(context, words)
     a = (context.get("root_cause") or {}).get("attribution") or {}
     if a.get("kind") and a.get("subtype"):
         words.add(f"{a['kind']}/{a['subtype']}".lower())

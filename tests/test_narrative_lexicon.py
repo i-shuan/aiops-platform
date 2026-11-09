@@ -32,6 +32,14 @@ REAL_OPENAI = {
 }
 
 
+# PR B 複驗時真實 OpenAI（gpt-6-luna，真實 ES 回放 11/3 bill-svc）回的三行：照 prompt 的欄位名寫 trace_id、status_code
+REAL_OPENAI_KEYS = {
+    "summary_line": "【一句話根因】P0 事件持續 30 分鐘，bill-svc 的增量幾乎全因等待 tax-gw:443，等待時間由 13.3 ms 升至 101.4 ms，失敗由 1 次升至 13 次。",
+    "action_line": "【立即止血動作】檢查 tax-gw:443 健康狀態與網路延遲，確認 bill-svc 的 HTTP client timeout 與 Max Connections，若持續惡化則評估降級或熔斷。",
+    "verification_line": f"【驗證與排除項】追蹤 POST /invoice 與 trace_id {TRACE}，確認 status_code 500 與 tax-gw:443 失敗是否改善。",
+}
+
+
 def _incident(entity="bill-svc", metric="latency", signal="latency"):
     inc = Incident([AnomalyEvent(entity, metric, T0 + m * timedelta(minutes=1), 6.0, {"signal": signal} if signal else {})
                     for m in range(0, 30, 5)])
@@ -78,6 +86,16 @@ def test_real_openai_briefing_still_passes():
     assert context["top_error_logs"][0]["error_type"] == "java.lang.IllegalStateException"
     assert context["sample_trace"]["trace_id"] == TRACE and context["sample_trace"]["endpoint"] == "POST /invoice"
     assert narrative.validate_briefing(REAL_OPENAI, context, {"bill-svc"}) is None
+
+
+def test_real_openai_briefing_using_context_key_names_passes():
+    """context 的鍵名（trace_id、status_code、wait_ms…）是模型在 prompt 裡看得到的詞，不算虛構。
+    固定資料的事件群是 25 分鐘（真實那次是 30），30 在 25 的 ±10% 外，所以這裡把時長對齊真實事件群。"""
+    context = _real_context()
+    context["incident_meta"]["duration_minutes"] = 30
+    assert narrative.validate_briefing(REAL_OPENAI_KEYS, context, {"bill-svc"}) is None
+    for key in ("trace_id", "status_code", "wait_ms", "failed_resource", "matched_runbook", "top_error_logs"):
+        assert key in narrative.briefing_lexicon(context)
 
 
 def test_identifier_tokens_cover_the_shapes_we_need():
