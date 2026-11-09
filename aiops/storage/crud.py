@@ -112,9 +112,12 @@ def find_one(model: Any, **filters: Any) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-def find_latest(model: Any, limit: int, **filters: Any) -> list[dict[str, Any]]:
-    """id 最大的 limit 筆（由新到舊）。"""
-    stmt = select(model).where(*_where(model, filters)).order_by(model.id.desc()).limit(limit)
+def find_latest(model: Any, limit: int, *, not_equal: dict[str, Any] | None = None,
+                **filters: Any) -> list[dict[str, Any]]:
+    """id 最大的 limit 筆（由新到舊）。not_equal：這些欄位不等於給定值（例如 resolution != ''）。"""
+    stmt = select(model).where(*_where(model, filters),
+                               *(getattr(model, k) != v for k, v in (not_equal or {}).items()))
+    stmt = stmt.order_by(model.id.desc()).limit(limit)
     with read_session() as s:
         return [row_to_dict(r) for r in s.scalars(stmt)]
 
