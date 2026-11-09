@@ -48,6 +48,9 @@ class Svc:
     error_type: str = "InternalError"
     error_message: str = "internal error"
     version: str = "1.0.0"
+    # True：所有下游呼叫同一個起點並行發出（asyncio.gather／執行緒池），請求耗時 = 自身 + 最慢的那個呼叫；
+    # False（預設）：依序呼叫，cursor 逐個往後推
+    parallel: bool = False
 
 
 class World:
@@ -116,11 +119,16 @@ class World:
             s = self.svcs[n]
             e = s.self_ms.copy()
             ok_rest = 1.0 - s.own_fail_p
+            slowest = np.zeros(self.minutes)
             for c in s.calls:
                 child_ms = c.ms + self.e_dur[c.callee] if c.is_service() else c.ms
                 child_fail = self.p_fail[c.callee] if c.is_service() else c.fail_p
-                e += c.prob * child_ms
+                if s.parallel:  # 並行：期望值近似成「最慢的那個」（每個呼叫的期望值取最大，忽略 max 的 Jensen 偏差）
+                    slowest = np.maximum(slowest, c.prob * child_ms)
+                else:
+                    e += c.prob * child_ms
                 ok_rest = ok_rest * (1.0 - c.prob * child_fail * (0.0 if c.swallow else 1.0))
+            e += slowest
             fail_rest = 1.0 - ok_rest
             tot_fail = s.crash_p + (1.0 - s.crash_p) * fail_rest
             self.e_dur[n] = s.crash_p * CRASH_MS + (1.0 - s.crash_p) * e
@@ -195,8 +203,11 @@ class World:
         else:
             self_total = self._ln(rng, float(svc.self_ms[m]))
             cursor = start + timedelta(milliseconds=self_total * PRE_CALL_SHARE)
+            fork, slowest = cursor, 0.0  # 並行：每個呼叫都從 fork 出發，結束後 cursor 推到最慢的那個
             failed_call = False
             for c in svc.calls:
+                if svc.parallel:
+                    cursor = fork
                 if rng.random() >= c.prob:
                     continue
                 sid = f"{rng.getrandbits(64):016x}"
@@ -220,9 +231,12 @@ class World:
                                        "duration": {"us": max(int(dur_c * 1000), 1)}, "destination": {"service": {"resource": res}}},
                               "event": {"outcome": "failure" if sfailed else "success"}})
                 cursor += timedelta(milliseconds=dur_c)
+                slowest = max(slowest, dur_c)
                 if sfailed and not c.swallow:
                     failed_call = True
                     err_msg, err_parent = f"{c.callee} call failed ({c.name or c.subtype})", sid
+            if svc.parallel:
+                cursor = fork + timedelta(milliseconds=slowest)
             dur = (cursor - start).total_seconds() * 1000 + self_total * (1 - PRE_CALL_SHARE)
             own = rng.random() < float(svc.own_fail_p[m])
             failed = own or failed_call

@@ -22,14 +22,14 @@ import pandas as pd
 from aiops.engine.context import AnomalyResult
 from aiops.engine.errors import BadRequest
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import DetectorOperator
+from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, DetectorOperator, scale_floor
 
 _MAD_TO_STD = 1.4826
 
 
 class _LagCompareDetector(DetectorOperator):
     default_offset: ClassVar[int] = 0
-    tunable = {"threshold": (4.0, 1.0, 20.0)}
+    tunable = {"threshold": (4.0, 1.0, 20.0), **SCALE_FLOOR_TUNABLE}
     other_params = frozenset({"offset_minutes", "mode"})
 
     def __init__(self, **params: Any):
@@ -69,7 +69,9 @@ class _LagCompareDetector(DetectorOperator):
             raise BadRequest(f"{self.operator_name} 訓練期間沒有 {self.offset} 分鐘前的資料可以比")
         self.center_ = float(d.median())
         scale = float((d - self.center_).abs().median() * _MAD_TO_STD)
-        self.scale_ = scale or float(d.std(ddof=0)) or 1.0
+        # 退路：MAD → 標準差 → 底噪（差值序列的中心常常是 0，相對下限沒作用時：min_scale、整數 1、最後 1.0）
+        self.scale_ = scale or float(d.std(ddof=0)) or scale_floor(0.0, d, self.param("min_scale"),
+                                                                    self.param("min_scale_ratio"), center=self.center_)
         self.fitted = True
         return self
 

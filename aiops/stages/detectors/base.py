@@ -287,6 +287,41 @@ def layer_params(cls: type[DetectorOperator], tuned: dict[str, Any], yaml_params
     return deep_merge(deep_merge({k: v for k, v in tuned.items() if k in allowed}, yaml_params), override)
 
 
+# 分母底噪的兩個 tunable（mad、zscore、hourly_baseline、quantile_drift、compare 都有）：
+#   min_scale：絕對下限，單位跟指標一樣（失敗數填 0.5、延遲 µs 填 5000）；0 = 不用
+#   min_scale_ratio：相對下限，|中心值| × 這個比例（預設 1%：延遲 1,000,000 µs 的序列分母至少 10,000）
+SCALE_FLOOR_TUNABLE: dict[str, tuple[float, float, float]] = {
+    "min_scale": (0.0, 0.0, 1e12),
+    "min_scale_ratio": (0.01, 0.0, 1.0),
+}
+
+
+def is_integer_series(values: pd.Series | np.ndarray) -> bool:
+    """全部是整數值（失敗數、請求數這類計數）。空序列或有 NaN／無限大都不算。"""
+    arr = np.asarray(values, dtype=float)
+    return bool(arr.size) and bool(np.isfinite(arr).all()) and bool((arr == np.round(arr)).all())
+
+
+def scale_floor(scale: float, values: pd.Series | np.ndarray | None = None, min_scale: float = 0.0,
+                min_scale_ratio: float = 0.01, *, center: float | None = None, integer: bool | None = None) -> float:
+    """分母的保底：max(算出來的 scale, 絕對下限 min_scale, |中心| × min_scale_ratio, 整數序列的 1 個單位)。
+
+    整數序列（失敗數、請求數）MAD 常常是 0：1 筆就是最小有意義的變動，分母至少 1——不然 2 筆失敗會變成百萬分。
+    中心與「是不是整數」預設從 values（訓練資料）算：中心取中位數；偵測時沒有訓練資料，就由 center／integer 傳進來
+    （演算法在 fit 時記在基準線裡）。
+    三個下限都是 0（min_scale=0、min_scale_ratio=0、中心為 0 或非整數）時退回 1.0，跟 quantile_drift／compare
+    既有的最後一層一致：寧可分數偏鈍，也不要除以趨近 0 的數把雜訊放大成異常。
+    底噪只在 scale 小於它時起作用；正常波動的序列 scale 遠大於中心的 1%，分數一分不變。
+    """
+    if center is None:
+        center = float(np.nanmedian(np.asarray(values, dtype=float))) if values is not None and len(values) else 0.0
+    if integer is None:
+        integer = values is not None and is_integer_series(values)
+    floor = max(float(min_scale), abs(float(center)) * float(min_scale_ratio), 1.0 if integer else 0.0)
+    out = max(float(scale) if np.isfinite(scale) else 0.0, floor)
+    return out if out > 0 else 1.0
+
+
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:
     if key not in routing:
         return None

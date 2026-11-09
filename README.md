@@ -292,6 +292,15 @@ curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_
 | `detector.rules` | 人訂的上下限、連續 N 點 | 有明確規格的指標 | `require_rule: false` 時只用核准的規則提案，沒有規則的序列不判 |
 | `detector.ensemble` | 前面幾個偵測節點的投票 | 想用交集／多數決壓誤報 | 接在偵測節點後面、`new_only` 前面；分母只算這條序列真的評估過資料的節點（見下方） |
 
+**分母底噪（`min_scale`／`min_scale_ratio`）**：`mad`、`zscore`、`hourly_baseline`、`quantile_drift`、`dod`／`wow` 的分母（MAD、標準差）都過 `stages/detectors/base.scale_floor`：取 max(算出來的值、`min_scale`、|中心| × `min_scale_ratio`、整數序列的 1 個單位)。以前 `mad` 在 MAD = 0 時除以 1e-6——失敗數序列 90% 是 0，平常 2 筆失敗就是 1,349,000 分（混沌場景 5 的誤報）；`zscore` 在 std = 0 時分數全 0，永遠不報。兩個都是 tunable（後台調參、節點 YAML、target `overrides` 都能改）：
+
+| 參數 | 預設 | 範圍 | 意思 |
+|---|---|---|---|
+| `min_scale` | 0 | 0～1e12 | 絕對下限，**單位跟指標一樣**：每分鐘失敗數填 0.5、延遲 µs 填 5000；0 = 不用。平台不知道指標單位，所以寫在 target 的 `overrides`（`it_otel.yaml` 範例 target 有示範） |
+| `min_scale_ratio` | 0.01 | 0～1 | 相對下限：中心值的 1%（延遲 1,000,000 µs 的序列分母至少 10,000）；沒填 `min_scale` 時的通用保底 |
+
+底噪只在 scale 趨近 0 時起作用：真實 11/3 五條延遲序列用預設參數重跑，373 個異常點連分數都一模一樣。`mad`／`zscore`／`hourly_baseline` 的基準線存原始的 MAD／標準差，底噪在偵測時才套，改 `min_scale` 不用等重訓；`quantile_drift`／`compare` 保留原本的退路（MAD → 標準差），最後一層才走底噪。多數決（`detector.ensemble`）不動。
+
 #### 每個服務跑哪些偵測器（target 白名單、overrides、止血）
 
 一條 workflow 的偵測節點是「菜單」，每個 target 自己點菜。三個機制，判斷順序是 **節點的 `exclude_entities` → 節點的 `include_entities` → target 的 `detectors`**，任何一關沒過，這個節點對這條序列就不跑（不載基準線、不載調參、不算投票）。
@@ -372,7 +381,7 @@ targets:
 
 | 根因算子 | 做法 | 需要 |
 |---|---|---|
-| `rca.root_cause.evidence`（`rca_report` 預設） | 這一輪撈到的 span：各服務**自身耗時**（span 耗時扣掉等下游的時間）與自身錯誤率的增量；被上游放大流量的服務，增量按流量倍數轉給放大者；前幾名拉不開或資料不足就回「證據不足」不指認。沒有 trace 的場景（工廠）退回 topological 並寫明；trace 來源連不上（例如 ES 重啟）則不退回、直接證據不足。候選的自身耗時增量裡，單一下游資源（`span.type` 是 db／external 的葉節點：Oracle、Redis、第三方 API）的等待佔 `min_dependency_share`（0.6）以上，就填 `dependency` 下鑽（例如 `tax-gw:443（external/http）`）：候選仍是服務、排名不變，報告與建議處置會說「去查它等的東西，不是它的程式」 | `ingestion.incident_traces`（已接好） |
+| `rca.root_cause.evidence`（`rca_report` 預設） | 這一輪撈到的 span：各服務**自身耗時**（span 耗時扣掉等下游的時間，定義見下方）與自身錯誤率的增量；被上游放大流量的服務，增量按流量倍數轉給放大者；前幾名拉不開或資料不足就回「證據不足」不指認。沒有 trace 的場景（工廠）退回 topological 並寫明；trace 來源連不上（例如 ES 重啟）則不退回、直接證據不足。候選的自身耗時增量裡，單一下游資源（`span.type` 是 db／external 的葉節點：Oracle、Redis、第三方 API）的等待佔 `min_dependency_share`（0.6）以上，就填 `dependency` 下鑽（例如 `tax-gw:443（external/http）`）：候選仍是服務、排名不變，報告與建議處置會說「去查它等的東西，不是它的程式」 | `ingestion.incident_traces`（已接好） |
 | `rca.root_cause.topological` | 傳播圖上沒有異常上游的實體，依最早出現排序 | 拓撲或 Lot 流向 |
 | `rca.root_cause.pagerank` | 反向傳播圖上的 Personalized PageRank：拖垮越多下游、越異常的上游排越前 | 拓撲或 Lot 流向 |
 | `rca.root_cause.cross_correlation` | 事件時段原始時序的時間位移互相關：誰的波動領先別人。前處理 `preprocess` 可選 `diff`（預設，一階差分）或 `hybrid`（只在異常時段保留穩健 z 分數、其他歸零） | 前面要有 `ingestion.incident_series`（`rca_report_correlation.yaml` 已經接好）；這是相關不是因果 |
@@ -424,6 +433,8 @@ targets:
 **三行式止血摘要**（`enrichment.llm_briefing`，放在 `rca.report` 之後）：context 只放已算好的東西（事件實體與時長、根因候選的 `attribution`、範例 trace、前 3 個日誌樣板、命中的 Runbook），`provider: noop`（預設）直接用模板拼三行（【一句話根因】【立即止血動作】【驗證與排除項】，數字一定精確）；設了供應商就讓模型寫、平台驗：三個鍵都要有且以規定的【】開頭、≤ 200 字；拓撲裡有但不在白名單（事件實體、歸因資源、範例 trace 端點與 id、Runbook id）的服務名不准出現；每個數字要能在 context 裡找到 ±10% 以內的；kafka／dns／redis 這類常見幻覺詞只有 context 裡有才放行。不過就退回模板並把原因寫在 `narrative.briefing_rejected`。OpenAI 相容供應商預設帶 `response_format: json_object`（`json_mode`，Anthropic 沒有對應參數、靠 prompt）。原本的 `enrichment.llm_summary`（summary／claims 總結）不變，兩個節點各自獨立。
 
 報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`trace_evidence` 段落優先用這一輪撈到的 span（事件前 vs 事件期間的請求、總耗時、自身耗時、錯誤率；資料帶 `span.type` 時再拆成「程式自身」與「等待每個下游資源」各多少、資源失敗幾筆），加一條代表性 trace 的呼叫鏈：**失敗優先、耗時次之**（入口 `event.outcome=failure` → HTTP 狀態碼 ≥ 500 → 子 span 有失敗 → 最慢），以前只挑最慢會挑到 244 ms／200 的正常慢請求。`ingestion.incident_traces` 設了 `max_before_minutes`（內建 RCA YAML 設 60）時，事件裡的服務在事件前入口請求不到 `min_entry_spans`（20）就把基準窗 15 → 30 → 60 分鐘往前擴（只撈多出來的前段、窗口連續、不跨週），段落第一行會標出「已由 15 分鐘擴展至 N 分鐘」。沒有才退回資料庫裡的 trace 時序。根因算子沒給候選時，「可能的源頭」段落會寫明證據不足的原因，不再整段消失。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
+
+**自身耗時怎麼算（`stages/rca/spans.self_times`）**：自身 = span 耗時 − `span.type = app` 的子 span 長度加總 − 其他子 span（db、external、cache、下游服務…）區間的**聯集**長度，下限 0。每個子 span 的 `[開始, 開始+耗時]` 先夾進父 span 的區間、排序、合併重疊：`asyncio.gather` 同時打 DB 與金流（父 100 ms、兩個子各 60 ms、同一起點）自身是 40 ms，不是以前「耗時減加總」的 −20 夾成 0；依序呼叫的聯集 = 加總，數字跟以前一樣。`app` 子 span 是服務自己的程式碼、跟同一個請求的 I/O 先後發生，所以加總不聯集——真實 11/3 資料的 app span 從 0 開始、外部呼叫 2～5 ms 處就開始，照字面聯集會多算 4～7 ms 自身。並行時每個下游的「等待」各算各的，所以「自身＋各資源等待」可以大於總耗時（兩個並行 60 ms 等待就是 120 ms），這是刻意的：每個資源真的各讓請求等了那麼久。子 span 超出父 span 區間超過 1 ms（`@timestamp` 是毫秒精度，1 ms 以內當截斷誤差）就是時鐘偏移：超出的部分不扣，筆數記在 `ServiceWindowStats.clock_skew_spans`，`trace_evidence` 段落有數字才多印一行。混沌場景 11 驗證並行與時鐘偏移兩種情況。
 
 ### 學習閉環
 

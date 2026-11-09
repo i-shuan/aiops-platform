@@ -41,6 +41,10 @@ MARGIN = 1.05
 MIN_SCORES = 1000  # 少於這麼多個正常分數，99.9% 分位數只是最大值的雜訊，不用
 
 
+def _ceil4(x: float) -> float:
+    return math.ceil(x * 10000) / 10000 if math.isfinite(x) else x
+
+
 def _in_windows(ts: pd.Timestamp, windows) -> bool:
     return any(pd.Timestamp(w.start) <= ts <= pd.Timestamp(w.end) for w in windows)
 
@@ -95,7 +99,9 @@ def infer(ctx: PipelineContext, cls: type[DetectorOperator], params: dict[str, A
     out = {"s_max": round(s_max, 4), "q": round(q, 4) if q is not None else None, "quantile": QUANTILE,
            "q_points": len(normal_scores), "q_days": days, "lookback_days": LOOKBACK_DAYS, "margin": MARGIN,
            "excluded_windows": len(exclusions), "series": per_series,
-           "target": round(max(s_max * MARGIN, q if q is not None else -math.inf), 4)}
+           # 無條件進位到小數 4 位、而且用回報出去的（四捨五入後的）s_max 算：門檻永遠 >= 報表上的 s_max × 1.05，
+           # 不會因為四捨五入少了 0.0001 讓「剛好等於誤報分數 ×1.05」的點又越線（分數小到兩位數時才看得到這個誤差）
+           "target": _ceil4(max(round(s_max, 4) * MARGIN, round(q, 4) if q is not None else -math.inf))}
     if q is None:
         out["note"] = f"過去 {LOOKBACK_DAYS} 天只有 {len(normal_scores)} 個正常分數（< {MIN_SCORES}），不算分位數，只用 S_max × {MARGIN}"
     if reasons:

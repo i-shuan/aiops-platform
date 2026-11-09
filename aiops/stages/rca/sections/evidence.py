@@ -66,6 +66,10 @@ def _from_spans(incident, ctx, traces_datasource: str | None = None) -> str:
                 for res in resources)
             app = (f"{b.app_ms_per_request:.1f}→" if b else "") + f"{d.app_ms_per_request:.1f} ms"
             lines.append(f"    程式自身 {app}；{waits}")
+    skew = {svc: d.clock_skew_spans for svc, d in during.items() if d.clock_skew_spans}
+    if skew:  # 沒有時鐘偏移就一字不多
+        lines.append("（時鐘偏移：事件期間有子 span 超出父 span 的時間範圍，超出的部分沒算進扣除——"
+                     + "、".join(f"{svc} {n} 筆" for svc, n in sorted(skew.items())) + "）")
     sample = sample_trace(spans, start, end)
     if sample is not None:
         link = _trace_link(sample.trace_id, as_utc(sample.ts), traces_datasource)
@@ -84,7 +88,7 @@ def _from_spans(incident, ctx, traces_datasource: str | None = None) -> str:
             lines.append(f"  {'  ' * depth}{s.service}{what}：{s.duration_ms:.1f} ms（自身 {own:.1f} ms）{'，失敗' if s.error else ''}")
         if len(chain) > MAX_CHAIN_LINES:
             lines.append(f"  …（還有 {len(chain) - MAX_CHAIN_LINES} 個 span）")
-    lines.append("＊ = 事件裡的服務。自身耗時 = span 耗時扣掉直接子 span 的耗時（含等外部資源）；程式自身 = 再扣掉等資源的時間。")
+    lines.append("＊ = 事件裡的服務。自身耗時 = span 耗時扣掉直接子 span 佔用的時間（並行的 I/O 子 span 重疊的部分只扣一次；含等外部資源）；程式自身 = 再扣掉等資源的時間。")
     return "\n".join(lines)
 
 
