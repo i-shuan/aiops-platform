@@ -22,6 +22,7 @@ from aiops.engine.context import (
 from aiops.engine.params import pick_most_specific
 from aiops.engine.topology import lot_edges_from_paths
 from aiops.engine.types import AnomalyEvent, Incident, as_utc
+from aiops.storage.db import run_in_transaction
 from aiops.storage.repository import (
     ActiveConfigs,
     Anomalies,
@@ -184,39 +185,64 @@ class StorageHooks:
                                         artifact=st.artifact, artifact_format=st.artifact_format)
             if saved is None:  # 別的 worker 先寫了：保留它較新的基準線，這次的丟掉（不是錯誤）
                 ctx.log(f"baseline:{node}:{target.entity}:conflict-kept-newer")
-        # 每筆異常帶著自己的偵測器與節點（不是用「最後一個跑的偵測器」一律蓋上）
-        Anomalies.create_many([
-            {"pipeline": ctx.pipeline, "entity": e.entity, "metric": e.metric, "ts": e.ts,
-             "value": float(e.value) if e.value is not None else 0.0, "score": float(e.score),
-             "detector_name": e.detector, "detector_node": e.detector_node, "level": e.level, "attrs": e.attrs}
-            for e in ctx.anomalies
-        ])
+        # 異常點不在這裡寫：跟事件群一起在 persist_batch 的單一交易落地。以前每條序列先寫，送通知失敗時
+        # 異常已經在庫裡、下一輪 detector.new_only 會把同一批當成「處理過」丟掉，那次告警就永遠發不出去
 
     def persist_batch(self, ctx: PipelineContext) -> None:
+        """一筆交易寫完這一輪的最終結果：異常點、新事件群、進行中事件群的更新、外部匯入異常標成已處理。
+        資料庫短暫斷線會整筆回復後重試（db.run_in_transaction）；失敗就什麼都沒寫，下一輪會重新偵測到同一批。
+        「已通知」紀錄與結案不在這裡：通知是在寫入之後才送（notifier 在 after_persist），要等送成功（finalize_batch）。"""
+        loaded = set(ctx.incident_ids)  # 載入進來的既有事件群（例如 RCA）已經存在，只寫新產生的。先算好：重試時不能被第一次的結果污染
+        new_ids: dict[str, int] = {}
+
+        def write() -> None:
+            new_ids.clear()  # 每次嘗試都是全新的交易，上一次寫的已經回復
+            # 每筆異常帶著自己的偵測器與節點（不是用「最後一個跑的偵測器」一律蓋上）
+            Anomalies.create_many([
+                {"pipeline": ctx.pipeline, "entity": e.entity, "metric": e.metric, "ts": e.ts,
+                 "value": float(e.value) if e.value is not None else 0.0, "score": float(e.score),
+                 "detector_name": e.detector, "detector_node": e.detector_node, "level": e.level, "attrs": e.attrs}
+                for e in ctx.detected_anomalies
+            ])
+            for inc in ctx.incidents:
+                if inc.fingerprint in loaded:
+                    continue
+                entities = set(inc.entities)
+                snapshot = {
+                    "topology": [[a, b] for a, b in ctx.topology if a in entities or b in entities],
+                    "lot_edges": [{"from": e.upstream, "to": e.downstream, "lots": e.lots} for e in ctx.lot_edges
+                                  if e.upstream in entities or e.downstream in entities],
+                }
+                row = Incidents.create(inc.uid, ctx.pipeline, inc.to_dict(), inc.severity, inc.suppressed_by,
+                                       ctx.pipeline, snapshot)
+                new_ids[inc.fingerprint] = row["id"]
+            for o in ctx.open_incidents:  # 吸收了新異常或升級的進行中事件群：快照寫回
+                if o.changed:
+                    Incidents.update_snapshot(o.id, o.incident.to_dict(), o.severity)
+            ExternalAnomalies.mark_processed(ctx.external_anomaly_ids)
+
+        run_in_transaction(write)
+        ctx.incident_ids.update(new_ids)
+
+    def finalize_batch(self, ctx: PipelineContext) -> None:
+        """通知都送出去之後才記的東西：已通知（冷卻用，從真正的最後一筆起算）、結案。
+        送失敗不會跑到這裡：事件群留在進行中，下一輪心跳用同一組標籤補送（含 endsAt 結案）。"""
         sent: dict[str, int] = {}
         for n in ctx.notifications:
             uid = n.labels.get("incident_uid", "")
             sent[uid] = sent.get(uid, 0) + 1
-        loaded = set(ctx.incident_ids)  # 載入進來的既有事件群（例如 RCA）已經存在，只寫這一輪新產生的
-        for inc in ctx.incidents:
-            if inc.fingerprint in loaded:
-                continue
-            entities = set(inc.entities)
-            snapshot = {
-                "topology": [[a, b] for a, b in ctx.topology if a in entities or b in entities],
-                "lot_edges": [{"from": e.upstream, "to": e.downstream, "lots": e.lots} for e in ctx.lot_edges
-                              if e.upstream in entities or e.downstream in entities],
-            }
-            row = Incidents.create(inc.uid, ctx.pipeline, inc.to_dict(), inc.severity, inc.suppressed_by,
-                                   ctx.pipeline, snapshot)
-            ctx.incident_ids[inc.fingerprint] = row["id"]
-            if not inc.suppressed_by and sent.get(inc.uid):
-                Notifications.record(row["id"], inc.fingerprint, inc.severity, inc.end, sent[inc.uid])
-        for o in ctx.open_incidents:  # 吸收了新異常或升級的進行中事件群：快照寫回；冷卻從真正的最後一筆起算
-            if o.changed:
-                Incidents.update_snapshot(o.id, o.incident.to_dict(), o.severity)
-                if sent.get(o.uid):
+
+        def write() -> None:
+            for inc in ctx.incidents:
+                incident_id = ctx.incident_ids.get(inc.fingerprint)
+                if incident_id is not None and not inc.suppressed_by and sent.get(inc.uid):
+                    Notifications.record(incident_id, inc.fingerprint, inc.severity, inc.end, sent[inc.uid])
+            for o in ctx.open_incidents:
+                # 有變動（吸收、升級）就補一筆；沒變動的心跳重送不每輪記，但第一次推送失敗、這一輪才真的送到的要記
+                if sent.get(o.uid) and (o.changed or not Notifications.exists_for(o.id)):
                     Notifications.record(o.id, o.incident.fingerprint, o.severity, o.incident.end, sent[o.uid])
-        for incident_id in ctx.resolved_incident_ids:
-            Incidents.mark_resolved(incident_id, ctx.now.replace(tzinfo=None))
-        ExternalAnomalies.mark_processed(ctx.external_anomaly_ids)
+            for incident_id in ctx.resolved_incident_ids:
+                Incidents.mark_resolved(incident_id, ctx.now.replace(tzinfo=None))
+
+        if sent or ctx.resolved_incident_ids:
+            run_in_transaction(write)

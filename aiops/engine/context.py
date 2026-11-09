@@ -259,6 +259,9 @@ class PipelineContext:
     anomaly_result: AnomalyResult | None = None
     new_detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 這次新訓練的，最後才存
     anomalies: list[AnomalyEvent] = field(default_factory=list)
+    # 這一輪各序列偵測出來、要寫進資料庫的異常（由引擎彙整；不含從資料庫載入的外部匯入異常，那些另有自己的表）。
+    # 跟通知一起在寫入階段落地，不再每條序列先寫：送通知失敗時整輪一起回復，下一輪才會重新偵測到同一批
+    detected_anomalies: list[AnomalyEvent] = field(default_factory=list)
     incidents: list[Incident] = field(default_factory=list)
     incidents_built: bool = False  # ensure_incidents 建過了：之後清單變空也不再從 anomalies 重建
     incident_ids: dict[str, int] = field(default_factory=dict)  # 事件群 fingerprint -> 已存的 id（持久化後填）

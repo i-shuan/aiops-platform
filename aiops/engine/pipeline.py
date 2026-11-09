@@ -18,7 +18,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
-from aiops.engine.errors import InfrastructureError, PlatformError, WorkflowError
+from aiops.engine.errors import InfrastructureError, NotFound, PlatformError, WorkflowError
 from aiops.engine.registry import OperatorRegistry
 
 
@@ -84,6 +84,10 @@ class Workflow(BaseModel):
     # 明確指定拓撲／Lot 流向時優先於從 trace、Lot 履歷自動推導的結果；給空清單代表「不要用」
     topology: list[tuple[str, str]] | None = None
     lot_edges: list[dict[str, Any]] | None = None
+    # 資料斷流：這一輪「抓不到資料」（資料源回沒資料、或抓回來是空的）的序列比例達到這個值，整輪視為基礎設施錯誤，
+    # 心跳不續命、備援通報會響。預設 1.0 = 全部序列都抓不到才算（PVC 滿、APM 寫不進去就是這個樣子；
+    # 個別序列本來就稀疏的只記錯誤）。查詢寫錯（BadRequest）是設定問題，不算斷流
+    max_failed_target_ratio: float = Field(1.0, gt=0, le=1)
 
     @model_validator(mode="after")
     def _unique_names(self):
@@ -111,6 +115,10 @@ class Hooks(Protocol):
 
     def persist_batch(self, ctx: PipelineContext) -> None: ...
 
+    def finalize_batch(self, ctx: PipelineContext) -> None:
+        """after_persist 節點（通知）都成功之後才做的紀錄：已通知、結案。通知送失敗就不會呼叫到。"""
+        ...
+
 
 class NullHooks:
     def load_batch(self, ctx: PipelineContext) -> None: ...
@@ -120,6 +128,8 @@ class NullHooks:
     def persist_target(self, ctx: PipelineContext) -> None: ...
 
     def persist_batch(self, ctx: PipelineContext) -> None: ...
+
+    def finalize_batch(self, ctx: PipelineContext) -> None: ...
 
 
 def _run_node(node: NodeSpec, op: Any, ctx: PipelineContext) -> PipelineContext:
@@ -241,7 +251,9 @@ class Pipeline:
         self.hooks.load_batch(batch)
 
         if self.target_nodes:
-            for spec in (targets if targets is not None else self.workflow.targets):
+            specs = list(targets if targets is not None else self.workflow.targets)
+            starved: list[str] = []  # 抓不到資料的序列：資料源說沒資料（NotFound）、或抓回來是空的
+            for spec in specs:
                 ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request)
                 skipped = {name: reason for name in self._detectors
                            if (reason := self._skip_reason(name, ctx.target)) is not None}
@@ -260,17 +272,29 @@ class Pipeline:
                     if strict:
                         raise
                     batch.errors.append(TargetError(ctx.target.entity, str(e)))
+                    if isinstance(e, NotFound):
+                        starved.append(ctx.target.entity)
                     continue
+                if ctx.raw_df is not None and ctx.raw_df.empty:
+                    starved.append(ctx.target.entity)
                 batch.anomalies.extend(ctx.anomalies)
+                batch.detected_anomalies.extend(ctx.anomalies)
                 batch.audit.extend(ctx.audit)
                 batch.errors.extend(ctx.errors)  # optional 節點在這條序列留下的錯誤
                 batch.result.update(ctx.result)
+            if specs and starved and len(starved) / len(specs) >= self.workflow.max_failed_target_ratio:
+                # 全部（或太多）序列都抓不到資料：不是「今天剛好沒異常」，是資料進不來（PVC 滿、APM 寫不進去、索引不見）。
+                # 當成基礎設施錯誤：這一輪不算成功，watchdog 不續命，排程的備援通報會響
+                shown = "、".join(starved[:10]) + ("…" if len(starved) > 10 else "")
+                raise InfrastructureError(f"資料斷流：{len(starved)}/{len(specs)} 條序列抓不到資料（{shown}），"
+                                          f"達到 max_failed_target_ratio={self.workflow.max_failed_target_ratio:g}，這一輪不算成功")
 
         for node, op in self.batch_nodes:
             batch = _run_node(node, op, batch)
         self.hooks.persist_batch(batch)
-        for node, op in self.after_persist_nodes:
+        for node, op in self.after_persist_nodes:  # 通知在寫入成功之後才送：送失敗時事件群已是進行中，下一輪心跳補送
             batch = _run_node(node, op, batch)
+        self.hooks.finalize_batch(batch)  # 通知都送出去了才記「已通知」與結案
         return batch
 
 

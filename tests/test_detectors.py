@@ -177,7 +177,7 @@ def test_execute_emits_events_and_saves_new_baseline():
 def test_saved_baseline_is_used_instead_of_refitting():
     """已存的基準線學的是「正常 50」：用這一輪資料重 fit 會把 90 當成常態（全是 90 的窗），用已存的就抓得到。"""
     state = DetectorState({"mean": 50.0, "std": 1.0}, T0)
-    all_high = _df([90.0] * 30)
+    all_high = _df([90.0] * 60)  # 60 點：剛好夠第一次訓練（min_train_points 預設 60），少於這個數會不學、不判
     assert not any(OperatorRegistry.create("detector.zscore").execute(_ctx(all_high)).anomaly_result.is_anomaly)
     ctx = OperatorRegistry.create("detector.zscore").execute(_ctx(all_high, detector_states={"detector.zscore": state}))
     assert all(ctx.anomaly_result.is_anomaly) and ctx.new_detector_states == {}

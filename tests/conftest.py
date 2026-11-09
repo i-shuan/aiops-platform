@@ -53,6 +53,16 @@ def retry_waits(monkeypatch):
 
 
 @pytest.fixture
+def db_retry_waits(monkeypatch):
+    """資料庫寫入交易的重試（storage/db.run_in_transaction）不要真的睡：記下每次要等幾秒。"""
+    from aiops.storage import db
+
+    waits: list[float] = []
+    monkeypatch.setattr(db.time, "sleep", waits.append)
+    return waits
+
+
+@pytest.fixture
 def client():
     return TestClient(create_app(), headers=AUTH)
 

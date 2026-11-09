@@ -16,7 +16,7 @@ from aiops.stages.notification.transport import AlertmanagerTransport, LogTransp
 class LogNotifier(BaseOperator):
     """只寫日誌、不真的送。開發用。"""
 
-    scope = "batch"
+    scope = "after_persist"
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         LogTransport().send(ctx.notifications)
@@ -26,9 +26,12 @@ class LogNotifier(BaseOperator):
 @OperatorRegistry.register("notifier.auto")
 class AutoNotifier(BaseOperator):
     """依環境變數 AIOPS_NOTIFIER 選擇出口：log（預設，只寫日誌）或 alertmanager。
-    內建 workflow 用它，部署時才決定；要在 YAML 裡固定，就改用 notifier.log／notifier.alertmanager。"""
+    內建 workflow 用它，部署時才決定；要在 YAML 裡固定，就改用 notifier.log／notifier.alertmanager。
 
-    scope = "batch"
+    所有 notifier 都在 after_persist：事件群先寫進資料庫、通知才送出。送不出去時事件群已經是「進行中」，
+    下一輪 alert.heartbeat 會用同一組標籤補送；通知紀錄與結案要等送成功（hooks.finalize_batch）才寫。"""
+
+    scope = "after_persist"
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         kind = os.environ.get("AIOPS_NOTIFIER", "log").strip().lower() or "log"
@@ -93,7 +96,7 @@ class AlertmanagerNotifier(BaseOperator):
     token 只從環境變數 AIOPS_ALERTMANAGER_TOKEN 讀，不寫在 YAML。送不出去丟 InfrastructureError，整輪失敗、不會假裝成功。
     """
 
-    scope = "batch"
+    scope = "after_persist"
 
     def __init__(self, endpoint: str | None = None):
         self.endpoint = endpoint

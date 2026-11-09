@@ -25,6 +25,8 @@ class DetectorOperator(BaseOperator):
     algorithm: ClassVar[str] = ""
     # True：df 除了 ts、value 還必須有 peer_* 欄位
     requires_peers: ClassVar[bool] = False
+    # False：不需要歷史資料學基準線（靜態規則），訓練點數再少也照判。True 的演算法訓練點數 < min_train_points 就不學、不判
+    requires_training: ClassVar[bool] = True
     # 可調參數：名稱 -> (預設值, 最小值, 最大值)。調參（含 LLM 抽規則）只能改這些，且不能超出範圍
     tunable: ClassVar[dict[str, tuple[float, float, float]]] = {}
     # 不開放自動調參、但合法的參數（例如靜態規則的上下限）
@@ -50,6 +52,9 @@ class DetectorOperator(BaseOperator):
             if "threshold" not in self.tunable:
                 raise TypeError(f"{self.operator_name or type(self).__name__} 沒有 threshold，不能設 warning_ratio")
         self.warning_ratio = ratio
+        self.min_train_points = int(behaviour.get("min_train_points", DEFAULT_MIN_TRAIN_POINTS))
+        if self.min_train_points < 1:
+            raise TypeError("min_train_points 至少 1")
         self.params = params
         self.fitted = False
 
@@ -125,18 +130,20 @@ class DetectorOperator(BaseOperator):
         df = ctx.raw_df
         state = ctx.detector_states.get(key)
         base_version = state.version if state else 0  # 寫回時帶上，資料庫才能偵測並發覆蓋
-        if ctx.train_df is not None:  # 批次訓練：基準線過期或還沒有
-            train = self._training_frame(ctx, ctx.train_df)
+        if ctx.train_df is not None or state is None:
+            # 批次訓練（基準線過期或還沒有）；完全沒有訓練窗（第一次、沒設 train_lookback）就用這一輪的資料
+            train = self._training_frame(ctx, ctx.train_df if ctx.train_df is not None else df)
+            if type(self).requires_training and len(train) < self.min_train_points:
+                # 冷啟動／資料太少：不學、不判、不投票（不進 detector_runs），下一輪資料夠了再學。
+                # 幾十個點學到的基準線不可信；服務一上線就壞的話，還會把壞的狀態學成正常
+                ctx.log(f"train:{key}:too-few-points:{len(train)}<{self.min_train_points}")
+                return ctx
             algo.fit(train)
             ctx.new_detector_states[key] = self._snapshot(algo, ctx, train, base_version)
-        elif state is not None:
+        else:
             algo.load_state(state.state)
             if state.artifact is not None:
                 algo.load_artifact(state.artifact_format, state.artifact)
-        else:  # 第一次：用這一輪的資料學基準線並保存
-            train = self._training_frame(ctx, df)
-            algo.fit(train)
-            ctx.new_detector_states[key] = self._snapshot(algo, ctx, train, base_version)
 
         ctx.detector_runs.append(key)  # 真的評估過這段資料才算參與（沒抓到異常 = 反對票）
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
@@ -168,7 +175,7 @@ class DetectorOperator(BaseOperator):
         if not removed:
             return df
         kept = df[~dirty].reset_index(drop=True)
-        if len(kept) < max(MIN_TRAIN_POINTS, len(df) // 2):
+        if len(kept) < max(EXCLUSION_MIN_KEEP, len(df) // 2):
             ctx.log(f"train:{self.state_key}:exclusion-skipped:{removed}/{len(df)}pts-would-leave-too-little")
             return df
         ctx.log(f"train:{self.state_key}:excluded:{removed}pts")
@@ -238,8 +245,11 @@ ROUTING_PARAMS = frozenset({"include_entities", "exclude_entities"})
 # 每個偵測節點都能寫的行為參數：
 #   exclude_incidents（預設 true）：訓練基準線時排除這個實體的歷史事故與維護窗
 #   warning_ratio（預設不開）：分數超過「門檻 × 這個比例」但還沒越線時記成 warning（預警），例如 0.8
-NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio"})
-MIN_TRAIN_POINTS = 30
+#   min_train_points（預設 60 = 每分鐘一點的 1 小時）：訓練點數不到就不學、不判；requires_training=False 的算子不受影響
+NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio", "min_train_points"})
+DEFAULT_MIN_TRAIN_POINTS = 60
+# 訓練排除事故窗後至少要剩這麼多點（或原本的一半），不然退回用全部資料
+EXCLUSION_MIN_KEEP = 30
 
 
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:

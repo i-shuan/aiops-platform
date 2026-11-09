@@ -16,6 +16,7 @@ class StaticRuleDetector(DetectorOperator):
 
     algorithm = "rules"
     other_params = frozenset({"upper", "lower", "consecutive", "require_rule"})
+    requires_training = False  # 上下限是人訂的，不用歷史資料；服務剛上線只有一個點也照判，給統計算子還不能學的時候兜底
 
     @property
     def has_rule(self) -> bool:

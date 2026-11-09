@@ -93,6 +93,11 @@ class Notifications:
         """cutoff 之後有通知過的紀錄（冷卻判斷用）。"""
         return crud.find_between(NotificationRow, "last_event_ts", cutoff, datetime(9999, 1, 1))
 
+    @staticmethod
+    def exists_for(incident_id: int) -> bool:
+        """這個事件群有沒有任何一筆已通知紀錄（第一次推送失敗、靠心跳補送成功的事件群，要在補送那一輪補記）。"""
+        return crud.find_one(NotificationRow, incident_id=incident_id) is not None
+
 
 class Anomalies:
     @staticmethod

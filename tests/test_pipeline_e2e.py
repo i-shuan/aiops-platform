@@ -84,15 +84,25 @@ def test_manual_resolve_sends_ends_at_and_cannot_be_done_twice(now, sent):
         run("admin_incident_resolve", request=UidRef(uid=uid), now=now)
 
 
-def test_notify_failure_fails_the_run_and_stores_no_half_state(now, monkeypatch):
+def test_notify_failure_fails_the_run_keeps_the_incident_open_and_records_no_notification(now, monkeypatch, sent):
+    """通知在寫入之後才送：送不出去時事件群已經是進行中，但「已通知」不能記（根本沒送到）。
+    以前是「通知沒送就不存事件群、下一輪重新處理」，實際上異常點已經先寫進去，下一輪會被 new_only 丟掉，那次告警永遠發不出去。"""
     monkeypatch.setenv("AIOPS_NOTIFIER", "alertmanager")
     monkeypatch.setenv("AIOPS_ALERTMANAGER_URL", "http://127.0.0.1:1")  # 沒人在聽
     from aiops.engine.errors import InfrastructureError
 
     with pytest.raises(InfrastructureError):
         _go(now)
-    assert Incidents.list_open(WF) == []  # 通知沒送出去，事件群就不存（下一輪會重新處理同一批）
+    assert len(Incidents.list_open(WF)) == 1  # 事件群存成進行中，下一輪心跳會用同一組標籤補送
     assert Notifications.since(now.replace(tzinfo=None) - timedelta(days=1)) == []
+    monkeypatch.setenv("AIOPS_NOTIFIER", "log")
+    uid = Incidents.list_open(WF)[0]["uid"]
+    _go(now + timedelta(minutes=5))
+    # 補送了同一張卡（同一個 incident_uid）、沒有重開一張。mock 的尖峰在 11:30，到 12:05 已安靜 35 分鐘，
+    # 所以補送的這一則同時就是結案（endsAt），事件群也在通知送成功後才標成已結案
+    assert [n.labels["incident_uid"] for n in sent] == [uid] and sent[0].ends_at is not None
+    assert Incidents.list_open(WF) == [] and Incidents.get_by_uid(uid)["status"] == "resolved"
+    assert len(Notifications.since(now.replace(tzinfo=None) - timedelta(days=1))) == 1
 
 
 def test_unknown_notifier_is_infrastructure_error(now, monkeypatch):
@@ -237,8 +247,7 @@ def test_detection_reads_the_trace_source_like_any_metric(now, traces):
 
 
 @pytest.mark.parametrize("query, why", [("cart/latency", "trace 欄位只能是 count, error_rate, p95_ms"),
-                                        ("cart", "trace 查詢格式是「服務/欄位」"),
-                                        ("nobody/p95_ms", "trace 在這段時間沒有 nobody 的資料")])
+                                        ("cart", "trace 查詢格式是「服務/欄位」")])
 def test_bad_trace_queries_are_target_errors(now, traces, query, why):
     from aiops.engine.pipeline import TargetSpec
 
@@ -246,6 +255,16 @@ def test_bad_trace_queries_are_target_errors(now, traces, query, why):
     # 只記在這條 target、原因要對得上；不能是別的錯誤剛好讓 errors 非空
     assert [e.entity for e in ctx.errors] == ["x"] and why in ctx.errors[0].message
     assert ctx.anomalies == []
+
+
+def test_the_only_target_having_no_data_is_data_starvation_not_a_quiet_round(now, traces):
+    """查詢合法但整段都沒資料：這一輪唯一的序列抓不到 = 1/1 斷流，整輪是基礎設施錯誤（以前只記錯誤、當成功）。"""
+    from aiops.engine.errors import InfrastructureError
+    from aiops.engine.pipeline import TargetSpec
+
+    with pytest.raises(InfrastructureError, match="資料斷流：1/1") as e:
+        _go(now, targets=[TargetSpec(source_type="trace", query="nobody/p95_ms", entity="x")])
+    assert "x" in str(e.value)
 
 
 def test_derived_topology_merges_incidents_and_explicit_empty_topology_disables_it(now, traces):
