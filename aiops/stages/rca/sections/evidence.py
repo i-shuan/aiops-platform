@@ -12,7 +12,8 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.notification.links import explore_url, grafana_base_url
 from aiops.stages.rca.base import RcaSection
-from aiops.stages.rca.spans import call_chain, window_stats
+from aiops.stages.rca.spans import (call_chain, is_resource_leaf, resource_kinds, resource_label, sample_trace,
+                                    sample_trace_reason, window_stats)
 
 _TRACE_MARGIN = timedelta(minutes=10)
 MAX_CHAIN_LINES = 15
@@ -38,8 +39,13 @@ def _from_spans(incident, ctx, traces_datasource: str | None = None) -> str:
     before = window_stats(spans, first_ts, start) if first_ts < start else {}
     during = window_stats(spans, start, end)
     base_min = (start - first_ts).total_seconds() / 60
+    kinds = resource_kinds(spans)
     lines = [f"這一輪撈到 {len(spans)} 個 span、{len({s.trace_id for s in spans})} 條 trace；"
              f"事件前 {base_min:.0f} 分鐘 vs 事件期間（每請求）："]
+    lookback = ctx.rca_trace_lookback
+    if lookback and lookback[0] != lookback[1]:
+        lines.append(f"（事件前基準窗因入口請求不足，已由 {lookback[0]} 分鐘擴展至 {lookback[1]} 分鐘；"
+                     f"{ctx.result.get('trace_fetch', {}).get('extended_for', '')}）".replace("；）", "）"))
     for service in sorted(during, key=lambda s: -(during[s].self_ms_per_request - (before[s].self_ms_per_request if s in before else 0))):
         d, b = during[service], before.get(service)
         mark = "＊" if service in incident.entities else "  "
@@ -50,17 +56,35 @@ def _from_spans(incident, ctx, traces_datasource: str | None = None) -> str:
         else:
             lines.append(f"{mark}{service}：請求 {d.requests}；總耗時 {d.total_ms_mean:.1f} ms；自身耗時 {d.self_ms_per_request:.1f} ms；"
                          f"錯誤率 {d.error_rate:.0%}（事件前沒有資料）")
-    in_window = [s for s in spans if start <= as_utc(s.ts) < end and s.parent_id is None]
-    if in_window:
-        slowest = max(in_window, key=lambda s: s.duration_ms)
-        link = _trace_link(slowest.trace_id, as_utc(slowest.ts), traces_datasource)
-        lines.append(f"事件期間最慢的一條 trace（{slowest.trace_id}，{slowest.duration_ms:.0f} ms）：" + (f"\n  {link}" if link else ""))
-        chain = call_chain(spans, slowest.trace_id)
+        resources = sorted(set(d.wait_ms_per_request) | set(b.wait_ms_per_request if b else {}),
+                           key=lambda res: -d.wait_ms_per_request.get(res, 0.0))
+        if resources:  # 只有帶 span.type 的資料才有這一行；mock 與舊索引一字不多
+            waits = "；".join(
+                f"等待 {res}{'（' + kinds[res] + '）' if kinds.get(res) else ''} "
+                + (f"{b.wait_ms_per_request.get(res, 0.0):.1f}→" if b else "") + f"{d.wait_ms_per_request.get(res, 0.0):.1f} ms"
+                + f"（資源失敗 {(str(b.wait_failures.get(res, 0)) + '→') if b else ''}{d.wait_failures.get(res, 0)} 筆）"
+                for res in resources)
+            app = (f"{b.app_ms_per_request:.1f}→" if b else "") + f"{d.app_ms_per_request:.1f} ms"
+            lines.append(f"    程式自身 {app}；{waits}")
+    sample = sample_trace(spans, start, end)
+    if sample is not None:
+        link = _trace_link(sample.trace_id, as_utc(sample.ts), traces_datasource)
+        why = sample_trace_reason(sample, spans)
+        title = (f"事件期間最具代表性的失敗 trace（{why}；{sample.trace_id}，{sample.duration_ms:.0f} ms）" if why
+                 else f"事件期間最慢的一條 trace（{sample.trace_id}，{sample.duration_ms:.0f} ms）")
+        lines.append(title + "：" + (f"\n  {link}" if link else ""))
+        chain = call_chain(spans, sample.trace_id)
+        children = {}
+        for s in spans:
+            if s.trace_id == sample.trace_id and s.parent_id:
+                children.setdefault(s.parent_id, []).append(s)
         for depth, s, own in chain[:MAX_CHAIN_LINES]:
-            lines.append(f"  {'  ' * depth}{s.service}：{s.duration_ms:.1f} ms（自身 {own:.1f} ms）{'，失敗' if s.error else ''}")
+            what = f" {s.name}" if s.name else ""
+            what += f" {s.kind}→{resource_label(s)}" if is_resource_leaf(s, children) else ""
+            lines.append(f"  {'  ' * depth}{s.service}{what}：{s.duration_ms:.1f} ms（自身 {own:.1f} ms）{'，失敗' if s.error else ''}")
         if len(chain) > MAX_CHAIN_LINES:
             lines.append(f"  …（還有 {len(chain) - MAX_CHAIN_LINES} 個 span）")
-    lines.append("＊ = 事件裡的服務。自身耗時 = span 耗時扣掉直接子 span 的耗時。")
+    lines.append("＊ = 事件裡的服務。自身耗時 = span 耗時扣掉直接子 span 的耗時（含等外部資源）；程式自身 = 再扣掉等資源的時間。")
     return "\n".join(lines)
 
 

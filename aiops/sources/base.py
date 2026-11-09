@@ -58,6 +58,9 @@ class BaseDataSourceSpec(ABC):
         """RCA 隨需撈 trace：[start, end] 內的 span／transaction，services 給了就只撈這些服務。
         回傳 (spans, 是否因為 max_spans 被截斷)。每個 span 是 dict：
         trace_id、span_id、parent_id（可能是 None）、service、ts（UTC datetime）、duration_ms、error。
+        選填鍵（沒給就當空字串／0，RCA 退回只看服務）：kind（span.type：app／db／external…；入口 transaction 留空）、
+        subtype（redis／http／postgresql）、resource（span.destination.service.resource，例如 tax-gw:443）、
+        status_code（http.response.status_code）、name（transaction.name）。
         預設不支援；存 trace 的資料源（Elasticsearch APM）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
 

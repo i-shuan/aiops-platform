@@ -368,7 +368,7 @@ targets:
 
 | 根因算子 | 做法 | 需要 |
 |---|---|---|
-| `rca.root_cause.evidence`（`rca_report` 預設） | 這一輪撈到的 span：各服務**自身耗時**（span 耗時扣掉等下游的時間）與自身錯誤率的增量；被上游放大流量的服務，增量按流量倍數轉給放大者；前幾名拉不開或資料不足就回「證據不足」不指認。沒有 trace 的場景（工廠）退回 topological 並寫明；trace 來源連不上（例如 ES 重啟）則不退回、直接證據不足 | `ingestion.incident_traces`（已接好） |
+| `rca.root_cause.evidence`（`rca_report` 預設） | 這一輪撈到的 span：各服務**自身耗時**（span 耗時扣掉等下游的時間）與自身錯誤率的增量；被上游放大流量的服務，增量按流量倍數轉給放大者；前幾名拉不開或資料不足就回「證據不足」不指認。沒有 trace 的場景（工廠）退回 topological 並寫明；trace 來源連不上（例如 ES 重啟）則不退回、直接證據不足。候選的自身耗時增量裡，單一下游資源（`span.type` 是 db／external 的葉節點：Oracle、Redis、第三方 API）的等待佔 `min_dependency_share`（0.6）以上，就填 `dependency` 下鑽（例如 `tax-gw:443（external/http）`）：候選仍是服務、排名不變，報告與建議處置會說「去查它等的東西，不是它的程式」 | `ingestion.incident_traces`（已接好） |
 | `rca.root_cause.topological` | 傳播圖上沒有異常上游的實體，依最早出現排序 | 拓撲或 Lot 流向 |
 | `rca.root_cause.pagerank` | 反向傳播圖上的 Personalized PageRank：拖垮越多下游、越異常的上游排越前 | 拓撲或 Lot 流向 |
 | `rca.root_cause.cross_correlation` | 事件時段原始時序的時間位移互相關：誰的波動領先別人。前處理 `preprocess` 可選 `diff`（預設，一階差分）或 `hybrid`（只在異常時段保留穩健 z 分數、其他歸零） | 前面要有 `ingestion.incident_series`（`rca_report_correlation.yaml` 已經接好）；這是相關不是因果 |
@@ -415,7 +415,7 @@ targets:
 - **真實 ES（scn 資料）**：40 個安靜時段全部「證據不足（trace 不足）」——每個服務 15 分鐘只有約 5 筆請求，低於 `min_requests` 20，**評分邏輯沒有被這批資料考驗到**。11/3 事故排出 bill-svc（自身耗時 +31 ms）、ord-svc（+20）、cart-api（+6）；這批 trace 沒有跨服務呼叫，自身耗時就是各服務總耗時，也沒有標準答案可以對。
 - **日誌**：超過上限時改成依時間分桶抽樣並加權（6,147 筆估成 6,151），倍率改成新出現與既有樣板同一把尺。但 cascade 的真正成因訊息（cart-api `HikariPool ... Connection is not available`）仍排第 10：前幾名是下游的「交易太慢」警告，平常完全沒出現所以倍率最高。日誌權重預設 0，不影響根因排名；要把成因訊息排前面需要分辨「症狀日誌」與「成因日誌」，還沒做。
 
-報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`trace_evidence` 段落優先用這一輪撈到的 span（事件前 vs 事件期間的請求、總耗時、自身耗時、錯誤率，加一條最慢 trace 的呼叫鏈），沒有才退回資料庫裡的 trace 時序。根因算子沒給候選時，「可能的源頭」段落會寫明證據不足的原因，不再整段消失。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
+報告段落是註冊的 `rca.section.<代號>`，新增段落 = 在 `aiops/stages/rca/sections/` 放一個檔案。`trace_evidence` 段落優先用這一輪撈到的 span（事件前 vs 事件期間的請求、總耗時、自身耗時、錯誤率；資料帶 `span.type` 時再拆成「程式自身」與「等待每個下游資源」各多少、資源失敗幾筆），加一條代表性 trace 的呼叫鏈：**失敗優先、耗時次之**（入口 `event.outcome=failure` → HTTP 狀態碼 ≥ 500 → 子 span 有失敗 → 最慢），以前只挑最慢會挑到 244 ms／200 的正常慢請求。`ingestion.incident_traces` 設了 `max_before_minutes`（內建 RCA YAML 設 60）時，事件裡的服務在事件前入口請求不到 `min_entry_spans`（20）就把基準窗 15 → 30 → 60 分鐘往前擴（只撈多出來的前段、窗口連續、不跨週），段落第一行會標出「已由 15 分鐘擴展至 N 分鐘」。沒有才退回資料庫裡的 trace 時序。根因算子沒給候選時，「可能的源頭」段落會寫明證據不足的原因，不再整段消失。`similar_cases` 段落會列出經驗庫裡相似的歷史事故與當時的處置。
 
 ### 學習閉環
 

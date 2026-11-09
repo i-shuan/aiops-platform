@@ -224,7 +224,10 @@ class ElasticsearchSpec(BaseDataSourceSpec):
 DEFAULT_TRACE_INDEX = "traces-apm-*"
 DEFAULT_LOG_INDEX = "logs-apm.*"
 SPAN_FIELDS = ["@timestamp", "trace.id", "span.id", "transaction.id", "parent.id", "service.name",
-               "span.duration.us", "transaction.duration.us", "event.outcome"]
+               "span.duration.us", "transaction.duration.us", "event.outcome",
+               # 下游資源歸因與範例 trace 排序用（Elastic APM／OTel 標準欄位）；索引沒有就是空字串／0，行為退回只看服務
+               "span.type", "span.subtype", "span.destination.service.resource",
+               "http.response.status_code", "transaction.name"]
 SPAN_SORT = [{"@timestamp": "asc"}, {"trace.id": "asc"}, {"span.id": {"order": "asc", "missing": "_first"}}]
 SAMPLE_MAX_BUCKETS = 30
 LOG_FIELDS = ["@timestamp", "service.name", "trace.id", "message", "error.exception", "error.log", "error.culprit"]
@@ -277,7 +280,15 @@ def _span(src: dict[str, Any]) -> dict[str, Any] | None:
     trace_id = (src.get("trace") or {}).get("id")
     if not (span_id and service and trace_id):
         return None
+    span = src.get("span") or {}
+    status = ((src.get("http") or {}).get("response") or {}).get("status_code")
+    # 索引裡可能是數字或字串（"502"）；其他型別一律當沒有（0），不吞例外
+    status_code = int(status) if isinstance(status, (int, float)) or (isinstance(status, str) and status.isdigit()) else 0
     return {"trace_id": trace_id, "span_id": span_id, "parent_id": (src.get("parent") or {}).get("id"),
             "service": canonical_service(service), "ts": as_utc_datetime(src["@timestamp"]),
             "duration_ms": float((own.get("duration") or {}).get("us") or 0) / 1000.0,
-            "error": (src.get("event") or {}).get("outcome") == "failure"}
+            "error": (src.get("event") or {}).get("outcome") == "failure",
+            # transaction 文件沒有 span.type（kind 留空 = 入口）；span 文件的 type 是 app／db／external／messaging…
+            "kind": str(span.get("type") or ""), "subtype": str(span.get("subtype") or ""),
+            "resource": str(((span.get("destination") or {}).get("service") or {}).get("resource") or ""),
+            "status_code": status_code, "name": str((src.get("transaction") or {}).get("name") or "")}

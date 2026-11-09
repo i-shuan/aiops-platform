@@ -39,7 +39,7 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.rca.base import RootCauseOperator, first_seen
 from aiops.stages.rca.logs import service_burst
-from aiops.stages.rca.spans import EXTERNAL_CALLER, UNKNOWN_CALLER, inbound_callers, window_stats
+from aiops.stages.rca.spans import EXTERNAL_CALLER, UNKNOWN_CALLER, inbound_callers, resource_kinds, window_stats
 
 MAX_HOPS = 10
 
@@ -48,16 +48,23 @@ MAX_HOPS = 10
 class EvidenceRootCause(RootCauseOperator):
     """params: self_weight（1.0）、error_weight（0.5）、log_weight（0.0）、min_requests（20）、min_self_increase_ms（5）、
     min_self_increase_ratio（0.2）、min_error_increase（0.05）、min_dominance（1.1）、min_load_ratio（1.5）、
-    fallback（"rca.root_cause.topological"；沒有 trace 的場景改用它，空字串 = 不退回）。"""
+    min_dependency_share（0.6：候選的自身耗時增量裡，單一下游資源的等待增量佔比達到就填 dependency 下鑽；
+    或入口失敗裡該資源失敗的佔比達到也填）、
+    fallback（"rca.root_cause.topological"；沒有 trace 的場景改用它，空字串 = 不退回）。
+
+    dependency 不改分數、不改排名：候選仍是服務（拓撲、傳播路徑、標準答案都不變），只多告訴人「該查的是它等的東西」。"""
 
     def __init__(self, self_weight: float = 1.0, error_weight: float = 0.5, log_weight: float = 0.0,
                  min_requests: int = 20, min_self_increase_ms: float = 5.0, min_self_increase_ratio: float = 0.2,
                  min_error_increase: float = 0.05, min_dominance: float = 1.1, min_load_ratio: float = 1.5,
-                 fallback: str = "rca.root_cause.topological"):
+                 min_dependency_share: float = 0.6, fallback: str = "rca.root_cause.topological"):
         if min(self_weight, error_weight, log_weight, min_self_increase_ms, min_self_increase_ratio, min_error_increase) < 0:
             raise ValueError("權重與門檻不能是負的")
         if min_requests < 1 or min_dominance < 1 or min_load_ratio <= 1:
             raise ValueError("min_requests 至少 1；min_dominance 至少 1（1 = 不做拉開檢查）；min_load_ratio 必須大於 1")
+        if not 0 < min_dependency_share <= 1:
+            raise ValueError("min_dependency_share 必須在 (0, 1]")
+        self.min_dependency_share = float(min_dependency_share)
         self.self_weight, self.error_weight, self.log_weight = float(self_weight), float(error_weight), float(log_weight)
         self.min_requests = int(min_requests)
         self.min_self_ms, self.min_self_ratio = float(min_self_increase_ms), float(min_self_increase_ratio)
@@ -182,13 +189,48 @@ class EvidenceRootCause(RootCauseOperator):
                              for r in ordered_rows if r["score"] >= top["score"] / self.min_dominance)
             return self._insufficient(ctx, f"前幾名拉不開（第一名 < 第二名 × {self.min_dominance:g}）：{close}。"
                                            "幾個服務一起變慢且程度相近，常見於共同的外部因素，不指認單一服務")
-        return [RootCandidate(r["entity"], r["score"], self._reason(r, bursts, base_min, load)) for r in ordered_rows]
+        kinds = resource_kinds(spans)
+        return [RootCandidate(r["entity"], r["score"], self._reason(r, bursts, base_min, load, kinds),
+                              self._dependency(r, kinds)) for r in ordered_rows]
 
-    def _reason(self, r, bursts, base_min, load) -> str:
+    def _dependency(self, r, kinds: dict[str, str]) -> str:
+        """單一下游資源佔了這個服務自身耗時增量（或入口失敗）的 min_dependency_share 以上，就是下鑽歸因。
+        等待增量用 (事件期間 − 事件前) 的每請求 ms；失敗用事件期間「該資源失敗筆數 ÷ 入口失敗筆數」。兩個資源各佔一半就不填。"""
+        b, d = r["b"], r["d"]
+        if r["self_raw"] > 0:
+            inc = {res: ms - b.wait_ms_per_request.get(res, 0.0) for res, ms in d.wait_ms_per_request.items()}
+            res, ms = max(inc.items(), key=lambda kv: kv[1], default=(None, 0.0))
+            if res is not None and ms > 0 and ms / r["self_raw"] >= self.min_dependency_share:
+                return f"{res}（{kinds.get(res, '')}）" if kinds.get(res) else res
+        entry_failures = round(d.error_rate * d.requests)
+        if entry_failures and d.error_rate - b.error_rate >= self.min_error_increase:
+            res, n = max(d.wait_failures.items(), key=lambda kv: kv[1], default=(None, 0))
+            if res is not None and n / entry_failures >= self.min_dependency_share:
+                return f"{res}（{kinds.get(res, '')}）" if kinds.get(res) else res
+        return ""
+
+    @staticmethod
+    def _breakdown(r, kinds: dict[str, str]) -> str:
+        """理由裡的拆解句：程式自身 vs 等每個資源各增加多少、資源失敗幾筆。沒有資源葉節點就回空字串（mock 資料一字不多）。"""
+        b, d = r["b"], r["d"]
+        resources = sorted(set(b.wait_ms_per_request) | set(d.wait_ms_per_request),
+                           key=lambda res: -(d.wait_ms_per_request.get(res, 0.0) - b.wait_ms_per_request.get(res, 0.0)))
+        if not resources:
+            return ""
+        parts = [f"程式自身 {b.app_ms_per_request:.1f}→{d.app_ms_per_request:.1f} ms（{d.app_ms_per_request - b.app_ms_per_request:+.1f}）"]
+        for res in resources:
+            bw, dw = b.wait_ms_per_request.get(res, 0.0), d.wait_ms_per_request.get(res, 0.0)
+            kind = f"，{kinds[res]}" if kinds.get(res) else ""
+            parts.append(f"等待 {res}{kind} {bw:.1f}→{dw:.1f} ms（{dw - bw:+.1f}，資源失敗 "
+                         f"{b.wait_failures.get(res, 0)}→{d.wait_failures.get(res, 0)} 筆）")
+        return "；其中 " + "、".join(parts)
+
+    def _reason(self, r, bursts, base_min, load, kinds: dict[str, str] | None = None) -> str:
         b, d = r["b"], r["d"]
         why = (f"自身耗時 {b.self_ms_per_request:.1f}→{d.self_ms_per_request:.1f} ms／請求（{r['self_raw']:+.1f}）；"
                f"自身錯誤率 {b.own_error_rate:.0%}→{d.own_error_rate:.0%}；入口請求 {b.requests}→{d.requests}"
                f"（事件前 {base_min:.0f} 分鐘）")
+        why += self._breakdown(r, kinds or {})
         if r["entity"] in load:
             why += f"；流入流量 {load[r['entity']]:.2f} 倍"
         if r["moved_out"]:
