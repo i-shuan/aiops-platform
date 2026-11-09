@@ -21,7 +21,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import DetectorOperator
+from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, DetectorOperator, is_integer_series, scale_floor
 
 HOURS_PER_WEEK = 168
 
@@ -29,10 +29,14 @@ HOURS_PER_WEEK = 168
 @OperatorRegistry.register("detector.hourly_baseline")
 class HourlyBaselineDetector(DetectorOperator):
     """params: threshold（偏離幾個該時段標準差）、tz（時區，預設 UTC）、
-    min_points（時段最少訓練點，預設 3）、min_weeks（時段至少要看過幾次完整的一週，預設 2）。"""
+    min_points（時段最少訓練點，預設 3）、min_weeks（時段至少要看過幾次完整的一週，預設 2）、
+    min_scale／min_scale_ratio（分母底噪，見 base.scale_floor）。
+
+    每個時段的標準差下限 = max(全段 std × 0.1, 底噪)；底噪的中心用該時段的平均。
+    全段 std 為 0（訓練期完全不變）時以前分數全 0（永遠不報），現在分母退到底噪。"""
 
     algorithm = "hourly_baseline"
-    tunable = {"threshold": (3.0, 1.0, 10.0)}
+    tunable = {"threshold": (3.0, 1.0, 10.0), **SCALE_FLOOR_TUNABLE}
     other_params = frozenset({"tz", "min_points", "min_weeks"})
 
     def __init__(self, **params: Any):
@@ -73,6 +77,7 @@ class HourlyBaselineDetector(DetectorOperator):
                          for b, r in agg.iterrows()}
         values = frame["v"]
         self.global_ = (float(values.mean()), float(values.std(ddof=0)))
+        self.integer_ = is_integer_series(values)
         self.fitted = True
         return self
 
@@ -84,28 +89,29 @@ class HourlyBaselineDetector(DetectorOperator):
     def get_state(self) -> dict:
         self._require_fitted()
         return {"buckets": {str(b): list(v) for b, v in self.buckets_.items()}, "global": list(self.global_),
-                "tz": str(self.tz), "buckets_ready": self.buckets_ready, "min_weeks": self.min_weeks}
+                "tz": str(self.tz), "buckets_ready": self.buckets_ready, "min_weeks": self.min_weeks,
+                "integer": self.integer_}
 
     def load_state(self, state: dict) -> HourlyBaselineDetector:
         # 舊版存的每個時段只有 (平均, 標準差, 點數)，沒有「看過幾週」：保守當成 1 週，會退回全段統計
         self.buckets_ = {int(b): (float(v[0]), float(v[1]), int(v[2]), float(v[3]) if len(v) > 3 else 1.0)
                          for b, v in state["buckets"].items()}
         self.global_ = (float(state["global"][0]), float(state["global"][1]))
+        self.integer_ = bool(state.get("integer", False))
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
         g_mean, g_std = self.global_
-        floor = max(g_std * 0.1, 1e-9)  # 某時段剛好完全不變時，避免除以 0 把小雜訊放大成異常
+        min_scale, ratio = self.param("min_scale"), self.param("min_scale_ratio")
         means, stds = [], []
         for b in self._bucket(df["ts"]):
             m, s, n, occ = self.buckets_.get(int(b), (g_mean, g_std, 0, 0.0))
             if not self._ready(n, occ):
                 m, s = g_mean, g_std  # 回退：等同 zscore
             means.append(m)
-            stds.append(max(s, floor))
+            # 某時段剛好完全不變時，避免除以 0 把小雜訊放大成異常：全段 std 的一成、再不夠就底噪
+            stds.append(max(s, g_std * 0.1, scale_floor(0.0, None, min_scale, ratio, center=m, integer=self.integer_)))
         scores = ((df["value"].astype(float) - np.array(means)) / np.array(stds)).abs()
-        if g_std == 0:
-            scores = scores * 0.0
         return self._result(df, scores, scores > self.param("threshold"))

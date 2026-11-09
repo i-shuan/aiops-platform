@@ -12,7 +12,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import DetectorOperator
+from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, DetectorOperator, scale_floor
 
 _MAD_TO_STD = 1.4826
 
@@ -22,7 +22,7 @@ class QuantileDriftDetector(DetectorOperator):
     """params: threshold、window（滾動窗點數）、quantile（預設 0.95）。"""
 
     algorithm = "quantile_drift"
-    tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 5.0, 1440.0)}
+    tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 5.0, 1440.0), **SCALE_FLOOR_TUNABLE}
     other_params = frozenset({"quantile"})
 
     def __init__(self, **params: Any):
@@ -48,7 +48,9 @@ class QuantileDriftDetector(DetectorOperator):
             r = pd.Series([float(df["value"].quantile(self.q))])
         self.center_ = float(r.median())
         scale = float((r - self.center_).abs().median() * _MAD_TO_STD)
-        self.scale_ = scale or float(r.std(ddof=0) or 0) or abs(self.center_) * 0.01 or 1.0
+        # 退路：MAD → 標準差 → 底噪（|中心| × min_scale_ratio、min_scale、整數序列 1、都沒有就 1.0）
+        self.scale_ = scale or float(r.std(ddof=0) or 0) or scale_floor(0.0, df["value"], self.param("min_scale"),
+                                                                         self.param("min_scale_ratio"), center=self.center_)
         self.fitted = True
         return self
 

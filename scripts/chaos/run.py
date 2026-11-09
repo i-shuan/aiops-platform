@@ -21,7 +21,7 @@ def render(results) -> str:
     for r in results:
         n_ok = sum(c.ok for c in r.checks)
         lines.append(f"| {r.n} | {r.title} | {r.verdict} | {n_ok}／{len(r.checks)} |")
-    lines.append(f"\n10 個場景中完全通過 {ok_n} 個；斷言合計 {sum(c.ok for r in results for c in r.checks)}／{sum(len(r.checks) for r in results)}。\n")
+    lines.append(f"\n{len(results)} 個場景中完全通過 {ok_n} 個；斷言合計 {sum(c.ok for r in results for c in r.checks)}／{sum(len(r.checks) for r in results)}。\n")
     for r in results:
         lines.append(f"## 場景 {r.n}：{r.title}　【{r.verdict}】\n")
         lines.append(f"**注入特徵**：{r.injected}\n")

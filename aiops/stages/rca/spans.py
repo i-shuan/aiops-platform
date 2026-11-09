@@ -2,8 +2,18 @@
 
 輸入是 ingestion.incident_traces 這一輪撈回來的 ctx.rca_spans（以整條 trace 為單位抽樣，父子接得起來）。
 
-- 自身耗時（self time）= span 耗時 − 它的直接子 span 耗時總和（下限 0）。子 span 平行時會多扣，所以下限設 0。
+- 自身耗時（self time）= span 耗時 − 直接子 span 區間的「聯集」長度。每個子 span 的 [開始, 開始+耗時] 先夾進父 span
+  的區間，排序後合併重疊：asyncio.gather／多執行緒並行打兩個下游（同一起點、各 60 ms、父 100 ms）自身是 40 ms，
+  不是以前「耗時減加總」的 −20 再夾成 0（並行的服務會被當成「全部時間都在等下游」，自身耗時被雙重扣光）。
+  依序呼叫的子 span 聯集 = 加總，數字跟以前一樣。
+  例外：span.type = app 的子 span（服務自己的程式碼，跑在請求自己的執行緒上）一律「加總」、不參與聯集——
+  它跟同一個請求的 I/O 是先後關係，不是並行。真實 11/3 資料的 app span 從 0 開始、外部呼叫在 2～5 ms 處開始
+  （時間戳是毫秒截斷、app span 包住了發出呼叫前後的程式時間），照字面聯集會把 4～7 ms 重疊算成「自身」，
+  自身耗時反而比總耗時還大；並行（asyncio.gather、執行緒池）只發生在 I/O 子 span（db、external、cache…）之間。
   「ord-svc 總共 2 秒、其中 1.9 秒在等 cart-api」-> ord-svc 自身 0.1 秒、cart-api 自身 1.9 秒。
+- 時鐘偏移：子 span 有一段落在父 span 區間外（開始早於父、或結束晚於父；不同主機的時鐘不同步、APM 取樣誤差），
+  超出的部分不扣（超出不到 1 ms 是毫秒截斷，照扣）；這種父 span 記成「時鐘偏移」，彙總在 ServiceWindowStats.clock_skew_spans，報告段落有數字才印。
+  max(0, …) 保留當最後的保護（聯集夾在父區間內，理論上不會負）。
 - 入口 span（entry）：父 span 不在同一個服務（或沒有父 span）的 span，等於這個服務被呼叫一次。
   每個服務的「每請求自身耗時」= 這個服務所有 span 的自身耗時總和 ÷ 入口數。
 - 呼叫者：沒有父 span 的是真正的外部入口（EXTERNAL_CALLER=""）；有父 span 但父不在樣本裡（撈取窗邊界、抽樣、
@@ -21,7 +31,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable
 
 from aiops.engine.context import SpanRecord
@@ -43,6 +53,7 @@ class ServiceWindowStats:
     app_ms_per_request: float = 0.0  # 自身耗時扣掉資源等待：程式自己的時間（沒有資源葉節點時 = self_ms_per_request）
     wait_ms_per_request: dict[str, float] = field(default_factory=dict)  # 資源 -> 每請求等待 ms
     wait_failures: dict[str, int] = field(default_factory=dict)  # 資源 -> 失敗的資源 span 筆數
+    clock_skew_spans: int = 0  # 子 span 超出父 span 區間（時鐘偏移）、超出部分沒扣的 span 筆數
 
 
 def resource_label(span: SpanRecord) -> str:
@@ -78,14 +89,60 @@ def resource_kinds(spans: Iterable[SpanRecord]) -> dict[str, str]:
     return {resource_label(s): resource_kind(s) for s in spans if is_resource_leaf(s, children)}
 
 
-def self_times(spans: Iterable[SpanRecord]) -> dict[str, float]:
-    """span_id -> 自身耗時（ms）。"""
+# 子 span 超出父區間多少才算時鐘偏移：資料源給的開始時間是 @timestamp（毫秒精度，次毫秒被截掉），父子各自截斷就可能
+# 差到 1 ms，那不是偏移。超出不到這麼多：照以前整段扣、不夾；兄弟 span 重疊不到這麼多：當成依序（不是並行）
+CLOCK_SKEW_TOLERANCE_MS = 1.0
+
+
+def _offset_ms(ts: datetime, origin: datetime) -> float:
+    """相對父 span 起點的毫秒數（用 timedelta 算，微秒精確；直接用 epoch 毫秒相減會掉精度）。"""
+    return (as_utc(ts) - origin) / timedelta(milliseconds=1)
+
+
+def self_times_detail(spans: Iterable[SpanRecord]) -> tuple[dict[str, float], frozenset[str]]:
+    """(span_id -> 自身耗時 ms, 有時鐘偏移的 span_id)。
+    自身 = 耗時 − app 子 span（夾進父區間）的長度加總 − 其他子 span 區間（夾進父區間）的聯集長度，下限 0。"""
     spans = list(spans)
-    child_ms: dict[str, float] = defaultdict(float)
+    children = _children_index(spans)
+    out: dict[str, float] = {}
+    skewed: set[str] = set()
     for s in spans:
-        if s.parent_id:
-            child_ms[s.parent_id] += s.duration_ms
-    return {s.span_id: max(0.0, s.duration_ms - child_ms.get(s.span_id, 0.0)) for s in spans}
+        kids = children.get(s.span_id)
+        if not kids:
+            out[s.span_id] = max(0.0, s.duration_ms)
+            continue
+        origin, hi = as_utc(s.ts), s.duration_ms  # 父區間 = [0, 耗時]
+        intervals, app_ms = [], 0.0
+        for c in kids:
+            c_lo = _offset_ms(c.ts, origin)
+            c_hi = c_lo + c.duration_ms
+            if c_lo < -CLOCK_SKEW_TOLERANCE_MS or c_hi > hi + CLOCK_SKEW_TOLERANCE_MS:
+                skewed.add(s.span_id)  # 真的超出：超出的部分不扣
+                c_lo, c_hi = max(c_lo, 0.0), min(c_hi, hi)
+            if c_hi <= c_lo:
+                continue
+            if c.kind == "app":
+                app_ms += c_hi - c_lo  # 程式自己的時間：跟 I/O 先後發生，加總
+            else:
+                intervals.append((c_lo, c_hi))
+        covered, cur_lo, cur_hi = 0.0, 0.0, None
+        for a, b in sorted(intervals):
+            # 重疊不到容忍值（毫秒截斷造成的假重疊）當成依序：依序呼叫的子 span 聯集 = 加總，跟以前一字不差
+            if cur_hi is None or a > cur_hi - CLOCK_SKEW_TOLERANCE_MS:
+                if cur_hi is not None:
+                    covered += cur_hi - cur_lo
+                cur_lo, cur_hi = a, b
+            else:
+                cur_hi = max(cur_hi, b)
+        if cur_hi is not None:
+            covered += cur_hi - cur_lo
+        out[s.span_id] = max(0.0, s.duration_ms - app_ms - covered)
+    return out, frozenset(skewed)
+
+
+def self_times(spans: Iterable[SpanRecord]) -> dict[str, float]:
+    """span_id -> 自身耗時（ms）。見 self_times_detail。"""
+    return self_times_detail(spans)[0]
 
 
 def _subtree_failed(spans: list[SpanRecord]) -> dict[str, bool]:
@@ -104,7 +161,7 @@ def _subtree_failed(spans: list[SpanRecord]) -> dict[str, bool]:
 
 def window_stats(spans: list[SpanRecord], start: datetime, end: datetime) -> dict[str, ServiceWindowStats]:
     """[start, end) 內的 span，依服務彙總。自身耗時用全部 span 算（含視窗邊界外的子 span 也算進扣除）。"""
-    selfs = self_times(spans)
+    selfs, skewed = self_times_detail(spans)
     below = _subtree_failed(spans)
     children = _children_index(spans)
     service_of = {s.span_id: s.service for s in spans}
@@ -118,6 +175,7 @@ def window_stats(spans: list[SpanRecord], start: datetime, end: datetime) -> dic
         a = acc[s.service]
         own = selfs.get(s.span_id, 0.0)
         a["self_ms"] += own
+        a["clock_skew"] += s.span_id in skewed
         if is_resource_leaf(s, children):
             label = resource_label(s)
             waits[s.service][label] += own
@@ -136,7 +194,8 @@ def window_stats(spans: list[SpanRecord], start: datetime, end: datetime) -> dic
             continue
         out[service] = ServiceWindowStats(service, int(n), a["self_ms"] / n, a["total_ms"] / n,
                                           a["own_errors"] / n, a["errors"] / n, a["app_ms"] / n,
-                                          {k: v / n for k, v in waits[service].items()}, dict(wait_fail[service]))
+                                          {k: v / n for k, v in waits[service].items()}, dict(wait_fail[service]),
+                                          int(a["clock_skew"]))
     return out
 
 

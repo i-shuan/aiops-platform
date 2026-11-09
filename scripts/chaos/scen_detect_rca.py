@@ -1,4 +1,4 @@
-"""場景 2～5：產生 -> 偵測 -> RCA 下鑽 -> Runbook（沿用 scenarios.py 的共用常數與世界模擬器）。"""
+"""場景 2～5、11：產生 -> 偵測 -> RCA 下鑽 -> Runbook（沿用 scenarios.py 的共用常數與世界模擬器）。"""
 from __future__ import annotations
 
 import json
@@ -219,4 +219,137 @@ def scenario_5() -> H.Result:
     acts = sec.get("suggested_actions", "")
     r.check("處方含檢查入參與回滾（Rollback）", "含『入參』與『回滾』", f"入參={'入參' in acts}、回滾={'回滾' in acts}", "入參" in acts and "回滾" in acts)
     r.notes.append(f"reason 摘要={top.get('reason', '')[:300]}；trace 佐證前 3 行={sec.get('trace_evidence', '').splitlines()[:3]}")
+    return r
+
+
+# ───────────────────────── 場景 11：並行子 span（區間聯集）─────────────────────────
+def _legacy_self(spans) -> dict[str, float]:
+    """改版前的自身耗時：耗時 − 直接子 span 耗時加總（下限 0）。只用來對照「並行會被雙重扣成 0」。"""
+    kids: dict[str, float] = {}
+    for s in spans:
+        if s.parent_id:
+            kids[s.parent_id] = kids.get(s.parent_id, 0.0) + s.duration_ms
+    return {s.span_id: max(0.0, s.duration_ms - kids.get(s.span_id, 0.0)) for s in spans}
+
+
+def _per_request(spans, selfs, svc: str, lo: datetime, hi: datetime) -> tuple[float, dict[str, float]]:
+    """(服務每請求自身耗時含等待, 資源 -> 每請求等待)：跟 stages/rca/spans.window_stats 同一個定義，自身耗時換成 selfs。"""
+    service_of = {s.span_id: s.service for s in spans}
+    has_kids = {s.parent_id for s in spans if s.parent_id}
+    own, n, wait = 0.0, 0, {}
+    for s in spans:
+        if s.service != svc or not (lo <= s.ts < hi):
+            continue
+        own += selfs[s.span_id]
+        if s.span_id not in has_kids and s.kind not in ("", "app"):
+            res = s.resource or s.subtype or s.kind
+            wait[res] = wait.get(res, 0.0) + selfs[s.span_id]
+        if s.parent_id is None or service_of.get(s.parent_id) != svc:
+            n += 1
+    return (own / n, {k: v / n for k, v in wait.items()}) if n else (0.0, {})
+
+
+def scenario_11() -> H.Result:
+    from aiops.stages.rca.spans import self_times_detail, window_stats
+    from scripts.chaos.world import iso
+
+    r = H.Result(11, "並行子 span（asyncio.gather 同時打 DB 與外部金流）",
+                 "ord-svc 自身 40 ms，同一起點並行呼叫 inventory-db 200 ms 與 payment-gw:443 200 ms；"
+                 "12:00 起 payment-gw 200→800 ms、同時 ord-svc 自身 40→240 ms（程式也變慢）。"
+                 "真值：程式自身 40→240、payment-gw 等待 200→800，歸因佔比 = 600 ÷ (200 + 600) = 0.75")
+    end = INC + timedelta(minutes=40)
+    w = World(T0, _mins(T0, end + timedelta(minutes=20)), [
+        Svc("ord-svc", "POST /orders", 40.0, [Call("inventory-db", 1.0, "db", "postgresql", 200.0, name="SELECT inventory"),
+                                              Call("payment-gw:443", 1.0, "external", "http", 200.0, name="POST payment-gw")],
+            parallel=True),
+        Svc("cart-api", "GET /cart", 30.0, [Call("redis", 1.0, "db", "redis", 1.0, name="HGETALL cart")]),
+        Svc("pay-api", "POST /pay", 25.0, [Call("postgres", 1.0, "db", "postgresql", 8.0, name="INSERT pay")]),
+    ], {"ord-svc": 25.0, "cart-api": 25.0, "pay-api": 20.0})
+    w.set(w.call("ord-svc", "payment-gw:443").ms, INC, end, 800.0)
+    w.set(w.svcs["ord-svc"].self_ms, INC, end, 240.0)
+    w.build()
+    H.fresh_db()
+    with H.es_for(w, INC - timedelta(minutes=80), end + timedelta(minutes=5)) as es:
+        by_tx: dict[str, list[dict]] = {}
+        for d in es.trace_docs:
+            if d["service"]["name"] == "ord-svc" and d["processor"]["event"] == "span":
+                by_tx.setdefault(d["parent"]["id"], []).append(d)
+        same_start = sum(1 for ks in by_tx.values() if len(ks) == 2 and ks[0]["timestamp"]["us"] == ks[1]["timestamp"]["us"])
+        r.check("世界資料：ord-svc 兩個子 span 同一起點（並行成立）", "全部同一起點", f"{same_start}／{len(by_tx)} 個請求",
+                same_start == len(by_tx) > 0)
+        wf = H.detection_workflow("it_otel", H.targets(["ord-svc", "cart-api", "pay-api"]))
+        rp = H.replay(wf, INC - timedelta(minutes=30), end)
+        incs = H.incidents()
+        r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、"
+                       f"事件群 {[(i['id'], i['incident']['entities']) for i in incs]}")
+        target = H.pick(incs, "ord-svc", INC - timedelta(minutes=5))
+        if not r.check("偵測到 ord-svc 事件群", "有", bool(target), bool(target)):
+            return r
+        out = H.rca(target["id"])
+        ctx = out["_ctx"]
+        spans = ctx.rca_spans
+        inc = ctx.incidents[0]
+        start, stop = inc.start, inc.end + timedelta(minutes=1)
+        first = min(s.ts for s in spans)
+        before, during = window_stats(spans, first, start), window_stats(spans, start, stop)
+        c = _cand(out)
+        top = c[0] if c else {}
+        a = top.get("attribution", {})
+        sm, wm = a.get("self_ms", {}), a.get("wait_ms", {})
+        r.check("候選是 ord-svc、下鑽到 payment-gw:443", "ord-svc／payment-gw:443", f"{top.get('entity')}／{a.get('resource')}",
+                top.get("entity") == "ord-svc" and a.get("resource") == "payment-gw:443")
+        r.check("事件前程式自身 ≈ 40 ms（不再被雙重扣成 0）", "40 ±6 ms", sm.get("before"), abs((sm.get("before") or 0) - 40) <= 6)
+        r.check("事件中程式自身 ≈ 240 ms", "240 ±36 ms", sm.get("during"), abs((sm.get("during") or 0) - 240) <= 36)
+        r.check("payment-gw 等待 200→800 ms", "200 ±30 → 800 ±120", f"{wm.get('before')}→{wm.get('during')}",
+                abs((wm.get("before") or 0) - 200) <= 30 and abs((wm.get("during") or 0) - 800) <= 120)
+        # 改版前（加總扣除）對同一份 span 算的佔比：並行時程式自身被吃掉，等待佔比被灌水
+        legacy = _legacy_self(spans)
+        lb, lwb = _per_request(spans, legacy, "ord-svc", first, start)
+        ld, lwd = _per_request(spans, legacy, "ord-svc", start, stop)
+        gw = "payment-gw:443"
+        legacy_share = round(min(max((lwd.get(gw, 0.0) - lwb.get(gw, 0.0)) / (ld - lb), 0.0), 1.0), 3) if ld > lb else 0.0
+        legacy_app_before = round(lb - sum(lwb.values()), 1)
+        legacy_app_during = round(ld - sum(lwd.values()), 1)
+        share = a.get("share") or 0.0
+        r.check("歸因佔比 ≈ 真值 0.75（不被灌水）", "0.75 ±0.05，且低於改版前算法", f"{share}（改版前算法 {legacy_share}）",
+                abs(share - 0.75) <= 0.05 and share < legacy_share)
+        skew = {s: (before[s].clock_skew_spans if s in before else 0, during[s].clock_skew_spans) for s in during}
+        r.check("沒有時鐘偏移：clock_skew_spans 全部 0", "全部 (0, 0)", skew, all(x == 0 for pair in skew.values() for x in pair))
+        has_line = "時鐘偏移：" in out["_sections"].get("trace_evidence", "")
+        r.check("報告沒有時鐘偏移那一行", "不含『時鐘偏移：』", has_line, not has_line)
+        r.notes.append(f"改版前算法（耗時 − 子 span 加總，下限 0）對同一份 span：程式自身 {legacy_app_before}→{legacy_app_during} ms"
+                       f"（真值 40→240）、佔比 {legacy_share}（真值 0.75）；新算法 {sm.get('before')}→{sm.get('during')} ms、佔比 {share}")
+
+        # 變體：時鐘偏移——事件期間挑 20 個 ord-svc 請求，把 payment-gw span 的起點挪到父 span 之前 30 ms、
+        # 耗時拉長到蓋過整個父 span：子區間夾進父區間後蓋滿 -> 父 span 自身被夾成 0，並記一筆時鐘偏移
+        tx = {d["transaction"]["id"]: d for d in es.trace_docs
+              if d["processor"]["event"] == "transaction" and d["service"]["name"] == "ord-svc"}
+        picked = 0
+        for d in es.trace_docs:
+            if picked >= 20:
+                break
+            if not (d["processor"]["event"] == "span" and d["service"]["name"] == "ord-svc"
+                    and d["span"]["destination"]["service"]["resource"] == gw):
+                continue
+            p = tx[d["parent"]["id"]]
+            if not (start + timedelta(minutes=2) <= _ts(p) < stop - timedelta(minutes=2)):
+                continue
+            new_us = p["timestamp"]["us"] - 30_000
+            d["timestamp"]["us"] = new_us
+            d["@timestamp"] = iso(datetime.fromtimestamp(new_us / 1e6, tz=UTC))
+            d["span"]["duration"]["us"] = p["transaction"]["duration"]["us"] + 60_000
+            picked += 1
+        es.trace_docs.sort(key=lambda d: (d["@timestamp"], d["trace"]["id"]))
+        out2 = H.rca(target["id"])
+        sp2 = out2["_ctx"].rca_spans
+        selfs2, skewed2 = self_times_detail(sp2)
+        moved = [s for s in sp2 if s.service == "ord-svc" and s.parent_id is None and s.span_id in skewed2]
+        zero = sum(1 for s in moved if selfs2[s.span_id] == 0.0)
+        d2 = window_stats(sp2, start, stop)
+        body = out2["_sections"].get("trace_evidence", "")
+        r.check("變體：被挪的請求父 span 自身被夾成 0", f"{picked} 筆都是 0", f"{zero}／{len(moved)}", zero == len(moved) == picked > 0)
+        r.check("變體：clock_skew_spans 計數", f"ord-svc 事件期間 {picked}", d2["ord-svc"].clock_skew_spans if "ord-svc" in d2 else None,
+                "ord-svc" in d2 and d2["ord-svc"].clock_skew_spans == picked)
+        line = next((ln.strip() for ln in body.splitlines() if "時鐘偏移" in ln), "(沒有)")
+        r.check("變體：報告印出時鐘偏移那一行", f"含『ord-svc {picked} 筆』", line, f"ord-svc {picked} 筆" in body)
     return r

@@ -103,8 +103,11 @@ def test_mad_resists_outliers_in_the_training_data():
 
 
 def test_mad_constant_training_does_not_divide_by_zero():
-    r = _algo("detector.mad").fit(_df([5.0] * 30)).detect(_df([5.0] * 29 + [6.0]))
-    assert r.is_anomaly[29] and np.isfinite(r.scores).all()
+    # 語意變更（底噪，docs/HARDENING_DESIGN.md 第 1 節）：以前 MAD=0 時分母是 1e-6，5→6 是 674,500 分、算異常；
+    # 現在整數序列分母至少 1 個單位，5→6（多 1 筆）是 0.6745 分、不是異常；跳 10 個單位照樣抓得到
+    r = _algo("detector.mad").fit(_df([5.0] * 30)).detect(_df([5.0] * 28 + [6.0, 15.0]))
+    assert np.isfinite(r.scores).all() and r.scores[28] == 0.6745 and not r.is_anomaly[28]
+    assert r.is_anomaly[29] and r.scores[29] == 6.745
 
 
 def test_shift_constant_series_is_quiet_and_only_the_jump_point_is_flagged():
