@@ -10,6 +10,7 @@ from datetime import timedelta
 
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
+from aiops.stages.notification.links import explore_url, grafana_base_url
 from aiops.stages.rca.base import RcaSection
 from aiops.stages.rca.spans import call_chain, window_stats
 
@@ -22,7 +23,15 @@ def _trace_rows(incident, ctx):
     return [r for s in incident.entities for r in ctx.trace_rows.get(s, []) if start <= as_utc(r.ts) <= end]
 
 
-def _from_spans(incident, ctx) -> str:
+def _trace_link(trace_id: str, ts, traces_datasource: str | None) -> str:
+    """最慢 trace 的 Grafana Explore 連結（trace.id 鎖定、時間鎖在那一刻前後）；沒設 AIOPS_GRAFANA_URL 或資料源就回空字串。"""
+    base = grafana_base_url()
+    if base is None or not traces_datasource:
+        return ""
+    return explore_url(base, traces_datasource, f'trace.id:"{trace_id}"', ts, ts, pad_minutes=5)
+
+
+def _from_spans(incident, ctx, traces_datasource: str | None = None) -> str:
     spans = ctx.rca_spans
     start, end = as_utc(incident.start), as_utc(incident.end) + timedelta(minutes=1)
     first_ts = min(as_utc(s.ts) for s in spans)
@@ -44,7 +53,8 @@ def _from_spans(incident, ctx) -> str:
     in_window = [s for s in spans if start <= as_utc(s.ts) < end and s.parent_id is None]
     if in_window:
         slowest = max(in_window, key=lambda s: s.duration_ms)
-        lines.append(f"事件期間最慢的一條 trace（{slowest.trace_id}，{slowest.duration_ms:.0f} ms）：")
+        link = _trace_link(slowest.trace_id, as_utc(slowest.ts), traces_datasource)
+        lines.append(f"事件期間最慢的一條 trace（{slowest.trace_id}，{slowest.duration_ms:.0f} ms）：" + (f"\n  {link}" if link else ""))
         chain = call_chain(spans, slowest.trace_id)
         for depth, s, own in chain[:MAX_CHAIN_LINES]:
             lines.append(f"  {'  ' * depth}{s.service}：{s.duration_ms:.1f} ms（自身 {own:.1f} ms）{'，失敗' if s.error else ''}")
@@ -56,16 +66,21 @@ def _from_spans(incident, ctx) -> str:
 
 @OperatorRegistry.register("rca.section.trace_evidence")
 class TraceEvidence(RcaSection):
-    """IT 場景：trace 佐證。優先用這一輪撈到的 span，沒有才用資料庫裡的 trace 時序。"""
+    """IT 場景：trace 佐證。優先用這一輪撈到的 span，沒有才用資料庫裡的 trace 時序。
+    params: traces_datasource（Grafana 的 trace 資料源 uid，例如 apm-traces）：有設、且環境變數 AIOPS_GRAFANA_URL 有值時，
+    最慢的那條 trace 附 Explore 連結；兩者缺一就只印 trace id。"""
 
     key, title = "trace_evidence", "Trace 佐證"
+
+    def __init__(self, traces_datasource: str | None = None):
+        self.traces_datasource = traces_datasource or None
 
     def applies(self, incident, ctx):
         return bool(ctx.rca_spans) or bool(_trace_rows(incident, ctx))
 
     def build(self, incident, ctx):
         if ctx.rca_spans:
-            return _from_spans(incident, ctx)
+            return _from_spans(incident, ctx, self.traces_datasource)
         by_service: dict[str, list] = {}
         for r in _trace_rows(incident, ctx):
             by_service.setdefault(r.service, []).append(r)

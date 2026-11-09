@@ -3,7 +3,8 @@
 labels 完全由事件群內容決定（uid、嚴重度、等級、實體、部門），所以心跳重送時重建出來的 labels 跟上次一模一樣，
 接收端才認得是同一筆。Alertmanager 用「整組 labels」辨識一則告警：嚴重度或實體變了就是另一則，
 所以升級時由 alert.heartbeat 先對舊 labels 送 endsAt 關掉、再送新 labels（同一個 incident_uid，Alertmanager 會分在同一群）。
-annotations 不影響辨識，每輪都依最新的事件群重算：已持續幾分鐘、累計幾筆、起跳值 -> 峰值 -> 最新值。
+annotations 不影響辨識，每輪都依最新的事件群重算：已持續幾分鐘、累計幾筆、起跳值 -> 峰值 -> 最新值，
+以及深度連結（設定了 AIOPS_GRAFANA_URL 才有）：指標大盤鎖在事故裡的服務與時間範圍、trace／log 的 Explore 查詢。
 對外只用全域唯一的 incident_uid，絕不放整數 id（整數 id 在資料庫重建後會重複）。
 """
 from __future__ import annotations
@@ -12,8 +13,9 @@ from datetime import datetime
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.types import WARNING, Incident, Notification, as_utc
+from aiops.engine.types import WARNING, GrafanaLinks, Incident, Notification, as_utc
 from aiops.stages._common import ensure_incidents
+from aiops.stages.notification.links import incident_links, links_config
 from aiops.engine.operator import BaseOperator
 
 UNASSIGNED_DEPT = "unassigned"
@@ -62,10 +64,13 @@ def escalation_path(incident: Incident) -> list[str]:
 
 
 def build_notifications(incident: Incident, preset: str, severity: str, ends_at: datetime | None = None,
-                        now: datetime | None = None) -> list[Notification]:
-    """一個部門一則，接收端才能用 dept 標籤直接分送；沒帶部門的歸 unassigned。"""
+                        now: datetime | None = None, links: GrafanaLinks | None = None) -> list[Notification]:
+    """一個部門一則，接收端才能用 dept 標籤直接分送；沒帶部門的歸 unassigned。
+    links 有給就在 annotations 加 grafana_*_url（時間範圍 = 初發到最近一筆，前後各留 pad 分鐘），
+    儀表板連結同時當 generatorURL（Grafana 卡片上的 See source）。"""
     entities = ", ".join(incident.entities)
     s = rolling_stats(incident, ends_at or now)
+    urls = incident_links(links, incident.entities, incident.start, incident.end) if links else {}
     path = escalation_path(incident)
     prefix = f"[Escalated from {path[-2]}] " if len(path) >= 2 and path[-1] == severity else ""
     state = "已恢復" if ends_at is not None else "已持續"
@@ -77,7 +82,7 @@ def build_notifications(incident: Incident, preset: str, severity: str, ends_at:
         + (f"；嚴重度 {' → '.join(path)}" if path else "")
         + (f"；收斂方式：{', '.join(tags)}" if tags else "")
     )
-    annotations = {"summary": title, "description": description, **s}
+    annotations = {"summary": title, "description": description, **s, **urls}
     if path:
         annotations["escalation_path"] = " -> ".join(path)
     return [
@@ -87,6 +92,7 @@ def build_notifications(incident: Incident, preset: str, severity: str, ends_at:
             annotations=dict(annotations),
             starts_at=incident.start,  # 鎖定初發時間：續命、升級、結案都用同一個 startsAt
             ends_at=ends_at,
+            generator_url=urls.get("grafana_dashboard_url") or next(iter(urls.values()), None),
         )
         for dept in (incident.depts or [UNASSIGNED_DEPT])
     ]
@@ -100,24 +106,31 @@ class NotifyPayload(BaseOperator):
     params: severity_thresholds（分數 >= 門檻就是該等級，例如 {P0: 10, P1: 6, P2: 3, P3: 0}）、
             notify_warnings（預設 true）：只有預警（每一筆都只是接近門檻）的事件群，嚴重度固定是 warning，
             通知照發並帶 level=warning 標籤，讓 Alertmanager 分到比較輕的通道；設 false 就只記錄不通知。
+            links（深度連結，選填）：{dashboard: d/apm-overview, var: service, pad_minutes: 15,
+            datasources: {traces: apm-traces, logs: apm-logs}}。基底網址只從環境變數 AIOPS_GRAFANA_URL 讀，
+            沒設就不產生任何連結（卡片其他內容照常）。組好的設定放進 ctx.grafana_links 給 alert.heartbeat 續命時沿用。
     """
 
     scope = "batch"
 
-    def __init__(self, severity_thresholds: dict[str, float] | None = None, notify_warnings: bool = True):
+    def __init__(self, severity_thresholds: dict[str, float] | None = None, notify_warnings: bool = True,
+                 links: dict | None = None):
         self.thresholds = {k: float(v) for k, v in (severity_thresholds or DEFAULT_SEVERITY).items()}
         self.notify_warnings = bool(notify_warnings)
+        self.links = dict(links or {})
 
     def severity_of(self, inc: Incident) -> str:
         return WARNING if inc.level == WARNING else severity_for(inc.score, self.thresholds)
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
+        ctx.grafana_links = links_config(self.links)  # 每輪重讀環境變數：常駐進程換了設定不用重啟
         for inc in ensure_incidents(ctx):
             inc.severity = self.severity_of(inc)
             if inc.level == WARNING and not self.notify_warnings and not inc.suppressed_by:
                 inc.suppressed_by = "warning_only：只是預警，這條管線設定不通知"
             if not inc.suppressed_by:
-                ctx.notifications.extend(build_notifications(inc, ctx.pipeline, inc.severity, now=ctx.now))
+                ctx.notifications.extend(build_notifications(inc, ctx.pipeline, inc.severity, now=ctx.now,
+                                                             links=ctx.grafana_links))
         for o in ctx.open_incidents:
             if not o.changed:
                 continue

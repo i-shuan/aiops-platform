@@ -58,7 +58,8 @@ def test_operators_do_not_touch_orm_or_storage_except_admin():
     assert not bad, bad
 
 
-NETWORK_LIBS = ["httpx", "requests", "urllib", "socket", "http.client", "http.server", "aiohttp"]
+# urllib 只禁會開連線的 urllib.request；urllib.parse 是純字串處理（拼深度連結的網址用），不算連外
+NETWORK_LIBS = ["httpx", "requests", "urllib.request", "socket", "http.client", "http.server", "aiohttp"]
 
 
 def test_operators_do_not_use_the_network_except_llm_notifiers_admin():

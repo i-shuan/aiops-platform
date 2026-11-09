@@ -486,6 +486,7 @@ receivers:
 - **升級**：嚴重度只升不降（降級在門檻附近會來回跳）。升級或吸收了新實體讓 labels 變了，心跳先對**舊 labels** 送 `endsAt = now`，同一輪再送新 labels（同一個 `incident_uid`），標題加 `[Escalated from P2]`，tags 記 `escalated:P2>P0`。warning 變 anomaly 走同一條路。
 - **結案防抖動**：實體最後一個「接得上」的異常（跟前一筆相隔不到 15 分鐘）之後安靜滿 15 分鐘才送 `endsAt`。中間斷超過 15 分鐘就視為真的恢復，後來的異常是另一場。這是時間判斷，不是「連續 N 輪無異常」。
 - **冷卻只擋新卡**：`suppress_dedup` 只作用在這一輪新組出的事件群；進行中的卡由 heartbeat 每輪續命，不受冷卻影響，也不阻止異常點寫入資料庫。
+- **深度連結（metrics → trace → log）**：設定環境變數 `AIOPS_GRAFANA_URL` 後，`alert.notify_payload` 的 `links` 參數（`{dashboard: d/apm-overview, var: service, pad_minutes: 15, datasources: {traces: apm-traces, logs: apm-logs}}`）讓每張卡的 annotations 多出 `grafana_dashboard_url`（儀表板變數鎖在事故裡的服務、時間鎖在初發到最近一筆、前後各留 15 分鐘）與 `grafana_traces_url`／`grafana_logs_url`（Explore，Lucene `service.name:("a" OR "b")`，同一段時間）；儀表板連結同時是 Alertmanager 的 `generatorURL`（Grafana 卡片上的 See source）。心跳、升級、結案通知都帶同一組連結；labels 一個都沒多。RCA 報告的「Trace 佐證」段落（`section_params: {trace_evidence: {traces_datasource: apm-traces}}`）則在最慢的 trace 後附 Explore 連結（鎖 `trace.id`）。沒設 `AIOPS_GRAFANA_URL` 就一個連結都不產生，其他內容一字不差。在真實 Grafana 13.0.7 上打開儀表板連結：變數 = `cart-api`、時間 = 回放事故的 14:35–16:30Z；Explore 連結要登入後才看得到（匿名 Viewer 沒有 Explore 權限）。
 
 > 真實資料回放（cart-api 11/3，多數決異常點 91 個、14:50~16:20Z，每 5 分鐘一輪）：改版前 Alertmanager 上出現 3 張卡（14:50、15:25、16:00 各開一張，資料庫 19 筆事件群、16 筆被冷卻擋下），描述從頭到尾是「1 筆」；改版後只有 1 張卡（14:50 開、16:35 結案，續命 20 次），資料庫 1 筆事件群，15:30 的卡寫著「已持續 40 分鐘，累計 41 筆，起跳 37.51 → 峰值 42.38 → 最新 42.62」。
 
@@ -622,6 +623,7 @@ SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
 | `AIOPS_NOTIFIER` | `log` | `log`：只寫日誌；`alertmanager`：真的推送 |
 | `AIOPS_ALERTMANAGER_URL` | （無） | 例如 `http://aiops-alertmanager.aiops-platform.svc:9093` |
 | `AIOPS_ALERTMANAGER_TOKEN` | （無） | 選填，Bearer token |
+| `AIOPS_GRAFANA_URL` | （無） | 選填，維運點得到的 Grafana 網址（例如 `https://grafana.example.com`）。有設才產生告警卡片與 RCA 報告的深度連結；儀表板、變數、資料源 uid 寫在管線 YAML |
 | `AIOPS_PROMETHEUS_URL`／`AIOPS_PROMETHEUS_TOKEN` | （無） | Prometheus 位址與選填 token |
 | `AIOPS_VICTORIAMETRICS_URL`／`AIOPS_VICTORIAMETRICS_TOKEN` | （無） | VictoriaMetrics 位址與選填 token |
 | `AIOPS_ES_URL`／`AIOPS_ES_API_KEY` | （無） | Elasticsearch 位址與選填 API key |

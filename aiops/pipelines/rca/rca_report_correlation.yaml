@@ -31,6 +31,7 @@ nodes:
     params:
       sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
                  propagation_path, trace_evidence, log_patterns, similar_cases, suggested_actions]
+      section_params: {trace_evidence: {traces_datasource: apm-traces}}
   - name: summary
     operator: enrichment.llm_summary
     optional: true

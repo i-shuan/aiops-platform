@@ -50,12 +50,14 @@ class Heartbeat(BaseOperator):
                 if t - last < self.quiet_after:
                     last = max(last, t)
             quiet = now - last >= self.quiet_after
+            links = ctx.grafana_links  # alert.notify_payload 這一輪組好的（排在它後面）；沒設定 Grafana 就是 None
             current = build_notifications(inc, open_inc.preset, open_inc.severity, ends_at=now if quiet else None,
-                                          now=now)
+                                          now=now, links=links)
             if open_inc.previous is not None:
                 prev_inc, prev_sev = open_inc.previous
                 still = {_label_key(n) for n in current}
-                stale = [n for n in build_notifications(prev_inc, open_inc.preset, prev_sev, ends_at=now, now=now)
+                stale = [n for n in build_notifications(prev_inc, open_inc.preset, prev_sev, ends_at=now, now=now,
+                                                        links=links)
                          if _label_key(n) not in still]
                 if stale:
                     ctx.log(f"supersede:{open_inc.uid}:{len(stale)}")
