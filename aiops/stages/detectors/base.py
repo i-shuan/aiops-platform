@@ -234,15 +234,13 @@ class DetectorOperator(BaseOperator):
         unknown = sorted(set(tuned) - allowed)
         if unknown:
             ctx.log(f"params:{self.state_key}:ignored-unknown:{','.join(unknown)}")
-        tuned = {k: v for k, v in tuned.items() if k in allowed}
-        locked = sorted(set(tuned) & set(self.params))
+        locked = sorted((set(tuned) & allowed) & set(self.params))
         if locked:
             ctx.log(f"params:{self.state_key}:yaml-locked:{','.join(locked)}")
-        merged = deep_merge(tuned, self.params)
         override = ctx.target.overrides.get(self.state_key, {}) if ctx.target else {}
         if override:
             ctx.log(f"params:{self.state_key}:target-override:{','.join(sorted(override))}")
-        return deep_merge(merged, override)
+        return layer_params(type(self), tuned, self.params, override)
 
     def warmup_points(self) -> int:
         """detect() 開頭需要幾個「前面的點」才算得出分數（滾動窗）。回測切測試段時往前多帶這麼多點。"""
@@ -277,6 +275,16 @@ NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio", "min_train_points
 DEFAULT_MIN_TRAIN_POINTS = 60
 # 訓練排除事故窗後至少要剩這麼多點（或原本的一半），不然退回用全部資料
 EXCLUSION_MIN_KEEP = 30
+
+
+def layer_params(cls: type[DetectorOperator], tuned: dict[str, Any], yaml_params: dict[str, Any],
+                 override: dict[str, Any]) -> dict[str, Any]:
+    """參數優先序的唯一實作：核准調參 <- 節點 YAML params（寫了的鍵鎖定）<- target overrides，逐鍵 deep_merge；
+    演算法預設值由算子自己補（param()）。偵測（effective_params）與回測（admin.proposal_backtest）都走這裡，
+    兩邊才會算出同一組參數——回測若少疊 YAML 那層，顯示的效果在正式偵測裡根本不會生效。
+    調參資料裡演算法已經不認得的鍵（改版拿掉的）直接略過。"""
+    allowed = {*cls.tunable, *cls.other_params}
+    return deep_merge(deep_merge({k: v for k, v in tuned.items() if k in allowed}, yaml_params), override)
 
 
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:

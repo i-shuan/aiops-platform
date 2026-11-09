@@ -57,9 +57,9 @@ class BaseOperator(ABC):
    * 模型有非 JSON 的本體時覆寫 `get_artifact() -> (格式, bytes)` 與 `load_artifact(格式, bytes)`，格式只能是 `npz`。
    * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only`、`detector.ensemble` 這類不學習的算子不繼承它。
    * `AnomalyEvent` 是 frozen：建立後不准改分數或偵測器名稱。要合併多個偵測器的判斷，用 `detector.ensemble` 產生新的裁決事件。
-   * **每條 target 跑哪些偵測節點由引擎決定**（`engine/pipeline.py`），順序：節點 `params.exclude_entities` → `params.include_entities` → target 的 `detectors`（節點名稱或算子名稱，不寫 = 全部）。被跳過的節點不載基準線與調參、不進 `ctx.detector_runs`。演算法裡不准自己判斷「這個實體要不要跑」。
+   * **每條 target 跑哪些偵測節點由引擎決定**（`engine/pipeline.py`），順序：節點 `params.exclude_entities` → `params.include_entities` → target 的 `detectors`（節點名稱或算子名稱，不寫 = 全部）。被跳過的節點不載基準線與調參、不進 `ctx.detector_runs`。引擎把真的會跑、會存基準線的節點名稱放進 `ctx.baseline_nodes`，`ingestion.fetch` 只在其中有節點還沒有基準線或到期時才抓訓練窗（全被跳過的序列不抓）。演算法裡不准自己判斷「這個實體要不要跑」。
    * `include_entities`／`exclude_entities` 是基底層的路由參數（`ROUTING_PARAMS`）：不進 `self.params`、不傳給演算法、調參提案帶它們會被拒絕。
-   * 參數優先序：演算法預設值 ← 後台核准調參（`ctx.detector_params`）← 節點 YAML `params` ← target `overrides[節點名稱]`（`effective_params`，逐鍵 `deep_merge`）。overrides 在載入期用 `check_override` 檢查參數名與範圍。
+   * 參數優先序：演算法預設值 ← 後台核准調參（`ctx.detector_params`）← 節點 YAML `params` ← target `overrides[節點名稱]`（`effective_params`，逐鍵 `deep_merge`）。overrides 在載入期用 `check_override` 檢查參數名與範圍。合併邏輯只有一份：`stages/detectors/base.layer_params`，偵測與回測（`admin.proposal_backtest`）都用它——回測會讀提案所屬管線的 YAML 疊上節點 `params` 與該實體 target 的 `overrides`，YAML 鎖住的鍵提案改了也不會生效，結果的 `workflow.locked` 會列出來。
    * `ctx.detector_runs` 只記「真的評估過資料」的節點（沒資料就 return 的不算）。`detector.ensemble` 的分母 = 參與者數；棄權不是反對票。`hourly_baseline` 資料不足時退回全段統計，仍算參與者——新偵測器若「這一輪算不出分數就不判」，覆寫 `can_evaluate(df) -> bool` 回 False（基底在加入 `detector_runs` 之前棄權；`rules` 沒規則、`quantile_drift`／`chronic` 滾動窗比資料長都這樣做），不要在 `detect` 裡回全 0。`requires_peers` 的算子在 `raw_df` 沒有 `peer_*` 欄位時（`peer_group` 只撈到自己）由基底棄權，`ingestion.fetch` 把它記成那條序列的錯誤。
    * 冷啟動門檻數的是 `training_points(train) -> int`（預設列數；`dod`／`wow` 只算 lag 欄位有值的列、`peer` 只算同儕有值的列），`DetectorState.points` 也記這個數。基準線到期重訓但訓練窗點數不足時，沿用資料庫裡的舊基準線照判（log `keep-old-baseline`），不留偵測盲區；完全沒有舊基準線才不判。
    * target 的 `detectors`／`overrides` 寫錯、節點的 include／exclude 寫了 workflow targets 裡沒有的實體，都在 `Pipeline.__init__`（API 傳入的 targets 在 `run()` 開頭）丟 `WorkflowError`，不准延到執行期。
@@ -68,7 +68,7 @@ class BaseOperator(ABC):
  * **節點 scope**：`target`（逐序列）→ `batch`（所有序列合併後）→ `after_persist`（資料庫寫入成功後才跑：所有 `notifier.*`）→ `after_finalize`（「已通知」與結案也寫成功後才跑：只有 `notifier.watchdog` 心跳，這一輪每一步都成功才續命）。順序錯在 `Pipeline.__init__` 報錯。
    * 寫入順序鐵律：異常點、事件群在 `hooks.persist_batch` 的**單一交易**落地（資料庫短暫斷線整筆回復後重試，`storage/db.run_in_transaction`），然後才送通知；通知都送出去了，引擎才呼叫 `hooks.finalize_batch` 記「已通知」與結案。推送失敗時事件群留在進行中，下一輪 `alert.heartbeat` 用同一組標籤補送（含 `endsAt`）。任何算子都不准在寫入前送出外部通知。
    * 資料斷流：這一輪抓不到資料（資料源丟 `NoDataError`、或抓回來是空的）的序列比例達到 workflow 的 `max_failed_target_ratio`（預設 1.0 = 全部）就是 `InfrastructureError`，`after_persist`／`after_finalize` 不執行、心跳不續命。只有 `engine/errors.NoDataError`（資料源與 `ingestion.fetch` 丟）算斷流：其他節點丟的 `NotFound`、查詢寫錯（`BadRequest`）、資料源回 200 但格式不對（`InvalidQueryError`）都只記錯誤。
-   * 序列隔離：`strict=False`（排程）時一條序列的**任何**例外（含演算法 bug 的 `ValueError`／`KeyError`）只記進 `errors`（訊息帶型別），其他序列照跑；`InfrastructureError` 例外，一律整輪失敗。`strict=True`（手動動作）照丟。
+   * 序列隔離：`strict=False`（排程）時一條序列的**任何**例外（含演算法 bug 的 `ValueError`／`KeyError`）只記進 `errors`（訊息帶型別），其他序列照跑；`InfrastructureError` 例外，一律整輪失敗。`strict=True`（手動動作）照丟；抓回來是空的序列在 strict 下也丟 `NoDataError`（404），跟資料源說沒資料同一種錯，不走斷流（503）。
  * **RCA 根因演算法（`rca.root_cause.*`）**：
    * 繼承 `stages/rca/base.RootCauseOperator`，只寫 `rank(incident, ctx) -> list[RootCandidate]`（由可能到不可能排好；資料不足回空清單，段落會略過）。
    * 需要原始時序時，在它前面放 `ingestion.incident_series`（讀 `ctx.rca_series`），不准自己連資料源。
@@ -218,7 +218,7 @@ nodes:
 
 **節點失敗怎麼處理**：預設任何節點出錯都讓這一輪（或這條序列）失敗。旁路裝飾節點（LLM 摘要等）加上 `optional: true`，失敗時只記進 `errors`（實體名為 `node:<節點名>`）並跳過，後面的節點與最終寫入照常執行。`InfrastructureError`（DB、資料源連不上）不受 `optional` 影響，一律讓整輪失敗。**不要把 fetch、detector、group、suppress、payload、notify 標成 optional。** 例外只有 RCA 的旁路證據撈取（`ingestion.incident_series`／`incident_traces`／`incident_logs`）：它們自己接住資料源連不上，寫進 `errors` 後略過，報告照出；偵測流程的 `ingestion.fetch` 不准這樣做。資料源的短暫抖動（連線失敗、逾時、429／502／503／504）由 `sources/_http.request` 重試 2 次。
 
-**參數優先序**：演算法預設值 ← 後台核准的調參 ← YAML `params`，逐鍵合併（`engine/params.deep_merge`）；YAML 寫了的鍵鎖定、不被調參覆蓋。調參分層 (偵測器, 管線, 實體)，取最具體的一層（管線×實體 > 管線 > 實體 > 全域）。
+**參數優先序**：演算法預設值 ← 後台核准的調參 ← YAML `params` ← target `overrides`，逐鍵合併（`engine/params.deep_merge`，收口在 `stages/detectors/base.layer_params`）；YAML 寫了的鍵鎖定、不被調參覆蓋。調參分層 (偵測器, 管線, 實體)，取最具體的一層（管線×實體 > 管線 > 實體 > 全域）。提案回測疊同樣的層，被 YAML 鎖住的鍵列在回測結果的 `workflow.locked`。
 
 **workflow 只能用名稱**：API 的 `workflow` 欄位只接受 `[A-Za-z0-9_-]+` 的內建名稱（`interfaces/runner.workflow_path`，在 `pipelines/` 所有子資料夾依名稱找檔，名稱重複直接報錯），絕不接受路徑；只有排程 CLI 可以用 `allow_file=True` 載入自己的 YAML 檔。
 

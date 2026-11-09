@@ -5,9 +5,10 @@
 """
 from __future__ import annotations
 
-from aiops.engine.context import PipelineContext
+from aiops.engine.context import PipelineContext, TargetError
 from aiops.engine.errors import BadRequest, Conflict, NotFound
 from aiops.engine.params import ANY, pick_most_specific
+from aiops.engine.pipeline import load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.signature import incident_signature
 from aiops.engine.types import Incident, as_utc
@@ -21,7 +22,8 @@ from aiops.engine.requests import (
 )
 from aiops.control_plane.learning import tuning_rules
 from aiops.engine.operator import BaseOperator
-from aiops.stages.detectors.base import ROUTING_PARAMS, DetectorOperator
+from aiops.interfaces.runner import workflow_path  # 回測要讀提案所屬管線的 YAML：跟 API 同一套名稱解析（白名單、唯一性）
+from aiops.stages.detectors.base import ROUTING_PARAMS, DetectorOperator, layer_params
 from aiops.stages.ingestion.fetch import fetch_target_frame
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
 from aiops.stages.enrichment import registry
@@ -75,6 +77,34 @@ def _effective_row(detector: str, pipeline: str, entity: str) -> dict | None:
     return pick_most_specific(ActiveConfigs.candidates(detector, pipeline, entity), pipeline, entity)
 
 
+def _workflow_layers(ctx: PipelineContext, detector: str, pipeline: str, entity: str) -> tuple[dict, dict, dict]:
+    """正式偵測疊在核准調參之上的兩層：提案所屬管線裡這個偵測器節點的 YAML params（鎖定鍵）與該實體 target 的 overrides。
+    回測不疊這兩層，顯示的效果在正式偵測裡就不會生效。提案不限定管線（*）就沒有這兩層。
+    回 (節點 params, overrides, 給回測結果看的說明)。"""
+    info: dict = {"pipeline": pipeline, "node": None, "locked": [], "overrides": {}, "note": ""}
+    if pipeline == ANY:
+        info["note"] = "提案不限定管線：沒有節點 YAML 與 target overrides 可疊"
+        return {}, {}, info
+    try:
+        wf = load_workflow(workflow_path(pipeline))
+    except (NotFound, BadRequest) as e:
+        info["note"] = f"讀不到 workflow {pipeline}（{e}）：回測沒有疊節點 YAML 與 overrides"
+        ctx.errors.append(TargetError(f"proposal:{detector}", info["note"]))  # 回測照跑，但要讓人看到少了一層
+        return {}, {}, info
+    nodes = [n for n in wf.nodes if n.operator == detector]
+    if not nodes:
+        info["note"] = f"workflow {pipeline} 沒有 {detector} 的節點：這個提案核准後不會被任何節點用到"
+        return {}, {}, info
+    node = nodes[0]
+    if len(nodes) > 1:
+        info["note"] = f"同一個演算法掛了 {len(nodes)} 個節點，這裡用 {node.name} 的 YAML params；其他：{[n.name for n in nodes[1:]]}"
+    yaml_params = OperatorRegistry.create(node.operator, node.params).params  # 跟引擎同一條路：扣掉路由與節點行為參數
+    target = next((t for t in wf.targets if entity != ANY and t.label == entity), None)
+    overrides = dict(target.overrides.get(node.name, {})) if target else {}
+    info.update(node=node.name, overrides=overrides)
+    return yaml_params, overrides, info
+
+
 def _flags_in(algo: DetectorOperator, df, begin: int, stop: int, warmup: int) -> int:
     """用 [0, begin) 訓練，數 [begin, stop) 裡被標成異常的點。前面多帶 warmup 個點讓滾動窗湊滿，但不計分。"""
     offset = min(warmup, begin)
@@ -121,8 +151,13 @@ class ProposalBacktestOp(BaseOperator):
         if cls.requires_peers and not (req.peers or req.peer_group):
             raise BadRequest(f"{row['detector_name']} 回測需要 peers 或 peer_group")
         current_row = _effective_row(row["detector_name"], row["pipeline"], row["entity"])
-        current_params = (current_row or {}).get("params", {})
-        current_algo, proposed_algo = cls(**current_params), cls(**row["params"])
+        # 跟正式偵測同一套優先序（layer_params）：核准調參 <- 節點 YAML <- target overrides。提案也要疊 YAML：
+        # YAML 鎖住的鍵提案改了也不會生效，回測就該照實顯示「沒差」，並把被鎖的鍵列出來
+        yaml_params, overrides, layers = _workflow_layers(ctx, row["detector_name"], row["pipeline"], row["entity"])
+        current_params = layer_params(cls, (current_row or {}).get("params", {}), yaml_params, overrides)
+        proposed_params = layer_params(cls, row["params"], yaml_params, overrides)
+        layers["locked"] = sorted(k for k in row["params"] if k in yaml_params or k in overrides)
+        current_algo, proposed_algo = cls(**current_params), cls(**proposed_params)
         lags = sorted({*current_algo.required_lags(), *proposed_algo.required_lags()})
         tr = req.time_range
         df = fetch_target_frame(ctx, tr.start, tr.end, tr.step_seconds, lags).reset_index(drop=True)
@@ -135,6 +170,7 @@ class ProposalBacktestOp(BaseOperator):
         backtest = {"metric": req.metric.model_dump(), "points": len(df), "train_points": split,
                     "test_points": len(df) - split, "warmup_points": min(warmup, split),
                     "split_at": df["ts"].iloc[split].isoformat(), "current_params": current_params,
+                    "proposed_params": proposed_params, "workflow": layers,
                     "current_anomalies": current_count, "proposed_anomalies": proposed_count,
                     "missed_windows": self._missed_windows(req.proposal_id, df, current_algo, proposed_algo, warmup)}
         ctx.result = {"proposal": Proposals.update(req.proposal_id, status="backtested", backtest=backtest)}

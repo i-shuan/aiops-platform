@@ -263,9 +263,11 @@ class Pipeline:
                 ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request)
                 skipped = {name: reason for name in self._detectors
                            if (reason := self._skip_reason(name, ctx.target)) is not None}
+                active = [d for d in self.detector_nodes if d[0] not in skipped]
+                ctx.baseline_nodes = [name for name, _ in active]  # fetch 看這個決定要不要抓訓練窗
                 try:
                     # 被跳過的節點不載基準線與調參；也不會進 detector_runs，裁決時不算參與者
-                    self.hooks.load_target(ctx, [d for d in self.detector_nodes if d[0] not in skipped])
+                    self.hooks.load_target(ctx, active)
                     for node, op in self.target_nodes:
                         if node.name in skipped:
                             ctx.log(f"{node.name}:skipped:{skipped[node.name]}")
@@ -288,6 +290,8 @@ class Pipeline:
                     batch.errors.append(TargetError(ctx.target.entity, f"{type(e).__name__}: {e}"))
                     continue
                 if ctx.raw_df is not None and ctx.raw_df.empty:
+                    if strict:  # 手動動作：跟資料源說「沒資料」一樣是 404，不要同一件事一邊 404、一邊 503 斷流
+                        raise NoDataError(f"{ctx.target.entity}：這段時間抓回來是空的（資料源回 200 但零筆）")
                     starved.append(ctx.target.entity)
                 batch.anomalies.extend(ctx.anomalies)
                 batch.detected_anomalies.extend(ctx.anomalies)

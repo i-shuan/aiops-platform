@@ -3,8 +3,14 @@
 > - 稽核基準：`main@bd16b7a`（2026-11-09），原始分支 `claude/arch-audit-e98c0f`；原本放在 `synth-out/reports/arch_audit.md`（不進 git），搬到這裡，內文未改寫。
 > - 缺口的 strict xfail 測試在 `tests/test_arch_audit_gaps.py`（28 個）。修好一項就會變 XPASS → 紅燈，修的人把對應的 xfail 拿掉。
 > - **修復進度由 `fix/arch-audit-gaps` 分支處理**，這份文件記錄的是稽核當下的狀態，內文不隨修復更新。
->   2026-11-09 已修（commit `c8f3d81`，對應 xfail 改成一般測試）：G6、G7、G8、G9、G11、G12、G13、G17、G18、G19。
->   還開著：G1（3 個 xfail）、G3（5 個）、G4、G5、G14、G15（各 1 個）；G2 已由 `test_engine_and_runner_never_special_case_an_operator_name` 補上防線；G10、G16 是設計決定，沒有 xfail。
+>   2026-11-09 第一批已修（commit `c8f3d81`，對應 xfail 改成一般測試）：G6、G7、G8、G9、G11、G12、G13、G17、G18、G19。
+>   2026-11-09 第二批已修（同分支的下一個 commit）：G1（`_imports` 也看 `import_module` 字串引數；網路防線加 `http.client`；`aiops.sources` 只准 `ingestion/fetch.py` 與控制面）、
+>   G10（strict=True 時空 df 丟 `NoDataError` 404，與資料源說沒資料一致；新測試 `test_strict_mode_reports_an_empty_frame_as_no_data_404`）、
+>   G14（引擎把會跑的基準線節點放進 `ctx.baseline_nodes`，`ingestion.fetch` 只在有人沒基準線或到期時抓訓練窗）、
+>   G15（`stages/detectors/base.layer_params` 是參數優先序的唯一實作，`admin.proposal_backtest` 疊上提案所屬管線的節點 YAML 與該實體 target 的 overrides，結果多 `proposed_params`、`workflow.{node,locked,overrides,note}`）。
+>   G2 已由 `test_engine_and_runner_never_special_case_an_operator_name` 補上防線。
+>   **裁決不修**：G5 → WontFix（`attrs` 改成唯讀映射會讓 `json.dumps` 失敗，deepcopy 只防君子又多花 CPU）；G16 → By Design（調參只分 (演算法, 管線, 實體)，CLAUDE.md 已寫明，不加節點維度）。
+>   **留待下一輪（Later）**：G4（`anomalies` 表加 `voted_by` 要動資料庫結構，等這批合入 main 後另開 migration 分支）、G3（可變狀態防線的 5 個盲點，純測試、對生產無風險）。對應 xfail 仍是 strict，共 7 個。
 >   Q12 的 Alertmanager 探針已在叢集實測（見該節末「叢集實測結果」）。
 > - 文末「實驗檔」一節提到的 `tests/_audit_exp_a.py`／`_b.py`／`_c.py` 已提煉成正規測試後刪除（只保留「現在就是乾淨的行為」）：
 >   Q2 → `tests/test_architecture.py::test_engine_and_runner_never_special_case_an_operator_name`；

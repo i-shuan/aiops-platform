@@ -1,7 +1,8 @@
 """架構稽核（2026-11-09，main@bd16b7a）找到的缺口。報告：docs/ARCH_AUDIT.md（每個缺口的重現方式、影響、建議修法）。
 
 每個測試寫的是「應該要有的行為」。還沒修的標 xfail(strict=True)：哪天修好了會變成 XPASS -> 紅燈，提醒把 xfail 拿掉。
-已修的（docstring 標「已修」）就是一般的回歸測試：G6、G7、G8、G9、G11、G12、G13、G17、G18、G19。
+已修的（docstring 標「已修」）就是一般的回歸測試：G1、G6～G15（G5 除外）、G17、G18、G19。
+裁決不修的：G5（attrs 唯讀化會讓 JSON 序列化失敗，WontFix）、G16（調參不分節點是設計決定）；G3、G4 留待下一輪。
 """
 from datetime import datetime, timedelta, timezone
 
@@ -82,8 +83,6 @@ def test_mutable_state_guard_catches_indirect_mutation(tmp_path, monkeypatch, bo
                      arch.test_no_module_or_class_level_state_is_mutated_at_runtime)
 
 
-@pytest.mark.xfail(strict=True, reason="Q1 缺口：import 防線只看靜態 import 敘述；importlib 動態載入 storage、"
-                   "http.client 連外、enrichment/ 底下 import sources 都不會紅")
 @pytest.mark.parametrize("rel,body,guard", [
     ("stages/grouping/probe.py", "import importlib\nrepo = importlib.import_module('aiops.storage.repository')\n",
      "test_operators_do_not_touch_orm_or_storage_except_admin"),
@@ -92,6 +91,7 @@ def test_mutable_state_guard_catches_indirect_mutation(tmp_path, monkeypatch, bo
      "test_operators_do_not_use_the_network_except_llm_notifiers_admin"),
 ], ids=["importlib-storage", "http.client", "enrichment-imports-sources"])
 def test_import_guards_catch_indirect_imports(tmp_path, monkeypatch, rel, body, guard):
+    """G1（已修）：import 防線也看 importlib.import_module 的字串引數、http.client，且 enrichment/ 不准 import sources。"""
     assert _guard_on(tmp_path, monkeypatch, {rel: body}, getattr(arch, guard))
 
 
@@ -204,6 +204,21 @@ def test_a_bug_on_one_target_does_not_take_down_the_whole_round():
         Pipeline(wf).run(now=T0, strict=True)
 
 
+def test_strict_mode_reports_an_empty_frame_as_no_data_404(monkeypatch):
+    """G10（已修）：strict=True（手動動作）時資料源回 200 但零筆，跟資料源丟 NoDataError 一樣是 404；
+    strict=False（排程）照舊走斷流判斷（503）。"""
+    from aiops.engine.errors import NoDataError
+    monkeypatch.setattr(MockSpec, "fetch_data", lambda self, q, s, e, step, fm=None: pd.DataFrame(
+        {"ts": pd.Series([], dtype="datetime64[ns, UTC]"), "value": pd.Series([], dtype=float)}))
+    wf = Workflow(name="gap_q8d", targets=[TargetSpec(source_type="mock", query="q", entity="svc")],
+                  nodes=[NodeSpec(name="fetch", operator="ingestion.fetch")])
+    with pytest.raises(NoDataError) as e:
+        Pipeline(wf).run(now=T0, strict=True)
+    assert e.value.status_code == 404 and "svc" in str(e.value)
+    with pytest.raises(InfrastructureError, match="資料斷流"):
+        Pipeline(wf).run(now=T0)
+
+
 # ── Q9：冷啟動門檻 ──
 
 
@@ -277,9 +292,8 @@ def test_watchdog_does_not_renew_when_finalize_fails(monkeypatch):
 # ── Q13：被跳過的節點零開銷 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q13 缺口：一條序列的偵測節點全部被跳過（或只剩不存基準線的節點）時，"
-                   "ctx.detector_states 永遠是空的，ingestion.fetch 的 _needs_training 每輪都去抓整段訓練窗（預設 1440 點）")
 def test_target_whose_detectors_are_all_skipped_does_not_fetch_training_data(monkeypatch):
+    """G14（已修）：引擎把這條序列真的會跑的基準線節點放進 ctx.baseline_nodes；全被跳過的序列 fetch 不抓訓練窗。"""
     calls = []
     real = MockSpec.fetch_data
     monkeypatch.setattr(MockSpec, "fetch_data", lambda self, q, s, e, step, fm=None: (calls.append((s, e)), real(self, q, s, e, step, fm))[1])
@@ -295,10 +309,9 @@ def test_target_whose_detectors_are_all_skipped_does_not_fetch_training_data(mon
 # ── Q14：回測跟正式偵測用的參數不一樣 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q14 缺口：admin.proposal_backtest 用 cls(**核准調參) 建現行／提案演算法，"
-                   "沒有疊上 workflow 節點 YAML 的 params（鎖定鍵）與 target overrides；YAML 鎖了 threshold 時，"
-                   "回測顯示的效果在正式偵測裡根本不會生效")
 def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monkeypatch, now):
+    """G15（已修）：回測跟偵測走同一個 layer_params：疊上提案所屬管線的節點 YAML params（鎖定鍵）；
+    YAML 鎖了 threshold 時現行與提案都是 9.0，結果一樣，並把被鎖的鍵列在 workflow.locked。"""
     from aiops.engine.requests import ProposalBacktest, ProposalCreate
     from aiops.interfaces import runner
     import shutil
@@ -313,7 +326,9 @@ def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monke
     req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, train_ratio=0.3,
                            time_range={"start": now.replace(hour=0), "end": now, "step_seconds": 60})
     bt = runner.run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=now)["proposal"]["backtest"]
-    assert bt["current_params"].get("threshold") == 9.0
+    assert bt["current_params"].get("threshold") == 9.0 and bt["proposed_params"].get("threshold") == 9.0
+    assert bt["workflow"]["node"] == "detect" and bt["workflow"]["locked"] == ["threshold"]
+    assert bt["current_anomalies"] == bt["proposed_anomalies"]  # 鎖住了，提案在正式偵測裡不會有任何差別
 
 
 # ── Q8 追加：資料源回 HTTP 200 但內容是 NaN／Inf 或格式不對 ──

@@ -16,7 +16,8 @@ class NotFound(PlatformError):
 class NoDataError(NotFound):
     """資料源說「查詢合法，但這段時間沒有資料」：回 404。
 
-    只有資料源（sources/）與 ingestion.fetch 可以丟它；引擎只把它算成「這條序列抓不到資料」（資料斷流的分子）。
+    只有資料源（sources/）與 ingestion.fetch 可以丟它；引擎只把它算成「這條序列抓不到資料」（資料斷流的分子），
+    唯一例外是 strict=True（手動動作）時抓回來是空的序列也丟它，讓「沒資料」一律是 404。
     其他地方查不到東西丟一般的 NotFound，不會被誤算成斷流。
     """
 

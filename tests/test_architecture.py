@@ -13,7 +13,12 @@ def _py(*parts: str):
     return [base] if base.is_file() else sorted(base.rglob("*.py"))
 
 
+def _callee(call: ast.Call) -> str:
+    return call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
+
+
 def _imports(path: Path) -> set[str]:
+    """靜態 import 敘述，加上 importlib.import_module("x")／__import__("x") 的字串引數：動態載入也是 import（稽核 G1）。"""
     out = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
@@ -21,6 +26,9 @@ def _imports(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             out.add(node.module)
             out |= {f"{node.module}.{a.name}" for a in node.names}
+        elif isinstance(node, ast.Call) and _callee(node) in ("import_module", "__import__") and node.args \
+                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            out.add(node.args[0].value)
     return out
 
 
@@ -50,13 +58,16 @@ def test_operators_do_not_touch_orm_or_storage_except_admin():
     assert not bad, bad
 
 
+NETWORK_LIBS = ["httpx", "requests", "urllib", "socket", "http.client", "http.server", "aiohttp"]
+
+
 def test_operators_do_not_use_the_network_except_llm_notifiers_admin():
-    # fetch.py 是唯一的抓資料算子，透過 sources 取資料
-    allowed = ("stages/enrichment/", "stages/notification/notifiers.py", "stages/notification/transport.py",
-               "control_plane/", "stages/ingestion/fetch.py")
-    bad = [b for b in _violations(_py("stages") + _py("control_plane"),
-                                  ["httpx", "requests", "urllib", "socket", "aiops.sources"])
-           if not b.startswith(allowed)]
+    files = _py("stages") + _py("control_plane")
+    # 連外函式庫：只有 LLM 供應商、通知傳輸、控制面可以用
+    allowed = ("stages/enrichment/", "stages/notification/notifiers.py", "stages/notification/transport.py", "control_plane/")
+    bad = [b for b in _violations(files, NETWORK_LIBS) if not b.startswith(allowed)]
+    # 資料源：只有抓資料的算子 ingestion/fetch.py 與控制面（資料源檢查）可以用；enrichment 連的是 LLM，不是資料源
+    bad += [b for b in _violations(files, ["aiops.sources"]) if not b.startswith(("stages/ingestion/fetch.py", "control_plane/"))]
     assert not bad, bad
 
 

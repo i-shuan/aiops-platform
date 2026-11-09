@@ -235,6 +235,9 @@ class PipelineContext:
     # 節點名稱 -> tuning 核准的現行參數（已依 管線×實體 > 管線 > 實體 > 全域 挑出最具體的一筆）
     detector_params: dict[str, dict[str, Any]] = field(default_factory=dict)
     detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 基準線
+    # 這條序列這一輪真的會跑、而且會存基準線的偵測節點（引擎依路由算好）。ingestion.fetch 只在這些節點裡有人
+    # 還沒有基準線或基準線到期時才抓訓練窗：全部被跳過的序列不抓（沒有人會學）
+    baseline_nodes: list[str] = field(default_factory=list)
     last_anomaly_ts: datetime | None = None  # 這條序列最後一筆已存的異常時間（只處理比它新的）
     # 這條序列訓練基準線時要排除的時段（這個實體的歷史事故、維護窗；被標成誤報的事故不排除）
     training_exclusions: list[TrainingExclusion] = field(default_factory=list)

@@ -127,12 +127,16 @@ class FetchOperator(BaseOperator):
         self.lags_minutes = sorted(set(lags))
 
     def _needs_training(self, ctx: PipelineContext) -> bool:
-        if not self.train_lookback_minutes:
+        """這一輪要不要多抓一段訓練窗：只看引擎說這條序列會跑的基準線節點（ctx.baseline_nodes）。
+        全部被路由跳過（或這條管線沒有會存基準線的節點）就不抓：抓了 1440 點也沒有人會學。"""
+        if not self.train_lookback_minutes or not ctx.baseline_nodes:
             return False
-        if not ctx.detector_states:
-            return True
         age = timedelta(minutes=self.retrain_minutes)
-        return any(as_utc(ctx.now) - st.trained_at >= age for st in ctx.detector_states.values())
+        for node in ctx.baseline_nodes:
+            state = ctx.detector_states.get(node)
+            if state is None or as_utc(ctx.now) - state.trained_at >= age:
+                return True  # 還沒有基準線、或到期要重訓
+        return False
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         epoch = int(as_utc(ctx.now).timestamp())

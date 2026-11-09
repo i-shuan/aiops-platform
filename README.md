@@ -270,6 +270,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_
 - **偵測節點各自獨立**：基準線與異常都綁 Workflow 節點名稱。同一個演算法可以在同一條管線掛兩次（例如 zscore 短窗、長窗），各自有自己的基準線；`anomalies.detector_name` 是算子名（`detector.zscore`），`detector_node` 是節點名。
 - **參數合併**：演算法預設值 ← 後台核准的調參 ← YAML 的 `params`，逐個鍵合併。**YAML 寫了的鍵是鎖定的**，不會被後台調參蓋掉；沒寫的鍵才吃調參。想讓某個參數交給後台調，就不要寫在 YAML。
 - **調參分層**：核准的參數有 (偵測器, 管線, 實體) 三個維度，`*` 代表不限定。套用時取最具體的一層：管線×實體 > 管線 > 實體 > 全域。回饋轉提案可用 `scope: entity | pipeline | global` 選層級（預設 `pipeline`）。不同層的提案互不使對方過期。
+- **回測跟偵測同一組參數**：提案有指定管線時，回測會讀那條管線的 YAML，疊上該偵測器節點的 `params`（鎖定鍵）與該實體 target 的 `overrides`；被 YAML 鎖住的鍵提案改了也不會生效，結果的 `workflow.locked` 會列出來、`current_anomalies` 與 `proposed_anomalies` 會一樣。
 - **回測切段**：回測資料前 `train_ratio`（預設 0.7）拿來訓練、後面拿來測試，只計算測試段的異常，避免用同一段資料訓練又評分。滾動窗的偵測器（如 `chronic`）會往前多帶 `warmup_points()` 個點讓窗口湊滿，這些點不計分。
 - **LLM 供應商**：放一個檔案到 `aiops/stages/enrichment/`，用 `@register("名稱")` 登記即可，啟動時自動掃描載入，不用改其他地方。
 
