@@ -252,16 +252,17 @@ class FeedbackSubmitOp(BaseOperator):
     def _golden(req: FeedbackSubmit, incident: dict) -> dict:
         inc = Incident.from_dict(incident["incident"], uid=incident["uid"])
         entities, metrics, signals = incident_signature(inc)
-        existing = Knowledge.get(incident["uid"])
-        context = {**((existing or {}).get("context") or {}), **req.context,
-                   "series": [s.to_dict() for s in incident_series(incident["incident"])]}
         fields = {"pipeline": incident["pipeline"] or "", "entities": entities, "metrics": metrics, "signals": signals,
                   "author": req.author, "verdict": "true_positive", "severity": incident["severity"] or "",
-                  "window_start": as_utc(inc.start), "window_end": as_utc(inc.end), "context": context}
+                  "window_start": as_utc(inc.start), "window_end": as_utc(inc.end)}
         if req.resolution:  # 沒寫就不蓋掉之前補過的處置
             fields["resolution"] = req.resolution
             fields["root_cause"] = req.root_cause or ""
-        return Knowledge.upsert(incident["uid"], **fields)
+        # 兩步都是資料庫端原子操作：ON CONFLICT 建列／更新欄位，再把 context 的鍵「追加」上去。
+        # 以前是 Python 讀出整個 context、合併、整包寫回：兩個人同時確認同一個事故，後寫的會蓋掉先寫的標籤
+        Knowledge.upsert(incident["uid"], **fields)
+        return Knowledge.merge_context(incident["uid"], {**req.context,
+                                                        "series": [s.to_dict() for s in incident_series(incident["incident"])]})
 
 
 @OperatorRegistry.register("admin.feedback_propose")

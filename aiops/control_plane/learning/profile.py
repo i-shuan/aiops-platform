@@ -15,12 +15,14 @@ admin.proposal_approve 對它回 409 並說明要改 YAML。不自動改 YAML。
 """
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pandas as pd
 
 from aiops.control_plane.learning.replay import fetch_span
-from aiops.engine.context import PipelineContext
+from aiops.engine.context import PipelineContext, Target
 from aiops.engine.errors import BadRequest, NotFound
 from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import load_workflow
@@ -38,10 +40,42 @@ def _round(x):
     return None if x is None or pd.isna(x) else round(float(x), 4)
 
 
-def profile(df: pd.DataFrame, step: int) -> dict:
-    """等間隔化後算 r(24h)、r(168h)、偏態、峰度。"""
+def doc_counts(ctx: PipelineContext, start: datetime, end: datetime, step: int) -> pd.Series | None:
+    """Elasticsearch 來源：同一個查詢改成 count（每桶文件數）。sum／count 類聚合對沒資料的桶會回 0.0，
+    序列看起來像「流量掉到 0」而不是「沒有資料」（破壞性驛收場景 9：只有 7.5 天資料卻算出 168h 自相關）；
+    文件數為 0 的桶就是沒資料。其他資料源（Prometheus 沒資料就沒點、mock）回 None，不需要遮罩。"""
+    t = ctx.target
+    if t is None or t.source_type != "elasticsearch":
+        return None
+    try:
+        raw = json.loads(t.query)
+    except ValueError as e:
+        ctx.log(f"series_profile:doc-counts:skip:query-not-json:{e}")
+        return None
+    if not isinstance(raw, dict):
+        return None
+    raw = {k: v for k, v in raw.items() if k != "value_field"}
+    raw["agg"] = "count"
+    probe = replace(ctx, target=Target("elasticsearch", json.dumps(raw), t.entity))
+    try:
+        cdf = fetch_span(probe, start, end, step)
+    except NoDataError as e:
+        ctx.log(f"series_profile:doc-counts:no-data:{e}")  # 連文件數都撈不到：整段沒資料，fetch_span 本身已經會丟 NoDataError
+        return None
+    return cdf.set_index(pd.to_datetime(cdf["ts"], utc=True))["value"].astype(float)
+
+
+def profile(df: pd.DataFrame, step: int, docs: pd.Series | None = None) -> dict:
+    """等間隔化後算 r(24h)、r(168h)、偏態、峰度。docs（每桶文件數）給了就把文件數為 0 的桶當成沒資料（NaN），
+    它們不參與自相關的配對，也不算進 points。"""
     s = df.set_index(pd.to_datetime(df["ts"], utc=True))["value"].astype(float).resample(f"{step}s").mean()
+    empty = 0
+    if docs is not None:
+        c = docs.resample(f"{step}s").sum().reindex(s.index).fillna(0.0)
+        empty = int(((c <= 0) & s.notna()).sum())
+        s = s.mask(c <= 0)
     out: dict = {"points": int(s.notna().sum()), "grid_points": len(s), "step_seconds": step,
+                 "empty_buckets": empty, "coverage": _round(s.notna().mean()) if len(s) else None,
                  "skewness": _round(s.skew()), "kurtosis": _round(s.kurt())}
     for name, seconds in (("r_24h", DAY), ("r_168h", WEEK)):
         lag = seconds // step
@@ -71,10 +105,12 @@ def _routing(pipeline: str, entity: str) -> tuple[list[str], list[str]]:
 
 @OperatorRegistry.register("admin.series_profile")
 class SeriesProfileOp(BaseOperator):
-    def __init__(self, min_acf: float = 0.3):
+    def __init__(self, min_acf: float = 0.3, min_coverage: float = 0.5):
         if not 0 < min_acf < 1:
             raise TypeError("min_acf 必須在 0 到 1 之間")
-        self.min_acf = float(min_acf)
+        if not 0 < min_coverage <= 1:
+            raise TypeError("min_coverage 必須在 0 到 1 之間")
+        self.min_acf, self.min_coverage = float(min_acf), float(min_coverage)
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         req = ctx.request
@@ -83,14 +119,18 @@ class SeriesProfileOp(BaseOperator):
         step = req.step_seconds
         epoch = int(as_utc(ctx.now).timestamp())
         end = datetime.fromtimestamp(epoch - epoch % step, tz=as_utc(ctx.now).tzinfo)
-        df = fetch_span(ctx, end - timedelta(days=req.days), end, step)
-        stats = profile(df, step)
+        start = end - timedelta(days=req.days)
+        df = fetch_span(ctx, start, end, step)
+        stats = profile(df, step, doc_counts(ctx, start, end, step))
         stats.update(start=df["ts"].iloc[0].isoformat(), end=df["ts"].iloc[-1].isoformat(), days=req.days,
-                     min_acf=self.min_acf)
+                     min_acf=self.min_acf, min_coverage=self.min_coverage)
         r24, r168 = stats["r_24h"], stats["r_168h"]
         nodes, skipped = _routing(req.pipeline, req.entity)
         result: dict = {"profile": stats, "proposal": None, "hourly_nodes": nodes, "already_skipped": skipped}
-        if r24 is None or r168 is None:
+        if stats["coverage"] is not None and stats["coverage"] < self.min_coverage:
+            result["advice"] = (f"資料不足：{req.days} 天裡只有 {stats['coverage']:.0%} 的時段有資料（空桶 {stats['empty_buckets']} 個，"
+                                f"門檻 {self.min_coverage:.0%}），不算週期、不給建議，維持既有算子")
+        elif r24 is None or r168 is None:
             result["advice"] = f"資料不足以算 {'r(24h)' if r24 is None else 'r(168h)'}（配對不到一天），不給建議"
         elif r24 >= self.min_acf or r168 >= self.min_acf:
             result["advice"] = f"有週期（r24h={r24}、r168h={r168}，至少一個 ≥ {self.min_acf}），時段基準線適用，不建議排除"
