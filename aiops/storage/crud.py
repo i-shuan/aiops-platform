@@ -4,10 +4,14 @@
 讀取類：get / find / find_one / max_of（用 read_session）
 節點之間不透過資料庫傳資料（tests/test_architecture.py 檢查）。
 """
+import json
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import JSON, cast, func, literal, select, text
 from sqlalchemy import update as sql_update
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from aiops.storage.models import row_to_dict, utc_naive
@@ -53,16 +57,70 @@ def update(model: Any, row_id: Any, **fields: Any) -> dict[str, Any]:
 
 
 def upsert(model: Any, match: dict[str, Any], **fields: Any) -> dict[str, Any]:
-    """依 match 找一筆；有就更新 fields，沒有就用 match + fields 新增。"""
+    """依 match（必須是這張表的唯一鍵）新增或更新 fields。
+
+    PostgreSQL／SQLite 走 INSERT ... ON CONFLICT DO UPDATE，由資料庫一次完成：多個 worker 同時「第一次」寫同一筆
+    不會有人撞唯一鍵（破壞性驗收場景 10：以前先查再寫，10 個 worker 有 4～6 個拿到 IntegrityError）。
+    其他方言退回先查再寫。回傳寫完的那一列。"""
+    values = _clean({**match, **fields})
+    changes = _clean(fields) or {k: values[k] for k in match}  # 沒有要改的欄位時 DO UPDATE 仍要有 set：寫回 match 本身（等於不動）
+    # 只給部分欄位（例如只改 verdict）就不是「建立」：ON CONFLICT 的 INSERT 會先撞 NOT NULL；這種呼叫走純 UPDATE，列不存在就報錯
+    required = [c.name for c in model.__table__.columns
+                if not c.nullable and not c.primary_key and c.default is None and c.server_default is None]
+    missing = [c for c in required if c not in values]
     with write_session() as s:
-        row = s.scalars(select(model).where(*_where(model, match))).first()
-        if row is None:
-            row = model(**_clean({**match, **fields}))
-            s.add(row)
+        dialect = s.get_bind().dialect.name
+        if missing:
+            result = s.execute(sql_update(model).where(*_where(model, match)).values(**changes))
+            if result.rowcount == 0:
+                raise KeyError(f"{model.__tablename__} 沒有 {match}，而且缺少建立它所需的欄位 {missing}")
+            s.expire_all()
+            row = s.scalars(select(model).where(*_where(model, match))).first()
+        elif dialect in ("postgresql", "sqlite"):
+            insert = (pg_insert if dialect == "postgresql" else sqlite_insert)(model).values(**values)
+            s.execute(insert.on_conflict_do_update(index_elements=list(match), set_=changes))
+            row = s.scalars(select(model).where(*_where(model, match))).first()
         else:
-            for k, v in _clean(fields).items():
-                setattr(row, k, v)
+            row = s.scalars(select(model).where(*_where(model, match))).first()
+            if row is None:
+                row = model(**values)
+                s.add(row)
+            else:
+                for k, v in changes.items():
+                    setattr(row, k, v)
         s.flush()
+        return row_to_dict(row)
+
+
+def merge_json(model: Any, match: dict[str, Any], column: str, patch: dict[str, Any], **fields: Any) -> dict[str, Any]:
+    """原子追加 JSON 欄位的頂層鍵（同鍵以 patch 為準），由資料庫在 UPDATE 裡合併，不經 Python 讀改寫：
+    多個 worker 同時追加不會互相覆蓋（破壞性驗收場景 10：讀改寫 50 次只留 5～7 個鍵）。
+
+    PostgreSQL：context || patch（欄位還是 json 型別的舊資料庫先轉 jsonb 再轉回去）。
+    SQLite：json_patch（RFC 7396；巢狀物件會往下合併，比 PostgreSQL 的頂層合併多合一層——呼叫端只能靠頂層鍵區分，
+    不要依賴巢狀合併）。其他方言退回讀改寫（不保證併發安全）。找不到那一列丟 KeyError。"""
+    payload = json.dumps(patch, ensure_ascii=False)
+    with write_session() as s:
+        dialect = s.get_bind().dialect.name
+        col = getattr(model, column)
+        if dialect == "postgresql":
+            kind = s.execute(text("SELECT data_type FROM information_schema.columns WHERE table_name = :t AND column_name = :c"),
+                             {"t": model.__tablename__, "c": column}).scalar()
+            expr = cast(col, JSONB).op("||")(cast(literal(payload), JSONB))
+            new_value: Any = cast(expr, JSON) if kind == "json" else expr
+        elif dialect == "sqlite":
+            new_value = func.json_patch(col, payload)
+        else:
+            row = s.scalars(select(model).where(*_where(model, match))).first()
+            if row is None:
+                raise KeyError(f"{model.__tablename__} 沒有 {match}")
+            new_value = {**(getattr(row, column) or {}), **patch}
+        result = s.execute(sql_update(model).where(*_where(model, match)).values({column: new_value, **_clean(fields)}))
+        if result.rowcount == 0:
+            raise KeyError(f"{model.__tablename__} 沒有 {match}")
+        s.flush()
+        s.expire_all()  # 欄位是資料庫算出來的，要重新讀
+        row = s.scalars(select(model).where(*_where(model, match))).first()
         return row_to_dict(row)
 
 

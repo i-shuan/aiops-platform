@@ -97,11 +97,17 @@ def _load_traces(sctx: PipelineContext, start: datetime, end: datetime) -> None:
 
 def fetch_span(sctx: PipelineContext, start: datetime, end: datetime, step: int,
                lags: list[int] | tuple[int, ...] = ()) -> pd.DataFrame:
-    """抓 [start, end]，超過 CHUNK_POINTS 點就切段抓再接起來（重疊的邊界點去重）。
-    某一段沒資料（資料源丟 NoDataError）只略過那段；整段都沒資料才丟 NoDataError。"""
+    """抓 [start, end]（**含 end 那一點**），超過 CHUNK_POINTS 點就切段抓再接起來（重疊的邊界點去重）。
+    某一段沒資料（資料源丟 NoDataError）只略過那段；整段都沒資料才丟 NoDataError。
+
+    資料源的區間查詢是含頭不含尾（Elasticsearch range lt、Prometheus 對齊後也不含 end 那個桶），所以多抓一個 step：
+    呼叫端（replay_window 的 ts <= end、黃金事故時窗、誤報時窗）都把 end 當成最後一個點。以前少抓這一點，
+    只有一分鐘的誤報事件群（start == end）會變成「時窗內沒有資料」而退回固定 ×1.2（破壞性驗收場景 7）。"""
     if sctx.target is not None and sctx.target.source_type == TRACE_SOURCE:
         _load_traces(sctx, start, end)
     chunk = timedelta(seconds=step * CHUNK_POINTS)
+    last = pd.Timestamp(as_utc(end))
+    end = end + timedelta(seconds=step)  # 多抓一個 step 讓不含尾的資料源也給出 end 那一點；含尾的資料源（mock）多出來的點在下面切掉
     frames, cursor = [], start
     while cursor < end:
         stop = min(cursor + chunk, end)
@@ -114,6 +120,7 @@ def fetch_span(sctx: PipelineContext, start: datetime, end: datetime, step: int,
     if not frames:
         raise NoDataError(f"{sctx.target.entity if sctx.target else '?'} 在 {start.isoformat()} ~ {end.isoformat()} 沒有資料")
     df = pd.concat(frames, ignore_index=True).drop_duplicates("ts", keep="last").sort_values("ts")
+    df = df[pd.to_datetime(df["ts"], utc=True) <= last]  # 一律 [start, end] 含兩端，不管資料源含不含尾
     return df.reset_index(drop=True)
 
 

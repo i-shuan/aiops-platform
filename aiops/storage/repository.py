@@ -324,7 +324,13 @@ class Knowledge:
 
     @staticmethod
     def upsert(incident_uid: str, **fields: Any) -> Row:
+        """新增或更新整欄（INSERT ... ON CONFLICT）。context 要「追加」用 merge_context，不要整包覆蓋。"""
         return crud.upsert(IncidentKnowledgeRow, {"incident_uid": incident_uid}, **fields, updated_at=utc_now())
+
+    @staticmethod
+    def merge_context(incident_uid: str, patch: dict[str, Any]) -> Row:
+        """原子追加 context 的頂層鍵（資料庫端合併，不經 Python 讀改寫）：多個 worker 同時補標籤、trace id、處方註記不會互相覆蓋。"""
+        return crud.merge_json(IncidentKnowledgeRow, {"incident_uid": incident_uid}, "context", patch, updated_at=utc_now())
 
     @staticmethod
     def get(incident_uid: str) -> Row | None:

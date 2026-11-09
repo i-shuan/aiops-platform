@@ -430,7 +430,7 @@ targets:
 | 功能 | 怎麼用 |
 |---|---|
 | 漏報補錄 | `POST /api/v1/tuning/feedback` 不給 `incident_uid`，改給 `pipeline`、`entity`、`time_range`、`verdict: missed`。轉提案後回測會檢查那段時間抓不抓得到（`missed_windows`） |
-| 歷史事故經驗庫／黃金事故庫 | 對事件群送 `verdict: true_positive` 就一律寫進 `incident_knowledge`（處置可以之後再補）：存事件群時窗、嚴重度、這場事故的序列（實體／資料源／查詢），`context` 可放根因下鑽、範例 trace id、tags。有寫 `resolution` 的才會出現在 RCA「歷史相似案例」。同一個事件群後來改判 `false_positive` 會降級，不再當黃金事故 |
+| 歷史事故經驗庫／黃金事故庫 | 對事件群送 `verdict: true_positive` 就一律寫進 `incident_knowledge`（處置可以之後再補）：存事件群時窗、嚴重度、這場事故的序列（實體／資料源／查詢），`context` 可放根因下鑽、範例 trace id、tags。有寫 `resolution` 的才會出現在 RCA「歷史相似案例」。同一個事件群後來改判 `false_positive` 會降級，不再當黃金事故。**併發安全**：寫入是 `INSERT … ON CONFLICT DO UPDATE`（兩個人同時第一次確認同一個事故不會撞唯一鍵）；`context` 的追加走 `Knowledge.merge_context`（PostgreSQL `context \|\| patch`、SQLite `json_patch`，資料庫端合併頂層鍵），不要用 `Knowledge.upsert(context=...)` 整包覆蓋——破壞性驗收（`docs/CHAOS_E2E_REPORT.md` 場景 10）10 個 worker 讀改寫 50 次只留 5～7 個鍵 |
 | 黃金事故防護罩 | 每次 `POST /api/v1/tuning/proposals/backtest` 都會把提案影響得到的黃金事故（提案那一層的管線×實體；`*` = 全部）一場一場另外現抓重跑（不靠 `time_range` 涵蓋它）：前面帶一整個訓練窗（該管線 `ingestion.fetch` 的 `train_lookback_minutes`／`step_seconds`），訓練只用時窗之前的資料、排除窗跟正式偵測同一套。現行參數抓得到、提案參數一點都抓不到 → `backtest.safety.passed: false`、`missed_golden` 列出是哪幾場，提案標成 `rejected`，核准回 409。現行參數本來就抓不到的列在 `baseline_missed`、資料源已經沒有那段的列在 `unchecked`，都不擋（理由見 `control_plane/learning/golden.py`） |
 | 誤報的分位數反推門檻 | 誤報回饋用 `scope: entity` 轉提案、偵測器有 `threshold` 時：新門檻 = max(誤報時窗最高分 S_max × 1.05, 過去 30 天分數的 99.9% 分位數 Q)，夾在可調範圍、單次最多 +50%（超過就這次先到 +50%，reason 寫還差多少）。資料源與查詢取自事件群，不用另外填；結果的 `quantile` 欄位有 S_max、Q、點數、排除了幾個時窗。管線／全域層級、資料撈不到、S_max 根本沒越過現行門檻（誤報是別的偵測器造成的）時退回固定規則（×1.2），原因寫在 reason。漏報維持 ×0.8 |
 | 序列體檢（ACF） | `POST /api/v1/tuning/profile`（`metric`、`pipeline`、`entity`，可給 `days`（預設 14）、`step_seconds`（預設 300）、`end`）：算 24h／168h 自相關、偏態、峰度。兩個自相關都 < 0.3（沒有日／週週期）就產生 `status: advisory` 的提案，建議把 `detector.hourly_baseline` 從這個 target 排除。**它不會自動生效**：每條 target 跑哪些節點只由 YAML 決定，核准 advisory 回 409。要套用就改 workflow YAML，二選一：在 hourly 節點的 `params` 加 `exclude_entities: [<實體>]`，或在該 target 寫 `detectors:` 列出要跑的節點（不列 hourly 那個） |
@@ -441,6 +441,8 @@ targets:
 - 黃金事故：bill-svc（15:40–16:10，根因 tax-gw:443）送 true_positive 後進庫。提案 `detector.mad` threshold 15（it_otel × bill-svc）回測（`time_range` 刻意設 08:00–13:00，不含事故）：防護罩另外抓了事故前 7 天（10,070 個訓練點）重跑，現行 3.5 在事故 30 分鐘內標 27 點、提案 0 點（該窗 mad 最高分 12.69）→ `safety.passed: false`、`rejected`、核准 409。threshold 4.0：27 → 21 點，通過、核准成功。
 - 分位數反推（**cart-api 其實是真事故，這裡標成誤報只是為了驗流程**）：mad 在 cart-api 誤報窗的 S_max = 7.05；過去 30 天實際只有 10 天有資料（ES 從 10/24 起），14,400 個分數的 99.9% 分位數 Q = 10.13；目標 max(7.40, 10.13) = 10.13，超過單次 +50%，這次提 3.5 → 5.25，reason 寫明還差 4.88。Q > S_max 代表 cart-api 的 mad 分數本身就重尾：單獨用 mad 3.5，日常每 1000 點就有不只 1 點越線，多數決才把它壓住。
 - 序列體檢：bill-svc r(24h) = 0.595、r(168h) = 0.789（ES 只有 10.1 天資料，168h 的配對只有 900 點 ≈ 3.1 天），有週期、不提案；其他四個服務 r(24h) 0.59–0.62、r(168h) 0.83–0.85，都不提案。這批資料沒有能觸發 advisory 的序列，advisory 路徑只有合成白噪音測試驗過。
+- 空桶 vs 真 0：`sum`／`count` 聚合對沒資料的桶會回 0.0（`avg` 回 null），序列體檢會把它誤當成「流量掉到 0」硬算週期。Elasticsearch 來源的體檢會多發一次同查詢的 `count` 聚合，文件數 0 的桶當成沒資料；`coverage`（有資料的時段比例）不到 `min_coverage`（預設 0.5）就一律寫「資料不足」、不算週期、不提案（破壞性驗收場景 9）。
+- 學習閉環現抓現算的時窗（黃金事故防護罩、分位數反推）一律 `[start, end]` 含兩端：以前少抓 end 那一點，只有一分鐘的誤報事件群會「時窗內沒有資料」而退回固定 ×1.2（破壞性驗收場景 7）。
 
 ### 訓練排除、兩級告警、日誌比對、自我健康心跳
 
@@ -540,7 +542,7 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0004_anomaly_level.sql
 psql -h <host> -U <user> -d aiops -f migrations/postgres/0005_knowledge_golden_incidents.sql
 ```
 
-`0005` 把經驗庫升級成黃金事故庫：加 `verdict`（既有的列都是「確認為真、寫了處置」才進來的，回填 `true_positive`）、`severity`、`window_start`／`window_end`（從事件群快照回填）、`context`（JSONB＋GIN 索引；程式自動建的 JSON 欄位會轉成 JSONB）、`updated_at`，以及 (pipeline, window_start)、(verdict, window_start) 索引。**還沒在真的 PostgreSQL 上跑過**（測試只做 SQLite 建表與 SQL 字串檢查），請先在測試庫試。
+`0005` 把經驗庫升級成黃金事故庫：加 `verdict`（既有的列都是「確認為真、寫了處置」才進來的，回填 `true_positive`）、`severity`、`window_start`／`window_end`（從事件群快照回填）、`context`（JSONB＋GIN 索引；程式自動建的 JSON 欄位會轉成 JSONB）、`updated_at`，以及 (pipeline, window_start)、(verdict, window_start) 索引。已在 PostgreSQL 16 實跑過兩條路徑（舊 schema 升級＋回填時窗、程式自動建表後把 JSON 轉成 JSONB），連跑三次只有 NOTICE；仍請先在你的測試庫試一次再上正式庫。
 
 執行前先停掉排程與 API。`0004` 加上異常的等級欄位（`anomaly`／`warning`），既有資料一律是 `anomaly`。它帶 `lock_timeout = '5s'`：拿不到鎖就整個放棄（什麼都沒改），找空檔重跑；回滾 SQL 寫在檔案開頭的註解。
 
