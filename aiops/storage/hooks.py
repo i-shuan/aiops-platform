@@ -166,6 +166,11 @@ class StorageHooks:
             self._pool_key, self._pool = key, (incidents, maintenance)
         return self._pool
 
+    def exclusions_for(self, ctx: PipelineContext, entity: str, dept: str | None) -> list[TrainingExclusion]:
+        """這個實體在 ctx.pipeline、ctx.now 之前的訓練排除窗。學習閉環的現抓現算（control_plane/learning/replay）
+        也用這一份，回測／反推門檻的訓練資料才跟正式偵測排除同樣的時段。"""
+        return self._exclusions_for(ctx, entity, dept)
+
     def _exclusions_for(self, ctx: PipelineContext, entity: str, dept: str | None) -> list[TrainingExclusion]:
         incidents, maintenance = self._exclusion_pool(ctx)
         out = [TrainingExclusion(start - EXCLUSION_MARGIN, end + EXCLUSION_MARGIN, f"incident {uid}")

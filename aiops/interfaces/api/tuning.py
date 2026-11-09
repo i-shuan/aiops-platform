@@ -8,6 +8,7 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
     RulePromote,
+    SeriesProfile,
     TuningMetricsQuery,
 )
 from aiops.interfaces.runner import run
@@ -53,3 +54,8 @@ def tuning_metrics(req: TuningMetricsQuery = Depends()):
 @router.post("/rules/promote")
 def promote_rules(req: RulePromote):
     return {"result": run("admin_rule_promote", request=req)}
+
+
+@router.post("/profile")
+def profile_series(req: SeriesProfile):
+    return {"result": run("admin_series_profile", request=req, targets=req.to_targets(), now=req.end)}

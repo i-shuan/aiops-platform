@@ -8,7 +8,6 @@ from __future__ import annotations
 from aiops.engine.context import PipelineContext, TargetError
 from aiops.engine.errors import BadRequest, Conflict, NotFound
 from aiops.engine.params import ANY, pick_most_specific
-from aiops.engine.pipeline import load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.signature import incident_signature
 from aiops.engine.types import Incident, as_utc
@@ -20,9 +19,10 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
 )
-from aiops.control_plane.learning import tuning_rules
+from aiops.control_plane.learning import golden, threshold, tuning_rules
+from aiops.control_plane.learning.replay import incident_series
+from aiops.control_plane.learning.replay import workflow_layers as _workflow_layers
 from aiops.engine.operator import BaseOperator
-from aiops.interfaces.runner import workflow_path  # 回測要讀提案所屬管線的 YAML：跟 API 同一套名稱解析（白名單、唯一性）
 from aiops.stages.detectors.base import ROUTING_PARAMS, DetectorOperator, layer_params
 from aiops.stages.ingestion.fetch import fetch_target_frame
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
@@ -77,34 +77,6 @@ def _effective_row(detector: str, pipeline: str, entity: str) -> dict | None:
     return pick_most_specific(ActiveConfigs.candidates(detector, pipeline, entity), pipeline, entity)
 
 
-def _workflow_layers(ctx: PipelineContext, detector: str, pipeline: str, entity: str) -> tuple[dict, dict, dict]:
-    """正式偵測疊在核准調參之上的兩層：提案所屬管線裡這個偵測器節點的 YAML params（鎖定鍵）與該實體 target 的 overrides。
-    回測不疊這兩層，顯示的效果在正式偵測裡就不會生效。提案不限定管線（*）就沒有這兩層。
-    回 (節點 params, overrides, 給回測結果看的說明)。"""
-    info: dict = {"pipeline": pipeline, "node": None, "locked": [], "overrides": {}, "note": ""}
-    if pipeline == ANY:
-        info["note"] = "提案不限定管線：沒有節點 YAML 與 target overrides 可疊"
-        return {}, {}, info
-    try:
-        wf = load_workflow(workflow_path(pipeline))
-    except (NotFound, BadRequest) as e:
-        info["note"] = f"讀不到 workflow {pipeline}（{e}）：回測沒有疊節點 YAML 與 overrides"
-        ctx.errors.append(TargetError(f"proposal:{detector}", info["note"]))  # 回測照跑，但要讓人看到少了一層
-        return {}, {}, info
-    nodes = [n for n in wf.nodes if n.operator == detector]
-    if not nodes:
-        info["note"] = f"workflow {pipeline} 沒有 {detector} 的節點：這個提案核准後不會被任何節點用到"
-        return {}, {}, info
-    node = nodes[0]
-    if len(nodes) > 1:
-        info["note"] = f"同一個演算法掛了 {len(nodes)} 個節點，這裡用 {node.name} 的 YAML params；其他：{[n.name for n in nodes[1:]]}"
-    yaml_params = OperatorRegistry.create(node.operator, node.params).params  # 跟引擎同一條路：扣掉路由與節點行為參數
-    target = next((t for t in wf.targets if entity != ANY and t.label == entity), None)
-    overrides = dict(target.overrides.get(node.name, {})) if target else {}
-    info.update(node=node.name, overrides=overrides)
-    return yaml_params, overrides, info
-
-
 def _flags_in(algo: DetectorOperator, df, begin: int, stop: int, warmup: int) -> int:
     """用 [0, begin) 訓練，數 [begin, stop) 裡被標成異常的點。前面多帶 warmup 個點讓滾動窗湊滿，但不計分。"""
     offset = min(warmup, begin)
@@ -140,7 +112,17 @@ class ProposalBacktestOp(BaseOperator):
 
     時間切段避免資料洩漏：前 train_ratio 的點拿來訓練（fit），後面的點才拿來測試並計分。
     偵測器若需要滾動窗（warmup_points），測試段往前多帶那麼多點讓窗口湊滿，但只統計測試段內的異常。
+
+    硬性安全卡口（黃金事故防護罩，control_plane/learning/golden.py）：提案影響得到的每一場確認過的真事故
+    （經驗庫 verdict = true_positive）都另外現抓重跑；提案參數讓任何一場從「抓得到」變成「一點都抓不到」，
+    backtest.safety.passed = false、提案標成 rejected（不能再回測、不能核准，要重新提案）。
+    golden_limit：一次最多驗最近的幾場（每場一次資料源查詢）；超過的照實記在 safety.skipped_oldest。
     """
+
+    def __init__(self, golden_limit: int = 50):
+        if golden_limit < 1:
+            raise TypeError("golden_limit 至少 1")
+        self.golden_limit = int(golden_limit)
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         req = _need(ctx.request, ProposalBacktest)
@@ -173,7 +155,9 @@ class ProposalBacktestOp(BaseOperator):
                     "proposed_params": proposed_params, "workflow": layers,
                     "current_anomalies": current_count, "proposed_anomalies": proposed_count,
                     "missed_windows": self._missed_windows(req.proposal_id, df, current_algo, proposed_algo, warmup)}
-        ctx.result = {"proposal": Proposals.update(req.proposal_id, status="backtested", backtest=backtest)}
+        backtest["safety"] = safety = golden.check(ctx, row, cls, self.golden_limit)
+        status = "backtested" if safety["passed"] else "rejected"
+        ctx.result = {"proposal": Proposals.update(req.proposal_id, status=status, backtest=backtest)}
         return ctx
 
     @staticmethod
@@ -204,8 +188,18 @@ class ProposalApproveOp(BaseOperator):
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         req = _need(ctx.request, ProposalApprove)
         row = _load(req.proposal_id)
+        if row["status"] == "advisory":
+            raise Conflict("這是 advisory 建議（例如序列體檢建議把某個偵測器從 target 排除）：每條 target 跑哪些偵測節點"
+                           "由 workflow YAML 決定（target.detectors、節點 exclude_entities），資料庫核准不會生效，"
+                           f"請照建議改 YAML。建議內容：{row['reason']}")
+        if row["status"] == "rejected":
+            missed = [m["incident_uid"] for m in ((row["backtest"] or {}).get("safety") or {}).get("missed_golden", [])]
+            raise Conflict(f"提案回測沒通過黃金事故防護罩（會漏抓 {missed}），不能核准；請重新提案")
         if row["status"] != "backtested":
             raise Conflict(f"提案狀態為 {row['status']}，必須先回測才能核准")
+        safety = (row["backtest"] or {}).get("safety")
+        if not safety or not safety.get("passed"):
+            raise Conflict("提案的回測結果沒有通過黃金事故防護罩（或是舊版回測、沒有驗過），請重新回測")
         # 條件式寫入：只有現行版本仍等於提案的基準版本才會成功，檢查與寫入是同一個動作，並發核准不會互相覆蓋
         config = ActiveConfigs.set(row["detector_name"], row["params"], row["source"], req.proposal_id,
                                    expected_version=row["base_version"], pipeline=row["pipeline"], entity=row["entity"])
@@ -223,7 +217,12 @@ class ProposalApproveOp(BaseOperator):
 @OperatorRegistry.register("admin.feedback_submit")
 class FeedbackSubmitOp(BaseOperator):
     """收回饋。漏報可以不指定事件群（平台根本沒告警），改記管線、實體與發生時段。
-    確認是真異常且寫了處置時，順便寫進歷史事故經驗庫（同一個事件群再寫一次就更新）。"""
+
+    確認是真異常（true_positive）的事件群一律寫進經驗庫（同一個事件群再寫一次就更新），處置可以之後再補：
+    它就是黃金事故，之後每個調參提案回測都要證明還抓得到它（admin.proposal_backtest 的 safety）。
+    寫入時一併存事件群時窗、嚴重度、這場事故的序列（實體／資料源／查詢，存在 context.series，回測照這個重抓）。
+    有寫處置的才會出現在 RCA「歷史相似案例」。
+    同一個事件群後來被改判 false_positive：經驗庫那筆降級成 false_positive（不刪，留紀錄），不再當黃金事故。"""
 
     scope = "batch"
 
@@ -243,18 +242,44 @@ class FeedbackSubmitOp(BaseOperator):
             "pipeline": req.pipeline or (incident["pipeline"] if incident else None),
             "entity": req.entity, "time_start": tr.start if tr else None, "time_end": tr.end if tr else None})
         ctx.result = {"feedback": feedback}
-        if incident is not None and req.resolution:
-            entities, metrics, signals = incident_signature(Incident.from_dict(incident["incident"], uid=incident["uid"]))
-            ctx.result["knowledge"] = Knowledge.upsert(
-                incident["uid"], pipeline=incident["pipeline"] or "", entities=entities, metrics=metrics,
-                signals=signals, resolution=req.resolution, root_cause=req.root_cause or "", author=req.author)
+        if incident is not None and req.verdict == "true_positive":
+            ctx.result["knowledge"] = self._golden(req, incident)
+        elif incident is not None and req.verdict == "false_positive" and Knowledge.get(incident["uid"]):
+            ctx.result["knowledge"] = Knowledge.upsert(incident["uid"], verdict="false_positive")
         return ctx
+
+    @staticmethod
+    def _golden(req: FeedbackSubmit, incident: dict) -> dict:
+        inc = Incident.from_dict(incident["incident"], uid=incident["uid"])
+        entities, metrics, signals = incident_signature(inc)
+        existing = Knowledge.get(incident["uid"])
+        context = {**((existing or {}).get("context") or {}), **req.context,
+                   "series": [s.to_dict() for s in incident_series(incident["incident"])]}
+        fields = {"pipeline": incident["pipeline"] or "", "entities": entities, "metrics": metrics, "signals": signals,
+                  "author": req.author, "verdict": "true_positive", "severity": incident["severity"] or "",
+                  "window_start": as_utc(inc.start), "window_end": as_utc(inc.end), "context": context}
+        if req.resolution:  # 沒寫就不蓋掉之前補過的處置
+            fields["resolution"] = req.resolution
+            fields["root_cause"] = req.root_cause or ""
+        return Knowledge.upsert(incident["uid"], **fields)
 
 
 @OperatorRegistry.register("admin.feedback_propose")
 class FeedbackProposeOp(BaseOperator):
-    """回饋 -> 調參提案。provider 不是 noop 時讓 LLM 抽規則並驗證；沒設定、失敗、驗證不過都退回固定規則。
-    結果只是提案，仍要回測與核准才生效。"""
+    """回饋 -> 調參提案。provider 不是 noop 時讓 LLM 抽規則並驗證；沒設定、失敗、驗證不過都退回規則式提案。
+    結果只是提案，仍要回測與核准才生效。
+
+    規則式提案：
+    - 誤報（false_positive）、提案層級是單一實體（scope=entity）、偵測器有 threshold：分位數反推
+      （control_plane/learning/threshold.py）：新門檻 = max(S_max × 1.05, 過去 30 天分數的 99.9% 分位數)，
+      資料源與查詢取自事件群裡的異常事件，不用呼叫端填。
+      * 只在 scope=entity 做：S_max 與分位數是「這一條序列」的分數分佈，拿它去定整條管線或全平台的門檻，
+        等於用一個服務的分佈去調其他所有服務；管線／全域層級維持固定規則。
+      * 單次變動上限 50%（tuning_rules 的規則）：目標超過就這次先調到 +50%，reason 寫明目標值與還差多少。
+        不切成多個提案：同一層的提案共用同一個基準版本，第一個核准後其他的一定變 stale，多步提案核准不了。
+      * S_max 不高於現行門檻（誤報不是這個偵測器的分數造成的，例如是多數決裡別的節點）、資料撈不到：
+        退回固定規則，原因寫在 reason 與結果的 quantile 欄位。
+    - 其他情況（漏報、管線／全域層級）：固定規則，誤報 ×1.2、漏報 ×0.8。"""
 
     scope = "batch"
 
@@ -263,21 +288,21 @@ class FeedbackProposeOp(BaseOperator):
             raise TypeError(f"provider 只能是 {', '.join(registry.names())}，不是 {provider!r}")
         self.provider, self.model, self.base_url = provider, model, base_url
 
-    def _extract(self, fb: dict, detector: str, tunable: dict, current: dict[str, float]):
-        """回傳 (要改的參數, 理由, generated_by, 退回原因)。"""
-        fallback = (*tuning_rules.template(fb["verdict"], tunable, current), "template")
+    def _extract(self, fb: dict, detector: str, tunable: dict, current: dict[str, float], rule):
+        """回傳 (要改的參數, 理由, generated_by, 退回原因)。rule() 是規則式提案 (參數, 理由, generated_by)，需要時才算。"""
         if self.provider == "noop":
-            return (*fallback, None)
+            return (*rule(), None)
+        fallback = rule
         try:
             llm = build_llm(self.provider, self.model, self.base_url)
             assert llm is not None
             prompt = tuning_rules.build_prompt(detector, fb["verdict"], fb["text"], tunable, current)
             reply = parse_json_reply(llm.complete(tuning_rules.SYSTEM, prompt))
         except LLMError as e:
-            return (*fallback, str(e))
+            return (*fallback(), str(e))
         reason = tuning_rules.validate(reply, fb["verdict"], tunable, current)
         if reason:
-            return (*fallback, reason)
+            return (*fallback(), reason)
         return reply["params"], reply["reason"], "llm", None
 
     @staticmethod
@@ -324,10 +349,53 @@ class FeedbackProposeOp(BaseOperator):
         pipeline, entity = self._scope(req, fb)
         active = (_effective_row(detector, pipeline, entity) or {}).get("params", {})
         current = {k: float(active.get(k, default)) for k, (default, _lo, _hi) in tunable.items()}
-        changes, reason, generated_by, rejected = self._extract(fb, detector, tunable, current)
+        details: dict = {}
+
+        def rule():
+            return self._rule(ctx, fb, detector, tunable, current, active, pipeline, entity, details)
+
+        changes, reason, generated_by, rejected = self._extract(fb, detector, tunable, current, rule)
         proposal = _create_proposal("llm" if generated_by == "llm" else "auto", detector, {**active, **changes},
                                     f"來自回饋 #{fb['id']}（{fb['verdict']}）：{reason}", req.proposer,
                                     pipeline, entity)
         Feedbacks.link_proposal(fb["id"], proposal["id"])
         ctx.result = {"proposal": proposal, "generated_by": generated_by, "rejected": rejected}
+        if details:
+            ctx.result["quantile"] = details
         return ctx
+
+    @staticmethod
+    def _rule(ctx: PipelineContext, fb: dict, detector: str, tunable: dict, current: dict[str, float],
+              active: dict, pipeline: str, entity: str, details: dict) -> tuple[dict, str, str]:
+        """規則式提案：能做分位數反推就做（條件見類別說明），否則固定規則。details 填入反推的中間數字給呼叫端看。"""
+        template = tuning_rules.template(fb["verdict"], tunable, current)
+        if not (fb["verdict"] == "false_positive" and fb["incident_uid"] and entity != ANY and "threshold" in tunable):
+            return (*template, "template")
+        incident = Incidents.get_by_uid(fb["incident_uid"])
+        series = incident_series(incident["incident"], entity) if incident else []
+        fell_back = None
+        if not series:
+            fell_back = "事件群裡沒有這個實體的資料源與查詢"
+        else:
+            cls = _detector_cls(detector)
+            yaml_params, overrides, _info = _workflow_layers(ctx, detector, pipeline, entity)
+            params = layer_params(cls, active, yaml_params, overrides)  # 算分數用正式偵測實際生效的參數
+            inc = Incident.from_dict(incident["incident"], uid=incident["uid"])
+            got = threshold.infer(ctx, cls, params, series, pipeline, entity, as_utc(inc.start), as_utc(inc.end))
+            if isinstance(got, str):
+                fell_back = f"撈不到資料（{got}）"
+            else:
+                details.update(got)
+                proposal, note = tuning_rules.quantile_step(got["target"], tunable, current)
+                if proposal is None:
+                    fell_back = note
+                else:
+                    details["proposed"] = proposal["threshold"]
+                    reason = (f"分位數反推：誤報時窗最高分 S_max={got['s_max']}，過去 {got['lookback_days']} 天"
+                              f"（實際有分數 {got['q_days']} 天、{got['q_points']} 點，排除 {got['excluded_windows']} 個事故／維護／黃金時窗）"
+                              f"99.9% 分位數 Q={got['q']}；目標 max(S_max×{got['margin']}, Q)={got['target']}。{note}")
+                    if got.get("note"):
+                        reason += f"（{got['note']}）"
+                    return proposal, reason, "quantile"
+        details["fallback"] = fell_back
+        return template[0], f"{template[1]}（沒用分位數反推：{fell_back}）", "template"

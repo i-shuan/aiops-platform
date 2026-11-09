@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, Integer, LargeBinary, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Float, Index, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aiops.storage.db import Base, create_all, drop_all
@@ -260,22 +260,41 @@ class ActiveDetectorConfigRow(Base):
 
 
 class IncidentKnowledgeRow(Base):
-    """歷史事故經驗庫：確認是真異常、並寫了處置方式的事件群。RCA 用它找「以前發生過的類似事故」。
+    """歷史事故經驗庫：維運確認過的事件群（true_positive 一律寫入，處置可以之後再補）。兩種人在用：
+
+    - RCA「歷史相似案例」：只拿有寫處置（resolution 非空）的列，列出當時怎麼處理
+    - 調參回測的黃金事故防護罩（admin.proposal_backtest）：verdict = true_positive 的列 = 黃金事故，
+      提案參數重跑時窗內一個異常都抓不到就擋下
 
     特徵簽章（entities、metrics、signals）在寫入當下從事件群抽出來存好，查詢時不必再解析事件內容。
+    entities 維持 JSON 清單（一個事件群可以有多個實體），實體過濾在 Python 端做（Knowledge.golden）：
+    黃金事故是人工確認的，量級是幾百到幾千筆，(pipeline, window_start) 索引先把範圍縮小就夠了。
+    context：根因下鑽、範例 trace id、主要錯誤、tags 這類擴充資訊（PostgreSQL 上是 JSONB + GIN，見 migration 0005）。
     """
 
     __tablename__ = "incident_knowledge"
+    __table_args__ = (
+        Index("ix_incident_knowledge_pipeline_window", "pipeline", "window_start"),
+        Index("ix_incident_knowledge_verdict_window", "verdict", "window_start"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     incident_uid: Mapped[str] = mapped_column(String(40), unique=True)
     pipeline: Mapped[str] = mapped_column(String(128), index=True, default="")
     entities: Mapped[list] = mapped_column(JSON)
     metrics: Mapped[list] = mapped_column(JSON)
     signals: Mapped[list] = mapped_column(JSON)
-    resolution: Mapped[str] = mapped_column(String(4000))
+    resolution: Mapped[str] = mapped_column(String(4000), default="", server_default="")  # 空字串 = 還沒寫處置
     root_cause: Mapped[str] = mapped_column(String(1000), default="")
     author: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    # true_positive = 黃金事故；同一個事件群後來被改判 false_positive 就降級（不刪，留紀錄）
+    verdict: Mapped[str] = mapped_column(String(16), default="true_positive", server_default="true_positive")
+    severity: Mapped[str] = mapped_column(String(8), default="", server_default="")
+    # 事件群的時窗（事件群 start／end，UTC）。黃金事故回測就重跑這一段
+    window_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    context: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
 def reset_all() -> None:

@@ -282,6 +282,11 @@ class Proposals:
         return crud.find_between(TuningProposalRow, "approved_at", start, end)
 
     @staticmethod
+    def with_status(detector: str, pipeline: str, entity: str, statuses: list[str]) -> list[Row]:
+        return crud.find_matching(TuningProposalRow, {"detector_name": detector, "pipeline": pipeline, "entity": entity},
+                                  {"status": statuses})
+
+    @staticmethod
     def open_for(detector: str, pipeline: str, entity: str) -> list[Row]:
         """這一層還沒結案（pending／backtested）的提案。"""
         return crud.find_matching(TuningProposalRow, {"detector_name": detector, "pipeline": pipeline, "entity": entity},
@@ -315,13 +320,29 @@ class Feedbacks:
 
 
 class Knowledge:
-    """歷史事故經驗庫。同一個事件群只留一筆，再寫一次就更新處置內容。"""
+    """歷史事故經驗庫（也是黃金事故庫）。同一個事件群只留一筆，再寫一次就更新。"""
 
     @staticmethod
     def upsert(incident_uid: str, **fields: Any) -> Row:
-        return crud.upsert(IncidentKnowledgeRow, {"incident_uid": incident_uid}, **fields)
+        return crud.upsert(IncidentKnowledgeRow, {"incident_uid": incident_uid}, **fields, updated_at=utc_now())
+
+    @staticmethod
+    def get(incident_uid: str) -> Row | None:
+        return crud.find_one(IncidentKnowledgeRow, incident_uid=incident_uid)
 
     @staticmethod
     def recent(limit: int) -> list[Row]:
-        """最新的 limit 筆（由新到舊）。"""
-        return crud.find_latest(IncidentKnowledgeRow, limit)
+        """最新的 limit 筆有寫處置的（由新到舊）。RCA 相似案例用：沒寫處置的列出來也沒有「當時怎麼處理」可看。"""
+        return crud.find_latest(IncidentKnowledgeRow, limit, not_equal={"resolution": ""})
+
+    @staticmethod
+    def golden(pipeline: str, entity: str) -> list[Row]:
+        """黃金事故：verdict = true_positive、有時窗、屬於這條管線（"*" = 所有管線）且涉及這個實體（"*" = 所有實體）。
+        依 window_start 排序。實體在 Python 端過濾（entities 是 JSON 清單）。"""
+        equals: dict[str, Any] = {"verdict": "true_positive"}
+        if pipeline != ANY:
+            equals["pipeline"] = pipeline
+        rows = [r for r in crud.find(IncidentKnowledgeRow, **equals)
+                if r["window_start"] is not None and r["window_end"] is not None
+                and (entity == ANY or entity in (r["entities"] or []))]
+        return sorted(rows, key=lambda r: r["window_start"])

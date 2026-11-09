@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 SYSTEM = (
@@ -56,3 +57,25 @@ def template(verdict: str, tunable: dict, current: dict[str, float]) -> tuple[di
     _default, low, high = tunable[key]
     value = round(min(high, max(low, current[key] * _FACTOR[verdict])), 4)
     return {key: value}, f"固定規則：{verdict} -> {key} {current[key]} -> {value}"
+
+
+def quantile_step(target: float, tunable: dict, current: dict[str, float]) -> tuple[dict[str, float] | None, str]:
+    """把分位數反推的目標門檻（誤報 -> 只能調高）變成一次提案：夾在範圍內、單次最多 +50%，並通過 validate。
+    回 (參數, 說明)；不該調（目標不高於現行）或驗證不過回 (None, 原因)。"""
+    _default, low, high = tunable["threshold"]
+    now = current["threshold"]
+    value = min(high, max(low, target))
+    note = f"目標 {target} 超出範圍，夾到 {value}。" if value != target else ""
+    if value <= now:
+        return None, (f"目標門檻 {value} 不高於現行 {now}：誤報時窗裡這個偵測器的分數沒有越線，"
+                      "誤報不是它造成的（例如是多數決裡其他節點）")
+    cap = math.floor(now * (1 + _MAX_CHANGE) * 10000) / 10000 if now else value
+    if value > cap:
+        note += (f"目標 {round(value, 4)} 超過單次上限 {int(_MAX_CHANGE * 100)}%，這次先調到 {cap}"
+                 f"（還差 {round(value - cap, 4)}；核准後若還誤報，再回饋一次會從 {cap} 往上算）。")
+        value = cap
+    value = round(value, 4)
+    problem = validate({"params": {"threshold": value}, "reason": "quantile"}, "false_positive", tunable, current)
+    if problem:
+        return None, f"反推結果驗證不過：{problem}"
+    return {"threshold": value}, note or f"新門檻 {value}。"

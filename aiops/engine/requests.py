@@ -204,6 +204,8 @@ class FeedbackSubmit(BaseModel):
     time_range: TimeRangeIn | None = None
     resolution: str | None = Field(None, min_length=1, max_length=4000)
     root_cause: str | None = Field(None, max_length=1000)
+    # true_positive 的擴充資訊（根因下鑽、範例 trace id、主要錯誤、tags），存進經驗庫的 context
+    context: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _shape(self):
@@ -216,6 +218,8 @@ class FeedbackSubmit(BaseModel):
             raise ValueError("resolution（處置）只能寫在確認為真異常（true_positive）的回饋上")
         if self.root_cause and self.resolution is None:
             raise ValueError("寫了 root_cause 也要寫 resolution，經驗庫才有處置可以參考")
+        if self.context and (self.verdict != "true_positive" or self.incident_uid is None):
+            raise ValueError("context 只能寫在針對事件群、確認為真異常（true_positive）的回饋上")
         return self
 
 
@@ -227,6 +231,23 @@ class FeedbackPropose(BaseModel):
     # entity = 只改這條管線的這個實體（事件群只有一個實體時可省略 entity）；pipeline = 這條管線全部；global = 全平台
     scope: Literal["entity", "pipeline", "global"] = "pipeline"
     entity: str | None = None
+
+
+class SeriesProfile(BaseModel):
+    """序列體檢（admin.series_profile）：撈 days 天的序列，算 24h／168h 自相關、偏態、峰度。
+    沒有日週期也沒有週週期時，產生「把 detector.hourly_baseline 從這個 target 排除」的建議（advisory，要改 YAML 才生效）。
+    end 不給 = 現在；回放歷史資料時給資料的最後時間。"""
+
+    metric: MetricIn
+    pipeline: str = Field(pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
+    entity: str = Field(min_length=1, max_length=256)
+    days: int = Field(14, ge=8, le=60)  # 至少 8 天：168h 的自相關要有一整週的配對
+    step_seconds: int = Field(300, ge=60, le=3600)
+    end: datetime | None = None
+    proposer: str = "series_profiler"
+
+    def to_targets(self) -> list:
+        return [TargetSpec(source_type=self.metric.source_type, query=self.metric.query, entity=self.entity)]
 
 
 class TuningMetricsQuery(BaseModel):
