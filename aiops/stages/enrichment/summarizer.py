@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiops.engine.context import PipelineContext
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.topology import propagation_edges
@@ -8,6 +10,8 @@ from aiops.stages.enrichment import narrative
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
 from aiops.stages.enrichment import registry
 from aiops.stages.enrichment.providers import build_llm
+
+logger = logging.getLogger("aiops.enrichment")
 
 
 @OperatorRegistry.register("enrichment.llm_summary")
@@ -53,7 +57,7 @@ class LLMSummarizer(BaseOperator):
 class LLMBriefing(BaseOperator):
     """三行式止血摘要（docs/RCA_STEP2_DESIGN.md 第 4 節）。放在 rca.report 之後：context 只吃已算好的根因歸因、範例 trace、
     日誌樣板與命中的 Runbook（ctx.rca_runbook），不丟原始資料。provider=noop（預設）完全不連外、直接用模板；
-    設了供應商就讓 LLM 寫、平台驗（白名單、數字 ±10%、幻覺黑名單），任何一步失敗都退回模板，絕不阻斷管線。
+    設了供應商就讓 LLM 寫、平台驗（白名單、封閉詞表、數字 ±10%），任何一步失敗都退回模板，絕不阻斷管線。
     params: provider、model、base_url、json_mode（預設 true；只對 OpenAI 相容供應商有效）。
     """
 
@@ -83,6 +87,7 @@ class LLMBriefing(BaseOperator):
         known = set(incident.entities) | {n for edge in propagation_edges(ctx.topology, ctx.lot_edges) for n in edge}
         reason = narrative.validate_briefing(reply, context, known)
         if reason:
+            logger.warning("HallucinationBlocked incident=%s provider=%s：%s", incident.uid, self.provider, reason)
             ctx.llm_briefing_rejected = reason
             return ctx
         ctx.llm_briefing = {k: reply[k].strip() for k in narrative.BRIEFING_KEYS}

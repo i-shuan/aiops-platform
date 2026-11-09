@@ -81,9 +81,75 @@ BRIEFING_SYSTEM = (
 )
 BRIEFING_KEYS = ("summary_line", "action_line", "verification_line")
 _PREFIX = {"summary_line": "【一句話根因】", "action_line": "【立即止血動作】", "verification_line": "【驗證與排除項】"}
-# 常見的幻覺詞：context 裡沒有這個字就不准出現（有的話是真證據，放行）
-_HALLUCINATION_WORDS = ("kafka", "rabbitmq", "dns", "redis", "oracle", "postgres", "mysql", "mongodb", "nginx", "istio",
-                        "envoy", "kubernetes", "cdn", "firewall", "防火牆")
+# 封閉世界詞表（docs/HARDENING_DESIGN.md 第 3 節）：三行裡每個「識別字 token」（含英數、可用 - _ . : / @ 連接的片段）
+# 都要出現在 context 的值裡，或在下面這份通用技術詞表裡；不在就退回模板。中文敘述不抽 token：
+# 死區——「請重啟資料庫主機」這種不含識別字的中文幻覺，封閉詞表擋不到（報告靠 briefing_generated_by 標來源）。
+_IDENT = re.compile(r"[A-Za-z0-9]+(?:[-_.:/@][A-Za-z0-9]+)*")
+_SPLIT = re.compile(r"([-_.:/@])")
+_IDENT_CHAR = re.compile(r"[A-Za-z0-9\-_.:/@]")
+_TRAILING_IDENT = re.compile(r"[A-Za-z0-9\-_.:/@]+$")
+_NUM_UNIT = re.compile(r"\d+(?:\.\d+)?([a-z]+)")
+# 放行清單（不是黑名單）：協定、單位、通用 SRE 名詞與動作。故意不放任何產品／元件名（kafka、redis、dns、k8s、nginx…）：
+# 那些只有 context 裡有才算數。
+GENERIC_LEXICON = frozenset("""
+http https grpc tcp udp tls ssl url uri api apis db sql nosql io i/o json yaml id ids ip
+get post put patch delete head options
+ms s sec secs min mins h hr kb mb gb tb rps qps tps iops
+p0 p1 p2 p3 p4 p50 p90 p95 p99 4xx 5xx sla slo sli rca aiops llm sre oom cpu gpu mem memory disk
+timeout timeouts client clients server servers pool pools connection connections conn max min rate limit limits limiting
+rollback roll back retry retries backoff circuit breaker fallback degrade failover hotfix deploy deployment release
+config feature flag flags canary hpa replica replicas pod pods node nodes host hosts cluster
+trace traces tracing span spans log logs logging error errors exception exceptions stack stacktrace status code
+latency throughput traffic saturation load slow query queries lock locks wait index cache health healthcheck check
+endpoint endpoints upstream downstream request requests response responses queue thread threads heap gc
+baseline threshold metric metrics alert alerts incident runbook ok e.g i.e vs
+""".split())
+
+
+def _value_tokens(obj: Any, out: set[str]) -> None:
+    """context 值（不含鍵名）裡的識別字 token，連同它們用連接符切開的每一段連續片段（java.lang.IllegalStateException → IllegalStateException）。"""
+    if isinstance(obj, str):
+        for tok in _IDENT.findall(obj):
+            parts = _SPLIT.split(tok.lower())  # 帶括號的 pattern：奇數位是連接符
+            words, seps = parts[0::2], parts[1::2]
+            for i in range(len(words)):  # 每一段連續片段：tax-gw:443 → tax、tax-gw、tax-gw:443、gw、gw:443、443
+                piece = words[i]
+                out.add(piece)
+                for j in range(i + 1, len(words)):
+                    piece += seps[j - 1] + words[j]
+                    out.add(piece)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _value_tokens(v, out)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _value_tokens(v, out)
+
+
+def briefing_lexicon(context: dict[str, Any]) -> set[str]:
+    """合法識別字（小寫）：context 值裡的全部 token ∪ 通用技術詞表。歸因的 kind/subtype 另外補成一個字（模板寫成 external/http）。"""
+    words: set[str] = set(GENERIC_LEXICON)
+    _value_tokens(context, words)
+    a = (context.get("root_cause") or {}).get("attribution") or {}
+    if a.get("kind") and a.get("subtype"):
+        words.add(f"{a['kind']}/{a['subtype']}".lower())
+    return words
+
+
+def unknown_identifier(text: str, lexicon: set[str]) -> str | None:
+    """第一個不在詞表裡的識別字 token（原文大小寫）；全部合法回 None。純數字（含 13.3、12:00）交給數字檢查；
+    數字黏單位（101.4ms）只檢查單位。"""
+    for tok in _IDENT.findall(text):
+        low = tok.lower()
+        if not re.search(r"[a-z]", low) or low in lexicon:
+            continue
+        m = _NUM_UNIT.fullmatch(low)
+        if m and m.group(1) in lexicon:
+            continue
+        return tok
+    return None
+
+
 _TOLERANCE = 0.10
 _MAX_LINE = 200
 
@@ -166,9 +232,10 @@ def briefing_whitelist(context: dict[str, Any]) -> set[str]:
 def validate_briefing(reply: dict[str, Any], context: dict[str, Any], known_entities: set[str]) -> str | None:
     """通過回 None；不通過回原因。
     1. 三個鍵都要是非空字串、≤ 200 字、以規定的【】開頭。
-    2. 實體白名單：known_entities（拓撲裡的服務）之中不在白名單的名字不准出現。
-    3. 數字：文字裡每個數字都要在 context 的數值（含字串裡的數字）±10% 內找到。
-    4. 黑名單詞（kafka、dns…）只有 context 裡有才放行。"""
+    2. 實體白名單：known_entities（拓撲裡的服務）之中不在白名單的名字不准出現（封閉詞表的特例，留著對照）。
+    3. 封閉詞表：每個識別字 token（不分大小寫）都要在 context 的值或通用技術詞表裡（briefing_lexicon）。
+    4. 數字：文字裡每個數字都要在 context 的數值（含字串裡的數字）±10% 內找到。
+    死區：不含識別字的中文幻覺（「請重啟資料庫主機」）擋不到。"""
     for key in BRIEFING_KEYS:
         line = reply.get(key)
         if not isinstance(line, str) or not line.strip():
@@ -182,17 +249,26 @@ def validate_briefing(reply: dict[str, Any], context: dict[str, Any], known_enti
     for name in sorted(known_entities - allowed_names):
         if name and name in text:
             return f"提到白名單以外的實體：{name}"
+    token = unknown_identifier(text, briefing_lexicon(context))
+    if token is not None:
+        shown = token if token == token.lower() else f"{token}（{token.lower()}）"
+        return f"提到證據與通用詞表裡沒有的識別字：{shown}"
     allowed_numbers: set[float] = set()
     _numbers_in(context, allowed_numbers)
     for num in _NUMBER.findall(text):
         if not _number_ok(float(num), allowed_numbers):
             return f"數字 {num} 在證據中找不到（±10%）"
-    haystack = json.dumps(context, ensure_ascii=False).lower()
-    lowered = text.lower()
-    for word in _HALLUCINATION_WORDS:
-        if word in lowered and word not in haystack:
-            return f"提到證據裡沒有的 {word}"
     return None
+
+
+def _clip(text: str, n: int) -> str:
+    """截到 n 字，但不把識別字切一半（切一半的 inventory-s 會被封閉詞表當成虛構名稱）。"""
+    if len(text) <= n:
+        return text
+    cut = text[:n]
+    if _IDENT_CHAR.fullmatch(text[n - 1]) and _IDENT_CHAR.fullmatch(text[n]):
+        cut = _TRAILING_IDENT.sub("", cut).rstrip()
+    return cut
 
 
 def briefing_template(context: dict[str, Any]) -> dict[str, str]:
@@ -216,9 +292,10 @@ def briefing_template(context: dict[str, Any]) -> dict[str, str]:
         if st.get("trace_id"):
             verify += f"；範例 trace {st['trace_id']}"
     else:
-        note = (context.get("root_note") or "").split("：", 1)[-1][:120]
+        note = _clip((context.get("root_note") or "").split("：", 1)[-1], 120)
         summary = f"{_PREFIX['summary_line']}證據不足，不指認單一服務（{entities}）：{note}"
         verify = f"{_PREFIX['verification_line']}先查共用的資料源、網路與未被追蹤的依賴，比對同時間其他告警"
     first = f"[{rb['id']}] {rb['actions'][0]}" if rb.get("actions") else "比對事件前後的變更紀錄（部署、設定、配方）"
     action = _PREFIX["action_line"] + first
-    return {"summary_line": summary[:_MAX_LINE], "action_line": action[:_MAX_LINE], "verification_line": verify[:_MAX_LINE]}
+    return {"summary_line": _clip(summary, _MAX_LINE), "action_line": _clip(action, _MAX_LINE),
+            "verification_line": _clip(verify, _MAX_LINE)}
