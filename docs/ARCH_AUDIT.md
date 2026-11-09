@@ -2,7 +2,10 @@
 >
 > - 稽核基準：`main@bd16b7a`（2026-11-09），原始分支 `claude/arch-audit-e98c0f`；原本放在 `synth-out/reports/arch_audit.md`（不進 git），搬到這裡，內文未改寫。
 > - 缺口的 strict xfail 測試在 `tests/test_arch_audit_gaps.py`（28 個）。修好一項就會變 XPASS → 紅燈，修的人把對應的 xfail 拿掉。
-> - **修復進度由 `fix/arch-audit-gaps` 分支處理**（G6–G9、G11、G13、G17–G19），這份文件記錄的是稽核當下的狀態，不隨修復更新。
+> - **修復進度由 `fix/arch-audit-gaps` 分支處理**，這份文件記錄的是稽核當下的狀態，內文不隨修復更新。
+>   2026-11-09 已修（commit `c8f3d81`，對應 xfail 改成一般測試）：G6、G7、G8、G9、G11、G12、G13、G17、G18、G19。
+>   還開著：G1（3 個 xfail）、G3（5 個）、G4、G5、G14、G15（各 1 個）；G2 已由 `test_engine_and_runner_never_special_case_an_operator_name` 補上防線；G10、G16 是設計決定，沒有 xfail。
+>   Q12 的 Alertmanager 探針已在叢集實測（見該節末「叢集實測結果」）。
 > - 文末「實驗檔」一節提到的 `tests/_audit_exp_a.py`／`_b.py`／`_c.py` 已提煉成正規測試後刪除（只保留「現在就是乾淨的行為」）：
 >   Q2 → `tests/test_architecture.py::test_engine_and_runner_never_special_case_an_operator_name`；
 >   Q4 → `tests/test_algorithms.py::test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_snapshot`；
@@ -530,6 +533,20 @@ Q11b 第 2 輪：同一實體 6 分鐘後又異常、被吸收進進行中事件
 ```
 PYTHONPATH=. .venv/Scripts/python C:/Users/cjy93/AppData/Local/Temp/claude/85c052f7c679c0cf/de234d9e-45a3-4c72-b5fe-2b0a6cabccbc/scratchpad/am_endsat.py
 ```
+
+**叢集實測結果（2026-11-09，fix/arch-audit-gaps 分支補做；使用者核准）**：對 rancher-desktop 叢集的 Alertmanager（`aiops-platform/aiops-alertmanager`，port-forward 19093）送 `alertname=arch_audit_probe, preset=arch_audit, severity=none, source=aiops` 的 firing，再連送 3 次 `endsAt=now`，每步查 `GET /api/v2/alerts?filter=preset="arch_audit"&active=true&inhibited=true&silenced=true`：
+
+```
+[0 事前]                      0 筆
+[1 送 firing]                 1 筆  state=active  fingerprint=fecc3e6902f0f3b6  endsAt=startsAt+1h（resolve_timeout）
+[2 送 endsAt=now（第 1 次）]  0 筆（已 resolved，不再列為 active）
+[3 送 endsAt=now（第 2 次）]  0 筆
+[4 送 endsAt=now（第 3 次）]  0 筆
+[5 事後 2 秒]                 0 筆
+distinct_fingerprints=[fecc3e6902f0f3b6]  still_firing=0
+```
+
+結論【實驗】：同一組 labels 重複送 endsAt 不會長出第二筆告警（整段只有一個 fingerprint），resolved 之後再送 resolved 也不會重新 firing；上面的【推論】成立。叢集上沒有留下任何 `preset=arch_audit` 的告警。腳本：發起 session 的 scratchpad `am_endsat_probe.py`。
 
 **缺口**：
 1. **watchdog 在 finalize 之前續命**：`notifier.watchdog` 跟其他 notifier 同是 after_persist，`finalize_batch` 在全部 after_persist 之後（`pipeline.py:295-297`）。finalize 失敗的那一輪對外是失敗（InfrastructureError、排程備援通報會響），但 Dead Man's Snitch 已經續命 ttl 分鐘——兩個健康訊號互相矛盾；若 DB 從此寫不進「已通知／結案」，每輪都重送同一則通知、每輪都續命心跳。建議：加一個 `after_finalize` scope 給 watchdog（引擎在 finalize_batch 之後才跑）。約 10 行（引擎 scope 順序＋watchdog 宣告＋CLAUDE.md）。測試：`test_watchdog_does_not_renew_when_finalize_fails`（xfail）
