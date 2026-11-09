@@ -215,19 +215,55 @@ class IncidentTracesFetch(BaseOperator):
     資料源沒設定 -> 略過（記在 audit）；連不上、查詢錯 -> 記進 errors 並略過，報告照出（拓撲就只用既有的）。
     params: source_type（預設 elasticsearch）、before_minutes（預設 15）、after_minutes（預設 0）、
             max_spans（上限，預設 20000，超過就截斷並註記）、only_incident_services（預設 false：撈這段時間所有服務，
-            才看得到事件實體跟沒出事的服務之間的關係；true 只撈事件裡的服務，量小但可能漏掉中間的服務）。
+            才看得到事件實體跟沒出事的服務之間的關係；true 只撈事件裡的服務，量小但可能漏掉中間的服務）、
+            max_before_minutes（預設 0 = 不擴展；設了就是基準窗自適應回溯的上限）、
+            min_entry_spans（預設 20；要跟 rca.root_cause.evidence 的 min_requests 一致，兩邊各自宣告、不互相 import）。
+
+    基準窗自適應回溯：事件裡任一實體在事件前 [start − before, start) 的入口 span 不到 min_entry_spans，
+    而事件期間夠（擴基準窗才有用；期間也不夠就留給根因算子寫「證據不足」），就把基準窗加倍（15 → 30 → 60）直到
+    max_before_minutes；每一步只撈多出來的前段 [start − new, start − old)，窗口維持連續、不跨週。
+    越長的基準越鈍（事故前的緩慢劣化會被算成「正常」），所以只擴到剛好夠。實際用了幾分鐘記在 ctx.rca_trace_lookback，
+    報告段落照實標出來。
     """
 
     scope = "batch"
 
     def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 15, after_minutes: int = 0,
-                 max_spans: int = 20000, only_incident_services: bool = False):
-        if min(before_minutes, after_minutes) < 0 or max_spans <= 0:
-            raise ValueError("before／after_minutes 不能小於 0；max_spans 必須大於 0")
+                 max_spans: int = 20000, only_incident_services: bool = False, max_before_minutes: int = 0,
+                 min_entry_spans: int = 20):
+        if min(before_minutes, after_minutes, max_before_minutes) < 0 or max_spans <= 0 or min_entry_spans < 1:
+            raise ValueError("before／after／max_before_minutes 不能小於 0；max_spans 必須大於 0；min_entry_spans 至少 1")
+        if max_before_minutes and max_before_minutes < before_minutes:
+            raise ValueError("max_before_minutes 要大於等於 before_minutes（0 = 不擴展）")
         self.source_type = source_type
         self.before, self.after = timedelta(minutes=before_minutes), timedelta(minutes=after_minutes)
         self.max_spans = int(max_spans)
         self.only_incident_services = bool(only_incident_services)
+        self.max_before = timedelta(minutes=max_before_minutes) if max_before_minutes else None
+        self.min_entry_spans = int(min_entry_spans)
+
+    @staticmethod
+    def _record(s: dict, spell) -> SpanRecord:
+        return SpanRecord(s["trace_id"], s["span_id"], s.get("parent_id"), spell(s["service"]), s["ts"],
+                          float(s.get("duration_ms") or 0.0), bool(s.get("error")),
+                          kind=str(s.get("kind") or ""), subtype=str(s.get("subtype") or ""),
+                          resource=str(s.get("resource") or ""), status_code=int(s.get("status_code") or 0),
+                          name=str(s.get("name") or ""))
+
+    @staticmethod
+    def _entry_counts(spans: list[SpanRecord], entities: list[str], lo: datetime, hi: datetime) -> dict[str, int]:
+        """[lo, hi) 內每個事件實體的入口 span 數（沒有父、或父不是同一個服務）。跟 stages/rca/spans 同一個定義，但 ingestion 不 import rca。"""
+        service_of = {s.span_id: s.service for s in spans}
+        counts = {e: 0 for e in entities}
+        for s in spans:
+            if s.service in counts and lo <= as_utc(s.ts) < hi and (s.parent_id is None or service_of.get(s.parent_id) != s.service):
+                counts[s.service] += 1
+        return counts
+
+    def _short_entities(self, spans, entities, inc_start, used, end) -> list[str]:
+        before = self._entry_counts(spans, entities, inc_start - used, inc_start)
+        during = self._entry_counts(spans, entities, inc_start, end)
+        return [f"{e} {before[e]} 筆" for e in entities if before[e] < self.min_entry_spans <= during[e]]
 
     def _skip(self, ctx: PipelineContext, why: str, as_error: bool) -> PipelineContext:
         ctx.log(f"incident_traces:skip:{why}")
@@ -243,22 +279,41 @@ class IncidentTracesFetch(BaseOperator):
         incident = ctx.incidents[0]
         if not is_configured(self.source_type):
             return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
-        start, end = as_utc(incident.start) - self.before, as_utc(incident.end) + self.after
+        inc_start = as_utc(incident.start)
+        start, end = inc_start - self.before, as_utc(incident.end) + self.after
         services = sorted(set(incident.entities)) if self.only_incident_services else None
+        entities = sorted(set(incident.entities))
         spell = _spelled_like_entities(incident.entities)
+        used, extended_for = self.before, ""
         try:
-            raw, truncated = get_datasource_spec(self.source_type).fetch_spans(start, end, services, self.max_spans)
-            spans = [SpanRecord(s["trace_id"], s["span_id"], s.get("parent_id"), spell(s["service"]), s["ts"],
-                                float(s.get("duration_ms") or 0.0), bool(s.get("error"))) for s in raw]
+            spec = get_datasource_spec(self.source_type)
+            raw, truncated = spec.fetch_spans(start, end, services, self.max_spans)
+            spans = [self._record(s, spell) for s in raw]
+            # 基準窗自適應回溯：入口請求不夠就往前加倍撈，只撈多出來的前段，窗口連續
+            while self.max_before is not None and used < self.max_before and len(spans) < self.max_spans:
+                short = self._short_entities(spans, entities, inc_start, used, end)
+                if not short:
+                    break
+                new = min(used * 2, self.max_before)
+                extra, cut = spec.fetch_spans(inc_start - new, inc_start - used, services, self.max_spans - len(spans))
+                seen = {s.span_id for s in spans}
+                spans = [self._record(s, spell) for s in extra if s["span_id"] not in seen] + spans
+                truncated = truncated or cut
+                extended_for = extended_for or f"{'、'.join(short)}（門檻 {self.min_entry_spans} 筆）"
+                ctx.log(f"incident_traces:extend:{int(used.total_seconds() // 60)}->{int(new.total_seconds() // 60)}:{';'.join(short)}")
+                used, start = new, inc_start - new
         except (InfrastructureError, BadRequest, NotFound) as e:
             return self._skip(ctx, str(e), as_error=True)
         except Exception as e:  # noqa: BLE001  旁路佐證：資料長得出乎意料也只略過這一段，不能讓整份報告失敗
             logger.warning("incident_traces 解析失敗，略過拓撲佐證：%s: %s", type(e).__name__, e)
             return self._skip(ctx, f"{type(e).__name__}: {e}", as_error=True)
         ctx.rca_spans = spans
+        before_min, used_min = int(self.before.total_seconds() // 60), int(used.total_seconds() // 60)
+        ctx.rca_trace_lookback = (before_min, used_min)
         ctx.result["trace_fetch"] = {"source_type": self.source_type, "spans": len(ctx.rca_spans),
                                      "truncated": truncated, "start": start.isoformat(), "end": end.isoformat(),
-                                     "services": sorted({s.service for s in ctx.rca_spans})}
+                                     "services": sorted({s.service for s in ctx.rca_spans}),
+                                     "before_minutes": before_min, "before_minutes_used": used_min, "extended_for": extended_for}
         ctx.log(f"incident_traces:{len(ctx.rca_spans)}{':truncated' if truncated else ''}")
         return ctx
 

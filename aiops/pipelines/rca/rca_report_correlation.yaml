@@ -10,7 +10,7 @@ nodes:
   # 隨需撈 trace 還原當下的呼叫關係（互相關排根因用不到，但「傳播路徑」段落要靠它）
   - name: fetch_traces
     operator: ingestion.incident_traces
-    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000}
+    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60}
   - name: build_topology
     operator: rca.build_dynamic_topology
     params: {mode: merge, min_calls: 1}

@@ -97,6 +97,9 @@ class RootCandidate:
     entity: str
     score: float
     reason: str
+    # 下鑽歸因：這個服務的增量主要花在等哪個下游資源（例如 "tax-gw:443（external/http）"）。候選實體仍是服務，
+    # 拓撲、傳播路徑、標準答案都不變；這一欄只告訴人「該去查的不是這個服務的程式，是它等的東西」。空字串 = 沒有
+    dependency: str = ""
 
 
 @dataclass
@@ -168,6 +171,12 @@ class SpanRecord:
     ts: datetime
     duration_ms: float
     error: bool = False
+    # 以下是選填（資料源沒給就是預設值，所有統計退回只看服務；mock 資料源與既有測試都不帶）
+    kind: str = ""          # span.type：""（入口 transaction）／app／db／external／messaging…
+    subtype: str = ""       # span.subtype：redis／http／postgresql
+    resource: str = ""      # span.destination.service.resource：tax-gw:443、redis
+    status_code: int = 0    # http.response.status_code；0 = 沒有
+    name: str = ""          # transaction.name：POST /invoice（只給報告文字用）
 
 
 @dataclass
@@ -275,6 +284,8 @@ class PipelineContext:
     # incident_traces 有設定 trace 來源、但這一輪連不上或讀失敗（例如 ES 重啟）。跟「這個場景本來就沒有 trace」（工廠）要分開：
     # 前者證據被吃掉，根因算子不該拿拓撲硬猜；後者退回拓撲推測是正常做法
     rca_traces_failed: bool = False
+    # incident_traces 的事件前基準窗：(設定的分鐘, 實際用的分鐘)。入口請求不足時會往前擴展，報告要照實標出來；None = 沒撈 trace
+    rca_trace_lookback: tuple[int, int] | None = None
     # RCA 重抓的事件時段原始時序：(實體, 指標) -> DataFrame(ts, value)。給互相關等需要原始資料的演算法
     rca_series: dict[tuple[str, str], pd.DataFrame] = field(default_factory=dict)
     # RCA 隨需現抓的事件前後 span（ingestion.incident_traces），給 rca.build_dynamic_topology 還原當下的呼叫關係
@@ -324,7 +335,8 @@ class PipelineContext:
         if self.rca_sections or self.rca_skipped:
             out.update(sections=[s.to_dict() for s in self.rca_sections], skipped=self.rca_skipped,
                        root_cause={"algorithm": self.rca_root_algorithm, "note": self.rca_root_note,
-                                   "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason}
+                                   "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason,
+                                                   "dependency": c.dependency}
                                                   for c in self.rca_root_candidates]},
                        narrative={"summary": self.llm_summary, "claims": self.llm_claims,
                                   "generated_by": self.llm_generated_by, "rejected": self.llm_rejected})

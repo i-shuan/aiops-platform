@@ -23,7 +23,11 @@ class SuggestedActions(RcaSection):
     def build(self, incident, ctx):
         actions: list[str] = []
         if ctx.rca_root_candidates:
+            top = ctx.rca_root_candidates[0]
             actions.append(f"優先處理可能的源頭：{', '.join(c.entity for c in ctx.rca_root_candidates[:3])}")
+            if top.dependency:  # 下鑽歸因：時間花在等下游資源，去查那個資源而不是這個服務的程式
+                actions.append(f"{top.entity} 的增量主要在等待 {top.dependency}：先查該依賴的延遲、錯誤與連線池／配額，"
+                               f"而不是 {top.entity} 自己的程式與機器")
         names = " ".join(f"{e.metric} {e.attrs.get('signal', '')}" for e in incident.events).lower()
         hits = [action for keywords, action in _RULES if any(k in names for k in keywords)]
         actions += hits or [_GENERIC]
