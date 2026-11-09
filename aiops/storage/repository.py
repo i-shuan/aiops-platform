@@ -239,12 +239,22 @@ class Traces:
 
 class ServiceEdges:
     @staticmethod
-    def add_calls(edges: dict[tuple[str, str], int]) -> int:
+    def add_calls(edges: dict[tuple[str, str], int], seen_at: datetime | None = None) -> dict[str, int]:
+        """累加呼叫次數（原子，資料庫算 calls + n）並把 last_seen 設成 seen_at（預設現在）。
+        回傳 {"added": 原本沒有的邊數, "updated": 原本就有的邊數}（新舊判斷是寫入前讀一次，併發時只影響這兩個數字的分配，不影響累加）。"""
+        if not edges:
+            return {"added": 0, "updated": 0}
+        seen_at = seen_at or utc_now()
+        known = {(e["caller"], e["callee"]) for e in crud.find(ServiceEdgeRow)}
         for (caller, callee), calls in edges.items():
-            existing = crud.find_one(ServiceEdgeRow, caller=caller, callee=callee)
-            crud.upsert(ServiceEdgeRow, {"caller": caller, "callee": callee},
-                        calls=(existing["calls"] if existing else 0) + calls, last_seen=utc_now())
-        return len(edges)
+            crud.increment(ServiceEdgeRow, {"caller": caller, "callee": callee}, "calls", int(calls), last_seen=seen_at)
+        updated = sum(1 for k in edges if k in known)
+        return {"added": len(edges) - updated, "updated": updated}
+
+    @staticmethod
+    def prune(before: datetime) -> int:
+        """移除 last_seen 早於 before 的邊，回傳移除幾條。last_seen 是 NULL（0006 之前的舊列）不刪：不知道多久沒出現。"""
+        return crud.delete_before(ServiceEdgeRow, "last_seen", before)
 
     @staticmethod
     def all() -> list[Row]:

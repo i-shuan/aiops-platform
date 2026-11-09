@@ -371,6 +371,10 @@ targets:
 
 ### RCA：根因演算法與報告段落
 
+**偵測時的服務拓撲（排程沉澱，預設來源是 `service_edges`）：**偵測時 `ctx.topology` 預設讀資料表 `service_edges`（`storage/hooks.py`），`alert.topology_chain` 沿這些邊把上下游的異常收斂成同一個事件群（可傳遞多層）。邊由排程動作 **`admin_topology_refresh`** 從 trace 來源自動沉澱：`run-once -w admin_topology_refresh`（K8s CronJob，建議每 30～60 分鐘一次）或 `POST /api/v1/ingestion/topology/refresh`，參數 `source_type`（預設 `elasticsearch`）、`lookback_minutes`（預設 60）、`max_spans`（預設 20000）、`prune_days`（預設 7）、`end`（回放歷史窗用，不給 = 現在）。流程：撈 `[end − lookback, end]` 的 span（跟 RCA 同一支 `fetch_spans`，超過上限以 trace 為單位抽樣、`truncated` 照實回報，次數是樣本內的次數）→ `engine/topology.service_edges` 算 (caller, callee, 次數) → `ServiceEdges.add_calls` 原子累加並把 `last_seen` 設成現在 → `ServiceEdges.prune` 移除 `last_seen` 早於 `prune_days` 天前的邊（`last_seen` 是 NULL 的舊列不刪：不知道多久沒出現）。回報 `spans`、`truncated`、`edges_seen`／`edges_added`／`edges_updated`／`edges_pruned`、`edges`（含次數）與 `window`。資料源沒設定就略過並在 `skipped` 說明（不撈也不 prune）；連不上丟 `InfrastructureError`、整輪失敗（拓撲停止更新要讓人知道）。`last_seen` 是「最近一次被刷新看到」的牆鐘時間，不是 trace 時間：回放舊窗口看到的邊也會被當成剛確認過。`POST /api/v1/ingestion/traces/merge`（`admin_merge_traces`）留給批次匯入 trace，同樣經 `add_calls` 更新 `last_seen`。**YAML 的 `topology:` 只在要明確覆寫時才寫**（寫了就不讀資料表，`topology_explicit`）；有排程刷新就不用寫。升級既有 PostgreSQL 要跑 `migrations/postgres/0006_service_edges_last_seen.sql`（`last_seen` 改可空＋索引）。
+
+> 混沌場景 4（`scripts/chaos/run.py 4`，gateway→order-api→inventory-svc→oracle）不再手動灌邊：偵測回放前對世界的 trace 跑一次 `admin.topology_refresh`（事故前 60 分鐘），9,228 個 span、未截斷，沉澱出 gateway→order-api 1,538 次、order-api→inventory-svc 1,538 次；三個服務收斂成同一個事件群、根因第 1 名 inventory-svc、下鑽 oracle／db。真實 ES 11/3 14:00–16:20Z：10,542 個 span、未截斷、`edges_seen = 0`（這批 trace 沒有跨服務呼叫），表裡 8 天前的邊被 prune、2 天前的保留。
+
 **拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才去 ES 撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`，用環境變數 `AIOPS_ES_TRACE_INDEX` 改；上限 `max_spans`（預設 20000）。區間內不超過上限就全部撈；超過時**不是取最早的 N 筆**（尖峰時那只是窗口開頭幾秒），而是把窗口切成最多 30 個時間桶、每桶用固定 seed 隨機挑 trace，輪流把**整條 trace** 撈回來直到湊滿上限（抽 span 會把父子拆斷），結果的 `trace_fetch.truncated` 為 true。記憶體：100 萬個 span 約 266 MB、聚合邊 0.7 秒，上限 2 萬時約 5 MB。
 
 > 真實 ES（11/3 13:50–16:20Z，共 11,283 span／3,761 條 trace）：上限 2000 時舊做法只涵蓋 13:50–14:16（10 分鐘格 3／15），新做法涵蓋整段（15／15，每 10 分鐘 129–138 個 span），抽到的 666 條 trace 全部完整；上限 5000 時舊做法 7／15、新做法 15／15。抽樣多花 0.7–1.1 秒（多了每桶一次候選查詢）。這批 trace 沒有跨服務呼叫，所以兩種做法的邊都是 0，邊的準確度要等有串 trace context 的資料才量得到。
@@ -551,6 +555,10 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0004_anomaly_level.sql
 
 ```bash
 psql -h <host> -U <user> -d aiops -f migrations/postgres/0005_knowledge_golden_incidents.sql
+```
+
+```bash
+psql -h <host> -U <user> -d aiops -f migrations/postgres/0006_service_edges_last_seen.sql
 ```
 
 `0005` 把經驗庫升級成黃金事故庫：加 `verdict`（既有的列都是「確認為真、寫了處置」才進來的，回填 `true_positive`）、`severity`、`window_start`／`window_end`（從事件群快照回填）、`context`（JSONB＋GIN 索引；程式自動建的 JSON 欄位會轉成 JSONB）、`updated_at`，以及 (pipeline, window_start)、(verdict, window_start) 索引。已在 PostgreSQL 16 實跑過兩條路徑（舊 schema 升級＋回填時窗、程式自動建表後把 JSON 轉成 JSONB），連跑三次只有 NOTICE；仍請先在你的測試庫試一次再上正式庫。

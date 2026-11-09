@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from aiops.engine.requests import IngestAnomalies, LotPathsMerge, MappingApprove, MappingSubmit, SourceRef, TraceMerge
+from aiops.engine.requests import IngestAnomalies, LotPathsMerge, MappingApprove, MappingSubmit, SourceRef, TopologyRefresh, TraceMerge
 from aiops.interfaces.runner import run
 
 router = APIRouter(prefix="/api/v1/ingestion", tags=["ingestion"])
@@ -24,6 +24,11 @@ def get_approved_mapping(source_type: str):
 @router.post("/traces/merge")
 def merge_traces(req: TraceMerge):
     return {"result": run("admin_merge_traces", request=req)}
+
+
+@router.post("/topology/refresh")
+def refresh_topology(req: TopologyRefresh):
+    return {"result": run("admin_topology_refresh", request=req)}
 
 
 @router.post("/lot-paths/merge")
