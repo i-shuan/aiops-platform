@@ -26,6 +26,9 @@ class PeerDetector(DetectorOperator):
     requires_peers = True
     tunable = {"threshold": (4.0, 1.0, 20.0)}
 
+    def training_points(self, df: pd.DataFrame) -> int:
+        return int(_deviation(df).notna().sum())  # 同儕那一刻沒值的列算不出偏離量，不算訓練點
+
     def fit(self, df: pd.DataFrame) -> "PeerDetector":
         d = _deviation(df).dropna()
         self.center_ = float(d.median())

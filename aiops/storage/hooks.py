@@ -19,6 +19,7 @@ from aiops.engine.context import (
     TraceRow,
     TrainingExclusion,
 )
+from aiops.engine.errors import NotFound
 from aiops.engine.params import pick_most_specific
 from aiops.engine.topology import lot_edges_from_paths
 from aiops.engine.types import AnomalyEvent, Incident, as_utc
@@ -84,31 +85,32 @@ class StorageHooks:
 
         if ctx.incident_id is not None:  # RCA：載入指定的事件群與佐證資料
             row = Incidents.get(ctx.incident_id)
-            if row is not None:
-                incident = Incident.from_dict(row["incident"], uid=row["uid"])
-                ctx.incidents = [incident]
-                ctx.incident_ids[incident.fingerprint] = row["id"]
-                ctx.incident_pipeline = row["pipeline"] or ""
-                snapshot = row.get("context") or {}  # 建立當下用的拓撲優先（可重現）；沒有才用上面現推導的
-                if not ctx.topology_explicit and snapshot.get("topology"):
-                    ctx.topology = [(a, b) for a, b in snapshot["topology"]]
-                if not ctx.lot_edges_explicit and snapshot.get("lot_edges"):
-                    ctx.lot_edges = [LotEdge(e["from"], e["to"], e["lots"]) for e in snapshot["lot_edges"]]
-                rows = Traces.window(incident.entities, incident.start - _RCA_TRACE_MARGIN,
-                                     incident.end + _RCA_TRACE_MARGIN)
-                for r in rows:
-                    ctx.trace_rows.setdefault(r["service"], []).append(
-                        TraceRow(r["service"], as_utc(r["ts"]), r["count"], r["error_rate"], r["p95_ms"]))
-                # RCA 重抓時序（ingestion.incident_series）要用的欄位對照
-                for source_type in sorted({e.source_type for e in incident.events if e.source_type}):
-                    fields = Mappings.approved_fields(source_type)
-                    if fields:
-                        ctx.field_maps[source_type] = fields
-                # 歷史相似事故的比對池（排除自己）
-                ctx.knowledge_cases = [
-                    KnowledgeCase(k["incident_uid"], k["pipeline"], list(k["entities"]), list(k["metrics"]),
-                                  list(k["signals"]), k["resolution"], k["root_cause"], as_utc(k["created_at"]))
-                    for k in Knowledge.recent(KNOWLEDGE_POOL_SIZE) if k["incident_uid"] != incident.uid]
+            if row is None:
+                raise NotFound(f"事件群 {ctx.incident_id} 不存在")  # 載入時就說清楚，不要等到撈 trace 才喊「沒有事件群」
+            incident = Incident.from_dict(row["incident"], uid=row["uid"])
+            ctx.incidents = [incident]
+            ctx.incident_ids[incident.fingerprint] = row["id"]
+            ctx.incident_pipeline = row["pipeline"] or ""
+            snapshot = row.get("context") or {}  # 建立當下用的拓撲優先（可重現）；沒有才用上面現推導的
+            if not ctx.topology_explicit and snapshot.get("topology"):
+                ctx.topology = [(a, b) for a, b in snapshot["topology"]]
+            if not ctx.lot_edges_explicit and snapshot.get("lot_edges"):
+                ctx.lot_edges = [LotEdge(e["from"], e["to"], e["lots"]) for e in snapshot["lot_edges"]]
+            rows = Traces.window(incident.entities, incident.start - _RCA_TRACE_MARGIN,
+                                 incident.end + _RCA_TRACE_MARGIN)
+            for r in rows:
+                ctx.trace_rows.setdefault(r["service"], []).append(
+                    TraceRow(r["service"], as_utc(r["ts"]), r["count"], r["error_rate"], r["p95_ms"]))
+            # RCA 重抓時序（ingestion.incident_series）要用的欄位對照
+            for source_type in sorted({e.source_type for e in incident.events if e.source_type}):
+                fields = Mappings.approved_fields(source_type)
+                if fields:
+                    ctx.field_maps[source_type] = fields
+            # 歷史相似事故的比對池（排除自己）
+            ctx.knowledge_cases = [
+                KnowledgeCase(k["incident_uid"], k["pipeline"], list(k["entities"]), list(k["metrics"]),
+                              list(k["signals"]), k["resolution"], k["root_cause"], as_utc(k["created_at"]))
+                for k in Knowledge.recent(KNOWLEDGE_POOL_SIZE) if k["incident_uid"] != incident.uid]
 
     def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None:
         target = ctx.target

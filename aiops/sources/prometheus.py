@@ -56,7 +56,11 @@ class PrometheusSpec(BaseDataSourceSpec):
 
     @staticmethod
     def _frame(series: dict) -> pd.DataFrame | None:
-        points = [(float(t), float(v)) for t, v in series.get("values", [])]
+        try:
+            points = [(float(t), float(v)) for t, v in series.get("values", [])]
+        except (TypeError, ValueError) as e:
+            # 回 200 但值不是數字：是查詢（或資料源）要改，當成這條序列的錯誤，不是整輪該掛
+            raise InvalidQueryError(f"prometheus 回應的值不是數字：{e}；labels={series.get('metric', {})}") from e
         points = [(t, v) for t, v in points if math.isfinite(v)]
         if not points:
             return None

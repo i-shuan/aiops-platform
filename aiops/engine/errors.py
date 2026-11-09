@@ -13,6 +13,14 @@ class NotFound(PlatformError):
     status_code = 404
 
 
+class NoDataError(NotFound):
+    """資料源說「查詢合法，但這段時間沒有資料」：回 404。
+
+    只有資料源（sources/）與 ingestion.fetch 可以丟它；引擎只把它算成「這條序列抓不到資料」（資料斷流的分子）。
+    其他地方查不到東西丟一般的 NotFound，不會被誤算成斷流。
+    """
+
+
 class Conflict(PlatformError):
     """狀態不允許此動作（例如未回測就核准、設定已被別人改過）。"""
 

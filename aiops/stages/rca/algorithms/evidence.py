@@ -39,7 +39,7 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.rca.base import RootCauseOperator, first_seen
 from aiops.stages.rca.logs import service_burst
-from aiops.stages.rca.spans import inbound_callers, window_stats
+from aiops.stages.rca.spans import EXTERNAL_CALLER, UNKNOWN_CALLER, inbound_callers, window_stats
 
 MAX_HOPS = 10
 
@@ -89,9 +89,9 @@ class EvidenceRootCause(RootCauseOperator):
                 continue
             current, hops = svc, 0
             while hops < MAX_HOPS:
-                callers = {c: n for c, n in during.get(current, {}).items() if c}
+                callers = {c: n for c, n in during.get(current, {}).items() if c not in (EXTERNAL_CALLER, UNKNOWN_CALLER)}
                 if not callers:
-                    break  # 流量直接來自外部入口：是外部流量本身變多，不是哪個服務放大的
+                    break  # 流量來自外部入口（或呼叫者不在樣本裡，不知道是誰）：不能指認哪個服務放大的
                 caller = max(callers, key=callers.get)
                 if load.get(caller, 0.0) >= self.min_load_ratio:
                     current, hops = caller, hops + 1  # 呼叫者自己也被灌流量，再往上找

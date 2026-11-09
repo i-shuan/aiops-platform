@@ -458,7 +458,7 @@ targets:
 >
 > 結論：它回答「壞掉時噴了什麼錯、從哪條 trace 看」，**不是根因排名**——錯誤量最大的常常是被拖累的下游。
 
-**自我健康心跳（Dead Man's Snitch）**：偵測 workflow 最後一個節點是 `notifier.watchdog`（scope `after_persist`：引擎在資料庫寫入成功之後才跑它）。每輪送一則 `alertname=AIOpsWatchdog`、`endsAt = 現在 + ttl_minutes`（預設 15，設排程間隔的 2～3 倍）的告警。排程停了、Pod 掛了、資料源或 DB 讓整輪失敗，就沒人續命，ttl 一到 Alertmanager 把它標成 resolved。在 Alertmanager 給它一條獨立路由並開 `send_resolved: true`，「心跳恢復」就等於「AIOps 停了」；或接 Healthchecks.io 這類 DMS 服務（收不到心跳才叫）：
+**自我健康心跳（Dead Man's Snitch）**：偵測 workflow 最後一個節點是 `notifier.watchdog`（scope `after_finalize`：引擎在資料庫寫入、通知送出、「已通知」與結案都寫成功之後才跑它）。每輪送一則 `alertname=AIOpsWatchdog`、`endsAt = 現在 + ttl_minutes`（預設 15，設排程間隔的 2～3 倍）的告警。排程停了、Pod 掛了、資料源或 DB 讓整輪失敗，就沒人續命，ttl 一到 Alertmanager 把它標成 resolved。在 Alertmanager 給它一條獨立路由並開 `send_resolved: true`，「心跳恢復」就等於「AIOps 停了」；或接 Healthchecks.io 這類 DMS 服務（收不到心跳才叫）：
 
 ```yaml
 route:
@@ -492,7 +492,7 @@ receivers:
 
 這三項是 [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) 盤點出來的生產問題，修法都在平台內部，沒有新架構。
 
-- **資料斷流**：一條偵測 workflow 的序列「抓不到資料」（資料源回沒資料、或抓回來是空的）的比例達到 `max_failed_target_ratio`（workflow 欄位，預設 `1.0` = 全部）時，整輪是基礎設施錯誤：`notifier.watchdog` 不續命、排程的備援通報會響。這是給「PVC 滿、APM 寫不進去、索引不見了」用的，那時查詢會回 HTTP 200 但零筆，以前會被當成「今天沒異常」照送心跳。查詢寫錯（`BadRequest`）只記錯誤，不算斷流；個別序列本來就稀疏的不會觸發（預設要全部）。
+- **資料斷流**：一條偵測 workflow 的序列「抓不到資料」（資料源丟 `NoDataError`、或抓回來是空的；ES 每桶都是 NaN／Inf 也算）的比例達到 `max_failed_target_ratio`（workflow 欄位，預設 `1.0` = 全部）時，整輪是基礎設施錯誤：`notifier.watchdog` 不續命、排程的備援通報會響。這是給「PVC 滿、APM 寫不進去、索引不見了」用的，那時查詢會回 HTTP 200 但零筆，以前會被當成「今天沒異常」照送心跳。查詢寫錯（`BadRequest`）只記錯誤，不算斷流；個別序列本來就稀疏的不會觸發（預設要全部）。
 - **先寫資料庫、再送通知**：所有 `notifier.*` 改在 `after_persist` 階段。異常點、事件群、進行中事件群的更新在 `persist_batch` 的**單一交易**寫完（資料庫短暫斷線時整筆回復、重試 2 次），通知才送；「已通知」紀錄與結案要等通知真的送出去（`finalize_batch`）。
   - 修掉一個會**永久遺失告警**的問題：以前異常點每條序列先寫、通知後送，推送失敗後下一輪重新偵測到同一個點，`detector.new_only` 會當成處理過而丟掉，那次告警再也不會發。實測（固定 11:40 的異常，推送失敗後恢復）：改前連跑 3 輪都是 0 筆；改後下一輪補送。
   - 結案那一輪推送失敗：事件群不會被標成已結案，下一輪再送一次 `endsAt`。

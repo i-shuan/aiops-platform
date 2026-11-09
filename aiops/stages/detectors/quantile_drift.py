@@ -39,6 +39,9 @@ class QuantileDriftDetector(DetectorOperator):
     def warmup_points(self) -> int:
         return int(self.param("window")) - 1
 
+    def can_evaluate(self, df: pd.DataFrame) -> bool:
+        return len(df) >= int(self.param("window"))  # 滾動窗湊不滿一個分數都算不出來：棄權，不投反對票
+
     def fit(self, df: pd.DataFrame) -> QuantileDriftDetector:
         r = self._rolling(df).dropna()
         if len(r) < 2:  # 訓練資料比窗口還短：退回整段的分位數

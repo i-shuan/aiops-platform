@@ -6,6 +6,8 @@
   「ord-svc 總共 2 秒、其中 1.9 秒在等 cart-api」-> ord-svc 自身 0.1 秒、cart-api 自身 1.9 秒。
 - 入口 span（entry）：父 span 不在同一個服務（或沒有父 span）的 span，等於這個服務被呼叫一次。
   每個服務的「每請求自身耗時」= 這個服務所有 span 的自身耗時總和 ÷ 入口數。
+- 呼叫者：沒有父 span 的是真正的外部入口（EXTERNAL_CALLER=""）；有父 span 但父不在樣本裡（撈取窗邊界、抽樣、
+  上游沒裝 APM）的是孤兒（UNKNOWN_CALLER="?"），仍算一次請求，但不能說它「來自外部」。
 - 自身錯誤：入口 span 失敗，而且它往下的子 span（同一條呼叫鏈）都沒有失敗，算這個服務自己的錯；
   下游失敗而連帶失敗的不算（那是被拖累）。
 """
@@ -18,6 +20,9 @@ from typing import Iterable
 
 from aiops.engine.context import SpanRecord
 from aiops.engine.types import as_utc
+
+EXTERNAL_CALLER = ""  # 沒有父 span：外部打進來的請求
+UNKNOWN_CALLER = "?"  # 有父 span 但父不在樣本裡：不知道是誰叫的，不能當成外部入口
 
 
 @dataclass(frozen=True)
@@ -85,16 +90,20 @@ def window_stats(spans: list[SpanRecord], start: datetime, end: datetime) -> dic
 
 
 def inbound_callers(spans: list[SpanRecord], start: datetime, end: datetime) -> dict[str, dict[str, int]]:
-    """[start, end) 內每個服務的入口 span 是誰呼叫的：callee -> {caller: 次數}。沒有父 span（入口請求）記成 caller=""。"""
+    """[start, end) 內每個服務的入口 span 是誰呼叫的：callee -> {caller: 次數}。
+    沒有父 span 記成 EXTERNAL_CALLER；有父但父不在樣本裡記成 UNKNOWN_CALLER（孤兒，不是外部入口）。"""
     service_of = {s.span_id: s.service for s in spans}
     lo, hi = as_utc(start), as_utc(end)
     out: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for s in spans:
         if not (lo <= as_utc(s.ts) < hi):
             continue
-        parent_service = service_of.get(s.parent_id) if s.parent_id else None
-        if s.parent_id is None or parent_service != s.service:
-            out[s.service][parent_service or ""] += 1
+        if s.parent_id is None:
+            out[s.service][EXTERNAL_CALLER] += 1
+        elif s.parent_id not in service_of:
+            out[s.service][UNKNOWN_CALLER] += 1
+        elif service_of[s.parent_id] != s.service:
+            out[s.service][service_of[s.parent_id]] += 1
     return {k: dict(v) for k, v in out.items()}
 
 

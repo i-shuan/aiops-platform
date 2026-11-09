@@ -29,7 +29,8 @@ class AutoNotifier(BaseOperator):
     內建 workflow 用它，部署時才決定；要在 YAML 裡固定，就改用 notifier.log／notifier.alertmanager。
 
     所有 notifier 都在 after_persist：事件群先寫進資料庫、通知才送出。送不出去時事件群已經是「進行中」，
-    下一輪 alert.heartbeat 會用同一組標籤補送；通知紀錄與結案要等送成功（hooks.finalize_batch）才寫。"""
+    下一輪 alert.heartbeat 會用同一組標籤補送；通知紀錄與結案要等送成功（hooks.finalize_batch）才寫。
+    只有 notifier.watchdog 更晚（after_finalize）：連結案都寫成功了才續命。"""
 
     scope = "after_persist"
 
@@ -47,7 +48,7 @@ WATCHDOG_ALERTNAME = "AIOpsWatchdog"
 
 @OperatorRegistry.register("notifier.watchdog")
 class WatchdogNotifier(BaseOperator):
-    """Dead Man's Snitch：每輪成功跑完（含資料庫寫入）就送一則「我還活著」的心跳告警，endsAt = 現在 + ttl。
+    """Dead Man's Snitch：每輪成功跑完（寫入、通知、結案紀錄都成功）就送一則「我還活著」的心跳告警，endsAt = 現在 + ttl。
 
     排程停了、Pod 掛了、資料源或 DB 連不上讓整輪失敗 -> 沒有人再續命，ttl 一到 Alertmanager 把它標成 resolved；
     在 Alertmanager 給 alertname=AIOpsWatchdog 一條 send_resolved: true 的路由（或接 Healthchecks 這類 DMS 服務），
@@ -58,7 +59,7 @@ class WatchdogNotifier(BaseOperator):
     時間用牆上時鐘而不是 ctx.now：心跳是「程式現在活著」，回放舊資料時也一樣。
     """
 
-    scope = "after_persist"
+    scope = "after_finalize"  # 比其他 notifier 更晚：finalize_batch（已通知、結案）寫失敗這一輪也不算活著
 
     def __init__(self, ttl_minutes: float = 15):
         if ttl_minutes <= 0:

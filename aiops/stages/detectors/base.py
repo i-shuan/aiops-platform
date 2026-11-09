@@ -117,6 +117,9 @@ class DetectorOperator(BaseOperator):
             return ctx  # 沒資料、沒評估：不算參與投票（棄權），不是投反對票
         if self.requires_peers and not (target.peers or target.peer_group):
             raise BadRequest(f"{self.operator_name} 需要同儕序列（target 的 peers 或 peer_group）")
+        if self.requires_peers and not any(str(c).startswith("peer_") for c in ctx.raw_df.columns):
+            ctx.log(f"detect:{key}:no-peers:abstain")  # peer_group 只撈到自己：沒得比就棄權，不投反對票
+            return ctx
 
         algo = type(self)(**self.effective_params(ctx))
         try:
@@ -128,19 +131,32 @@ class DetectorOperator(BaseOperator):
             raise BadRequest(f"{self.operator_name} 需要 ingestion.fetch 的 lags_minutes 包含 {missing}")
 
         df = ctx.raw_df
+        if not algo.can_evaluate(df):
+            # 這一輪的資料算不出任何分數（滾動窗比資料長、沒有規則可套）：棄權，不進 detector_runs，不投反對票
+            ctx.log(f"detect:{key}:cannot-evaluate:abstain")
+            return ctx
         state = ctx.detector_states.get(key)
         base_version = state.version if state else 0  # 寫回時帶上，資料庫才能偵測並發覆蓋
+        train: pd.DataFrame | None = None
         if ctx.train_df is not None or state is None:
             # 批次訓練（基準線過期或還沒有）；完全沒有訓練窗（第一次、沒設 train_lookback）就用這一輪的資料
-            train = self._training_frame(ctx, ctx.train_df if ctx.train_df is not None else df)
-            if type(self).requires_training and len(train) < self.min_train_points:
-                # 冷啟動／資料太少：不學、不判、不投票（不進 detector_runs），下一輪資料夠了再學。
-                # 幾十個點學到的基準線不可信；服務一上線就壞的話，還會把壞的狀態學成正常
-                ctx.log(f"train:{key}:too-few-points:{len(train)}<{self.min_train_points}")
-                return ctx
+            candidate = self._training_frame(ctx, ctx.train_df if ctx.train_df is not None else df)
+            points = algo.training_points(candidate)  # 演算法真正學得到的點（lag／同儕有值的列），不是列數
+            if type(self).requires_training and points < self.min_train_points:
+                if state is None:
+                    # 冷啟動／資料太少：不學、不判、不投票（不進 detector_runs），下一輪資料夠了再學。
+                    # 幾十個點學到的基準線不可信；服務一上線就壞的話，還會把壞的狀態學成正常
+                    ctx.log(f"train:{key}:too-few-points:{points}<{self.min_train_points}")
+                    return ctx
+                # 基準線到期要重訓、但這次訓練窗資料不足（資料斷了一天剛恢復）：舊基準線還能用，先用它判
+                ctx.log(f"train:{key}:too-few-points:{points}<{self.min_train_points}:keep-old-baseline")
+            else:
+                train = candidate
+        if train is not None:
             algo.fit(train)
-            ctx.new_detector_states[key] = self._snapshot(algo, ctx, train, base_version)
+            ctx.new_detector_states[key] = self._snapshot(algo, ctx, train, base_version, algo.training_points(train))
         else:
+            assert state is not None
             algo.load_state(state.state)
             if state.artifact is not None:
                 algo.load_artifact(state.artifact_format, state.artifact)
@@ -182,13 +198,24 @@ class DetectorOperator(BaseOperator):
         return kept
 
     def _snapshot(self, algo: DetectorOperator, ctx: PipelineContext, df: pd.DataFrame,
-                  base_version: int) -> DetectorState:
+                  base_version: int, points: int) -> DetectorState:
         artifact = algo.get_artifact()
         fmt, blob = artifact if artifact is not None else ("", None)
         if blob is not None and fmt not in SAFE_ARTIFACT_FORMATS:
             raise BadRequest(f"{self.operator_name} 的模型檔格式 {fmt!r} 不允許（只接受 {sorted(SAFE_ARTIFACT_FORMATS)}）")
         return DetectorState(algo.get_state(), as_utc(ctx.now), df["ts"].min().to_pydatetime(),
-                             df["ts"].max().to_pydatetime(), len(df), base_version, self.operator_name, blob, fmt)
+                             df["ts"].max().to_pydatetime(), points, base_version, self.operator_name, blob, fmt)
+
+    # ── 演算法可以覆寫的「我這一輪能不能判」與「我真正學到幾個點」 ──
+
+    def can_evaluate(self, df: pd.DataFrame) -> bool:
+        """這一輪的資料算得出分數嗎？算不出來（滾動窗比資料長、沒有規則）就棄權：不進 detector_runs、不投反對票。"""
+        return True
+
+    def training_points(self, df: pd.DataFrame) -> int:
+        """訓練資料裡演算法真正用得到的點數（冷啟動門檻與 DetectorState.points 用）。
+        預設是列數；需要 lag 或同儕欄位的演算法只算那些欄位有值的列。"""
+        return len(df)
 
     @property
     def state_key(self) -> str:

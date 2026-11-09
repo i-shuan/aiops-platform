@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Protocol
@@ -18,8 +19,10 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
-from aiops.engine.errors import InfrastructureError, NotFound, PlatformError, WorkflowError
+from aiops.engine.errors import InfrastructureError, NoDataError, PlatformError, WorkflowError
 from aiops.engine.registry import OperatorRegistry
+
+logger = logging.getLogger("aiops.engine")
 
 
 # 資料源一律明寫、沒有預設值：漏寫時以前會默默退回 mock（假資料），監控平台寧可直接報錯（API 回 400、YAML 載入失敗）
@@ -116,7 +119,8 @@ class Hooks(Protocol):
     def persist_batch(self, ctx: PipelineContext) -> None: ...
 
     def finalize_batch(self, ctx: PipelineContext) -> None:
-        """after_persist 節點（通知）都成功之後才做的紀錄：已通知、結案。通知送失敗就不會呼叫到。"""
+        """after_persist 節點（通知）都成功之後才做的紀錄：已通知、結案。通知送失敗就不會呼叫到；
+        寫失敗則 after_finalize 節點（心跳）不會跑。"""
         ...
 
 
@@ -157,16 +161,18 @@ class Pipeline:
         for n, op in self.nodes:
             op.node_name = n.name
         scopes = [getattr(op, "scope", "target") for _, op in self.nodes]
-        order = {"target": 0, "batch": 1, "after_persist": 2}
+        order = {"target": 0, "batch": 1, "after_persist": 2, "after_finalize": 3}
         unknown = sorted({s for s in scopes if s not in order})
         if unknown:
             raise WorkflowError(f"Workflow {workflow.name}：未知的節點 scope {unknown}")
         if [order[s] for s in scopes] != sorted(order[s] for s in scopes):
-            raise WorkflowError(f"Workflow {workflow.name}：節點順序必須是 scope=target → batch → after_persist")
+            raise WorkflowError(f"Workflow {workflow.name}：節點順序必須是 scope=target → batch → after_persist → after_finalize")
         self.target_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "target"]
         self.batch_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "batch"]
-        # 寫入成功之後才跑（例如自我健康心跳）：資料庫寫不進去時整輪失敗，這些節點不會執行
+        # 寫入成功之後才跑（通知）：資料庫寫不進去時整輪失敗，這些節點不會執行
         self.after_persist_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "after_persist"]
+        # 「已通知」與結案也記完之後才跑（自我健康心跳）：這一輪每一步都成功了才算活著
+        self.after_finalize_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "after_finalize"]
         # (節點名稱, 算子名稱)：基準線與調參都以節點區分，同一個演算法掛兩次也不會互相覆蓋
         # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only、ensemble 這類不需要）
         self.detector_nodes = [(n.name, n.operator) for n, op in self.target_nodes if getattr(op, "has_baseline", False)]
@@ -252,7 +258,7 @@ class Pipeline:
 
         if self.target_nodes:
             specs = list(targets if targets is not None else self.workflow.targets)
-            starved: list[str] = []  # 抓不到資料的序列：資料源說沒資料（NotFound）、或抓回來是空的
+            starved: list[str] = []  # 抓不到資料的序列：資料源說沒資料（NoDataError）、或抓回來是空的
             for spec in specs:
                 ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request)
                 skipped = {name: reason for name in self._detectors
@@ -272,8 +278,14 @@ class Pipeline:
                     if strict:
                         raise
                     batch.errors.append(TargetError(ctx.target.entity, str(e)))
-                    if isinstance(e, NotFound):
+                    if isinstance(e, NoDataError):  # 只有「資料源沒資料」算斷流；偵測器自己查不到東西（NotFound）不算
                         starved.append(ctx.target.entity)
+                    continue
+                except Exception as e:  # noqa: BLE001  一條序列的演算法 bug（ValueError、KeyError…）不該讓其他健康序列也沒結果
+                    if strict:
+                        raise
+                    logger.exception("target %s 失敗：%s", ctx.target.entity, e)
+                    batch.errors.append(TargetError(ctx.target.entity, f"{type(e).__name__}: {e}"))
                     continue
                 if ctx.raw_df is not None and ctx.raw_df.empty:
                     starved.append(ctx.target.entity)
@@ -295,6 +307,8 @@ class Pipeline:
         for node, op in self.after_persist_nodes:  # 通知在寫入成功之後才送：送失敗時事件群已是進行中，下一輪心跳補送
             batch = _run_node(node, op, batch)
         self.hooks.finalize_batch(batch)  # 通知都送出去了才記「已通知」與結案
+        for node, op in self.after_finalize_nodes:  # 心跳最後送：結案寫不進去也算這一輪失敗，不續命
+            batch = _run_node(node, op, batch)
         return batch
 
 

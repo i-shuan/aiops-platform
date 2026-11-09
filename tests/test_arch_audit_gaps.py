@@ -1,7 +1,7 @@
-"""架構稽核（2026-11-09，main@bd16b7a）找到、但還沒修的缺口。
+"""架構稽核（2026-11-09，main@bd16b7a）找到的缺口。報告：docs/ARCH_AUDIT.md（每個缺口的重現方式、影響、建議修法）。
 
-每個測試寫的是「應該要有的行為」，現在會失敗，所以標 xfail(strict=True)：哪天修好了會變成 XPASS -> 紅燈，
-提醒把 xfail 拿掉。報告：synth-out/reports/arch_audit.md（每個缺口的重現方式、影響、建議修法）。
+每個測試寫的是「應該要有的行為」。還沒修的標 xfail(strict=True)：哪天修好了會變成 XPASS -> 紅燈，提醒把 xfail 拿掉。
+已修的（docstring 標「已修」）就是一般的回歸測試：G6、G7、G8、G9、G11、G12、G13、G17、G18、G19。
 """
 from datetime import datetime, timedelta, timezone
 
@@ -122,18 +122,16 @@ def test_anomaly_event_attrs_cannot_be_mutated_in_place():
 # ── Q5：裁決分母 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q5 缺口：detector.rules 設 require_rule=false 又沒有規則時「不判」，"
-                   "卻照樣進 detector_runs，在 majority／intersection 裡投反對票，把其他節點抓到的異常否決掉")
 def test_rules_without_a_rule_abstains_instead_of_vetoing():
+    """G6（已修）：detector.rules 沒有規則時 can_evaluate=False -> 棄權，不進 detector_runs、不投反對票。"""
     ctx = _vote([NodeSpec(name="z", operator="detector.zscore"),
                  NodeSpec(name="r", operator="detector.rules", params={"require_rule": False})])
     assert [a.voted_by for a in ctx.anomalies] == [("z",)]
 
 
-@pytest.mark.xfail(strict=True, reason="Q5 缺口：quantile_drift／chronic 的滾動窗比這一輪資料長時一個分數都算不出來"
-                   "（全是 NaN -> 0），卻照樣算參與者、投反對票")
 @pytest.mark.parametrize("op", ["detector.quantile_drift", "detector.chronic"])
 def test_window_longer_than_the_data_abstains(op):
+    """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權。"""
     ctx = _vote([NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="w", operator=op, params={"window": 600})])
     assert [a.voted_by for a in ctx.anomalies] == [("z",)]
 
@@ -141,13 +139,13 @@ def test_window_longer_than_the_data_abstains(op):
 # ── Q6：入口 span 的定義 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q6 缺口：父 span 不在樣本裡（撈取時間窗邊界、抽樣、沒裝 APM 的上游）的 span，"
-                   "service_edges 不算邊，inbound_callers／window_stats 卻把它算成外部入口（caller=''），灌高流量倍數")
 def test_orphan_spans_are_not_counted_as_external_entry_requests():
+    """G7（已修）：父 span 不在樣本裡的孤兒記成 UNKNOWN_CALLER（"?"），仍算一次請求，但不是外部入口（""）。"""
     spans = [SpanRecord("t1", "a1", None, "api", T0, 100), SpanRecord("t1", "b1", "a1", "cart", T0, 80),
              SpanRecord("t2", "b2", "missing-parent", "cart", T0, 80)]
     callers = inbound_callers(spans, T0 - timedelta(minutes=1), T0 + timedelta(minutes=1))
     assert callers["cart"].get("", 0) == 0
+    assert callers["cart"] == {"api": 1, "?": 1} and callers["api"] == {"": 1}
 
 
 # ── Q8：斷流攔截 ──
@@ -160,9 +158,8 @@ def solo_group(monkeypatch):
                         {k: v for k, v in real(self, query, start, end, step, by, field_map).items() if k == f"{by}-0"})
 
 
-@pytest.mark.xfail(strict=True, reason="Q8 缺口：peer_group 只撈到自己（單一副本的服務）丟的是 NotFound（fetch.py:82），"
-                   "被引擎當成「資料源沒資料」算進斷流；全部 target 都這樣就整輪 InfrastructureError、心跳停")
 def test_peer_group_with_only_itself_is_not_data_starvation(solo_group):
+    """G8（已修）：單一副本的服務 peer_group 只撈到自己 -> 記成那條序列的錯誤、detector.peer 棄權，不算斷流。"""
     targets = [TargetSpec(source_type="mock", query="m", entity=e, attrs={"pod": "pod-0"},
                           peer_group={"query": f"grp_{e}", "by": "pod"}) for e in ("a", "b")]
     ctx = Pipeline(Workflow(name="gap_q8", targets=targets, nodes=[
@@ -178,9 +175,8 @@ class _NotFoundInDetector(BaseOperator):
         raise NotFound("偵測器內部查表找不到（不是資料源沒資料）")
 
 
-@pytest.mark.xfail(strict=True, reason="Q8 缺口：引擎用「例外型別是 NotFound」判斷斷流，不管是誰丟的；偵測器或其他節點丟的 "
-                   "NotFound 也會讓整輪變成資料斷流")
 def test_not_found_from_a_non_fetch_node_is_not_starvation():
+    """G8（已修）：只有資料源丟的 NoDataError 算斷流；其他節點丟的 NotFound 只是那條序列的錯誤。"""
     targets = [TargetSpec(source_type="mock", query=q, entity=q) for q in ("a", "b")]
     ctx = Pipeline(Workflow(name="gap_q8b", targets=targets, nodes=[
         NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="x", operator="audit_gap.notfound")])).run(now=T0)
@@ -197,13 +193,15 @@ class _BugOnOneTarget(BaseOperator):
         return ctx
 
 
-@pytest.mark.xfail(strict=True, reason="Q8 缺口：strict=False 的承諾是「某條序列失敗記在 errors，其他序列照跑」，"
-                   "但只接 PlatformError；一條序列的 ValueError 讓整輪失敗、健康的序列也沒結果")
 def test_a_bug_on_one_target_does_not_take_down_the_whole_round():
+    """G9（已修）：strict=False 時一條序列的任何例外都只記在 errors（含型別），健康的序列照跑；strict=True 照丟。"""
     targets = [TargetSpec(source_type="mock", query=q, entity=q) for q in ("broken", "healthy")]
-    ctx = Pipeline(Workflow(name="gap_q8c", targets=targets, nodes=[
-        NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="x", operator="audit_gap.bug")])).run(now=T0)
-    assert [e.entity for e in ctx.errors] == ["broken"]
+    wf = Workflow(name="gap_q8c", targets=targets, nodes=[
+        NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="x", operator="audit_gap.bug")])
+    ctx = Pipeline(wf).run(now=T0)
+    assert [e.entity for e in ctx.errors] == ["broken"] and ctx.errors[0].message.startswith("ValueError: ")
+    with pytest.raises(ValueError):
+        Pipeline(wf).run(now=T0, strict=True)
 
 
 # ── Q9：冷啟動門檻 ──
@@ -217,10 +215,8 @@ def _ctx(raw, train=None, state=None):
     return c
 
 
-@pytest.mark.xfail(strict=True, reason="Q9 缺口：min_train_points 數的是訓練 df 的列數，不是演算法真正能用的點；"
-                   "wow／dod 只有 lag 有值的列、peer 只有同儕有值的列才算數。100 列裡只有 2 列有上週的值也會過門檻、"
-                   "用 2 個點學基準線，還記成 points=100")
 def test_cold_start_gate_counts_usable_points_for_lag_detectors():
+    """G11（已修）：冷啟動門檻數的是 training_points（lag／同儕有值的列），100 列只有 2 列有上週的值 -> 不學、不判。"""
     train = _frame(100)
     train["lag_10080"] = float("nan")
     train.loc[98:, "lag_10080"] = [50.0, 51.0]
@@ -231,9 +227,8 @@ def test_cold_start_gate_counts_usable_points_for_lag_detectors():
     assert op.execute(_ctx(raw, train)).detector_runs == []
 
 
-@pytest.mark.xfail(strict=True, reason="Q9 缺口：基準線到期重訓、但這次訓練窗資料不足時，連資料庫裡可用的舊基準線也不用，"
-                   "整個節點這一輪不判（資料斷了一天之後恢復的那幾輪是偵測盲區）")
 def test_retrain_with_too_few_points_keeps_using_the_old_baseline():
+    """G12（已修）：到期重訓但訓練窗資料不足時，沿用資料庫裡的舊基準線照判，不留偵測盲區。"""
     old = DetectorState({"mean": 50.0, "std": 1.0}, T0 - timedelta(days=2), points=1440, version=3,
                         detector="detector.zscore")
     op = OperatorRegistry.create("detector.zscore")
@@ -254,9 +249,8 @@ class _Spike(BaseOperator):
         return ctx
 
 
-@pytest.mark.xfail(strict=True, reason="Q12 缺口：notifier.watchdog 也是 after_persist，在 finalize_batch 之前就送出心跳；"
-                   "finalize_batch 寫入失敗時這一輪是 InfrastructureError，但心跳已經續命了")
 def test_watchdog_does_not_renew_when_finalize_fails(monkeypatch):
+    """G13（已修）：notifier.watchdog 改到 after_finalize，「已通知」與結案寫失敗時心跳不續命。"""
     from sqlalchemy.exc import OperationalError
 
     from aiops.storage import repository
@@ -340,11 +334,9 @@ def _ms(i):
     return int((T0 - timedelta(minutes=60 - i)).timestamp() * 1000)
 
 
-@pytest.mark.xfail(strict=True, reason="Q8 缺口：Prometheus 會濾掉 NaN／Inf、全部不能用就丟 NoDataError（prometheus.py:60,76），"
-                   "Elasticsearch 只濾 None（elasticsearch.py:57）。ES 回 200、每桶都是 NaN／Inf 時被當成「有資料」："
-                   "不算斷流、心跳照送，還把 {'mean': nan} 這種基準線寫進資料庫，之後到重訓前這個節點都判不出任何東西")
 @pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
 def test_elasticsearch_all_nan_or_inf_is_no_data(value):
+    """G17（已修）：ES 每桶都是 NaN／Inf 跟 Prometheus 一樣算沒資料（NoDataError），不會學成 {'mean': nan}。"""
     from aiops.sources.base import NoDataError
     from aiops.sources.elasticsearch import ElasticsearchSpec
     spec = ElasticsearchSpec("http://es", client=_es_client([{"key": _ms(i), "v": {"value": value}} for i in range(60)]))
@@ -352,10 +344,9 @@ def test_elasticsearch_all_nan_or_inf_is_no_data(value):
         spec.fetch_data(_ES_QUERY, T0 - timedelta(minutes=60), T0, 60)
 
 
-@pytest.mark.xfail(strict=True, reason="Q8 缺口：資料源回 200 但格式不對（ES 桶缺 key、值是字串、Prometheus 值是字串）時，"
-                   "丟的是原始 KeyError／ValueError，不是 PlatformError：不會被記成那條序列的錯誤，而是整輪失敗（跟 G9 同一個洞）")
 @pytest.mark.parametrize("case", ["es-missing-key", "es-string-value", "prom-string-value"])
 def test_malformed_source_response_is_a_platform_error(case):
+    """G18（已修）：資料源回 200 但格式不對 -> InvalidQueryError（PlatformError），記成那條序列的錯誤。"""
     import json as _json
 
     import httpx
@@ -378,8 +369,7 @@ def test_malformed_source_response_is_a_platform_error(case):
 # ── Q15 追加：RCA 帶不存在的事件群 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q15 缺口：load_batch 查不到 incident_id 時默默略過（hooks.py:86-87），"
-                   "直到 ingestion.incident_traces 才丟「沒有可以撈 trace 的事件群」；應該在載入時就說是哪個事件群不存在")
 def test_rca_for_a_missing_incident_says_which_incident(client):
+    """G19（已修）：load_batch 查不到事件群就丟 NotFound 帶 id，API 回 404。"""
     r = client.post("/api/v1/rca", json={"incident_id": 999999})
     assert r.status_code == 404 and "999999" in r.text

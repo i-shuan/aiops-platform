@@ -57,6 +57,10 @@ class _LagCompareDetector(DetectorOperator):
             return (now - past) / past.abs().clip(lower=1e-9)
         return now - past
 
+    def training_points(self, df: pd.DataFrame) -> int:
+        col = f"lag_{self.offset}"  # 只有「過去那一刻也有值」的列才學得到東西；上週才開始收的資料大多是 NaN
+        return int(df[col].notna().sum()) if col in df.columns else 0
+
     def fit(self, df: pd.DataFrame) -> _LagCompareDetector:
         if f"lag_{self.offset}" not in df.columns:
             raise BadRequest(f"{self.operator_name} 訓練資料沒有 lag_{self.offset}（fetch 要設 lags_minutes）")

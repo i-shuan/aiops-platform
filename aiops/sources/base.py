@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from aiops.engine.errors import BadRequest, NotFound
+from aiops.engine.errors import BadRequest, NoDataError  # noqa: F401  NoDataError 定義在 engine，這裡再匯出給資料源用
 
 
 def canonical_service(name: Any) -> str:
@@ -22,10 +22,6 @@ def as_utc_datetime(value: Any) -> datetime:
 
 class InvalidQueryError(BadRequest):
     """查詢寫錯（語法、多條序列、索引不存在）：是使用者要改的，回 400。"""
-
-
-class NoDataError(NotFound):
-    """查詢合法但這段時間沒有資料：回 404。排程會把它當成這個 target 失敗回報。"""
 
 
 class BaseDataSourceSpec(ABC):

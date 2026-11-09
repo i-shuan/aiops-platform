@@ -53,10 +53,14 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             raise InvalidQueryError(f"elasticsearch 查詢失敗（HTTP {resp.status_code}）：{reason or resp.text[:200]}")
 
         buckets = (payload.get("aggregations") or {}).get("series", {}).get("buckets", [])
-        points = [(b["key"], bucket_value(q, b)) for b in buckets]
-        points = [(t, v) for t, v in points if v is not None]
+        try:
+            points = [(b["key"], bucket_value(q, b)) for b in buckets]
+        except (KeyError, TypeError, ValueError) as e:
+            # 回 200 但內容不是數值序列（value_field 指到字串欄位、桶沒有 key）：是查詢要改，不是整輪該掛
+            raise InvalidQueryError(f"elasticsearch 回應格式不對（index={q.index}, value_field={q.value_field}）：{e!r}") from e
+        points = [(t, v) for t, v in points if v is not None and math.isfinite(v)]  # NaN／Inf 跟沒資料一樣，不能學成基準線
         if not points:
-            raise NoDataError(f"elasticsearch 在這段時間沒有資料：index={q.index}")
+            raise NoDataError(f"elasticsearch 在這段時間沒有資料（或只有 NaN／Inf）：index={q.index}")
         return pd.DataFrame({
             "ts": pd.to_datetime([t for t, _ in points], unit="ms", utc=True),
             "value": [v for _, v in points],

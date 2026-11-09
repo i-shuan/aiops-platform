@@ -19,7 +19,7 @@ from string import Template
 import pandas as pd
 
 from aiops.engine.context import LogRecord, PipelineContext, SpanRecord, TargetError
-from aiops.engine.errors import BadRequest, InfrastructureError, NotFound
+from aiops.engine.errors import BadRequest, InfrastructureError, NoDataError, NotFound
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.sources import get_datasource_spec, is_configured
@@ -48,7 +48,7 @@ def _trace_frame(ctx: PipelineContext, query: str, start: datetime, end: datetim
     points = sorted((to_utc(r.ts), float(getattr(r, field))) for r in ctx.trace_rows.get(service, [])
                     if s <= to_utc(r.ts) <= e)
     if not points:
-        raise NotFound(f"{TRACE_SOURCE} 在這段時間沒有 {service} 的資料")
+        raise NoDataError(f"{TRACE_SOURCE} 在這段時間沒有 {service} 的資料")
     return pd.DataFrame({"ts": pd.to_datetime([t for t, _ in points], utc=True), "value": [v for _, v in points]})
 
 
@@ -79,7 +79,11 @@ def _group(ctx: PipelineContext, start: datetime, end: datetime, step: int) -> t
         raise BadRequest(f"peer_group 撈回的成員裡找不到自己（{g.by}={me}）：{sorted(members)[:10]}")
     others = sorted(m for m in members if m != me)
     if not others:
-        raise NotFound(f"peer_group 只撈到自己（{g.by}={me}），沒有同儕可以比")
+        # 單一副本的服務：資料是有的，只是沒有同儕可以比。不是「沒資料」（不算斷流），也不擋住其他偵測節點；
+        # 記成這條序列的錯誤讓人看到，同儕偵測器看到沒有 peer_* 欄位會棄權
+        msg = f"peer_group 只撈到自己（{g.by}={me}），沒有同儕可以比；detector.peer 這一輪棄權"
+        if all(e.message != msg for e in ctx.errors):  # 偵測窗與訓練窗各抓一次，只記一筆
+            ctx.errors.append(TargetError(t.entity, msg))
     return others, [members[m] for m in others]
 
 

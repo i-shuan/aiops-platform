@@ -22,6 +22,9 @@ class StaticRuleDetector(DetectorOperator):
     def has_rule(self) -> bool:
         return self.params.get("upper") is not None or self.params.get("lower") is not None
 
+    def can_evaluate(self, df: pd.DataFrame) -> bool:
+        return self.has_rule  # require_rule=false 又沒有規則：不判也不投票（棄權），不是「看過了沒異常」
+
     def validate_params(self) -> None:
         if not self.has_rule and self.params.get("require_rule", True):
             raise ValueError("detector.rules 至少要給 upper 或 lower")
