@@ -52,7 +52,7 @@ class BaseOperator(ABC):
    * 必須支援 `fit(df) -> self`（批次訓練）與 `detect(df) -> AnomalyResult`（即時推論）。
    * 必須支援 `get_state() -> dict` 與 `load_state(state: dict)` 以供模型基準線持久化。
    * 偵測用到滾動窗時覆寫 `warmup_points() -> int`（需要前面幾個點才算得出分數），回測切測試段時會多帶這些點讓窗口湊滿（不計分）。
-   * 基準線、調參、異常血緣都以 **Workflow 節點名稱**（`self.state_key`）為準，同一個演算法可以在同一條管線掛多次。
+   * 基準線與異常血緣以 **Workflow 節點名稱**（`self.state_key`）為準，同一個演算法可以在同一條管線掛多次。後台核准的調參目前只分 (演算法, 管線, 實體)、沒有節點這一層：`ctx.detector_params` 雖然以節點名稱為 key，同一條管線裡同一個演算法的多個節點拿到的是同一份調參（要各自不同就寫在節點 YAML `params` 或 target `overrides`）。
    * 需要「往前 N 分鐘的自己」（同比、環比）時覆寫 `required_lags() -> list[int]`；fetch 要在 YAML 設對應的 `lags_minutes`，df 會多 `lag_<分鐘>` 欄位，回測也照這個抓。
    * 模型有非 JSON 的本體時覆寫 `get_artifact() -> (格式, bytes)` 與 `load_artifact(格式, bytes)`，格式只能是 `npz`。
    * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only`、`detector.ensemble` 這類不學習的算子不繼承它。

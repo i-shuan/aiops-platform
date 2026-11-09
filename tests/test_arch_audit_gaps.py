@@ -1,0 +1,322 @@
+"""架構稽核（2026-11-09，main@bd16b7a）找到、但還沒修的缺口。
+
+每個測試寫的是「應該要有的行為」，現在會失敗，所以標 xfail(strict=True)：哪天修好了會變成 XPASS -> 紅燈，
+提醒把 xfail 拿掉。報告：synth-out/reports/arch_audit.md（每個缺口的重現方式、影響、建議修法）。
+"""
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+import pytest
+
+import test_architecture as arch  # tests/ 在 sys.path 上（pytest 預設 prepend 匯入模式）
+from aiops.engine.context import DetectorState, PipelineContext, SpanRecord, Target
+from aiops.engine.errors import InfrastructureError, NotFound
+from aiops.engine.operator import BaseOperator
+from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow
+from aiops.engine.registry import OperatorRegistry
+from aiops.engine.types import AnomalyEvent
+from aiops.sources.mock import MockSpec
+from aiops.stages.rca.spans import inbound_callers
+from aiops.storage import db, models
+from aiops.storage.hooks import StorageHooks
+
+T0 = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
+
+
+def _frame(n, spike=None):
+    values = [50.0 + (i % 3) for i in range(n)]
+    if spike is not None and n:
+        values[-1] = spike
+    return pd.DataFrame({"ts": pd.date_range(T0 - timedelta(hours=2), periods=n, freq="60s"), "value": values})
+
+
+@OperatorRegistry.register("audit_gap.frame")
+class _Frame(BaseOperator):
+    """固定資料的 fetch：120 點、最後一點是 500 的尖峰。"""
+
+    scope = "target"
+
+    def execute(self, ctx):
+        ctx.raw_df = _frame(120, 500.0)
+        return ctx
+
+
+def _vote(nodes, strategy="majority"):
+    wf = Workflow(name="gap", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
+        NodeSpec(name="fetch", operator="audit_gap.frame"), *nodes,
+        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": strategy})])
+    return Pipeline(wf).run(now=T0)
+
+
+# ── Q1／Q3：架構測試的盲點（用暫存的假 aiops/ 樹餵給既有的架構測試，它應該要紅） ──
+
+
+def _guard_on(tmp_path, monkeypatch, files: dict[str, str], guard) -> bool:
+    for rel, body in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(arch, "ROOT", tmp_path)
+    try:
+        guard()
+    except AssertionError:
+        return True  # 架構測試紅了 = 抓到
+    return False
+
+
+_CLASS_LEVEL = "class Det:\n    tunable = {'threshold': (3.0, 1.0, 10.0)}\n"  # 讓「至少掃到一個類別層級物件」的前提成立
+
+
+@pytest.mark.xfail(strict=True, reason="Q3 缺口：test_no_module_or_class_level_state_is_mutated_at_runtime 只認"
+                   "「直接對模組層級名稱呼叫 append/update…或下標賦值」；別名、類別層級計數器、lru_cache、屬性賦值、"
+                   "跨模組修改都抓不到")
+@pytest.mark.parametrize("body", [
+    "_SEEN = []\ndef f(k):\n    s = _SEEN\n    s.append(k)\n",
+    "class Op:\n    runs = 0\n    def execute(self, ctx):\n        type(self).runs += 1\n        return ctx\n",
+    "import functools\n@functools.lru_cache(maxsize=None)\ndef lookup(k):\n    return k\n",
+    "import types\n_STATE = types.SimpleNamespace(n=0)\ndef f():\n    _STATE.n = _STATE.n + 1\n",
+    "from aiops.engine import topology\ndef f():\n    topology.CACHE = {}\n",
+], ids=["alias", "class-counter", "lru_cache", "attr-assign", "cross-module"])
+def test_mutable_state_guard_catches_indirect_mutation(tmp_path, monkeypatch, body):
+    assert _guard_on(tmp_path, monkeypatch, {"stages/x/base.py": _CLASS_LEVEL, "stages/x/probe.py": body},
+                     arch.test_no_module_or_class_level_state_is_mutated_at_runtime)
+
+
+@pytest.mark.xfail(strict=True, reason="Q1 缺口：import 防線只看靜態 import 敘述；importlib 動態載入 storage、"
+                   "http.client 連外、enrichment/ 底下 import sources 都不會紅")
+@pytest.mark.parametrize("rel,body,guard", [
+    ("stages/grouping/probe.py", "import importlib\nrepo = importlib.import_module('aiops.storage.repository')\n",
+     "test_operators_do_not_touch_orm_or_storage_except_admin"),
+    ("stages/grouping/probe.py", "import http.client\n", "test_operators_do_not_use_the_network_except_llm_notifiers_admin"),
+    ("stages/enrichment/probe.py", "from aiops.sources import base\n",
+     "test_operators_do_not_use_the_network_except_llm_notifiers_admin"),
+], ids=["importlib-storage", "http.client", "enrichment-imports-sources"])
+def test_import_guards_catch_indirect_imports(tmp_path, monkeypatch, rel, body, guard):
+    assert _guard_on(tmp_path, monkeypatch, {rel: body}, getattr(arch, guard))
+
+
+# ── Q4：資料血緣 ──
+
+
+@pytest.mark.xfail(strict=True, reason="Q4 缺口：anomalies 表沒有 voted_by 欄位；detector.ensemble 的裁決事件落地後，"
+                   "只剩事件群快照記得是哪些節點投的票（keep_members=false 時成員事件也不寫）")
+def test_anomalies_table_keeps_who_voted():
+    wf = Workflow(name="gap_q4", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
+        NodeSpec(name="fetch", operator="audit_gap.frame"),
+        NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="m", operator="detector.mad"),
+        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": "union"}),
+        NodeSpec(name="group", operator="alert.same_entity")])
+    Pipeline(wf, StorageHooks()).run(now=T0)
+    with db.read_session() as s:
+        rows = s.query(models.AnomalyRow).all()
+    assert rows and all(sorted(getattr(r, "voted_by", None) or []) == ["m", "z"] for r in rows)
+
+
+@pytest.mark.xfail(strict=True, reason="Q4 缺口：AnomalyEvent 是 frozen，但 attrs 是普通 dict，下游可以原地改（淺層凍結）")
+def test_anomaly_event_attrs_cannot_be_mutated_in_place():
+    e = AnomalyEvent("svc", "q", T0, 9.0, {"dept": "it"}, detector="detector.zscore", detector_node="z")
+    with pytest.raises(TypeError):
+        e.attrs["dept"] = "changed"
+
+
+# ── Q5：裁決分母 ──
+
+
+@pytest.mark.xfail(strict=True, reason="Q5 缺口：detector.rules 設 require_rule=false 又沒有規則時「不判」，"
+                   "卻照樣進 detector_runs，在 majority／intersection 裡投反對票，把其他節點抓到的異常否決掉")
+def test_rules_without_a_rule_abstains_instead_of_vetoing():
+    ctx = _vote([NodeSpec(name="z", operator="detector.zscore"),
+                 NodeSpec(name="r", operator="detector.rules", params={"require_rule": False})])
+    assert [a.voted_by for a in ctx.anomalies] == [("z",)]
+
+
+@pytest.mark.xfail(strict=True, reason="Q5 缺口：quantile_drift／chronic 的滾動窗比這一輪資料長時一個分數都算不出來"
+                   "（全是 NaN -> 0），卻照樣算參與者、投反對票")
+@pytest.mark.parametrize("op", ["detector.quantile_drift", "detector.chronic"])
+def test_window_longer_than_the_data_abstains(op):
+    ctx = _vote([NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="w", operator=op, params={"window": 600})])
+    assert [a.voted_by for a in ctx.anomalies] == [("z",)]
+
+
+# ── Q6：入口 span 的定義 ──
+
+
+@pytest.mark.xfail(strict=True, reason="Q6 缺口：父 span 不在樣本裡（撈取時間窗邊界、抽樣、沒裝 APM 的上游）的 span，"
+                   "service_edges 不算邊，inbound_callers／window_stats 卻把它算成外部入口（caller=''），灌高流量倍數")
+def test_orphan_spans_are_not_counted_as_external_entry_requests():
+    spans = [SpanRecord("t1", "a1", None, "api", T0, 100), SpanRecord("t1", "b1", "a1", "cart", T0, 80),
+             SpanRecord("t2", "b2", "missing-parent", "cart", T0, 80)]
+    callers = inbound_callers(spans, T0 - timedelta(minutes=1), T0 + timedelta(minutes=1))
+    assert callers["cart"].get("", 0) == 0
+
+
+# ── Q8：斷流攔截 ──
+
+
+@pytest.fixture
+def solo_group(monkeypatch):
+    real = MockSpec.fetch_group
+    monkeypatch.setattr(MockSpec, "fetch_group", lambda self, query, start, end, step, by, field_map=None:
+                        {k: v for k, v in real(self, query, start, end, step, by, field_map).items() if k == f"{by}-0"})
+
+
+@pytest.mark.xfail(strict=True, reason="Q8 缺口：peer_group 只撈到自己（單一副本的服務）丟的是 NotFound（fetch.py:82），"
+                   "被引擎當成「資料源沒資料」算進斷流；全部 target 都這樣就整輪 InfrastructureError、心跳停")
+def test_peer_group_with_only_itself_is_not_data_starvation(solo_group):
+    targets = [TargetSpec(source_type="mock", query="m", entity=e, attrs={"pod": "pod-0"},
+                          peer_group={"query": f"grp_{e}", "by": "pod"}) for e in ("a", "b")]
+    ctx = Pipeline(Workflow(name="gap_q8", targets=targets, nodes=[
+        NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="p", operator="detector.peer")])).run(now=T0)
+    assert sorted(e.entity for e in ctx.errors) == ["a", "b"]  # 記成這兩條序列的錯誤，不是整輪斷流
+
+
+@OperatorRegistry.register("audit_gap.notfound")
+class _NotFoundInDetector(BaseOperator):
+    scope = "target"
+
+    def execute(self, ctx):
+        raise NotFound("偵測器內部查表找不到（不是資料源沒資料）")
+
+
+@pytest.mark.xfail(strict=True, reason="Q8 缺口：引擎用「例外型別是 NotFound」判斷斷流，不管是誰丟的；偵測器或其他節點丟的 "
+                   "NotFound 也會讓整輪變成資料斷流")
+def test_not_found_from_a_non_fetch_node_is_not_starvation():
+    targets = [TargetSpec(source_type="mock", query=q, entity=q) for q in ("a", "b")]
+    ctx = Pipeline(Workflow(name="gap_q8b", targets=targets, nodes=[
+        NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="x", operator="audit_gap.notfound")])).run(now=T0)
+    assert sorted(e.entity for e in ctx.errors) == ["a", "b"]
+
+
+@OperatorRegistry.register("audit_gap.bug")
+class _BugOnOneTarget(BaseOperator):
+    scope = "target"
+
+    def execute(self, ctx):
+        if ctx.target.entity == "broken":
+            raise ValueError("演算法 bug")
+        return ctx
+
+
+@pytest.mark.xfail(strict=True, reason="Q8 缺口：strict=False 的承諾是「某條序列失敗記在 errors，其他序列照跑」，"
+                   "但只接 PlatformError；一條序列的 ValueError 讓整輪失敗、健康的序列也沒結果")
+def test_a_bug_on_one_target_does_not_take_down_the_whole_round():
+    targets = [TargetSpec(source_type="mock", query=q, entity=q) for q in ("broken", "healthy")]
+    ctx = Pipeline(Workflow(name="gap_q8c", targets=targets, nodes=[
+        NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="x", operator="audit_gap.bug")])).run(now=T0)
+    assert [e.entity for e in ctx.errors] == ["broken"]
+
+
+# ── Q9：冷啟動門檻 ──
+
+
+def _ctx(raw, train=None, state=None):
+    c = PipelineContext(pipeline="p", now=T0, target=Target("mock", "q", "svc"))
+    c.raw_df, c.train_df = raw, train
+    if state is not None:
+        c.detector_states["n"] = state
+    return c
+
+
+@pytest.mark.xfail(strict=True, reason="Q9 缺口：min_train_points 數的是訓練 df 的列數，不是演算法真正能用的點；"
+                   "wow／dod 只有 lag 有值的列、peer 只有同儕有值的列才算數。100 列裡只有 2 列有上週的值也會過門檻、"
+                   "用 2 個點學基準線，還記成 points=100")
+def test_cold_start_gate_counts_usable_points_for_lag_detectors():
+    train = _frame(100)
+    train["lag_10080"] = float("nan")
+    train.loc[98:, "lag_10080"] = [50.0, 51.0]
+    raw = _frame(30, 500.0)
+    raw["lag_10080"] = 50.0
+    op = OperatorRegistry.create("detector.wow")
+    op.node_name = "n"
+    assert op.execute(_ctx(raw, train)).detector_runs == []
+
+
+@pytest.mark.xfail(strict=True, reason="Q9 缺口：基準線到期重訓、但這次訓練窗資料不足時，連資料庫裡可用的舊基準線也不用，"
+                   "整個節點這一輪不判（資料斷了一天之後恢復的那幾輪是偵測盲區）")
+def test_retrain_with_too_few_points_keeps_using_the_old_baseline():
+    old = DetectorState({"mean": 50.0, "std": 1.0}, T0 - timedelta(days=2), points=1440, version=3,
+                        detector="detector.zscore")
+    op = OperatorRegistry.create("detector.zscore")
+    op.node_name = "n"
+    ctx = op.execute(_ctx(_frame(30, 500.0), train=_frame(20), state=old))
+    assert ctx.detector_runs == ["n"] and ctx.anomalies
+
+
+# ── Q12：結案寫入失敗 ──
+
+
+@OperatorRegistry.register("audit_gap.spike")
+class _Spike(BaseOperator):
+    scope = "target"
+
+    def execute(self, ctx):
+        ctx.anomalies = [AnomalyEvent(ctx.target.entity, "q", T0 - timedelta(minutes=1), 8.0)]
+        return ctx
+
+
+@pytest.mark.xfail(strict=True, reason="Q12 缺口：notifier.watchdog 也是 after_persist，在 finalize_batch 之前就送出心跳；"
+                   "finalize_batch 寫入失敗時這一輪是 InfrastructureError，但心跳已經續命了")
+def test_watchdog_does_not_renew_when_finalize_fails(monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from aiops.storage import repository
+    beats = []
+    cls = OperatorRegistry.get("notifier.watchdog")
+    real = cls.heartbeat
+    monkeypatch.setattr(cls, "heartbeat", lambda self, ctx, now: (beats.append(now), real(self, ctx, now))[1])
+    monkeypatch.setattr("aiops.storage.db.time.sleep", lambda s: None)
+
+    def boom(*a, **k):
+        raise OperationalError("INSERT", {}, Exception("db gone after push"))
+
+    monkeypatch.setattr(repository.Notifications, "record", staticmethod(boom))
+
+    wf = Workflow(name="gap_q12", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
+        NodeSpec(name="d", operator="audit_gap.spike"), NodeSpec(name="g", operator="alert.same_entity"),
+        NodeSpec(name="p", operator="alert.notify_payload"), NodeSpec(name="n", operator="notifier.log"),
+        NodeSpec(name="w", operator="notifier.watchdog")])
+    with pytest.raises(InfrastructureError):
+        Pipeline(wf, StorageHooks()).run(now=T0)
+    assert beats == []
+
+
+# ── Q13：被跳過的節點零開銷 ──
+
+
+@pytest.mark.xfail(strict=True, reason="Q13 缺口：一條序列的偵測節點全部被跳過（或只剩不存基準線的節點）時，"
+                   "ctx.detector_states 永遠是空的，ingestion.fetch 的 _needs_training 每輪都去抓整段訓練窗（預設 1440 點）")
+def test_target_whose_detectors_are_all_skipped_does_not_fetch_training_data(monkeypatch):
+    calls = []
+    real = MockSpec.fetch_data
+    monkeypatch.setattr(MockSpec, "fetch_data", lambda self, q, s, e, step, fm=None: (calls.append((s, e)), real(self, q, s, e, step, fm))[1])
+    targets = [TargetSpec(source_type="mock", query="qa", entity="a"), TargetSpec(source_type="mock", query="qc", entity="c")]
+    p = Pipeline(Workflow(name="gap_q13", targets=targets, nodes=[
+        NodeSpec(name="fetch", operator="ingestion.fetch",
+                 params={"lookback_minutes": 60, "train_lookback_minutes": 1440, "retrain_minutes": 1440}),
+        NodeSpec(name="z", operator="detector.zscore", params={"include_entities": ["a"]})]), StorageHooks())
+    p.run(now=T0, targets=[targets[1]])
+    assert len(calls) == 1  # 只抓偵測窗
+
+
+# ── Q14：回測跟正式偵測用的參數不一樣 ──
+
+
+@pytest.mark.xfail(strict=True, reason="Q14 缺口：admin.proposal_backtest 用 cls(**核准調參) 建現行／提案演算法，"
+                   "沒有疊上 workflow 節點 YAML 的 params（鎖定鍵）與 target overrides；YAML 鎖了 threshold 時，"
+                   "回測顯示的效果在正式偵測裡根本不會生效")
+def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monkeypatch, now):
+    from aiops.engine.requests import ProposalBacktest, ProposalCreate
+    from aiops.interfaces import runner
+    import shutil
+    shutil.copytree(runner.WORKFLOW_DIR, tmp_path, dirs_exist_ok=True)  # 內建的 admin_* 也要找得到
+    (tmp_path / "detection" / "locked.yaml").write_text(
+        "name: locked\nnodes:\n  - {name: fetch, operator: ingestion.fetch}\n"
+        "  - {name: detect, operator: detector.zscore, params: {threshold: 9.0}}\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "WORKFLOW_DIR", tmp_path)
+    pid = runner.run("admin_proposal_create", request=ProposalCreate(
+        source="manual", detector="detector.zscore", params={"threshold": 1.5}, proposer="amy",
+        pipeline="locked"))["proposal"]["id"]
+    req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, train_ratio=0.3,
+                           time_range={"start": now.replace(hour=0), "end": now, "step_seconds": 60})
+    bt = runner.run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=now)["proposal"]["backtest"]
+    assert bt["current_params"].get("threshold") == 9.0

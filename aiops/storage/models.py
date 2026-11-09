@@ -80,7 +80,8 @@ class NotificationRow(Base):
 
 
 class AnomalyRow(Base):
-    """偵測結果（只增不改）。由 persist_target 寫入。"""
+    """偵測結果（只增不改）。由 hooks.persist_batch 跟事件群在同一筆交易寫入（不是 persist_target）。
+    detector.ensemble 的裁決事件只存裁決節點（detector_node = 裁決節點名稱），投票者 voted_by 只在事件群快照裡。"""
 
     __tablename__ = "anomalies"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
