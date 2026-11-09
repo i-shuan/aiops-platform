@@ -22,16 +22,15 @@ class RcaReport(BaseOperator):
 
     def __init__(self, sections: list[str], section_params: dict[str, dict[str, Any]] | None = None):
         section_params = section_params or {}
+        for key in sections:  # 先查段落名稱：寫錯段落是根本錯誤，section_params 對不上只是它的後果
+            if not OperatorRegistry.has(f"{SECTION_PREFIX}{key}"):
+                available = ", ".join(n.removeprefix(SECTION_PREFIX) for n in OperatorRegistry.names(SECTION_PREFIX))
+                raise WorkflowError(f"未知的報告段落：{key}（可用：{available}）")
         unknown_params = sorted(set(section_params) - set(sections))
         if unknown_params:
             raise WorkflowError(f"section_params 給了沒有列在 sections 裡的段落：{unknown_params}")
-        self.sections: list[RcaSection] = []
-        for key in sections:
-            name = f"{SECTION_PREFIX}{key}"
-            if not OperatorRegistry.has(name):
-                available = ", ".join(n.removeprefix(SECTION_PREFIX) for n in OperatorRegistry.names(SECTION_PREFIX))
-                raise WorkflowError(f"未知的報告段落：{key}（可用：{available}）")
-            self.sections.append(OperatorRegistry.create(name, section_params.get(key)))
+        self.sections: list[RcaSection] = [OperatorRegistry.create(f"{SECTION_PREFIX}{key}", section_params.get(key))
+                                           for key in sections]
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         need_incident(ctx)

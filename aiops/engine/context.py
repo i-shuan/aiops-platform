@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel
 
-from aiops.engine.types import AnomalyEvent, Incident, Notification
+from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
 
 
 @dataclass
@@ -291,6 +291,7 @@ class PipelineContext:
     llm_generated_by: str = "template"
     llm_rejected: str | None = None
     notifications: list[Notification] = field(default_factory=list)
+    grafana_links: GrafanaLinks | None = None  # alert.notify_payload 組好，alert.heartbeat 續命時沿用
     resolved_incident_ids: list[int] = field(default_factory=list)
     errors: list[TargetError] = field(default_factory=list)
     audit: list[str] = field(default_factory=list)

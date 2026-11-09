@@ -164,3 +164,17 @@ class Notification:
     starts_at: datetime
     # 有值 = 結案（恢復通知）；None = 仍在發生
     ends_at: datetime | None = None
+    # 「看來源」連結（Alertmanager 的 generatorURL，Grafana 卡片上的 See source）；沒設定 Grafana 就是 None
+    generator_url: str | None = None
+
+
+@dataclass(frozen=True)
+class GrafanaLinks:
+    """深度連結的設定：基底網址來自部署（環境變數），儀表板、變數、資料源 uid 來自管線 YAML。
+    alert.notify_payload 組好放進 ctx.grafana_links，alert.heartbeat 續命時用同一份，卡片每一輪都帶連結。"""
+
+    base_url: str
+    dashboard: str | None = None  # 例如 d/apm-overview（不含基底網址）
+    var: str = "service"  # 儀表板上鎖服務用的變數名稱
+    pad_minutes: float = 15  # 事故前後各多看幾分鐘
+    datasources: dict[str, str] = field(default_factory=dict)  # {traces: apm-traces, logs: apm-logs}：Explore 連結用

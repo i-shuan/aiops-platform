@@ -33,10 +33,13 @@ nodes:
     operator: alert.suppress_dedup
     params: {cooldown_minutes: 30}
 
-  # 定嚴重度、產生通知內容
+  # 定嚴重度、產生通知內容。links = 深度連結：設定了環境變數 AIOPS_GRAFANA_URL 才會在卡片 annotations 加
+  # grafana_dashboard_url（APM 總覽鎖在事故的服務與時間）、grafana_traces_url／grafana_logs_url（Explore 查詢）
   - name: payload
     operator: alert.notify_payload
-    params: {severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}}
+    params:
+      severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}
+      links: {dashboard: d/apm-overview, var: service, pad_minutes: 15, datasources: {traces: apm-traces, logs: apm-logs}}
   # 進行中事件群：用最新內容續命、升級時先關舊標籤再送新的、安靜滿 resolve_after_minutes 才結案（防抖動）。
   # 要排在 payload 之後（升級的嚴重度由 payload 算）
   - name: heartbeat

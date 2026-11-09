@@ -32,6 +32,8 @@ class AlertmanagerTransport:
             alert = {"labels": n.labels, "annotations": n.annotations, "startsAt": _iso_utc(n.starts_at)}
             if n.ends_at is not None:
                 alert["endsAt"] = _iso_utc(n.ends_at)
+            if n.generator_url:
+                alert["generatorURL"] = n.generator_url  # Grafana 卡片上的 See source
             body.append(alert)
         return body
 
