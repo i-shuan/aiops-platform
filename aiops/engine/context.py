@@ -98,8 +98,12 @@ class RootCandidate:
     score: float
     reason: str
     # 下鑽歸因：這個服務的增量主要花在等哪個下游資源（例如 "tax-gw:443（external/http）"）。候選實體仍是服務，
-    # 拓撲、傳播路徑、標準答案都不變；這一欄只告訴人「該去查的不是這個服務的程式，是它等的東西」。空字串 = 沒有
+    # 拓撲、傳播路徙、標準答案都不變；這一欄只告訴人「該去查的不是這個服務的程式，是它等的東西」。空字串 = 沒有
     dependency: str = ""
+    # 給程式判斷用的結構化版本（Runbook 規則、LLM context）：resource、kind、subtype、self_ms{before,during}、
+    # wait_ms{before,during}、failures{before,during}、share（等待增量 ÷ 自身耗時增量，0～1）、by（"latency"／"errors"／""）。
+    # 有資源葉節點就填（share 不夠主導時 by 為空、dependency 為空字串，但數字照給）；沒有資源葉節點就是 {}
+    attribution: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -297,10 +301,18 @@ class PipelineContext:
     rca_log_window_minutes: tuple[float, float] = (0.0, 0.0)  # (事件期間, 正常期間) 的長度，算每分鐘頻率用
     rca_sections: list[ReportSection] = field(default_factory=list)
     rca_skipped: list[str] = field(default_factory=list)
+    # rca.section.suggested_actions 命中的故障特徵（Runbook）：{"id", "name", "actions": [...]}；沒命中任何一條就是 None。
+    # 給 enrichment.llm_briefing 當 context，也讓 API 的呼叫端不用去解析段落文字
+    rca_runbook: dict[str, Any] | None = None
     llm_summary: str | None = None
     llm_claims: list[dict[str, Any]] = field(default_factory=list)
     llm_generated_by: str = "template"
     llm_rejected: str | None = None
+    # enrichment.llm_briefing 的三行止血摘要：{"summary_line", "action_line", "verification_line"}；模板或 LLM 寫的，
+    # generated_by 說明是哪個；LLM 回文不過驗證時 rejected 寫原因並退回模板
+    llm_briefing: dict[str, str] | None = None
+    llm_briefing_generated_by: str = "template"
+    llm_briefing_rejected: str | None = None
     notifications: list[Notification] = field(default_factory=list)
     grafana_links: GrafanaLinks | None = None  # alert.notify_payload 組好，alert.heartbeat 續命時沿用
     resolved_incident_ids: list[int] = field(default_factory=list)
@@ -336,10 +348,13 @@ class PipelineContext:
             out.update(sections=[s.to_dict() for s in self.rca_sections], skipped=self.rca_skipped,
                        root_cause={"algorithm": self.rca_root_algorithm, "note": self.rca_root_note,
                                    "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason,
-                                                   "dependency": c.dependency}
+                                                   "dependency": c.dependency, "attribution": c.attribution}
                                                   for c in self.rca_root_candidates]},
+                       runbook=self.rca_runbook,
                        narrative={"summary": self.llm_summary, "claims": self.llm_claims,
-                                  "generated_by": self.llm_generated_by, "rejected": self.llm_rejected})
+                                  "generated_by": self.llm_generated_by, "rejected": self.llm_rejected,
+                                  "briefing": self.llm_briefing, "briefing_generated_by": self.llm_briefing_generated_by,
+                                  "briefing_rejected": self.llm_briefing_rejected})
         if self.errors:
             out["errors"] = [{"entity": e.entity, "message": e.message} for e in self.errors]
         return out

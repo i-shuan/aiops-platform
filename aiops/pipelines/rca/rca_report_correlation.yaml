@@ -36,3 +36,7 @@ nodes:
     operator: enrichment.llm_summary
     optional: true
     params: {provider: noop}
+  - name: briefing
+    operator: enrichment.llm_briefing
+    optional: true
+    params: {provider: noop}

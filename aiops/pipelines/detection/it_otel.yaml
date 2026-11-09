@@ -69,6 +69,8 @@ nodes:
     params: {ttl_minutes: 15}
 
 targets:
-  # 範例（mock 資料源）。正式使用請複製這個檔，改成自己的 targets
-  - {source_type: mock, query: 'cpu{service="cart"}', entity: cart, attrs: {dept: payments}}
-  - {source_type: mock, query: 'cpu{service="redis"}', entity: redis, attrs: {dept: platform}}
+  # 範例（mock 資料源）。正式使用請複製這個檔，改成自己的 targets。
+  # attrs.signal（latency／errors／traffic／saturation）：alert.golden_signals 加權與 RCA 建議處置的故障特徵都靠它判斷
+  # 這條序列是哪一類；ES 這種 metric 是整段查詢 JSON 的資料源判不出類別，不填就不會觸發
+  - {source_type: mock, query: 'cpu{service="cart"}', entity: cart, attrs: {dept: payments, signal: saturation}}
+  - {source_type: mock, query: 'cpu{service="redis"}', entity: redis, attrs: {dept: platform, signal: saturation}}

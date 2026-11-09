@@ -59,5 +59,6 @@ nodes:
     params: {ttl_minutes: 15}
 
 targets:
-  - {source_type: mock, query: 'rf_power{tool="ETCH-01"}', entity: ETCH-01, attrs: {dept: fab-etch}}
-  - {source_type: mock, query: 'focus{tool="LITHO-02"}', entity: LITHO-02, attrs: {dept: fab-litho}}
+  # attrs.signal：製程參數的類別（給 RCA 建議處置的製程規則用；不是 IT 的黃金訊號也沒關係）
+  - {source_type: mock, query: 'rf_power{tool="ETCH-01"}', entity: ETCH-01, attrs: {dept: fab-etch, signal: rf_power}}
+  - {source_type: mock, query: 'focus{tool="LITHO-02"}', entity: LITHO-02, attrs: {dept: fab-litho, signal: focus}}

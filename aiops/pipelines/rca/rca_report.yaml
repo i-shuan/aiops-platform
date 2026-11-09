@@ -34,3 +34,8 @@ nodes:
     operator: enrichment.llm_summary
     optional: true  # 旁路節點：失敗只記進 errors，RCA 段落照常回傳
     params: {provider: noop}
+  # 三行式止血摘要：只吃根因歸因、範例 trace、日誌樣板、命中的 Runbook；noop 用模板，設供應商才連外（白名單與數字驗證不過就退回模板）
+  - name: briefing
+    operator: enrichment.llm_briefing
+    optional: true
+    params: {provider: noop}
