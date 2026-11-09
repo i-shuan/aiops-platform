@@ -12,6 +12,7 @@ from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import NodeSpec, NullHooks, Pipeline, TargetSpec, Workflow, load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import AnomalyEvent
+from aiops.stages.detectors.base import DetectorOperator
 from aiops.stages.ensemble.ensemble import EnsembleOperator
 
 NOW = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
@@ -277,3 +278,110 @@ targets:
     with pytest.raises(ValidationError) as e:
         TargetSpec(source_type="mock", query="a", detectors=[])
     assert [(err["loc"], err["type"]) for err in e.value.errors()] == [(("detectors",), "too_short")]
+
+
+# ── 稽核 Q5：冷啟動棄權、白名單跳過，只剩一個參與者時任何策略都是 pass-through ──
+
+
+@pytest.mark.parametrize("strategy", [{"strategy": "intersection"}, {"strategy": "majority"},
+                                      {"strategy": "at_least", "min_votes": 3}])
+def test_cold_start_and_skipped_nodes_leave_one_voter_who_decides_alone(strategy):
+    n_skip = ("n_skip", "detector.zscore", {"threshold": 2.0})            # 會抓 SMALL＋BIG，但 target 沒選它
+    n_cold = ("n_cold", "detector.mad", {"min_train_points": 10_000})     # 訓練段 100 點 < 10000：冷啟動棄權
+    n_ok = ("n_ok", "detector.zscore", {"threshold": 5.0})                # 只抓 BIG
+    rec = _run(n_skip, n_cold, n_ok, ("vote", "detector.ensemble", strategy),
+               targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["n_cold", "n_ok"]}])
+    a = rec.contexts["a"]
+    assert a.detector_runs == ["n_ok"]
+    assert "n_skip:skipped:not-selected" in a.audit and any(l.startswith("train:n_cold:too-few-points") for l in a.audit)
+    assert any("voters=1:need=1" in line for line in a.audit)
+    assert _minutes(a.anomalies) == [BIG] and [(e.detector_node, e.voted_by) for e in a.anomalies] == [("vote", ("n_ok",))]
+
+
+# ── 稽核 Q13：路由順序（exclude → include → detectors）與被跳過的節點零開銷 ──
+
+
+def test_routing_order_is_visible_in_the_skip_reason_and_skipped_nodes_load_nothing(monkeypatch):
+    """both：include b、exclude a。a 被 exclude 先擋（原因 excluded；若先看 include 會變成 not-included）。
+    inc_b：include b，但 b 的白名單沒選它 -> not-selected（include 過了才看白名單）。
+    走真的 StorageHooks：被跳過的節點不查調參、不查基準線、也不存基準線。"""
+    from aiops.storage import crud, repository
+    from aiops.storage.hooks import StorageHooks
+    from aiops.storage.models import DetectorModelRow
+
+    models_get, candidates = [], []
+    real_get, real_cand = repository.DetectorModels.get, repository.ActiveConfigs.candidates
+    monkeypatch.setattr(repository.DetectorModels, "get",
+                        staticmethod(lambda p, e, q, op, node: (models_get.append((e, node)), real_get(p, e, q, op, node))[1]))
+    monkeypatch.setattr(repository.ActiveConfigs, "candidates",
+                        staticmethod(lambda op, p, e: (candidates.append((e, op)), real_cand(op, p, e))[1]))
+    wf = _wf(("both", "detector.zscore", {"include_entities": ["b"], "exclude_entities": ["a"]}),
+             ("inc_b", "detector.mad", {"include_entities": ["b"]}),
+             ("sel", "detector.quantile_drift", {"window": 20}),
+             targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["both", "inc_b", "sel"]},
+                      {"source_type": "mock", "query": "b", "entity": "b", "detectors": ["both"]}])
+    ctx = Pipeline(wf, StorageHooks()).run(now=NOW)
+    skips = sorted(line for line in ctx.audit if ":skipped:" in line)
+    assert skips == ["both:skipped:excluded", "inc_b:skipped:not-included", "inc_b:skipped:not-selected",
+                     "sel:skipped:not-selected"]
+    assert sorted(models_get) == [("a", "sel"), ("b", "both")]
+    assert sorted(candidates) == [("a", "detector.quantile_drift"), ("b", "detector.zscore")]
+    assert sorted((r["entity"], r["node"]) for r in crud.find(DetectorModelRow)) == [("a", "sel"), ("b", "both")]
+
+
+# ── 稽核 Q14：巢狀字典參數逐鍵 deep_merge（調參 ← 節點 YAML ← target overrides） ──
+
+
+@OperatorRegistry.register("test.nested_params")
+class _NestedParams(DetectorOperator):
+    """參數 bands 是巢狀字典。detect 用 bands.lo × bands.nested.y 當門檻：兩個鍵分別只出現在調參層與 overrides 層，
+    淺層合併會整個換掉 bands，就拿不到其中一個。"""
+
+    algorithm = "nested"
+    tunable = {"threshold": (3.0, 1.0, 10.0)}
+    other_params = frozenset({"bands"})
+
+    def fit(self, df):
+        self.fitted = True
+        return self
+
+    def get_state(self):
+        return {}
+
+    def load_state(self, state):
+        self.fitted = True
+        return self
+
+    def detect(self, df):
+        bands = self.params["bands"]
+        limit = bands["lo"] * bands["nested"]["y"]
+        return self._result(df, df["value"], df["value"] > limit)
+
+
+TUNED = {"bands": {"hi": 1, "lo": 2, "nested": {"z": 9, "x": 0}}, "threshold": 4.0}
+YAML = {"bands": {"hi": 5, "nested": {"x": 1}}}
+OVERRIDE = {"bands": {"mid": 3, "nested": {"y": 2, "x": 8}}}
+MERGED = {"bands": {"hi": 5, "lo": 2, "mid": 3, "nested": {"z": 9, "x": 8, "y": 2}}, "threshold": 4.0}
+
+
+def test_nested_params_merge_key_by_key_across_all_three_layers():
+    op = OperatorRegistry.create("test.nested_params", YAML)
+    op.node_name = "n"
+    ctx = PipelineContext(pipeline="p", now=NOW, target=Target("mock", "q", "e", overrides={"n": OVERRIDE}))
+    ctx.detector_params["n"] = TUNED
+    assert op.effective_params(ctx) == MERGED  # 兄弟鍵 lo、mid、z 都在；hi：YAML 蓋調參；x：override 蓋 YAML 蓋調參
+    assert TUNED["bands"]["nested"] == {"z": 9, "x": 0} and op.params == YAML  # 合併不改任何一層的輸入
+
+
+class _Tuned(NullHooks):
+    """不碰資料庫，直接給核准調參（StorageHooks 的 load_target 會從 active_detector_configs 填同一個欄位）。"""
+
+    def load_target(self, ctx, detector_nodes):
+        ctx.detector_params = {name: TUNED for name, _ in detector_nodes}
+
+
+def test_nested_params_reach_the_algorithm_merged_in_a_pipeline():
+    wf = _wf(("n", "test.nested_params", YAML),
+             targets=[{"source_type": "mock", "query": "a", "entity": "a", "overrides": {"n": OVERRIDE}}])
+    ctx = Pipeline(wf, _Tuned()).run(now=NOW)
+    assert _minutes(ctx.anomalies) == [BIG]  # 門檻 lo(2，調參層) × nested.y(2，override 層) = 4：只有 BIG(8) 越線
