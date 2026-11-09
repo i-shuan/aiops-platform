@@ -176,7 +176,11 @@ class TraceSeriesRow(Base):
 
 
 class ServiceEdgeRow(Base):
-    """從 trace 的父子 span 推導出的服務呼叫關係（caller 呼叫 callee）。alerts、rca 自動拿來當 topology。"""
+    """從 trace 的父子 span 推導出的服務呼叫關係（caller 呼叫 callee）。alerts、rca 自動拿來當 topology。
+
+    寫入者：admin.topology_refresh（排程從 trace 來源沉澱）與 admin.merge_traces（批次匯入），都走 ServiceEdges.add_calls。
+    last_seen：最近一次被刷新／匯入看到的時間（牆鐘，不是 trace 本身的時間）；NULL = 欄位加上之前就存在的舊列，
+    不知道多久沒出現，prune 不刪它（migrations/postgres/0006）。"""
 
     __tablename__ = "service_edges"
     __table_args__ = (UniqueConstraint("caller", "callee"),)
@@ -184,7 +188,7 @@ class ServiceEdgeRow(Base):
     caller: Mapped[str] = mapped_column(String(256))
     callee: Mapped[str] = mapped_column(String(256))
     calls: Mapped[int] = mapped_column(Integer, default=0)
-    last_seen: Mapped[datetime] = mapped_column(DateTime)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
 class LotPathRow(Base):

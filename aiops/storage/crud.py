@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from sqlalchemy import JSON, cast, func, literal, select, text
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import update as sql_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -122,6 +123,35 @@ def merge_json(model: Any, match: dict[str, Any], column: str, patch: dict[str, 
         s.expire_all()  # 欄位是資料庫算出來的，要重新讀
         row = s.scalars(select(model).where(*_where(model, match))).first()
         return row_to_dict(row)
+
+
+def increment(model: Any, match: dict[str, Any], column: str, amount: int, **fields: Any) -> None:
+    """原子累加：列不存在就以 amount 建立，存在就 column = column + amount（同時寫入 fields）。
+    PostgreSQL／SQLite 用 ON CONFLICT DO UPDATE 由資料庫算，兩個 worker 同時累加同一列不會互相蓋掉（讀改寫會少算一次）。
+    match 必須是唯一鍵。其他方言退回讀改寫（不保證併發安全）。"""
+    values = _clean({**match, **fields, column: amount})
+    with write_session() as s:
+        dialect = s.get_bind().dialect.name
+        col = getattr(model, column)
+        if dialect in ("postgresql", "sqlite"):
+            insert = (pg_insert if dialect == "postgresql" else sqlite_insert)(model).values(**values)
+            s.execute(insert.on_conflict_do_update(
+                index_elements=list(match), set_={column: col + insert.excluded[column], **_clean(fields)}))
+            return
+        row = s.scalars(select(model).where(*_where(model, match))).first()
+        if row is None:
+            s.add(model(**values))
+            return
+        setattr(row, column, (getattr(row, column) or 0) + amount)
+        for k, v in _clean(fields).items():
+            setattr(row, k, v)
+
+
+def delete_before(model: Any, column: str, before: Any) -> int:
+    """刪掉 column < before 的列，回傳刪了幾筆。column 是 NULL 的列不會被刪（SQL 的 NULL < x 不成立）。"""
+    with write_session() as s:
+        result = s.execute(sql_delete(model).where(getattr(model, column) < utc_naive(before)))
+        return int(result.rowcount or 0)
 
 
 def insert_if_absent(model: Any, **fields: Any) -> dict[str, Any] | None:

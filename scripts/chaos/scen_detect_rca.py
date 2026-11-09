@@ -121,21 +121,14 @@ def scenario_3() -> H.Result:
 
 
 # ───────────────────────── 場景 4：跨服務連鎖雪崩 ─────────────────────────
-def topology_from(es, lo: datetime, hi: datetime) -> int:
-    """把世界的 trace 當 API 匯入（跟生產的 admin.merge_traces 同一條路），平台才有持久化的服務拓撲。"""
-    from aiops.engine.requests import SpanIn, TraceMerge
+def topology_refresh(lo: datetime, hi: datetime) -> dict:
+    """不手動灌邊：跟生產排程同一條路（admin.topology_refresh），從世界的 trace 來源（平台的 elasticsearch 資料源）
+    撈 [lo, hi] 的 span、算出服務呼叫邊、沉澱進 service_edges。偵測時 ctx.topology 預設就讀這張表。"""
+    from aiops.engine.requests import TopologyRefresh
     from aiops.interfaces.runner import run
-    from aiops.sources.elasticsearch import _span
 
-    spans = []
-    for d in es.trace_docs:
-        if lo <= _ts(d) < hi:
-            s = _span(d)
-            if s:
-                spans.append(SpanIn(trace_id=s["trace_id"], service=s["service"], start=s["ts"], duration_ms=s["duration_ms"],
-                                    error=s["error"], span_id=s["span_id"], parent_id=s["parent_id"]))
-    run("admin_merge_traces", request=TraceMerge(spans=spans[:3000], persist=True))
-    return len(spans[:3000])
+    return run("admin_topology_refresh",
+               request=TopologyRefresh(source_type="elasticsearch", end=hi, lookback_minutes=_mins(lo, hi)))
 
 
 def scenario_4() -> H.Result:
@@ -153,8 +146,13 @@ def scenario_4() -> H.Result:
     w.build()
     H.fresh_db()
     with H.es_for(w, INC - timedelta(minutes=90), end + timedelta(minutes=5)) as es:
-        n = topology_from(es, INC - timedelta(minutes=60), INC - timedelta(minutes=30))
-        r.notes.append(f"拓撲：匯入 {n} 個 span（事故前，經 admin_merge_traces 持久化）")
+        topo = topology_refresh(INC - timedelta(minutes=90), INC - timedelta(minutes=30))  # 偵測回放開始前、事故前 60 分鐘
+        r.notes.append(f"拓撲（admin.topology_refresh，事故前 {topo['window']['start']}～{topo['window']['end']}）："
+                       f"span {topo['spans']}（truncated={topo['truncated']}）、邊 {topo['edges']}、"
+                       f"新增 {topo['edges_added']}／更新 {topo['edges_updated']}／移除 {topo['edges_pruned']}")
+        seen = {(e["caller"], e["callee"]) for e in topo["edges"]}
+        r.check("拓撲由排程動作從 trace 沉澱（不手動灌邊）", "gateway→order-api、order-api→inventory-svc",
+                sorted(seen), seen == {("gateway", "order-api"), ("order-api", "inventory-svc")})
         wf = H.detection_workflow("it_otel", H.targets(["gateway", "order-api", "inventory-svc"]))
         rp = H.replay(wf, INC - timedelta(minutes=30), end)
         incs = H.incidents()

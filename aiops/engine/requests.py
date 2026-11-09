@@ -111,6 +111,16 @@ class TraceMerge(BaseModel):
     persist: bool = True
 
 
+class TopologyRefresh(BaseModel):
+    """admin.topology_refresh：從 trace 來源撈 [end − lookback_minutes, end] 的 span，把服務呼叫邊沉澱進 service_edges。"""
+
+    source_type: SourceType = "elasticsearch"
+    lookback_minutes: int = Field(60, gt=0, le=24 * 60)
+    max_spans: int = Field(20000, gt=0, le=200000)
+    prune_days: int = Field(7, gt=0)  # last_seen 早於「現在 − prune_days」的邊移除
+    end: datetime | None = None  # 回放歷史用；不給 = 現在
+
+
 class LotStepIn(BaseModel):
     lot_id: str
     station: str
