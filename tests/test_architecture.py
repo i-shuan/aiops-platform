@@ -1,5 +1,6 @@
 """架構防線（CLAUDE.md 第 1 節）：用 AST 檢查 import 與禁用語法，違規就紅燈。"""
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,47 @@ def test_storage_has_no_business_logic_imports():
 def test_core_and_engine_do_not_import_concrete_operators():
     bad = _violations(_py("engine"), ["aiops.stages", "aiops.control_plane", "aiops.storage", "aiops.interfaces.api"])
     assert not bad, bad
+
+
+_OPERATOR_NAME = re.compile(r"^(detector|alert|notifier|rca|ingestion|enrichment|admin)\.")
+
+
+def _operator_name_literals(source: str) -> list[str]:
+    """原始碼裡長得像算子名稱的字串常數（含 f-string 的固定片段）。
+    不算：docstring、OperatorRegistry.names(<前綴>) 的引數（列出某類算子，不是特判某一個）。"""
+    tree = ast.parse(source)
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body and \
+                isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
+            skip.add(id(node.body[0].value))
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", "")) == "names":
+            skip |= {id(a) for a in node.args}
+    return [f"{n.lineno}: {n.value!r}" for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skip and _OPERATOR_NAME.match(n.value)]
+
+
+def test_engine_and_runner_never_special_case_an_operator_name():
+    """CLAUDE.md 第 1 節「嚴禁在引擎內 hardcode 具體算子邏輯」（稽核 Q2）：引擎與 runner 只能用算子自己宣告的屬性
+    （scope、has_baseline、include／exclude_entities）分流，不准拿算子名稱字串比對。"""
+    allowed = '''"""detector.mad 這種說明文字可以。"""
+from pydantic import Field
+workflow: str = Field("rca_report", pattern=r"^[A-Za-z0-9_-]+$")
+detectors = OperatorRegistry.names("detector.")
+run("admin_tune")
+'''
+    flagged = '''if op.operator_name == "detector.mad":
+    pass
+if name.startswith("alert."):
+    pass
+label = f"notifier.{kind}"
+'''
+    assert _operator_name_literals(allowed) == []  # 檢查器本身：workflow 名稱、names(prefix) 不誤報
+    assert len(_operator_name_literals(flagged)) == 3  # 檢查器本身：比對、前綴、f-string 都抓得到
+    files = _py("engine") + _py("interfaces", "runner.py")
+    assert len(files) > 5, "掃描範圍是空的，這個檢查會變成空轉"
+    bad = [f"{f.relative_to(ROOT).as_posix()}:{hit}" for f in files for hit in _operator_name_literals(_src(f))]
+    assert not bad, "\n".join(bad)
 
 
 def test_detectors_do_not_import_each_other():

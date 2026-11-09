@@ -8,11 +8,13 @@
 
 每個測試在修正前都會失敗（第 2 項尤其：修正前 11:40 的異常在推送失敗後永遠不會發出）。
 """
+import copy
+import inspect
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from aiops.engine.context import PipelineContext, Target
 from aiops.engine.errors import InfrastructureError
@@ -244,3 +246,208 @@ def test_abstaining_detector_is_not_counted_by_the_ensemble():
     vote.node_name = "vote"
     out = vote.execute(ctx)
     assert ctx.detector_runs == ["rules"] and [e.voted_by for e in out.anomalies] == [("rules",)]  # 1 個參與者就它說了算
+
+
+# ── 稽核補強（docs/ARCH_AUDIT.md Q8、Q10、Q11）──
+
+
+@pytest.fixture
+def blank_source(monkeypatch):
+    """mock 資料源加一種查詢：blank:* 回 HTTP 200 但零筆（空 DataFrame，不是 NoDataError）。"""
+    real = MockSpec.fetch_data
+
+    def fetch(self, query, start, end, step_seconds, field_map=None):
+        if query.startswith("blank:"):
+            return pd.DataFrame({"ts": pd.Series([], dtype="datetime64[ns, UTC]"), "value": pd.Series([], dtype=float)})
+        return real(self, query, start, end, step_seconds, field_map)
+
+    monkeypatch.setattr(MockSpec, "fetch_data", fetch)
+
+
+def test_source_returning_an_empty_frame_is_starvation_too(blank_source, beats):
+    """資料源沒丟 NoDataError、只是回空的：引擎 raw_df.empty 那條路徑同樣算斷流，心跳 0 次。"""
+    with pytest.raises(InfrastructureError, match="資料斷流") as e:
+        _detection([("blank:a", "a"), ("blank:b", "b")]).run(now=T0)
+    assert "2/2" in str(e.value) and beats == []
+    with pytest.raises(InfrastructureError, match="1/2"):
+        _detection([("blank:a", "a"), ("metric_b", "b")], max_failed_target_ratio=0.5).run(now=T0)
+    assert beats == []
+    ctx = _detection([("blank:a", "a"), ("metric_b", "b")]).run(now=T0)  # 預設 1.0：只有一半沒資料，這一輪照常
+    assert len(beats) == 1 and ctx.errors == []
+
+
+def _spike_with_watchdog():
+    wf = _spike_pipeline().workflow
+    nodes = [*wf.nodes, NodeSpec(name="watchdog", operator="notifier.watchdog")]
+    return Pipeline(wf.model_copy(update={"nodes": nodes}), StorageHooks())
+
+
+@pytest.mark.parametrize("cls, meth, error, raised, waits", [
+    ("Incidents", "create", OperationalError("INSERT", {}, Exception("db gone")), InfrastructureError, [0.5, 1.5]),
+    ("Anomalies", "create_many", OperationalError("INSERT", {}, Exception("db gone")), InfrastructureError, [0.5, 1.5]),
+    ("Incidents", "create", IntegrityError("INSERT", {}, Exception("dup")), IntegrityError, []),   # 不是斷線：不重試
+    ("Incidents", "create", RuntimeError("bug"), RuntimeError, []),                                # 程式錯誤：不重試
+], ids=["incidents-down", "anomalies-down", "integrity-no-retry", "bug-no-retry"])
+def test_persist_failure_of_any_kind_sends_nothing(monkeypatch, sent, beats, db_retry_waits, cls, meth, error, raised, waits):
+    """稽核 Q10：persist_batch 丟任何例外，after_persist（notifier.*、watchdog 心跳）一個都不跑；資料庫沒有半套。"""
+    _push_ok(monkeypatch)
+
+    def boom(*a, **kw):
+        raise error
+
+    monkeypatch.setattr(getattr(repository, cls), meth, staticmethod(boom))
+    with pytest.raises(raised):
+        _spike_with_watchdog().run(now=SPIKE_AT + timedelta(minutes=5))
+    assert sent == [] and beats == [] and db_retry_waits == waits
+    assert Anomalies.entity_last_seen("spike", ["svc"]) == {} and Incidents.list_open("spike") == []
+
+
+def test_persist_ok_control_group_does_notify(monkeypatch, sent, beats):
+    _push_ok(monkeypatch)
+    _spike_with_watchdog().run(now=SPIKE_AT + timedelta(minutes=5))
+    assert [n.labels["entities"] for n in sent] == ["svc"] and len(beats) == 1
+
+
+@OperatorRegistry.register("test.spikes_at")
+class SpikesAt(BaseOperator):
+    """在指定的分鐘（相對 T0）各有一個異常；每輪往回看 60 分鐘都會再偵測到，靠 detector.new_only 去重。"""
+
+    scope = "target"
+
+    def __init__(self, minutes: list[int]):
+        self.minutes = list(minutes)
+
+    def execute(self, ctx):
+        at = [T0 + timedelta(minutes=m) for m in self.minutes]
+        ctx.anomalies = [AnomalyEvent(ctx.target.entity, "q", t, 8.0) for t in at
+                         if ctx.now - timedelta(minutes=60) <= t <= ctx.now]
+        return ctx
+
+
+def _spikes_pipeline(minutes):
+    wf = _spike_pipeline().workflow
+    nodes = [NodeSpec(name="detect", operator="test.spikes_at", params={"minutes": minutes}), *wf.nodes[1:]]
+    return Pipeline(wf.model_copy(update={"nodes": nodes}), StorageHooks())
+
+
+def _ctx_fields(ctx):
+    """交易重試會讀、而且不准被第一次嘗試改動的 ctx 欄位。"""
+    return copy.deepcopy({
+        "detected_anomalies": [e.to_dict() for e in ctx.detected_anomalies],
+        "incidents": [(i.uid, i.fingerprint, i.to_dict(), i.suppressed_by) for i in ctx.incidents],
+        "incident_ids": dict(ctx.incident_ids),
+        "open_incidents": [(o.id, o.uid, o.severity, o.changed, o.incident.to_dict()) for o in ctx.open_incidents],
+        "external_anomaly_ids": list(ctx.external_anomaly_ids),
+        "notifications": [(n.labels, n.ends_at) for n in ctx.notifications],
+        "resolved_incident_ids": list(ctx.resolved_incident_ids),
+    })
+
+
+@pytest.fixture
+def persist_spy(monkeypatch):
+    """記下 persist_batch 進入前（before）、第一次寫入失敗當下（mid）、完成後（after）的 ctx 欄位。
+    fail(類別, 方法) 讓那個寫入點第一次呼叫丟 OperationalError（交易回復、重試），之後照常。"""
+    snaps: dict = {}
+    real_persist = StorageHooks.persist_batch
+
+    def persist(self, ctx):
+        snaps["ctx"], snaps["before"] = ctx, _ctx_fields(ctx)
+        real_persist(self, ctx)
+        snaps["after"] = _ctx_fields(ctx)
+
+    monkeypatch.setattr(StorageHooks, "persist_batch", persist)
+
+    def fail(cls, meth, on_failure=None):
+        real = getattr(getattr(repository, cls), meth)
+        snaps["calls"] = 0
+
+        def flaky(*a, **kw):
+            snaps["calls"] += 1
+            if snaps["calls"] == 1:
+                snaps["mid"] = _ctx_fields(snaps["ctx"])
+                if on_failure:
+                    on_failure(snaps["ctx"])
+                raise OperationalError(meth, {}, Exception("connection reset mid-transaction"))
+            return real(*a, **kw)
+
+        monkeypatch.setattr(getattr(repository, cls), meth, staticmethod(flaky))
+
+    snaps["fail"] = fail
+    return snaps
+
+
+def test_retry_after_the_incident_was_written_sees_exactly_the_same_ctx(persist_spy, sent, db_retry_waits):
+    """稽核 Q11：失敗點在 Incidents.create 之後（ExternalAnomalies.mark_processed）。第一次嘗試已經建了事件群，
+    交易回復後重試；失敗當下的 ctx 跟進入時逐欄相同，完成後只多了交易成功才寫的 incident_ids，事件群只有一份。"""
+    persist_spy["fail"]("ExternalAnomalies", "mark_processed")
+    ctx = _spike_pipeline().run(now=SPIKE_AT + timedelta(minutes=5))
+    before, mid, after = persist_spy["before"], persist_spy["mid"], persist_spy["after"]
+    assert persist_spy["calls"] == 2 and db_retry_waits == [0.5]
+    assert mid == before  # 第一次嘗試（已 create 事件群）沒碰 ctx
+    assert {k for k in before if before[k] != after[k]} == {"incident_ids"}
+    rows = Incidents.list_open("spike")
+    assert len(rows) == 1 and after["incident_ids"] == {ctx.incidents[0].fingerprint: rows[0]["id"]}
+    assert len(Anomalies.entity_last_seen("spike", ["svc"])) == 1 and len(sent) == 1
+
+
+def test_retry_decides_which_incidents_already_exist_from_the_ctx_at_entry(persist_spy, sent, db_retry_waits):
+    """就算交易裡有程式把 id 提早寫回 ctx.incident_ids（這裡在第一次嘗試失敗前模擬），重試仍以「進入 persist_batch 時」
+    的 incident_ids 判斷哪些事件群已存在：事件群照樣建立，最後的 id 指向真的那一列，不是回復掉的那次。"""
+    def pollute(ctx):
+        ctx.incident_ids[ctx.incidents[0].fingerprint] = 999_999
+
+    persist_spy["fail"]("ExternalAnomalies", "mark_processed", on_failure=pollute)
+    ctx = _spike_pipeline().run(now=SPIKE_AT + timedelta(minutes=5))
+    rows = Incidents.list_open("spike")
+    assert len(rows) == 1 and ctx.incident_ids == {ctx.incidents[0].fingerprint: rows[0]["id"]}
+    assert len(sent) == 1
+
+
+def test_every_attempt_starts_with_empty_accumulators(monkeypatch, sent, db_retry_waits):
+    """run_in_transaction 的合約：fn 每次從頭再跑。persist_batch 的 write() 收集「這次新建的 id」的容器（閉包裡的 dict），
+    每次嘗試開頭都必須是空的；否則回復掉那次的結果會留到重試。黑箱看不出來（重試會用同樣的鍵蓋過去），所以直接看閉包。
+    重構掉這個容器時，這個測試要跟著改成新的寫法，不要刪。"""
+    import aiops.storage.hooks as hooks_mod
+
+    seen: list[dict] = []
+    current: dict = {}
+    real_txn, real_create_many = hooks_mod.run_in_transaction, repository.Anomalies.create_many
+    real_mark = repository.ExternalAnomalies.mark_processed
+
+    def txn(fn, **kw):
+        current["fn"] = fn
+        return real_txn(fn, **kw)
+
+    def create_many(rows):  # write() 的第一個寫入：一次嘗試剛開始
+        closure = inspect.getclosurevars(current["fn"]).nonlocals
+        seen.append({k: dict(v) for k, v in closure.items() if isinstance(v, dict)})
+        return real_create_many(rows)
+
+    calls = {"n": 0}
+
+    def mark(ids):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OperationalError("UPDATE", {}, Exception("connection reset"))
+        return real_mark(ids)
+
+    monkeypatch.setattr(hooks_mod, "run_in_transaction", txn)
+    monkeypatch.setattr(repository.Anomalies, "create_many", staticmethod(create_many))
+    monkeypatch.setattr(repository.ExternalAnomalies, "mark_processed", staticmethod(mark))
+    _spike_pipeline().run(now=SPIKE_AT + timedelta(minutes=5))
+    assert len(seen) == 2 and all(seen), seen  # 兩次嘗試，每次都看得到至少一個容器（不然這個檢查是空轉）
+    assert all(v == {} for attempt in seen for v in attempt.values()), seen
+    assert len(Incidents.list_open("spike")) == 1
+
+
+def test_retry_of_an_absorbed_incident_update_keeps_ctx_and_writes_one_snapshot(persist_spy, sent, db_retry_waits):
+    """稽核 Q11（update_snapshot 路徑）：第 2 輪同一實體又異常、被吸收進進行中事件群；寫回快照第一次失敗、重試成功。"""
+    _spikes_pipeline([40]).run(now=T0 + timedelta(minutes=45))
+    persist_spy["fail"]("Incidents", "update_snapshot")
+    _spikes_pipeline([40, 46]).run(now=T0 + timedelta(minutes=47))
+    before, mid, after = persist_spy["before"], persist_spy["mid"], persist_spy["after"]
+    assert persist_spy["calls"] == 2 and db_retry_waits == [0.5]
+    assert [o[3] for o in before["open_incidents"]] == [True]  # 真的走到 update_snapshot（吸收了新異常）
+    assert mid == before and after == before
+    rows = Incidents.list_open("spike")
+    assert len(rows) == 1 and len(rows[0]["incident"]["events"]) == 2

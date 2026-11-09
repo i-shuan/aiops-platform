@@ -8,6 +8,7 @@ import pytest
 
 from aiops.engine.context import PeerGroup, PipelineContext, Target
 from aiops.engine.errors import BadRequest, WorkflowError
+from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import Pipeline, load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import AnomalyEvent
@@ -293,6 +294,54 @@ targets:
     assert rows and {(r["detector_name"], r["detector_node"]) for r in rows} == {("detector.ensemble", "vote")}
     wf = load_workflow(tmp_path / "voted.yaml")
     assert [n for n, _ in Pipeline(wf).detector_nodes] == ["z_sensitive", "z_strict"]  # 裁決節點不載基準線
+
+
+@OperatorRegistry.register("test.lineage_frame")
+class _LineageFrame(BaseOperator):
+    """固定資料：訓練段 ±1 交錯（mean 0、std 1、MAD 1），偵測段最後一點 50 -> zscore 與 mad 都會抓到。"""
+
+    scope = "target"
+
+    def execute(self, ctx):
+        ts = pd.date_range(ctx.now - timedelta(minutes=30), periods=30, freq="60s")
+        ctx.train_df = pd.DataFrame({"ts": pd.date_range(ctx.now - timedelta(days=1), periods=100, freq="60s"),
+                                     "value": [(-1.0) ** i for i in range(100)]})
+        ctx.raw_df = pd.DataFrame({"ts": ts, "value": [0.0] * 29 + [50.0]})
+        return ctx
+
+
+def test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_snapshot(now):
+    """稽核 Q4：兩個偵測節點 + union 裁決 + 一筆外部匯入異常，走 StorageHooks 落地。
+    anomalies 表只記裁決事件（detector.ensemble／vote）；事件群快照帶著每個事件自己的 detector、detector_node、voted_by；
+    外部匯入的不寫 anomalies 表，快照裡是 external:<source>、節點空字串。"""
+    from aiops.engine.pipeline import NodeSpec, TargetSpec, Workflow
+    from aiops.storage.hooks import StorageHooks
+    from aiops.storage.models import IncidentRow
+    from aiops.storage.repository import ExternalAnomalies
+
+    ExternalAnomalies.create_many([{"pipeline": "lineage", "source": "fdc", "external_id": "x1", "entity": "tool-9",
+                                    "metric": "temp", "ts": (now - timedelta(minutes=3)).replace(tzinfo=None),
+                                    "value": 99.0, "score": 7.0, "attrs": {}}])
+    wf = Workflow(name="lineage", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
+        NodeSpec(name="fetch", operator="test.lineage_frame"),
+        NodeSpec(name="z", operator="detector.zscore"),
+        NodeSpec(name="m", operator="detector.mad"),
+        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": "union"}),
+        NodeSpec(name="new_only", operator="detector.new_only"),
+        NodeSpec(name="group", operator="alert.same_entity"),
+        NodeSpec(name="absorb", operator="alert.absorb_open"),
+        NodeSpec(name="payload", operator="alert.notify_payload"),
+        NodeSpec(name="heartbeat", operator="alert.heartbeat"),
+        NodeSpec(name="notify", operator="notifier.log")])
+    ctx = Pipeline(wf, StorageHooks()).run(now=now)
+    assert {(e.detector, e.detector_node, e.voted_by) for e in ctx.detected_anomalies} == \
+        {("detector.ensemble", "vote", ("m", "z"))}
+    rows = [r for r in crud.find(AnomalyRow) if r["pipeline"] == "lineage"]
+    assert rows and {(r["entity"], r["detector_name"], r["detector_node"]) for r in rows} == {("svc", "detector.ensemble", "vote")}
+    snapshot = {tuple(i["incident"]["entities"]): [(ev["detector"], ev["detector_node"], list(ev["voted_by"]))
+                                                   for ev in i["incident"]["events"]] for i in crud.find(IncidentRow)}
+    assert snapshot == {("svc",): [("detector.ensemble", "vote", ["m", "z"])],
+                        ("tool-9",): [("external:fdc", "", [])]}
 
 
 def test_events_are_immutable():

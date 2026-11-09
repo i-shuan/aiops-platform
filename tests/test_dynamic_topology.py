@@ -387,6 +387,36 @@ def test_incident_traces_window_and_service_filter():
     assert len(ctx.rca_spans) == 16 * 2 * 2  # 16 分鐘 × 2 個服務 × (transaction + db span)
 
 
+def test_rca_and_trace_import_share_one_edge_parser(monkeypatch):
+    """稽核 Q6：rca.build_dynamic_topology 與 admin.merge_traces 的呼叫邊都來自 engine/topology.service_edges。
+    把兩邊用到的 service_edges 換成同一個假的：兩個算子都只吐出假的邊，代表沒有誰自己另外解析 parent_id。"""
+    import aiops.control_plane.operations.ingest as ingest
+    import aiops.stages.rca.topology_builder as builder
+    from aiops.engine import topology
+    from aiops.engine.requests import SpanIn, TraceMerge
+
+    assert builder.service_edges is topology.service_edges and ingest.service_edges is topology.service_edges
+    seen: list = []
+
+    def fake(spans):
+        seen.append(len(list(spans)))
+        return Counter({("fake-caller", "fake-callee"): 7})
+
+    monkeypatch.setattr(builder, "service_edges", fake)
+    monkeypatch.setattr(ingest, "service_edges", fake)
+    spans = [_span("t1", "a", None, "cart-api"), _span("t1", "b", "a", "ord-svc")]
+    ctx = _ctx()
+    ctx.rca_spans = spans
+    built = OperatorRegistry.create("rca.build_dynamic_topology", {"mode": "replace"}).execute(ctx)
+    assert built.topology == [("fake-caller", "fake-callee")]
+
+    req = TraceMerge(persist=False, spans=[SpanIn(trace_id=s.trace_id, span_id=s.span_id, parent_id=s.parent_id,
+                                                  service=s.service, start=T, duration_ms=1.0) for s in spans])
+    merged = OperatorRegistry.create("admin.merge_traces").execute(PipelineContext(pipeline="admin", now=T, request=req))
+    assert merged.result["edges"] == [{"caller": "fake-caller", "callee": "fake-callee", "calls": 7}]
+    assert seen == [2, 2]
+
+
 def test_build_topology_merge_replace_and_min_calls():
     def build(params, spans, topology=()):
         ctx = _ctx()

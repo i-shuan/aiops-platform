@@ -96,6 +96,45 @@ def test_cli_may_load_its_own_file_but_the_api_path_may_not(tmp_path, now):
     assert run_once(str(custom), now) == 0
 
 
+@pytest.mark.parametrize("bad", ["..\\x", "C:/Windows/win.ini", "/etc/passwd", "metrics_only.yaml", "metrics_only\n",
+                                 "metrics_only\x00", "a" * 129])
+def test_api_rejects_more_path_shapes_on_both_entry_points(client, bad):
+    """稽核 Q7：結尾換行、NUL、絕對路徑、帶副檔名、超長，都在 Pydantic 就 422（還沒進 runner）。"""
+    assert client.post("/api/v1/runs", json={"workflow": bad, "targets": []}).status_code == 422
+    assert client.post("/api/v1/rca", json={"workflow": bad, "incident_id": 1}).status_code == 422
+
+
+def test_api_unknown_workflow_name_is_404_not_a_path_lookup(client):
+    r = client.post("/api/v1/runs", json={"workflow": "nope", "targets": []})
+    assert r.status_code == 404 and "nope" in r.text
+
+
+def _dir_link(link, target) -> str:
+    """建立指向 target 的資料夾連結。Windows 用 junction（一般帳號就能建，is_symlink() 是 False），其他平台用 symlink。"""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+        return "junction"
+    link.symlink_to(target, target_is_directory=True)
+    return "symlink"
+
+
+def test_directory_link_inside_pipelines_pointing_outside_is_refused(tmp_path, monkeypatch, client):
+    """稽核 Q7：pipelines/ 裡放一個連到外面的資料夾（Windows junction 擋不到 is_symlink，要靠 resolve() 那道）。"""
+    wf_dir, outside = tmp_path / "pipelines", tmp_path / "outside"
+    shutil.copytree(runner.WORKFLOW_DIR, wf_dir)
+    outside.mkdir()
+    (outside / "evil2.yaml").write_text("name: evil2\nnodes: [{name: x, operator: notifier.log}]\n", encoding="utf-8")
+    kind = _dir_link(wf_dir / "linked", outside)
+    monkeypatch.setattr(runner, "WORKFLOW_DIR", wf_dir)
+    with pytest.raises(BadRequest, match="軟連結" if kind == "symlink" else "不在"):
+        workflow_path("evil2")
+    r = client.post("/api/v1/runs", json={"workflow": "evil2", "targets": []})
+    assert r.status_code == 400 and "evil2" in r.text
+    assert workflow_path("metrics_only").name == "metrics_only.yaml"  # 同一個複本裡的正常名稱照樣能用
+
+
 # ── P0-2 節點血緣 ──
 
 
