@@ -320,3 +320,66 @@ def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monke
                            time_range={"start": now.replace(hour=0), "end": now, "step_seconds": 60})
     bt = runner.run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=now)["proposal"]["backtest"]
     assert bt["current_params"].get("threshold") == 9.0
+
+
+# ── Q8 追加：資料源回 HTTP 200 但內容是 NaN／Inf 或格式不對 ──
+
+
+def _es_client(buckets):
+    import json as _json
+
+    import httpx
+    body = _json.dumps({"aggregations": {"series": {"buckets": buckets}}}, allow_nan=True).encode()
+    return httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))
+
+
+_ES_QUERY = '{"index": "metrics-*", "value_field": "cpu.pct", "agg": "avg"}'
+
+
+def _ms(i):
+    return int((T0 - timedelta(minutes=60 - i)).timestamp() * 1000)
+
+
+@pytest.mark.xfail(strict=True, reason="Q8 缺口：Prometheus 會濾掉 NaN／Inf、全部不能用就丟 NoDataError（prometheus.py:60,76），"
+                   "Elasticsearch 只濾 None（elasticsearch.py:57）。ES 回 200、每桶都是 NaN／Inf 時被當成「有資料」："
+                   "不算斷流、心跳照送，還把 {'mean': nan} 這種基準線寫進資料庫，之後到重訓前這個節點都判不出任何東西")
+@pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_elasticsearch_all_nan_or_inf_is_no_data(value):
+    from aiops.sources.base import NoDataError
+    from aiops.sources.elasticsearch import ElasticsearchSpec
+    spec = ElasticsearchSpec("http://es", client=_es_client([{"key": _ms(i), "v": {"value": value}} for i in range(60)]))
+    with pytest.raises(NoDataError):
+        spec.fetch_data(_ES_QUERY, T0 - timedelta(minutes=60), T0, 60)
+
+
+@pytest.mark.xfail(strict=True, reason="Q8 缺口：資料源回 200 但格式不對（ES 桶缺 key、值是字串、Prometheus 值是字串）時，"
+                   "丟的是原始 KeyError／ValueError，不是 PlatformError：不會被記成那條序列的錯誤，而是整輪失敗（跟 G9 同一個洞）")
+@pytest.mark.parametrize("case", ["es-missing-key", "es-string-value", "prom-string-value"])
+def test_malformed_source_response_is_a_platform_error(case):
+    import json as _json
+
+    import httpx
+
+    from aiops.engine.errors import PlatformError
+    from aiops.sources.elasticsearch import ElasticsearchSpec
+    from aiops.sources.prometheus import PrometheusSpec
+    start = T0 - timedelta(minutes=60)
+    if case == "es-missing-key":
+        spec, q = ElasticsearchSpec("http://es", client=_es_client([{"v": {"value": 1.0}}] * 3)), _ES_QUERY
+    elif case == "es-string-value":
+        spec, q = ElasticsearchSpec("http://es", client=_es_client([{"key": _ms(i), "v": {"value": "abc"}} for i in range(3)])), _ES_QUERY
+    else:
+        body = _json.dumps({"status": "success", "data": {"result": [{"metric": {}, "values": [[T0.timestamp(), "abc"]]}]}}).encode()
+        spec, q = PrometheusSpec("http://p", client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))), "up"
+    with pytest.raises(PlatformError):
+        spec.fetch_data(q, start, T0, 60)
+
+
+# ── Q15 追加：RCA 帶不存在的事件群 ──
+
+
+@pytest.mark.xfail(strict=True, reason="Q15 缺口：load_batch 查不到 incident_id 時默默略過（hooks.py:86-87），"
+                   "直到 ingestion.incident_traces 才丟「沒有可以撈 trace 的事件群」；應該在載入時就說是哪個事件群不存在")
+def test_rca_for_a_missing_incident_says_which_incident(client):
+    r = client.post("/api/v1/rca", json={"incident_id": 999999})
+    assert r.status_code == 404 and "999999" in r.text
