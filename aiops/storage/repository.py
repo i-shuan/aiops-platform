@@ -118,7 +118,8 @@ class Anomalies:
 
     @staticmethod
     def create_many(rows: list[Row]) -> int:
-        return crud.create_many(AnomalyRow, rows)
+        """冪等：(pipeline, entity, metric, ts, detector_node) 已經有的列跳過（uq_anomalies_key），重跑同一輪不會寫出兩份。"""
+        return crud.create_many_ignoring_duplicates(AnomalyRow, rows)
 
 
 class ExternalAnomalies:

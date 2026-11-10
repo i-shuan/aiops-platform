@@ -148,8 +148,8 @@ class ExternalAnomalyIn(StrictModel):
     entity: str
     metric: str
     ts: datetime
-    score: float = Field(ge=0)
-    value: float | None = None
+    score: float = Field(ge=0, allow_inf_nan=False)  # Infinity 過得了 ge=0：在 API 入口就擋，不要進資料庫
+    value: float | None = Field(default=None, allow_inf_nan=False)
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 
