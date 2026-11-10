@@ -46,14 +46,17 @@ def build_sections(ctx: PipelineContext) -> list[dict[str, str]]:
     else:
         status = "判定狀態：ok"
     out.append({"key": "rca_status", "title": "判定狀態", "body": status})
+    # 候選是誰判的照實寫：機率模型的分數是後驗機率，LLM 判斷（rca.root_cause.llm）的分數是它自評的信心
+    by_llm = ctx.rca_root_algorithm == "rca.root_cause.llm"
+    title, word = ("根因候選（LLM 判斷）", "信心") if by_llm else ("根因候選（機率模型）", "機率")
     if ctx.rca_root_candidates:
         rows = []
         for i, c in enumerate(ctx.rca_root_candidates[:5], 1):
             dep = f"，等待 {c.dependency}" if c.dependency else ""
-            rows.append(f"{i}. {c.entity}（機率 {_num(round(float(c.score), 3))}{dep}）：{c.reason}")
-        out.append({"key": "root_candidates", "title": "根因候選（機率模型）", "body": "\n".join(rows)})
+            rows.append(f"{i}. {c.entity}（{word} {_num(round(float(c.score), 3))}{dep}）：{c.reason}")
+        out.append({"key": "root_candidates", "title": title, "body": "\n".join(rows)})
     elif ctx.rca_root_note:
-        out.append({"key": "root_candidates", "title": "根因候選（機率模型）", "body": f"沒有候選：{ctx.rca_root_note}"})
+        out.append({"key": "root_candidates", "title": title, "body": f"沒有候選：{ctx.rca_root_note}"})
     if ctx.rca_facts:
         rows = [f"{f.entity} {f.kind}={_num(float(f.value))}{(' ' + f.unit) if f.unit else ''}（{f.window}）"
                 for f in ctx.rca_facts[:20]]

@@ -4,7 +4,9 @@
     .venv/Scripts/python scripts/chaos/run.py            # 全部
     .venv/Scripts/python scripts/chaos/run.py 3 7 10     # 指定場景
     --out docs/CHAOS_E2E_REPORT.md                        # 報表寫到檔案
-    --rca legacy|cognitive    # RCA 用哪支 workflow：legacy = rca_report（預設，輸出跟以前逐列相同）；cognitive = rca_report_cognitive
+    --rca legacy|cognitive|llm  # RCA 用哪支 workflow：legacy = rca_report（預設，輸出跟以前逐列相同）；cognitive = rca_report_cognitive；
+                              # llm = rca_report_llm（LLM 判斷根因；只能配 --llm yaml 或失效模式 down／slow／garbage）。
+                              # 跟 --compare 一起用時指定右欄是哪個引擎（預設 cognitive）
     --compare                 # 每個場景先跑 legacy 再跑 cognitive，輸出並排表（每條斷言兩欄＋根因排名、分數、Runbook）
     --llm faithful|down|slow|garbage|hallucinate|yaml
                               # cognitive 時 LLM 節點換成腳本化假 LLM 的哪個模式（預設 faithful；yaml = 不換，照 YAML 的供應商）
@@ -77,18 +79,18 @@ def _rca_rows(log: list[dict], engine: str) -> list[str]:
     for e in log:
         top = "、".join(f"{i + 1}. {ent}（{score}{'／' + res if res else ''}）" for i, (ent, score, res) in enumerate(e["top"])) or "（無候選）"
         # legacy 不寫 rca_status（欄位預設值 ok 沒有意義），只有 cognitive 列狀態與原因
-        status = (e["status"] + (f"：{e['reason']}" if e["reason"] else "")) if engine == "cognitive" else "—"
+        status = (e["status"] + (f"：{e['reason']}" if e["reason"] else "")) if engine != "legacy" else "—"
         ev = "、".join(f"{k}@{ent}" for k, ent in e["evidence"]) or "—"
         rows.append(f"| {engine} | {e['incident']} | {status} | {top} | {e['runbook']} | {ev} |")
     return rows
 
 
-def render_compare(pairs, missing: str) -> str:
+def render_compare(pairs, missing: str, new: str = "cognitive") -> str:
     """pairs：[(場景編號, legacy 結果列表, legacy RCA_LOG, cognitive 結果列表或 None, cognitive RCA_LOG)]"""
-    lines = ["## 新舊並排總表（legacy = rca_report、cognitive = rca_report_cognitive）\n"]
+    lines = [f"## 新舊並排總表（legacy = rca_report、{new} = {H.RCA_WORKFLOWS[new]}）\n"]
     if missing:
-        lines.append(f"> **cognitive 欄沒有跑**：{missing}\n")
-    lines.append("| # | 場景 | legacy | cognitive |\n|---|---|---|---|")
+        lines.append(f"> **{new} 欄沒有跑**：{missing}\n")
+    lines.append(f"| # | 場景 | legacy | {new} |\n|---|---|---|---|")
     tot = {"l": [0, 0], "c": [0, 0]}
     diff = 0
     for _, leg, _, cog, _ in pairs:
@@ -101,21 +103,21 @@ def render_compare(pairs, missing: str) -> str:
             if cr:
                 diff += sum(1 for _, a, b in _pair(r.checks, cr.checks) if (a is not None and a.ok) != (b is not None and b.ok))
         for cr in (cog or []) if not leg else []:
-            lines.append(f"| {cr.n} | {cr.title} | （只有 cognitive）| {_score(cr)} |")
+            lines.append(f"| {cr.n} | {cr.title} | （只有 {new}）| {_score(cr)} |")
         for cr in cog or []:
             tot["c"][0] += sum(c.ok for c in cr.checks)
             tot["c"][1] += len(cr.checks)
-    lines.append(f"\n斷言合計：legacy {tot['l'][0]}／{tot['l'][1]}；cognitive {tot['c'][0]}／{tot['c'][1]}；兩邊結果不同的斷言 {diff} 條。\n")
+    lines.append(f"\n斷言合計：legacy {tot['l'][0]}／{tot['l'][1]}；{new} {tot['c'][0]}／{tot['c'][1]}；兩邊結果不同的斷言 {diff} 條。\n")
     for n, leg, llog, cog, clog in pairs:
         cmap = {r.n: r for r in (cog or [])}
         for lr, cr in ([(r, cmap.get(r.n)) for r in leg] if leg else [(None, r) for r in cog or []]):
             r = lr or cr
-            lines.append(f"## 場景 {r.n}：{r.title}　【legacy {lr.verdict if lr else '—'}｜cognitive {cr.verdict if cr else '—'}】\n")
-            lines.append("| 斷言 | legacy | cognitive | 不同 |\n|---|---|---|---|")
+            lines.append(f"## 場景 {r.n}：{r.title}　【legacy {lr.verdict if lr else '—'}｜{new} {cr.verdict if cr else '—'}】\n")
+            lines.append(f"| 斷言 | legacy | {new} | 不同 |\n|---|---|---|---|")
             for what, a, b in _pair(lr.checks if lr else [], cr.checks if cr else []):
                 same = "≠" if (a is not None and b is not None and a.ok != b.ok) else ""
                 lines.append(f"| {what} | {_cell(a)} | {_cell(b)} | {same} |")
-            for res, tag in ((lr, "legacy"), (cr, "cognitive")):
+            for res, tag in ((lr, "legacy"), (cr, new)):
                 if res and res.crash:
                     lines.append(f"\n**{tag} 場景崩潰**：\n```\n{res.crash}\n```")
                 for note in (res.notes if res and res.blocked else []):
@@ -123,7 +125,7 @@ def render_compare(pairs, missing: str) -> str:
             lines.append("")
         lines.append(f"**場景 {n} 的 RCA 關鍵數字**（每次 rca() 一列，子場景依序）\n")
         lines.append("| 引擎 | 事件群 | 狀態 | 根因排名（分數／資源） | Runbook | LLM 證據 |\n|---|---|---|---|---|---|")
-        lines += _rca_rows(llog, "legacy") + _rca_rows(clog, "cognitive")
+        lines += _rca_rows(llog, "legacy") + _rca_rows(clog, new)
         lines.append("")
     return "\n".join(lines)
 
@@ -135,7 +137,7 @@ def _opt(args: list[str], name: str, default):
     return args[i + 1], args[:i] + args[i + 2:]
 
 
-def compare(numbers: list[int], llm: str, missing: str) -> list[tuple]:
+def compare(numbers: list[int], llm: str, missing: str, new: str = "cognitive") -> list[tuple]:
     pairs = []
     for n in numbers or list(S.SCENARIOS):
         leg, llog = [], []
@@ -145,7 +147,7 @@ def compare(numbers: list[int], llm: str, missing: str) -> list[tuple]:
             leg, llog = S.run([n]), list(H.RCA_LOG)
         cog, clog = None, []
         if not missing or n in COGNITIVE_ONLY:   # cognitive 不存在時 24 自己標「尚無 cognitive 引擎」，其他場景不跑
-            H.use_rca("cognitive", llm)
+            H.use_rca(new, llm)
             H.RCA_LOG.clear()
             cog, clog = S.run([n]), list(H.RCA_LOG)
         pairs.append((n, leg, llog, cog, clog))
@@ -169,7 +171,8 @@ if __name__ == "__main__":
         sys.exit(2)
     t = time.time()
     if do_compare:
-        text = render_compare(compare(numbers, llm, missing), missing)
+        new = mode if mode != "legacy" else "cognitive"
+        text = render_compare(compare(numbers, llm, missing, new), missing, new)
     else:
         H.use_rca(mode, llm)
         if not numbers and mode == "legacy":

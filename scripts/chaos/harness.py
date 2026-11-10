@@ -140,7 +140,8 @@ def before(incs: list[dict], entity: str, not_before: datetime) -> list[tuple[in
 
 # ── RCA 引擎選擇（新舊並排，docs/COGNITIVE_RCA_DESIGN.md §6）──
 # legacy = rca_report（舊判斷層，預設，行為與輸出跟加這段之前逐列相同）；cognitive = rca_report_cognitive（主 session 建立）
-RCA_WORKFLOWS = {"legacy": "rca_report", "cognitive": "rca_report_cognitive"}
+# llm = rca_report_llm（呼叫圖＋事實＋證據交給 LLM 判斷）：第三個引擎，跟前兩個並排
+RCA_WORKFLOWS = {"legacy": "rca_report", "cognitive": "rca_report_cognitive", "llm": "rca_report_llm"}
 _RCA = {"mode": "legacy", "llm": "faithful"}   # run.py 用 use_rca() 設；llm="yaml" = 不換供應商，照 YAML 原樣跑
 RCA_LOG: list[dict] = []                        # 每次 rca() 的關鍵數字（--compare 並排用）；呼叫端自己清
 
@@ -173,7 +174,8 @@ def _rca_summary(name: str, incident_id: int, ctx, out: dict) -> dict:
             "reason": getattr(ctx, "rca_undetermined_reason", ""), "algorithm": out.get("root_cause", {}).get("algorithm", ""),
             "top": [(c["entity"], c["score"], (c.get("attribution") or {}).get("resource")) for c in cands[:3]],
             "runbook": (out.get("runbook") or {}).get("id", "(無)"),
-            "evidence": [(e.kind, e.entity) for e in getattr(ctx, "rca_evidence", [])], "facts": len(getattr(ctx, "rca_facts", []))}
+            "evidence": [(e.kind, e.entity) for e in getattr(ctx, "rca_evidence", [])], "facts": len(getattr(ctx, "rca_facts", [])),
+            "judge_log": [a for a in getattr(ctx, "audit", []) if a.startswith("root_cause.llm")]}
 
 
 def rca(incident_id: int, mutate=None, *, mode: str | None = None, llm: str | None = None) -> dict:
@@ -185,7 +187,7 @@ def rca(incident_id: int, mutate=None, *, mode: str | None = None, llm: str | No
         raise CognitiveUnavailable(why)
     name = RCA_WORKFLOWS[mode]
     wf = load_workflow(workflow_path(name))
-    if mode == "cognitive" and llm != "yaml":
+    if mode != "legacy" and llm != "yaml":
         from scripts.chaos import scripted_llm
 
         scripted_llm.wire(wf, llm)

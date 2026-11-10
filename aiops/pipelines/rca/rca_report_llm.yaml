@@ -1,0 +1,39 @@
+name: rca_report_llm
+description: "LLM 判斷型 RCA：事實 → LLM 證據抽取 → 呼叫圖＋事實＋證據交給 LLM 判斷根因 → 報告 → LLM 戰情摘要（跟 rca_report、rca_report_cognitive 並排對照；LLM 失效時報告照出、根因寫無法判定）"
+nodes:
+  # 撈取三段與證據層跟 rca_report_cognitive.yaml 相同：三個引擎吃同一份原始資料，差別只在判斷層
+  - name: fetch_traces
+    operator: ingestion.incident_traces
+    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
+             follow_messaging: true, max_lag_minutes: 120}
+  - name: build_topology
+    operator: rca.build_dynamic_topology
+    params: {mode: merge, min_calls: 1}
+  - name: fetch_logs
+    operator: ingestion.incident_logs
+    params: {source_type: elasticsearch, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
+  - name: facts
+    operator: rca.facts
+  - name: extract_evidence
+    operator: enrichment.extract_evidence
+    params: {timeout_seconds: 30, retries: 0}
+  # LLM 判斷：呼叫圖＋全部事實＋日誌證據一起送。候選要引用事實／證據編號，驗證不過就丟；
+  # 全丟光或 LLM 失效 → rca_status=undetermined。逾時後不重試
+  - name: root_cause
+    operator: rca.root_cause.llm
+    params: {timeout_seconds: 60, retries: 0, max_facts: 150, top_k: 5}
+  - name: report
+    operator: rca.report
+    params:
+      sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
+                 propagation_path, facts, trace_evidence, log_patterns, similar_cases, suggested_actions]
+      section_params: {trace_evidence: {traces_datasource: apm-traces}}
+  # 戰情摘要：只吃已判好的候選、事實與證據；驗證不過退模板，旁路不影響根因結論
+  - name: narrator
+    operator: enrichment.rca_narrator
+    optional: true
+    params: {timeout_seconds: 30}
+  - name: briefing
+    operator: enrichment.llm_briefing
+    optional: true
+    params: {provider: noop}

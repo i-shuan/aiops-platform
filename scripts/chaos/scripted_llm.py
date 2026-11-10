@@ -175,7 +175,9 @@ def _scripted(model: str, base_url: str, api_key: str | None) -> BaseLLM:
 
 
 # ── 接線：把 cognitive workflow 裡的 LLM 節點指到這個假供應商 ──
-LLM_OPERATORS = ("enrichment.extract_evidence", "enrichment.rca_narrator")
+LLM_OPERATORS = ("enrichment.extract_evidence", "enrichment.rca_narrator", "rca.root_cause.llm")
+JUDGE = "rca.root_cause.llm"
+JUDGE_MODES = ("down", "slow", "garbage")   # 假 LLM 只會抽證據、不會判斷根因：判斷節點只能接失效模式
 _TIMEOUT_KEYS = ("timeout_seconds", "timeout_s", "timeout")
 
 
@@ -186,6 +188,9 @@ def node_timeout(params: dict, default: float = 30.0) -> float:
 def wire(wf, mode: str) -> list[str]:
     """把 LLM 節點的 provider 換成 chaos_scripted（model 欄位帶模式）。回傳接上的節點名稱；一個都沒有就報錯，
     不然「LLM 全掛」場景會在 LLM 根本沒接上的情況下假裝通過。slow 模式睡的秒數 = 節點逾時 + 5。"""
+    if mode not in JUDGE_MODES and any(n.operator == JUDGE for n in wf.nodes):
+        raise RuntimeError(f"{wf.name} 的根因由 LLM 判斷，腳本化假 LLM（{mode}）不會判斷："
+                           f"請用 --llm yaml（真的 LLM）或失效模式 {'／'.join(JUDGE_MODES)}")
     hit = []
     for n in wf.nodes:
         if n.operator not in LLM_OPERATORS:
