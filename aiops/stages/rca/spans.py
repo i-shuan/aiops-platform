@@ -26,6 +26,15 @@
   「這個服務的請求在它自己身上變慢、不是在等下游服務」），另外拆出 app_ms_per_request（程式自己）與 wait_ms_per_request
   （每個資源各多少），讓報告說得出「該查的是它等的東西」。上游沒裝 APM 的服務會被當成資源（external 葉節點），
   報告寫「等待 ord-svc:8080」語意沒錯，但它其實是個服務。
+- 非同步邊（訊息佇列）：消費者 transaction（SpanRecord.consumer = True）的 parent.id 指到生產者的 send span，
+  但它是「之後某個時間才被另一個行程處理」，不是 send span 等它做完。所以它不算任何 span 的同步子 span
+  （_children_index 只收同步子 span），三件事跟著對：
+  (1) send span 仍是葉節點 -> 發布訊息花的時間算「等 kafka／rabbitmq」這個資源，不會因為底下掛了消費者就消失；
+  (2) 消費者的區間不從 send span 扣、也不算時鐘偏移（晚 20 分鐘處理是佇列延遲，不是兩台主機的時鐘不同步）；
+  (3) 消費失敗不算生產者「下游失敗被拖累」——生產者早就回應了。
+  消費者一律是入口（即使生產者跟它同一個服務）。它的呼叫者記成 MQ_CALLER_PREFIX + 生產者服務（mq:order-api）：
+  跟同步呼叫者分開，流量放大的回溯不會沿著它往上走（訊息量變多不等於此刻被上游打爆，要看的是發布時窗，見 engine/mq.py）。
+  還原不出生產者（parent 與 links 都不在樣本裡）記成 UNKNOWN_CALLER。
 """
 from __future__ import annotations
 
@@ -39,6 +48,7 @@ from aiops.engine.types import as_utc
 
 EXTERNAL_CALLER = ""  # 沒有父 span：外部打進來的請求
 UNKNOWN_CALLER = "?"  # 有父 span 但父不在樣本裡：不知道是誰叫的，不能當成外部入口
+MQ_CALLER_PREFIX = "mq:"  # 透過訊息佇列送來的：mq:<生產者服務>。不是同步呼叫者
 _APP_KINDS = ("", "app")  # 空 = 入口 transaction；app = 服務自己的程式；其他（db、external、cache、messaging…）都是等外部資源
 
 
@@ -67,11 +77,24 @@ def resource_kind(span: SpanRecord) -> str:
 
 
 def _children_index(spans: Iterable[SpanRecord]) -> dict[str, list[SpanRecord]]:
+    """parent span_id -> 它的「同步」子 span。訊息消費者（consumer）不收：它是非同步處理，父 span 沒有在等它。
+    自身耗時的扣除、時鐘偏移、資源葉節點、下游連帶失敗都從這裡拿子 span，所以非同步邊在這一處剪開就全部一致。"""
     children: dict[str, list[SpanRecord]] = defaultdict(list)
     for s in spans:
-        if s.parent_id:
+        if s.parent_id and not s.consumer:
             children[s.parent_id].append(s)
     return children
+
+
+def producer_service(span: SpanRecord, service_of: dict[str, str]) -> str | None:
+    """消費者 transaction 的訊息是哪個服務發的：先看 parent.id（單筆消費），再看 span.links（批次消費）。
+    都不在樣本裡回 None。"""
+    if span.parent_id and span.parent_id in service_of:
+        return service_of[span.parent_id]
+    for _, linked in span.links:
+        if linked in service_of:
+            return service_of[linked]
+    return None
 
 
 def is_resource_leaf(span: SpanRecord, children: dict[str, list[SpanRecord]]) -> bool:
@@ -182,7 +205,8 @@ def window_stats(spans: list[SpanRecord], start: datetime, end: datetime) -> dic
             wait_fail[s.service][label] += int(bool(s.error))
         else:
             a["app_ms"] += own
-        if s.parent_id is None or service_of.get(s.parent_id) != s.service:  # 入口 span
+        # 入口 span：沒有父、父在別的服務，或是訊息消費者（生產者跟它同一個服務也算一次獨立的處理）
+        if s.parent_id is None or service_of.get(s.parent_id) != s.service or s.consumer:
             a["requests"] += 1
             a["total_ms"] += s.duration_ms
             a["errors"] += bool(s.error)
@@ -205,7 +229,8 @@ def sample_trace(spans: list[SpanRecord], start: datetime, end: datetime) -> Spa
     outcome 是 APM 的權威失敗旗標；狀態碼補 outcome 缺漏的資料源；「子樹失敗但入口成功」是被吞掉的下游錯誤；
     最後才看耗時——以前只看耗時，真實資料挑到的是 244 ms／200 的正常慢請求，真正的 500 排第二。"""
     lo, hi = as_utc(start), as_utc(end)
-    roots = [s for s in spans if s.parent_id is None and lo <= as_utc(s.ts) < hi]
+    # 訊息消費者也是入口：它的 parent 是幾分鐘前別的服務的 send span，不在事件時窗裡，只看「沒有父」會永遠挑不到它
+    roots = [s for s in spans if (s.parent_id is None or s.consumer) and lo <= as_utc(s.ts) < hi]
     if not roots:
         return None
     below = _subtree_failed(spans)
@@ -228,14 +253,18 @@ def sample_trace_reason(span: SpanRecord, spans: list[SpanRecord]) -> str:
 
 def inbound_callers(spans: list[SpanRecord], start: datetime, end: datetime) -> dict[str, dict[str, int]]:
     """[start, end) 內每個服務的入口 span 是誰呼叫的：callee -> {caller: 次數}。
-    沒有父 span 記成 EXTERNAL_CALLER；有父但父不在樣本裡記成 UNKNOWN_CALLER（孤兒，不是外部入口）。"""
+    沒有父 span 記成 EXTERNAL_CALLER；有父但父不在樣本裡記成 UNKNOWN_CALLER（孤兒，不是外部入口）。
+    訊息消費者記成 MQ_CALLER_PREFIX + 生產者服務；還原不出生產者記成 UNKNOWN_CALLER（它絕對不是外部打進來的同步請求）。"""
     service_of = {s.span_id: s.service for s in spans}
     lo, hi = as_utc(start), as_utc(end)
     out: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for s in spans:
         if not (lo <= as_utc(s.ts) < hi):
             continue
-        if s.parent_id is None:
+        if s.consumer:
+            producer = producer_service(s, service_of)
+            out[s.service][MQ_CALLER_PREFIX + producer if producer else UNKNOWN_CALLER] += 1
+        elif s.parent_id is None:
             out[s.service][EXTERNAL_CALLER] += 1
         elif s.parent_id not in service_of:
             out[s.service][UNKNOWN_CALLER] += 1

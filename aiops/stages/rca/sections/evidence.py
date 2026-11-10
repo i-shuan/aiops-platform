@@ -12,6 +12,7 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.notification.links import explore_url, grafana_base_url
 from aiops.stages.rca.base import RcaSection
+from aiops.stages.rca.mq import edge_line, producer_windows
 from aiops.stages.rca.spans import (call_chain, is_resource_leaf, resource_kinds, resource_label, sample_trace,
                                     sample_trace_reason, window_stats)
 
@@ -35,12 +36,15 @@ def _trace_link(trace_id: str, ts, traces_datasource: str | None) -> str:
 def _from_spans(incident, ctx, traces_datasource: str | None = None) -> str:
     spans = ctx.rca_spans
     start, end = as_utc(incident.start), as_utc(incident.end) + timedelta(minutes=1)
-    first_ts = min(as_utc(s.ts) for s in spans)
+    # 補撈過訊息發布時段時，事件前基準仍從主撈取窗算起（跟根因算子同一個起點）
+    first_ts = as_utc(ctx.rca_main_start) if ctx.rca_main_start else min(as_utc(s.ts) for s in spans)
     before = window_stats(spans, first_ts, start) if first_ts < start else {}
     during = window_stats(spans, start, end)
     base_min = (start - first_ts).total_seconds() / 60
     kinds = resource_kinds(spans)
-    lines = [f"這一輪撈到 {len(spans)} 個 span、{len({s.trace_id for s in spans})} 條 trace；"
+    extra = ((ctx.result.get("trace_fetch") or {}).get("mq") or {}).get("extra_spans", 0)
+    lines = [f"這一輪撈到 {len(spans)} 個 span、{len({s.trace_id for s in spans})} 條 trace"
+             + (f"（其中 {extra} 個是訊息發布時段補撈的）" if extra else "") + "；"
              f"事件前 {base_min:.0f} 分鐘 vs 事件期間（每請求）："]
     lookback = ctx.rca_trace_lookback
     if lookback and lookback[0] != lookback[1]:
@@ -70,6 +74,16 @@ def _from_spans(incident, ctx, traces_datasource: str | None = None) -> str:
     if skew:  # 沒有時鐘偏移就一字不多
         lines.append("（時鐘偏移：事件期間有子 span 超出父 span 的時間範圍，超出的部分沒算進扣除——"
                      + "、".join(f"{svc} {n} 筆" for svc, n in sorted(skew.items())) + "）")
+    for edge in ctx.rca_mq:  # 沒有非同步邊就一字不多
+        lines.append(edge_line(edge))
+        pb, pd = producer_windows(spans, edge)
+        if pb and pd:
+            lines.append(f"    {edge.producer} 在發布時窗：請求 {pb.requests}→{pd.requests}；自身耗時 "
+                         f"{pb.self_ms_per_request:.1f}→{pd.self_ms_per_request:.1f} ms"
+                         f"（{pd.self_ms_per_request - pb.self_ms_per_request:+.1f}）；自身錯誤率 "
+                         f"{pb.own_error_rate:.0%}→{pd.own_error_rate:.0%}（對照：發布時窗之前等長的一段）")
+    if ctx.rca_mq_note:
+        lines.append(ctx.rca_mq_note)
     sample = sample_trace(spans, start, end)
     if sample is not None:
         link = _trace_link(sample.trace_id, as_utc(sample.ts), traces_datasource)

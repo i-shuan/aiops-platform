@@ -222,6 +222,8 @@ def briefing_whitelist(context: dict[str, Any]) -> set[str]:
         names.add(rc["candidate"])
     if (rc.get("attribution") or {}).get("resource"):
         names.add(rc["attribution"]["resource"])
+    mq = (rc.get("attribution") or {}).get("async") or {}  # 訊息佇列的另一端：處方會叫人回頭查生產者
+    names.update(name for name in (mq.get("producer"), mq.get("consumer")) if name)
     st = context.get("sample_trace") or {}
     for key in ("endpoint", "failed_resource", "trace_id"):
         if st.get(key):
@@ -273,6 +275,28 @@ def _clip(text: str, n: int) -> str:
     return cut
 
 
+def _async_clause(rc: dict[str, Any]) -> str:
+    """摘要行的訊息佇列補充句。只引用 attribution["async"] 裡現成的字串（lag_text、pub_window_text），數字守門才對得上。"""
+    info = (rc.get("attribution") or {}).get("async") or {}
+    lag = info.get("lag_text") or {}
+    if info.get("role") == "producer":
+        return (f"；{rc['candidate']} 是訊息生產者，以上是訊息發布時窗 {info.get('pub_window_text')} 的數字"
+                f"（{info.get('consumer')} 事後才消費到，延遲 P95 {lag.get('during')}）")
+    if info.get("backlog"):
+        return f"；佇列 {info.get('queue') or '（名稱未知）'} 積壓，訊息延遲 P95 {lag.get('before')}→{lag.get('during')}"
+    return ""
+
+
+def _async_verify(rc: dict[str, Any]) -> str:
+    """第一名是承接了訊息夾帶失敗的生產者時的驗證行：消費者的失敗算在它發的訊息上，就不能再寫「排除它本身的程式」
+    （trace 看不到訊息內容，壞訊息正是它的程式發的）。其他情況回空字串，沿用原本的驗證行。"""
+    info = (rc.get("attribution") or {}).get("async") or {}
+    if info.get("role") != "producer" or not info.get("moved_error"):
+        return ""
+    return (f"{_PREFIX['verification_line']}{info.get('consumer')} 處理失敗的訊息是 {rc['candidate']} 在 {info.get('pub_window_text')} 發的；"
+            f"trace 看不到訊息內容，不能排除 {rc['candidate']} 當時發出壞訊息，請抽查失敗訊息")
+
+
 def briefing_template(context: dict[str, Any]) -> dict[str, str]:
     """不靠 LLM 的三行：全部從 attribution、runbook、範例 trace 拼，數字一定精確。"""
     rc = context.get("root_cause") or {}
@@ -297,6 +321,9 @@ def briefing_template(context: dict[str, Any]) -> dict[str, str]:
         note = _clip((context.get("root_note") or "").split("：", 1)[-1], 120)
         summary = f"{_PREFIX['summary_line']}證據不足，不指認單一服務（{entities}）：{note}"
         verify = f"{_PREFIX['verification_line']}先查共用的資料源、網路與未被追蹤的依賴，比對同時間其他告警"
+    if rc.get("candidate"):
+        summary += _async_clause(rc)
+        verify = _async_verify(rc) or verify
     first = f"[{rb['id']}] {rb['actions'][0]}" if rb.get("actions") else "比對事件前後的變更紀錄（部署、設定、配方）"
     action = _PREFIX["action_line"] + first
     return {"summary_line": _clip(summary, _MAX_LINE), "action_line": _clip(action, _MAX_LINE),

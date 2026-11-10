@@ -12,6 +12,20 @@
      （例：流量 2 倍 -> 一半算在放大者）。這是近似：排隊延遲對負載不是線性的，理由文字會寫明轉了多少，讓人自己判斷
   沒有流量變化時（被呼叫端自己變慢、共同外部因素）這一步什麼都不做。
 
+訊息佇列（非同步邊，ctx.rca_mq；ingestion.incident_traces 開了 follow_messaging 才有，沒有就整段不做、輸出一字不差）：
+  事件實體消費的訊息是更早之前發的，生產者有沒有問題要回到「這批訊息的發布時窗」看（MqEdge.pub_start~pub_end），
+  對照組是發布時窗之前等長的一段——不是事件時窗、也不是事件前。
+  1. 生產者在發布時窗的自身耗時或自身錯誤率增量過了跟下面一樣的顯著門檻，才替它補一列候選（它通常不在事件裡，
+     所以這是唯一會出現「事件實體以外」候選的地方）；沒過門檻不補列，只在消費者的理由裡寫「看過了、沒異常」
+  2. 訊息夾帶失敗轉記：生產者過了門檻，而且消費者事件期間「自己失敗」的入口有 >= MIN_MESSAGE_SHARE 是在消費這條邊的訊息，
+     消費者的自身錯誤率增量 × 那個佔比 × async_weight 轉記給生產者。只轉錯誤、不轉耗時：消費者變慢是它自己或它的依賴的事
+     （佇列積壓看延遲 P95，寫在理由與 attribution["async"]，不進分數）
+  這是推論不是證明：trace 只能證明「訊息是它發的、它當時有異常」，不能證明訊息內容有問題，理由文字照實寫。
+  死區（都留有測試）：
+    a. 毒訊息但生產者自己沒有任何症狀（耗時、錯誤都正常）-> 不補列、不轉記，第一名仍是消費者
+    b. 生產者在對照段（發布時窗之前）就已經壞了 -> 看不出增量，不補列
+    c. 消費者自己的 bug 剛好碰上生產者真的有異常 -> 會被轉記（async_weight 設 0 可以關掉轉記做對照）
+
 分數（每個特徵先除以候選中的最大值，歸一到 0~1；用的是歸因後的增量）：
   自身耗時增量（事件期間 − 事件前，ms／請求）       權重 self_weight（預設 1，主分；只為消融對照保留，不要改）
   自身錯誤率增量（不含下游連帶的失敗）             權重 error_weight（預設 0.5）
@@ -39,9 +53,13 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.rca.base import RootCauseOperator, first_seen
 from aiops.stages.rca.logs import service_burst
+from aiops.stages.rca.mq import async_attribution, lag_text, producer_windows, window_text
 from aiops.stages.rca.spans import EXTERNAL_CALLER, UNKNOWN_CALLER, inbound_callers, resource_kinds, window_stats
 
 MAX_HOPS = 10
+# 訊息夾帶失敗轉記的門檻：消費者事件期間自己失敗的入口，至少這個比例是在消費同一條邊的訊息才轉。
+# 不到一半代表它大部分的失敗跟這批訊息無關（同步請求也在失敗），不能把錯記到生產者頭上
+MIN_MESSAGE_SHARE = 0.5
 
 
 @OperatorRegistry.register("rca.root_cause.evidence")
@@ -50,14 +68,17 @@ class EvidenceRootCause(RootCauseOperator):
     min_self_increase_ratio（0.2）、min_error_increase（0.05）、min_dominance（1.1）、min_load_ratio（1.5）、
     min_dependency_share（0.6：候選的自身耗時增量裡，單一下游資源的等待增量佔比達到就填 dependency 下鑽；
     或入口失敗裡該資源失敗的佔比達到也填）、
-    fallback（"rca.root_cause.topological"；沒有 trace 的場景改用它，空字串 = 不退回）。
+    fallback（"rca.root_cause.topological"；沒有 trace 的場景改用它，空字串 = 不退回）、
+    async_weight（1.0；訊息夾帶失敗轉記的比例，0 = 不轉記，只為消融對照）、
+    min_lag_seconds（60；訊息延遲 P95 到這個秒數、而且比事件前多一倍才標成積壓，見 stages/rca/mq.is_backlog）。
 
     dependency 不改分數、不改排名：候選仍是服務（拓撲、傳播路徑、標準答案都不變），只多告訴人「該查的是它等的東西」。"""
 
     def __init__(self, self_weight: float = 1.0, error_weight: float = 0.5, log_weight: float = 0.0,
                  min_requests: int = 20, min_self_increase_ms: float = 5.0, min_self_increase_ratio: float = 0.2,
                  min_error_increase: float = 0.05, min_dominance: float = 1.1, min_load_ratio: float = 1.5,
-                 min_dependency_share: float = 0.6, fallback: str = "rca.root_cause.topological"):
+                 min_dependency_share: float = 0.6, fallback: str = "rca.root_cause.topological",
+                 async_weight: float = 1.0, min_lag_seconds: float = 60.0):
         if min(self_weight, error_weight, log_weight, min_self_increase_ms, min_self_increase_ratio, min_error_increase) < 0:
             raise ValueError("權重與門檻不能是負的")
         if min_requests < 1 or min_dominance < 1 or min_load_ratio <= 1:
@@ -65,6 +86,9 @@ class EvidenceRootCause(RootCauseOperator):
         if not 0 < min_dependency_share <= 1:
             raise ValueError("min_dependency_share 必須在 (0, 1]")
         self.min_dependency_share = float(min_dependency_share)
+        if not 0 <= async_weight <= 1 or min_lag_seconds < 0:
+            raise ValueError("async_weight 必須在 [0, 1]（0 = 不做訊息夾帶失敗轉記）；min_lag_seconds 不能是負的")
+        self.async_weight, self.min_lag_seconds = float(async_weight), float(min_lag_seconds)
         self.self_weight, self.error_weight, self.log_weight = float(self_weight), float(error_weight), float(log_weight)
         self.min_requests = int(min_requests)
         self.min_self_ms, self.min_self_ratio = float(min_self_increase_ms), float(min_self_increase_ratio)
@@ -108,6 +132,74 @@ class EvidenceRootCause(RootCauseOperator):
                 break
         return load, amplifier
 
+    def _messaging(self, ctx, spans, rows: dict[str, dict]) -> None:
+        """訊息佇列歸因（見模組說明）。原地改 rows：消費者列掛上它的邊與說明；生產者在發布時窗真的有異常時補一列，
+        並把消費者自身錯誤率增量中「訊息夾帶」的部分轉記給它。"""
+        err_base: dict[str, float] = {}  # 消費者 -> 轉記前的自身錯誤率增量（多條邊都拿同一個基數算，不會越轉越少）
+        for edge in ctx.rca_mq:
+            r = rows.get(edge.consumer)
+            if r is None or "pub" in r:
+                continue
+            r.setdefault("mq", []).append(edge)
+            queue = edge.queue or "（佇列名稱未知）"
+            if not edge.producer:
+                r.setdefault("mq_notes", []).append(f"佇列 {queue} 的訊息只有 message.age、不知道是誰發的，沒有回頭看生產者")
+                continue
+            if edge.producer == edge.consumer:
+                continue
+            window = window_text(edge.pub_start, edge.pub_end)
+            pb, pd = producer_windows(spans, edge)
+            if pb is None or pd is None or pb.requests < self.min_requests or pd.requests < self.min_requests:
+                r.setdefault("mq_notes", []).append(
+                    f"訊息生產者 {edge.producer} 在發布時窗 {window}（或它之前等長的對照段）的入口請求不足 {self.min_requests} 筆，"
+                    "無法比較它當時有沒有異常")
+                continue
+            self_inc = pd.self_ms_per_request - pb.self_ms_per_request
+            err_inc = pd.own_error_rate - pb.own_error_rate
+            numbers = (f"自身耗時 {pb.self_ms_per_request:.1f}→{pd.self_ms_per_request:.1f} ms、"
+                       f"自身錯誤率 {pb.own_error_rate:.0%}→{pd.own_error_rate:.0%}")
+            if not (self_inc >= max(self.min_self_ms, pb.self_ms_per_request * self.min_self_ratio)
+                    or err_inc >= self.min_error_increase):
+                note = f"訊息生產者 {edge.producer}（佇列 {queue}）在發布時窗 {window} {numbers}，未見異常，不轉記"
+                if edge.failed and r["err_raw"] >= self.min_error_increase:
+                    # 生產者沒有症狀 ≠ 它發出去的內容沒問題：trace 只有耗時與錯誤，看不到 payload。照實講，交給人查。
+                    note += (f"；但 {edge.consumer} 處理這批訊息有 {edge.failed} 則失敗，trace 看不到訊息內容，"
+                             f"無法排除是 {edge.producer} 發出的內容有問題，請人工抽查失敗訊息與 dead-letter queue")
+                    r["mq_suspect"] = True
+                r.setdefault("mq_notes", []).append(note)
+                continue
+            target = rows.get(edge.producer)
+            if target is None:
+                target = rows[edge.producer] = {"entity": edge.producer, "b": pb, "d": pd, "self_raw": self_inc,
+                                                "err_raw": err_inc, "moved_in": [], "moved_out": None,
+                                                "self_eff": self_inc, "err_eff": err_inc, "pub": edge}
+            elif "pub" not in target:  # 生產者本來就在事件裡：主列看的是事件時窗，發布時窗的數字補在說明
+                target.setdefault("mq_notes", []).append(
+                    f"它在訊息發布時窗 {window}（{edge.consumer} 事後消費的那批，佇列 {queue}）{numbers}")
+            d = r["d"]
+            own_failures = round(d.own_error_rate * d.requests)
+            share = min(edge.failed / own_failures, 1.0) if own_failures else 0.0
+            base = err_base.setdefault(edge.consumer, max(r["err_eff"], 0.0))
+            if share < MIN_MESSAGE_SHARE or not self.async_weight:
+                continue
+            moved = min(base * share * self.async_weight, max(r["err_eff"], 0.0))
+            if moved > 0:
+                r["err_eff"] -= moved
+                target["err_eff"] += moved
+                r.setdefault("mq_out", []).append((edge, moved, share))
+                target.setdefault("mq_in", []).append((edge, moved))
+
+    def _async(self, r, attribution: dict) -> dict:
+        """attribution 補上 "async"：這個候選是訊息生產者（補列或承接了轉記）還是消費者。沒有非同步邊就原樣回傳。"""
+        mq_in, mq_out = r.get("mq_in") or [], r.get("mq_out") or []
+        if "pub" in r or mq_in:
+            edge = r.get("pub") or mq_in[0][0]
+            return {**attribution, "async": async_attribution(edge, "producer", self.min_lag_seconds, sum(x[1] for x in mq_in))}
+        if r.get("mq"):
+            return {**attribution, "async": async_attribution(r["mq"][0], "consumer", self.min_lag_seconds,
+                                                             sum(x[1] for x in mq_out), bool(r.get("mq_suspect")))}
+        return attribution
+
     def rank(self, incident, ctx):
         spans = ctx.rca_spans
         if not spans:
@@ -123,7 +215,8 @@ class EvidenceRootCause(RootCauseOperator):
                                  else f"證據不足，不指認根因：這一輪沒有 trace，{name} 也排不出（沒有拓撲或 Lot 流向）")
             return ranked
         start, end = as_utc(incident.start), as_utc(incident.end) + timedelta(minutes=1)
-        first_ts = min(as_utc(s.ts) for s in spans)
+        # 補撈過生產者發布時段時，手上最早的 span 是幾十分鐘前的；事件前基準仍從主撈取窗算起
+        first_ts = as_utc(ctx.rca_main_start) if ctx.rca_main_start else min(as_utc(s.ts) for s in spans)
         if first_ts >= start:
             return self._insufficient(ctx, "撈到的 span 沒有涵蓋事件開始之前，沒有基準可以比較（把 incident_traces 的 before_minutes 加大）")
         before, during = window_stats(spans, first_ts, start), window_stats(spans, start, end)
@@ -161,6 +254,9 @@ class EvidenceRootCause(RootCauseOperator):
             rows[amp]["err_eff"] += moved_err
             rows[amp]["moved_in"].append((entity, moved_self, load[entity]))
 
+        if ctx.rca_mq:
+            self._messaging(ctx, spans, rows)
+
         for r in rows.values():
             b = r["b"]
             r["hit"] = (r["self_eff"] >= max(self.min_self_ms, b.self_ms_per_request * self.min_self_ratio)
@@ -194,7 +290,7 @@ class EvidenceRootCause(RootCauseOperator):
         for r in ordered_rows:
             dependency, attribution = self._dependency(r, kinds)
             out.append(RootCandidate(r["entity"], r["score"], self._reason(r, bursts, base_min, load, kinds),
-                                     dependency, attribution))
+                                     dependency, self._async(r, attribution)))
         return out
 
     def _dependency(self, r, kinds: dict[str, str]) -> tuple[str, dict]:
@@ -252,11 +348,20 @@ class EvidenceRootCause(RootCauseOperator):
 
     def _reason(self, r, bursts, base_min, load, kinds: dict[str, str] | None = None) -> str:
         b, d = r["b"], r["d"]
+        pub = r.get("pub")  # 訊息生產者補的列：數字是發布時窗的，不是事件時窗的
+        if pub:
+            width = (pub.pub_end - pub.pub_start).total_seconds() / 60
+            scope = f"（訊息發布時窗 {window_text(pub.pub_start, pub.pub_end)} vs 它之前的 {width:.0f} 分鐘；不是事件時窗）"
+        else:
+            scope = f"（事件前 {base_min:.0f} 分鐘）"
         why = (f"自身耗時 {b.self_ms_per_request:.1f}→{d.self_ms_per_request:.1f} ms／請求（{r['self_raw']:+.1f}）；"
                f"自身錯誤率 {b.own_error_rate:.0%}→{d.own_error_rate:.0%}；入口請求 {b.requests}→{d.requests}"
-               f"（事件前 {base_min:.0f} 分鐘）")
+               + scope)
         why += self._breakdown(r, kinds or {})
-        if r["entity"] in load:
+        if pub:
+            why += (f"；這一列看的是訊息發布時窗：{pub.consumer} 在事件期間消費的訊息是它在這段時間發到佇列 "
+                    f"{pub.queue or '（佇列名稱未知）'} 的（延遲 P95 {lag_text(pub.lag_ms_p95)}），所以回頭看它當時的狀況")
+        elif r["entity"] in load:
             why += f"；流入流量 {load[r['entity']]:.2f} 倍"
         if r["moved_out"]:
             amp, ms, err, ratio = r["moved_out"]
@@ -264,6 +369,22 @@ class EvidenceRootCause(RootCauseOperator):
                     if ms or err else f"；流量被 {amp} 放大到 {ratio:.2f} 倍（{amp} 不在事件裡，未轉分數）")
         for victim, ms, ratio in r["moved_in"]:
             why += f"；把 {victim} 的流量放大到 {ratio:.2f} 倍，承接 {victim} 自身耗時增量中的 {ms:.1f} ms"
+        for edge in r.get("mq", ()):
+            who = f"生產者 {edge.producer}" if edge.producer else "生產者未知"
+            why += (f"；消費訊息佇列 {edge.queue or '（佇列名稱未知）'}（{who}）：延遲 P95 "
+                    f"{lag_text(edge.lag_ms_p95_before)}→{lag_text(edge.lag_ms_p95)}，"
+                    f"這批訊息發布於 {window_text(edge.pub_start, edge.pub_end)}")
+        for edge, moved, share in r.get("mq_out", ()):
+            window = window_text(edge.pub_start, edge.pub_end)
+            why += (f"；自身錯誤率增量中 {moved:.0%} 推估為訊息夾帶造成（事件期間自己失敗的入口有 {share:.0%} 是在消費 "
+                    f"{edge.producer} 於 {window} 發的訊息，而它當時有異常），改記在 {edge.producer}"
+                    "（推論：trace 只能證明訊息是它發的、它當時有異常，不能證明訊息內容有問題）")
+        for edge, moved in r.get("mq_in", ()):
+            why += (f"；承接 {edge.consumer} 自身錯誤率增量中的 {moved:.0%}（它消費失敗的訊息是這裡在 "
+                    f"{window_text(edge.pub_start, edge.pub_end)} 發的，佇列 {edge.queue or '（佇列名稱未知）'}，"
+                    f"延遲 P95 {lag_text(edge.lag_ms_p95)}）")
+        for note in r.get("mq_notes", ()):
+            why += f"；{note}"
         if r["entity"] in bursts:
             p = bursts[r["entity"]]
             why += f"；日誌暴增：{p['template'][:60]} 約 {p['ratio']:.0f} 倍（權重 {self.log_weight:g}）"

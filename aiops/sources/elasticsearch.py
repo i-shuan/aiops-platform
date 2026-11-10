@@ -102,6 +102,31 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             after = hits[-1]["sort"]
         return spans[:max_spans], True
 
+    def fetch_linked_spans(self, trace_ids: list[str], start: datetime, end: datetime,
+                           max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
+        """訊息佇列跨時窗：把指定 trace 在 [start, end] 內的 span 全撈回來（消費者 parent／span.links 指到的生產者那一段）。
+        不帶服務過濾：生產者是誰要撈回來才知道。trace.id 每 500 個一批、每批 search_after 分頁，湊滿 max_spans 就停。"""
+        index = os.environ.get("AIOPS_ES_TRACE_INDEX", "").strip() or DEFAULT_TRACE_INDEX
+        ids = sorted({t for t in trace_ids if t})
+        window = _window_filters(start, end, None)
+        spans: list[dict[str, Any]] = []
+        for i in range(0, len(ids), LINKED_TRACES_PER_QUERY):
+            batch = ids[i:i + LINKED_TRACES_PER_QUERY]
+            after = None
+            while True:
+                if len(spans) >= max_spans:
+                    return spans[:max_spans], True
+                body: dict[str, Any] = {"size": min(5000, max_spans - len(spans)), "_source": SPAN_FIELDS, "sort": SPAN_SORT,
+                                        "query": {"bool": {"filter": [*window, {"terms": {"trace.id": batch}}]}}}
+                if after is not None:
+                    body["search_after"] = after
+                hits = self._search(index, body, "撈訊息生產者 trace").get("hits", {}).get("hits", [])
+                if not hits:
+                    break
+                spans += [s for s in (_span(h["_source"]) for h in hits) if s is not None]
+                after = hits[-1]["sort"]
+        return spans, False
+
     def _search(self, index: str, body: dict[str, Any], what: str) -> dict[str, Any]:
         resp = _http.request(self.client, self.source_type, "POST", f"{self.base_url}/{index}/_search",
                              headers=self.headers, json=body)
@@ -227,9 +252,12 @@ SPAN_FIELDS = ["@timestamp", "trace.id", "span.id", "transaction.id", "parent.id
                "span.duration.us", "transaction.duration.us", "event.outcome",
                # 下游資源歸因與範例 trace 排序用（Elastic APM／OTel 標準欄位）；索引沒有就是空字串／0，行為退回只看服務
                "span.type", "span.subtype", "span.destination.service.resource",
-               "http.response.status_code", "transaction.name"]
+               "http.response.status_code", "transaction.name",
+               # 訊息佇列（非同步邊）：消費者 transaction 的型別、佇列名、訊息年齡，與批次消費的 span.links
+               "transaction.type", "transaction.message.queue.name", "transaction.message.age.ms", "span.links"]
 SPAN_SORT = [{"@timestamp": "asc"}, {"trace.id": "asc"}, {"span.id": {"order": "asc", "missing": "_first"}}]
 SAMPLE_MAX_BUCKETS = 30
+LINKED_TRACES_PER_QUERY = 500
 LOG_FIELDS = ["@timestamp", "service.name", "trace.id", "message", "error.exception", "error.log", "error.culprit"]
 # 分頁要穩定的排序：時間＋每筆唯一的 error.id（不用 _doc，跨分片沒有 PIT 時不保證順序）
 LOG_SORT = [{"@timestamp": "asc"}, {"error.id": {"order": "asc", "missing": "_last"}}]
@@ -273,17 +301,34 @@ def _log(src: dict[str, Any]) -> dict[str, Any] | None:
             "trace_id": str((src.get("trace") or {}).get("id") or "")}
 
 
+def _links(raw: Any) -> tuple[tuple[str, str], ...]:
+    """span.links 整理成 ((trace_id, span_id), ...)。索引裡可能是陣列或單一物件；缺 trace.id 或 span.id 的丟掉。"""
+    items = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        trace_id, span_id = (item.get("trace") or {}).get("id"), (item.get("span") or {}).get("id")
+        if trace_id and span_id:
+            out.append((str(trace_id), str(span_id)))
+    return tuple(out)
+
+
 def _span(src: dict[str, Any]) -> dict[str, Any] | None:
-    own = src.get("span") or src.get("transaction") or {}
-    span_id = (src.get("span") or {}).get("id") or (src.get("transaction") or {}).get("id")
+    span, txn = src.get("span") or {}, src.get("transaction") or {}
+    # 是 span 文件還是 transaction 文件，看有沒有 span.id：批次消費的 transaction 文件帶 span.links，
+    # 所以會有 span 物件但沒有 span.id，不能用「有沒有 span 物件」判斷（會把 transaction 的耗時讀成 0）
+    own = span if span.get("id") else txn
+    span_id = own.get("id")
     service = (src.get("service") or {}).get("name")
     trace_id = (src.get("trace") or {}).get("id")
     if not (span_id and service and trace_id):
         return None
-    span = src.get("span") or {}
     status = ((src.get("http") or {}).get("response") or {}).get("status_code")
     # 索引裡可能是數字或字串（"502"）；其他型別一律當沒有（0），不吞例外
     status_code = int(status) if isinstance(status, (int, float)) or (isinstance(status, str) and status.isdigit()) else 0
+    message = txn.get("message") or {}
+    age = (message.get("age") or {}).get("ms")
     return {"trace_id": trace_id, "span_id": span_id, "parent_id": (src.get("parent") or {}).get("id"),
             "service": canonical_service(service), "ts": as_utc_datetime(src["@timestamp"]),
             "duration_ms": float((own.get("duration") or {}).get("us") or 0) / 1000.0,
@@ -291,4 +336,9 @@ def _span(src: dict[str, Any]) -> dict[str, Any] | None:
             # transaction 文件沒有 span.type（kind 留空 = 入口）；span 文件的 type 是 app／db／external／messaging…
             "kind": str(span.get("type") or ""), "subtype": str(span.get("subtype") or ""),
             "resource": str(((span.get("destination") or {}).get("service") or {}).get("resource") or ""),
-            "status_code": status_code, "name": str((src.get("transaction") or {}).get("name") or "")}
+            "status_code": status_code, "name": str(txn.get("name") or ""),
+            # 訊息消費者：transaction.type = messaging 的 transaction 文件。它的 parent／links 指向生產者的 send span（非同步邊）
+            "consumer": own is txn and txn.get("type") == "messaging",
+            "queue": str((message.get("queue") or {}).get("name") or ""),
+            "age_ms": float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None,
+            "links": _links(span.get("links"))}

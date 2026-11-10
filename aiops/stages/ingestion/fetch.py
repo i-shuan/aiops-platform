@@ -20,6 +20,7 @@ import pandas as pd
 
 from aiops.engine.context import LogRecord, PipelineContext, SpanRecord, TargetError
 from aiops.engine.errors import BadRequest, InfrastructureError, NoDataError, NotFound
+from aiops.engine.mq import age_p95_ms, build_edges, consumer_entries, spread, unresolved_trace_ids
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.sources import get_datasource_spec, is_configured
@@ -217,24 +218,46 @@ class IncidentTracesFetch(BaseOperator):
             max_spans（上限，預設 20000，超過就截斷並註記）、only_incident_services（預設 false：撈這段時間所有服務，
             才看得到事件實體跟沒出事的服務之間的關係；true 只撈事件裡的服務，量小但可能漏掉中間的服務）、
             max_before_minutes（預設 0 = 不擴展；設了就是基準窗自適應回溯的上限）、
-            min_entry_spans（預設 20；要跟 rca.root_cause.evidence 的 min_requests 一致，兩邊各自宣告、不互相 import）。
+            min_entry_spans（預設 20；要跟 rca.root_cause.evidence 的 min_requests 一致，兩邊各自宣告、不互相 import）、
+            follow_messaging（預設 false；見下）、max_lag_minutes（預設 120）、max_linked_traces（預設 200）、
+            min_consumer_spans（預設 5）、mq_pad_minutes（預設 2）。
 
     基準窗自適應回溯：事件裡任一實體在事件前 [start − before, start) 的入口 span 不到 min_entry_spans，
     而事件期間夠（擴基準窗才有用；期間也不夠就留給根因算子寫「證據不足」），就把基準窗加倍（15 → 30 → 60）直到
     max_before_minutes；每一步只撈多出來的前段 [start − new, start − old)，窗口維持連續、不跨週。
     越長的基準越鈍（事故前的緩慢劣化會被算成「正常」），所以只擴到剛好夠。實際用了幾分鐘記在 ctx.rca_trace_lookback，
     報告段落照實標出來。
+
+    訊息佇列跨時窗（follow_messaging: true 才做；關著的時候行為跟沒有這段程式一樣）：
+    事件實體在事件期間有 >= min_consumer_spans 筆訊息消費者入口時，這批訊息是更早之前發的，生產者有沒有問題要回到
+    發布的那段時間看。做法：
+      1. 消費者記的訊息年齡（message.age）P95 超過 max_lag_minutes -> 不撈，ctx.rca_mq_note 寫「延遲超過上限」
+      2. 消費者的 parent／span.links 指到的生產者 span 不在手上的，挑至多 max_linked_traces 條 trace（等距挑，不是拿最早的），
+         用 fetch_linked_spans 補回 [事件開始 − max_lag, 事件結束] 內的那幾條 trace
+      3. engine/mq.build_edges 算每條 (生產者, 消費者, 佇列) 的延遲與生產者時窗（發布時間 P5~P95 ± mq_pad）-> ctx.rca_mq
+      4. 生產者時窗＋它前面一段等長基準如果早於主撈取窗，再補撈那一段「所有服務」的 span（只撈生產者的話，
+         它的同步下游不在樣本裡，等下游的時間會被算成自身耗時）
+    補撈的量另計、合計不超過 max_spans（主撈取在尖峰時常常剛好用滿 max_spans，共用額度等於永遠補不到）。
+    這一段任何一步失敗都只記 errors 與 ctx.rca_mq_note，主撈取的 span 照用、報告照出。
     """
 
     scope = "batch"
 
     def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 15, after_minutes: int = 0,
                  max_spans: int = 20000, only_incident_services: bool = False, max_before_minutes: int = 0,
-                 min_entry_spans: int = 20):
+                 min_entry_spans: int = 20, follow_messaging: bool = False, max_lag_minutes: int = 120,
+                 max_linked_traces: int = 200, min_consumer_spans: int = 5, mq_pad_minutes: int = 2):
         if min(before_minutes, after_minutes, max_before_minutes) < 0 or max_spans <= 0 or min_entry_spans < 1:
             raise ValueError("before／after／max_before_minutes 不能小於 0；max_spans 必須大於 0；min_entry_spans 至少 1")
         if max_before_minutes and max_before_minutes < before_minutes:
             raise ValueError("max_before_minutes 要大於等於 before_minutes（0 = 不擴展）")
+        if not isinstance(follow_messaging, bool):
+            raise ValueError("follow_messaging 只能是 true／false")
+        if max_lag_minutes <= 0 or max_linked_traces <= 0 or min_consumer_spans < 1 or mq_pad_minutes < 0:
+            raise ValueError("max_lag_minutes、max_linked_traces 必須大於 0；min_consumer_spans 至少 1；mq_pad_minutes 不能小於 0")
+        self.follow_messaging = follow_messaging
+        self.max_lag, self.mq_pad = timedelta(minutes=max_lag_minutes), timedelta(minutes=mq_pad_minutes)
+        self.max_linked_traces, self.min_consumer_spans = int(max_linked_traces), int(min_consumer_spans)
         self.source_type = source_type
         self.before, self.after = timedelta(minutes=before_minutes), timedelta(minutes=after_minutes)
         self.max_spans = int(max_spans)
@@ -248,15 +271,16 @@ class IncidentTracesFetch(BaseOperator):
                           float(s.get("duration_ms") or 0.0), bool(s.get("error")),
                           kind=str(s.get("kind") or ""), subtype=str(s.get("subtype") or ""),
                           resource=str(s.get("resource") or ""), status_code=int(s.get("status_code") or 0),
-                          name=str(s.get("name") or ""))
+                          name=str(s.get("name") or ""), consumer=bool(s.get("consumer")), queue=str(s.get("queue") or ""),
+                          age_ms=s.get("age_ms"), links=tuple((str(t), str(i)) for t, i in s.get("links") or ()))
 
     @staticmethod
     def _entry_counts(spans: list[SpanRecord], entities: list[str], lo: datetime, hi: datetime) -> dict[str, int]:
-        """[lo, hi) 內每個事件實體的入口 span 數（沒有父、或父不是同一個服務）。跟 stages/rca/spans 同一個定義，但 ingestion 不 import rca。"""
+        """[lo, hi) 內每個事件實體的入口 span 數（沒有父、父不是同一個服務、或是訊息消費者）。跟 stages/rca/spans 同一個定義，但 ingestion 不 import rca。"""
         service_of = {s.span_id: s.service for s in spans}
         counts = {e: 0 for e in entities}
         for s in spans:
-            if s.service in counts and lo <= as_utc(s.ts) < hi and (s.parent_id is None or service_of.get(s.parent_id) != s.service):
+            if s.service in counts and lo <= as_utc(s.ts) < hi and (s.parent_id is None or service_of.get(s.parent_id) != s.service or s.consumer):
                 counts[s.service] += 1
         return counts
 
@@ -272,6 +296,65 @@ class IncidentTracesFetch(BaseOperator):
             ctx.rca_traces_failed = True  # 有設定卻撈不到：根因算子要知道證據是被吃掉的，不是本來就沒有
             ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_traces'}", f"撈 trace 失敗，拓撲只用既有的：{why}"))
         return ctx
+
+    def _follow_messaging(self, ctx: PipelineContext, spec, spans: list[SpanRecord], entities: list[str], spell,
+                          services: list[str] | None, inc_start: datetime, start: datetime, end: datetime,
+                          used: timedelta) -> tuple[list[SpanRecord], dict]:
+        """訊息佇列跨時窗（見類別說明）。回 (併好補撈結果的 span, 寫進 trace_fetch.mq 的摘要)。"""
+        hi = end + timedelta(minutes=1)
+        consumers = consumer_entries(spans, entities, inc_start, hi)
+        info: dict = {"consumers": len(consumers), "linked_traces": 0, "extra_spans": 0, "queries": 0, "edges": 0}
+        if len(consumers) < self.min_consumer_spans:
+            ctx.log(f"incident_traces:mq:skip:consumers={len(consumers)}<{self.min_consumer_spans}")
+            return spans, info
+        lag_minutes = int(self.max_lag.total_seconds() // 60)
+        age = age_p95_ms(consumers)
+        if age is not None and age > self.max_lag.total_seconds() * 1000:
+            ctx.rca_mq_note = (f"訊息延遲超過上限：消費者記的訊息年齡 P95 約 {age / 60000:.0f} 分鐘，超過 max_lag_minutes（{lag_minutes}），"
+                               "不往回撈生產者那段時間的 trace；請直接查佇列積壓與生產者當時的狀況")
+            ctx.log("incident_traces:mq:over-max-lag")
+            return spans, {**info, "skipped": "over_max_lag", "age_p95_minutes": round(age / 60000, 1)}
+        budget = self.max_spans
+        seen = {s.span_id for s in spans}
+
+        def merge(raw: list[dict]) -> int:
+            fresh = [self._record(s, spell) for s in raw if s["span_id"] not in seen]
+            seen.update(s.span_id for s in fresh)
+            spans.extend(fresh)
+            return len(fresh)
+
+        wanted = unresolved_trace_ids(spans, consumers)
+        if wanted:
+            picked = spread(wanted, self.max_linked_traces)
+            raw, cut = spec.fetch_linked_spans(picked, inc_start - self.max_lag, end, budget)
+            added = merge(raw)
+            budget -= added
+            info.update(linked_traces=len(picked), linked_candidates=len(wanted), extra_spans=added,
+                        queries=1, truncated=bool(cut))
+        base_start = inc_start - used
+        edges, _, unresolved = build_edges(spans, entities, inc_start, hi, base_start, self.mq_pad)
+        if not edges:
+            ctx.rca_mq_note = ("偵測到 messaging consumer，但沒有 span link、parent 或 message.age，無法跨時窗"
+                               f"（事件期間 {len(consumers)} 筆消費者入口都對不到發布時間；往回只找 {lag_minutes} 分鐘）")
+            ctx.log("incident_traces:mq:unlinked")
+            return spans, {**info, "unresolved": unresolved}
+        # 生產者時窗＋前面等長的基準早於主撈取窗的部分：補撈所有服務，生產者的自身耗時才扣得掉它等下游的時間
+        known = [e for e in edges if e.producer]
+        if known and budget > 0:
+            floor = inc_start - self.max_lag - used
+            need_lo = max(min(e.pub_start - (e.pub_end - e.pub_start) for e in known), floor)
+            need_hi = min(max(e.pub_end for e in known), start)
+            if need_lo < need_hi:
+                raw, cut = spec.fetch_spans(need_lo, need_hi, services, budget)
+                added = merge(raw)
+                info.update(extra_spans=info["extra_spans"] + added, queries=info["queries"] + 1,
+                            truncated=bool(info.get("truncated") or cut),
+                            pub_fetch=[need_lo.isoformat(), need_hi.isoformat()])
+                edges, _, unresolved = build_edges(spans, entities, inc_start, hi, base_start, self.mq_pad)
+        ctx.rca_mq = edges
+        info.update(edges=len(edges), unresolved=unresolved)
+        ctx.log(f"incident_traces:mq:{len(edges)}edges:+{info['extra_spans']}spans")
+        return spans, info
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         if not ctx.incidents:
@@ -307,6 +390,22 @@ class IncidentTracesFetch(BaseOperator):
         except Exception as e:  # noqa: BLE001  旁路佐證：資料長得出乎意料也只略過這一段，不能讓整份報告失敗
             logger.warning("incident_traces 解析失敗，略過拓撲佐證：%s: %s", type(e).__name__, e)
             return self._skip(ctx, f"{type(e).__name__}: {e}", as_error=True)
+        mq = None
+        if self.follow_messaging:
+            main = list(spans)
+            main_first = min((as_utc(s.ts) for s in main), default=None)
+            try:
+                spans, mq = self._follow_messaging(ctx, spec, spans, entities, spell, services, inc_start, start, end, used)
+            except Exception as e:  # noqa: BLE001  旁路的旁路：補撈失敗只少了生產者那一段，主撈取的 span 照用
+                why = str(e) if isinstance(e, (InfrastructureError, BadRequest, NotFound)) else f"{type(e).__name__}: {e}"
+                logger.warning("incident_traces 訊息佇列跨時窗失敗，只用事件時窗的 span：%s", why)
+                spans, mq = main, {"skipped": why}
+                ctx.rca_mq = []
+                ctx.rca_mq_note = f"訊息佇列跨時窗撈取失敗，沒有回到生產者發布時段比對：{why}"
+                ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_traces'}",
+                                              f"訊息佇列跨時窗撈取失敗，根因只看事件時窗：{why}"))
+            if len(spans) > len(main):  # 補撈了更早的 span：事件前基準仍從主撈取窗算起
+                ctx.rca_main_start = main_first
         ctx.rca_spans = spans
         before_min, used_min = int(self.before.total_seconds() // 60), int(used.total_seconds() // 60)
         ctx.rca_trace_lookback = (before_min, used_min)
@@ -314,6 +413,8 @@ class IncidentTracesFetch(BaseOperator):
                                      "truncated": truncated, "start": start.isoformat(), "end": end.isoformat(),
                                      "services": sorted({s.service for s in ctx.rca_spans}),
                                      "before_minutes": before_min, "before_minutes_used": used_min, "extended_for": extended_for}
+        if mq is not None:
+            ctx.result["trace_fetch"]["mq"] = mq
         ctx.log(f"incident_traces:{len(ctx.rca_spans)}{':truncated' if truncated else ''}")
         return ctx
 

@@ -23,6 +23,7 @@ from aiops.storage.models import (
     IncidentRow,
     LotPathRow,
     NotificationRow,
+    ServiceAsyncEdgeRow,
     ServiceEdgeRow,
     SilenceRow,
     TraceSeriesRow,
@@ -259,6 +260,32 @@ class ServiceEdges:
     @staticmethod
     def all() -> list[Row]:
         return crud.find(ServiceEdgeRow)
+
+
+class AsyncEdges:
+    """非同步邊（訊息佇列的 生產者 -> 消費者）。跟 ServiceEdges 分開：方向相反，不能混進同步拓撲。"""
+
+    @staticmethod
+    def record(edges: dict[tuple[str, str], tuple[float, int]], seen_at: datetime | None = None) -> dict[str, int]:
+        """edges: (producer, consumer) -> (延遲 P95 毫秒, 訊息數)。訊息數原子累加；延遲覆蓋成這一次的值、last_seen 設成 seen_at。
+        回傳 {"added", "updated"}（算法同 ServiceEdges.add_calls）。"""
+        if not edges:
+            return {"added": 0, "updated": 0}
+        seen_at = seen_at or utc_now()
+        known = {(e["producer"], e["consumer"]) for e in crud.find(ServiceAsyncEdgeRow)}
+        for (producer, consumer), (lag_ms, count) in edges.items():
+            crud.increment(ServiceAsyncEdgeRow, {"producer": producer, "consumer": consumer}, "messages", int(count),
+                           lag_ms_p95=float(lag_ms), last_seen=seen_at)
+        updated = sum(1 for k in edges if k in known)
+        return {"added": len(edges) - updated, "updated": updated}
+
+    @staticmethod
+    def prune(before: datetime) -> int:
+        return crud.delete_before(ServiceAsyncEdgeRow, "last_seen", before)
+
+    @staticmethod
+    def all() -> list[Row]:
+        return crud.find(ServiceAsyncEdgeRow)
 
 
 class LotPaths:

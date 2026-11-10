@@ -61,8 +61,16 @@ class BaseDataSourceSpec(ABC):
         選填鍵（沒給就當空字串／0，RCA 退回只看服務）：kind（span.type：app／db／external…；入口 transaction 留空）、
         subtype（redis／http／postgresql）、resource（span.destination.service.resource，例如 tax-gw:443）、
         status_code（http.response.status_code）、name（transaction.name）。
+        訊息佇列（非同步邊）用的選填鍵：consumer（transaction.type = messaging 的消費者入口）、queue（佇列名）、
+        age_ms（訊息年齡，沒有就是 None）、links（批次消費的 span.links：[(trace_id, span_id), ...]）。
         預設不支援；存 trace 的資料源（Elasticsearch APM）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
+
+    def fetch_linked_spans(self, trace_ids: list[str], start: datetime, end: datetime,
+                           max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
+        """訊息佇列跨時窗：把指定 trace 在 [start, end] 內的 span 撈回來（格式同 fetch_spans，不帶服務過濾）。
+        消費者的 parent／span.links 指向的生產者 span 常常落在事故窗之前，靠它補回來。預設不支援。"""
+        raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援依 trace 撈 span（訊息佇列跨時窗）")
 
     def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
                    max_logs: int = 5000) -> tuple[list[dict[str, Any]], bool]:

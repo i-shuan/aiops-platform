@@ -181,6 +181,42 @@ class SpanRecord:
     resource: str = ""      # span.destination.service.resource：tax-gw:443、redis
     status_code: int = 0    # http.response.status_code；0 = 沒有
     name: str = ""          # transaction.name：POST /invoice（只給報告文字用）
+    # 訊息佇列（Elastic APM messaging）：消費者 transaction 才有值。非同步父子邊跟同步呼叫要分開算（見 stages/rca/spans.py）
+    consumer: bool = False  # transaction.type = messaging：這個入口是「從佇列拿到訊息」，不是被同步呼叫
+    queue: str = ""         # transaction.message.queue.name
+    age_ms: float | None = None  # transaction.message.age.ms：訊息在佇列裡等了多久；None = 資料源沒給
+    links: tuple[tuple[str, str], ...] = ()  # span.links：批次消費時指回各個生產者 span 的 (trace_id, span_id)
+
+
+@dataclass(frozen=True)
+class MqEdge:
+    """RCA 從 span 還原的一條非同步邊（生產者 -> 佇列 -> 消費者）。延遲 = 消費時間 − 發布時間（T_pub）。
+
+    pub_start／pub_end 是事件期間被消費的那批訊息「當初是什麼時候發布的」（T_pub 的 P5～P95，前後各留緩衝）：
+    根因算子拿這個時窗去看生產者，而不是拿事件時窗（消費者 12:20 才出事，訊息可能是 12:00 發的）。
+    linked_by：T_pub 怎麼來的——parent（消費者的 parent.id 指到 send span）、link（span.links）、
+    age（只有 message.age，知道什麼時候發的但不知道是誰發的，producer 是空字串）。
+    """
+
+    producer: str
+    consumer: str
+    queue: str
+    messages: int
+    lag_ms_p50: float
+    lag_ms_p95: float
+    pub_start: datetime
+    pub_end: datetime
+    linked_by: str
+    # 事件前（基準窗）同一條邊的延遲 P95；沒有樣本就是 None。報告印「延遲 X→Y」用
+    lag_ms_p95_before: float | None = None
+    failed: int = 0  # 這批訊息裡消費者「自己失敗」（不是下游連帶）的入口筆數（訊息夾帶失敗轉記用）
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"producer": self.producer, "consumer": self.consumer, "queue": self.queue, "messages": self.messages,
+                "lag_ms": {"p50": round(self.lag_ms_p50, 1), "p95": round(self.lag_ms_p95, 1),
+                           "p95_before": None if self.lag_ms_p95_before is None else round(self.lag_ms_p95_before, 1)},
+                "pub_window": [self.pub_start.isoformat(), self.pub_end.isoformat()],
+                "linked_by": self.linked_by, "failed": self.failed}
 
 
 @dataclass
@@ -258,6 +294,9 @@ class PipelineContext:
     recent_notifications: list[RecentNotification] = field(default_factory=list)
     topology: list[tuple[str, str]] = field(default_factory=list)  # (caller, callee)
     lot_edges: list[LotEdge] = field(default_factory=list)
+    # 非同步邊（訊息佇列）：(生產者, 消費者) -> 延遲 P95（毫秒）。由 admin.topology_refresh 沉澱、引擎載入；
+    # alert.messaging_link 用它把「生產者先出事、消費者隔一段延遲才出事」的兩群併成一群
+    async_edges: dict[tuple[str, str], float] = field(default_factory=dict)
     # Workflow 明確給了（含給空清單）就不要再從 trace／Lot 履歷自動推導
     topology_explicit: bool = False
     lot_edges_explicit: bool = False
@@ -290,10 +329,17 @@ class PipelineContext:
     rca_traces_failed: bool = False
     # incident_traces 的事件前基準窗：(設定的分鐘, 實際用的分鐘)。入口請求不足時會往前擴展，報告要照實標出來；None = 沒撈 trace
     rca_trace_lookback: tuple[int, int] | None = None
+    # follow_messaging 補撈了更早的 span（生產者發布時段）時，主撈取窗裡最早那個 span 的時間：事件前基準從這裡算起，
+    # 不是從補撈回來的最早那個 span。None = 沒有補撈（基準就是手上最早的 span）
+    rca_main_start: datetime | None = None
     # RCA 重抓的事件時段原始時序：(實體, 指標) -> DataFrame(ts, value)。給互相關等需要原始資料的演算法
     rca_series: dict[tuple[str, str], pd.DataFrame] = field(default_factory=dict)
     # RCA 隨需現抓的事件前後 span（ingestion.incident_traces），給 rca.build_dynamic_topology 還原當下的呼叫關係
     rca_spans: list[SpanRecord] = field(default_factory=list)
+    # 事件實體當消費者的非同步邊（ingestion.incident_traces 的 follow_messaging 還原）；沒有 messaging 資料就是空的
+    rca_mq: list[MqEdge] = field(default_factory=list)
+    # 看到 messaging 消費者但跨不了時窗的原因（沒有 link／parent／age、延遲超過上限、補撈失敗）：報告要照實寫
+    rca_mq_note: str = ""
     # RCA 隨需現抓的錯誤日誌（ingestion.incident_logs）：事件期間與事件前的正常期間，給 rca.section.log_patterns 比對
     rca_logs: list[LogRecord] = field(default_factory=list)
     rca_logs_baseline: list[LogRecord] = field(default_factory=list)
@@ -345,11 +391,14 @@ class PipelineContext:
             out.update(anomalies=len(self.anomalies), notifications=len(self.notifications),
                        resolved_incidents=len(self.resolved_incident_ids))
         if self.rca_sections or self.rca_skipped:
+            root_cause: dict[str, Any] = {"algorithm": self.rca_root_algorithm, "note": self.rca_root_note,
+                                          "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason,
+                                                          "dependency": c.dependency, "attribution": c.attribution}
+                                                         for c in self.rca_root_candidates]}
+            if self.rca_mq or self.rca_mq_note:  # 沒有 messaging 資料時回傳的形狀跟以前一樣
+                root_cause["messaging"] = {"note": self.rca_mq_note, "edges": [e.to_dict() for e in self.rca_mq]}
             out.update(sections=[s.to_dict() for s in self.rca_sections], skipped=self.rca_skipped,
-                       root_cause={"algorithm": self.rca_root_algorithm, "note": self.rca_root_note,
-                                   "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason,
-                                                   "dependency": c.dependency, "attribution": c.attribution}
-                                                  for c in self.rca_root_candidates]},
+                       root_cause=root_cause,
                        runbook=self.rca_runbook,
                        narrative={"summary": self.llm_summary, "claims": self.llm_claims,
                                   "generated_by": self.llm_generated_by, "rejected": self.llm_rejected,
