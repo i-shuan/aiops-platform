@@ -8,6 +8,11 @@
   2. 沒有時把 metric 字串切成整字 token（非字母數字為界），整字相等才算（duration、latency → latency；io、disk → saturation）
   3. 都沒有 → 類別未知，只靠歸因、trace、日誌的規則
 命中的規則全部列出（依 priority），一條都沒命中才給保底並寫明「沒有命中任何故障特徵」。
+
+流量類的兩條處方靠 trace 證據分流（docs/MQ_QPS_DESIGN.md P1）：
+  RB-08 內部呼叫放大：第一名帶 attribution["amplifier"]（它對下游的扇出暴增，把下游灌爆）→ 查重試、迴圈、熔斷；擴容沒有用。
+  RB-04 容量飽和：流量與延遲兩種訊號都在而且範例 trace 沒失敗（原規則），或第一名帶 attribution["ingress_surge"]
+        （流量確定是外部入口打進來的）——後者不看範例 trace 有沒有失敗：被灌爆的服務本來就會拋錯。
 """
 from __future__ import annotations
 
@@ -82,6 +87,16 @@ class RunbookFacts:
         return self.attribution.get("async") or {}
 
     @property
+    def amplifier(self) -> dict[str, Any]:
+        """第一名候選把下游流量放大的證據（attribution["amplifier"]，見 rca.root_cause.evidence 的「扇出」）；沒有就是空的。"""
+        return self.attribution.get("amplifier") or {}
+
+    @property
+    def ingress_surge(self) -> dict[str, Any]:
+        """第一名候選的流量是外部入口打進來的證據（attribution["ingress_surge"]）；沒有就是空的。"""
+        return self.attribution.get("ingress_surge") or {}
+
+    @property
     def sample_failed(self) -> bool:
         return bool(self.sample) and (bool(self.sample.error) or self.sample.status_code >= 500)
 
@@ -110,7 +125,10 @@ class RunbookFacts:
         """處方文字裡可以帶入的欄位。"""
         a = self.attribution
         mq = self.async_info
-        return {"entity": self.top.entity if self.top else "", "resource": a.get("resource", ""),
+        amp, fan = self.amplifier, self.amplifier.get("fanout") or {}
+        return {"victim": amp.get("victim", ""), "fanout_before": str(fan.get("before", "?")), "fanout_during": str(fan.get("during", "?")),
+                "fanout_ratio": str(amp.get("fanout_ratio", "?")), "entry": self.ingress_surge.get("entry", ""),
+                "entity": self.top.entity if self.top else "", "resource": a.get("resource", ""),
                 "kind": "/".join(p for p in (a.get("kind", ""), a.get("subtype", "")) if p),
                 "endpoint": (self.sample.name if self.sample and self.sample.name else "範例 trace"),
                 "status": str(self.sample.status_code) if self.sample and self.sample.status_code else "失敗",
@@ -162,13 +180,20 @@ RUNBOOK_RULES: tuple[Runbook, ...] = (
             ("排查 {resource} 當前慢查詢（slow log）、鎖等待（lock wait）與活躍連線數",
              "檢查近期是否有缺少索引的查詢或批次搬移作業上線",
              "確認 {entity} 的連線池（connection pool）是否打滿導致取連線阻塞")),
+    Runbook("RB-08", "內部呼叫放大（重試風暴／迴圈呼叫）", 85,
+            lambda f: f.amplifier.get("type") == "traffic_amplifier",
+            ("檢查 {entity} 呼叫 {victim} 的 retry policy 與 backoff：每處理一個請求呼叫 {victim} 的次數由 {fanout_before} 次"
+             "變成 {fanout_during} 次（扇出 {fanout_ratio} 倍），先確認是不是重試風暴",
+             "核對 {entity} 近期的部署與設定變更，是否引入 tight loop 或逐筆呼叫 {victim}（原本批次查一次，變成每筆查一次）",
+             "在 {entity} 啟用客戶端熔斷（circuit breaker）或由閘道對 {victim} 限流（rate limiting）先保住 {victim}；"
+             "擴容 {victim} 沒有用，流量是 {entity} 放大出來的")),
     Runbook("RB-03", "應用程式內部邏輯異常或狀態機錯誤", 80,
             lambda f: "errors" in f.signals and f.sample_failed and (f.top is None or f.share < 0.3),
             ("點下方範例 trace 檢查 {endpoint}（HTTP {status}）的入參與堆疊日誌",
              "核對事故初發前 1 小時內 {entity} 是否有部署、設定變更或 feature flag 開啟",
              "若為新版本導致，建議立即回滾（rollback）")),
     Runbook("RB-04", "流量突波引發容量飽和", 70,
-            lambda f: {"traffic", "latency"} <= f.signals and not f.sample_failed,
+            lambda f: ({"traffic", "latency"} <= f.signals and not f.sample_failed) or bool(f.ingress_surge),
             ("確認突發流量來源是業務活動／行銷大促，還是異常爬蟲／惡意攻擊",
              "觸發 HPA 水平擴展或手動擴容 replica 數量",
              "視情況在入口閘道啟用 API 限流（rate limiting）")),

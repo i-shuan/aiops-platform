@@ -1,4 +1,4 @@
-"""11 個破壞性端到端場景。每個場景回傳 Result（注入特徵、逐條斷言的預期與實測、備註）。
+"""破壞性端到端場景（1～11 在這個檔；12 非同步佇列在 scen_mq.py、13 流量放大在 scen_traffic_amp.py）。每個場景回傳 Result（注入特徵、逐條斷言的預期與實測、備註）。
 
 原則：斷言寫使用者要求的樣子，不照平台現狀遷就；平台做不到的就老實記成「未通過」並在備註寫原因，不改平台、不放寬斷言。
 """
@@ -74,11 +74,12 @@ from scripts.chaos import scen_detect_rca as D  # noqa: E402
 
 from scripts.chaos import scen_learning as L  # noqa: E402
 from scripts.chaos import scen_mq as Q  # noqa: E402
+from scripts.chaos import scen_traffic_amp as A  # noqa: E402
 
-# 場景函式回一個 Result，或一串（12 是 12a～12g 七個子場景，各自一列）
+# 場景函式回一個 Result，或一串（12 是 12a～12g 七個子場景、13 是 13a～13c 三個，各自一列）
 SCENARIOS = {1: scenario_1, 2: D.scenario_2, 3: D.scenario_3, 4: D.scenario_4, 5: D.scenario_5,
              6: L.scenario_6, 7: L.scenario_7, 8: L.scenario_8, 9: L.scenario_9, 10: L.scenario_10, 11: D.scenario_11,
-             12: Q.scenario_12}
+             12: Q.scenario_12, 13: A.scenario_13}
 
 
 def run(numbers: list[int] | None = None) -> list[H.Result]:

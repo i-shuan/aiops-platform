@@ -37,6 +37,7 @@ class Call:
     fail_p: float | np.ndarray = 0.0   # 資源呼叫失敗（逾時、回錯）的機率
     swallow: bool = False          # 呼叫端接住例外：交易照樣回 200
     name: str = ""                 # span.name
+    times: float | np.ndarray = 1.0    # 每個請求重複呼叫幾次（重試風暴、迴圈呼叫）；1 = 一次，亂數序列與輸出跟沒有這個欄位時完全一樣
     # ── 以下只有 kind="messaging" 用：callee 是 broker 上的資源名（kafka/order-events），consumer 是消費它的服務 ──
     consumer: str = ""             # 消費者服務名（不寫 = 只有 send span，沒有人消費）
     queue: str = ""                # transaction.message.queue.name；不寫用 callee
@@ -114,7 +115,7 @@ class World:
             s.own_fail_p = self._a(s.own_fail_p)
             s.crash_p = self._a(s.crash_p)
             for c in s.calls:
-                c.ms, c.fail_p = self._a(c.ms), self._a(c.fail_p)
+                c.ms, c.fail_p, c.times = self._a(c.ms), self._a(c.fail_p), self._a(c.times)
                 if c.is_messaging():
                     if c.link_mode not in ("parent", "links", "none"):
                         raise ValueError(f"link_mode 只能是 parent／links／none：{c.link_mode}")
@@ -181,8 +182,8 @@ class World:
                 if s.parallel:  # 並行：期望值近似成「最慢的那個」（每個呼叫的期望值取最大，忽略 max 的 Jensen 偏差）
                     slowest = np.maximum(slowest, c.prob * child_ms)
                 else:
-                    e += c.prob * child_ms
-                ok_rest = ok_rest * (1.0 - c.prob * child_fail * (0.0 if c.swallow else 1.0))
+                    e += c.prob * c.times * child_ms
+                ok_rest = ok_rest * (1.0 - c.prob * child_fail * (0.0 if c.swallow else 1.0)) ** c.times
             e += slowest
             fail_rest = 1.0 - ok_rest
             tot_fail = s.crash_p + (1.0 - s.crash_p) * fail_rest
@@ -201,7 +202,7 @@ class World:
             s = self.svcs[n]
             for c in s.calls:
                 if c.is_service():
-                    rate[c.callee] += rate[n] * (1.0 - s.crash_p) * c.prob
+                    rate[c.callee] += rate[n] * (1.0 - s.crash_p) * c.prob * c.times
                 elif c.is_messaging() and c.consumer:
                     # 送出成功的才進佇列；消費者的請求率 = 佇列每分鐘吐出幾則（簡化：一個消費者服務只吃這一條佇列）
                     q = self._queue(rate[n] * (1.0 - s.crash_p) * c.prob * (1.0 - c.fail_p), c)
@@ -321,7 +322,7 @@ class World:
             cursor = start + timedelta(milliseconds=self_total * PRE_CALL_SHARE)
             fork, slowest = cursor, 0.0  # 並行：每個呼叫都從 fork 出發，結束後 cursor 推到最慢的那個
             failed_call = False
-            for c in svc.calls:
+            for c in (c for c in svc.calls for _ in range(int(round(float(c.times[m]))))):  # times：同一個呼叫重複幾次
                 if svc.parallel:
                     cursor = fork
                 if rng.random() >= c.prob:

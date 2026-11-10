@@ -211,3 +211,43 @@ curl -s -H "Authorization: ApiKey $ES_KEY" -H "Content-Type: application/json" "
 12. 儲存的 lag 取最近一次 `admin.topology_refresh` 的值；舊版把消費者當同步邊寫進 `service_edges` 的列，由既有 prune 自然過期。
 13. 混沌：新增場景 12g（沉澱後同輪事件併卡）；模擬器沒有 lag 指標 target，`lag` 訊號只由單元測試涵蓋。
 14. 已發現但不在範圍：RB-03 對訊息消費者的處方字面是「檢查 Kafka RECEIVE（HTTP 失敗）」，措辭不貼切。
+
+---
+
+## 9. P1 實作結果與偏離設計（2026-11-10，分支 `feat/traffic-amplifier-p1`）
+
+範圍：5.2 的缺口 1、2、4（入口突波有輸出、扇出判準、attribution 欄位）＋ Runbook RB-08 與放寬的 RB-04。缺口 3（飽和判準）與缺口 5（非同步放大）沒有做。
+
+### 9.1 做了什麼
+- **扇出判準**（`algorithms/evidence.py`）：扇出 = 呼叫者→被呼叫者的呼叫數 ÷ 呼叫者自己的入口請求數。事件期間 ÷ 事件前 ≥ `min_fanout_ratio`（預設 2.0，YAML 可調，≤ 1 直接 `ValueError`），而且受害者自己的自身耗時或錯誤率增量過顯著門檻，才在放大者候選上標 `attribution["amplifier"]`（`type`、`victim`、`via`、`load_ratio`、`fanout{before,during}`、`fanout_ratio`、`moved_self_ms`、`moved_error`、`victims`、`in_incident`）。
+- **不在事件裡的放大者補候選列**：扇出判準成立、它的入口請求也 ≥ `min_requests` 才補，`in_incident=False`，理由寫明「它不在事件裡（自己沒有告警）」。
+- **入口突波**：往上游走到外部入口（沒有父 span 的請求不少於孤兒）時，在被灌流量的候選標 `attribution["ingress_surge"]`（`entry`、`load_ratio`、`entry_load_ratio`），不轉分數。
+- **Runbook**（`sections/actions.py`）：RB-08「內部呼叫放大」優先序 85，條件是第一名帶 `amplifier.type == "traffic_amplifier"`；RB-04 條件變成「原條件 **或** 第一名帶 `ingress_surge`」。`RunbookFacts` 新增 `amplifier`、`ingress_surge` 兩個 property。
+- **三行摘要**（`enrichment/narrative.py`）：模板新增放大者／入口突波句；封閉詞表加 `loop tight policy storm throttle throttling fanout fan-out fan amplifier amplification ingress gateway`；放大者的 `victim`／`via`／`victims` 與入口 `entry` 進實體白名單（13b 的放大者不在事件實體裡，沒進白名單會被當成編造）。
+- **混沌場景 13**（`scripts/chaos/scen_traffic_amp.py`，`run.py 13`）：模擬器 `Call` 新增 `times`（每個請求重複呼叫幾次；預設 1 時亂數序列與輸出跟以前完全一樣）。
+
+### 9.2 驗收實測
+| 項目 | 結果 |
+|---|---|
+| 全套 `pytest tests/` | 913 passed、1 skipped、14 xfailed（改前 885／1／13；差額 = 新檔 28 passed＋1 xfailed），含架構測試與 `test_claude_md_examples` |
+| 新增 `tests/test_rca_amplifiers.py` | 28 passed＋1 xfailed（非同步放大死區） |
+| 既有測試檔 | 零改動，沒有放寬任何斷言 |
+| 混沌 13a（放大者也在事件裡） | 13／13：候選 order-svc 1.50、payment-svc 0.07、ingress-gw 0.00；扇出 1.0→25.0（25 倍）、payment-svc 流入 22.87 倍、轉記自身耗時 95.1 ms、錯誤率 0.275；RB-08 |
+| 混沌 13b（放大者完全靜默、不在事件裡） | 13／13：平台自己補列 order-svc 並排第一（1.50），`in_incident=False`；RB-08 |
+| 混沌 13c（外部突波對照組） | 7／7：候選 payment-svc 1.50、其餘 0.00；沒有任何候選被標 amplifier；`ingress_surge` entry=ingress-gw、流入 6.01 倍；範例 trace 失敗仍命中 RB-04、不含 RB-08 |
+| 混沌 1～11 | 87／90，與改前逐列相同（場景 2、3、5 各差 1 項是既有缺口） |
+| 混沌 12 | 76／77，與改前逐列相同（12e 已知死區） |
+| 真實 11/3 ES 快照 | 異常點 75、事件群 3、errors 0，JSON 與 P0 改後逐點相同（忽略 `program`）：ord-svc→oracle、bill-svc→tax-gw:443、cart-api 不指認。真實資料裡沒有扇出暴增的事故，所以這是「零回歸」證明，不是放大者功能在真實資料上的證明 |
+
+### 9.3 已知死區與照現況寫死的行為
+- **非同步放大**（`xfail(strict=True)`）：生產者把訊息量放大 5 倍，非同步邊不算流量倍數，指不到生產者；消費者照自己的症狀排第一，也不會亂標放大者。
+- **新上線的呼叫路徑**：事件前這條邊不到 `min_requests` 筆，扇出倍數沒有分母，不標 amplifier（舊的流量轉記規則照做）。
+- **放大倍數小**（例：扇出 1.6 倍、門檻調到 1.5）：只轉 `(1 − 1/1.6)` = 37.5% 的增量，受害者仍排第一；放大者排第二、有 `amplifier` 標記，但 RB-08 只看第一名所以不命中。
+- **下游扛得住**：扇出暴增但受害者沒有顯著變化 → 不指名（沒有受害者就沒有放大者）。
+- **模擬器限制**：沒有容量模型，payment-svc 被灌爆後的變慢與 500 是場景直接注入的，不是由流量推出來的；沒有 fire-and-forget 呼叫，13b 的「靜默」靠把 order-svc 排除在監控 target 外＋並行呼叫達成。
+
+### 9.4 與核准規格不同的地方
+1. **RB-04 的放寬是加一條路，不是拿掉 `not sample_failed`**：條件 =「（traffic＋latency 且範例沒失敗）或 有 `ingress_surge` 證據」。沒有 trace 證據、只有指標訊號時，範例失敗仍不開 RB-04——否則任何「流量漲＋變慢＋出錯」都會開容量處方，包含內部放大（該開 RB-08）與單純程式錯誤。
+2. **待決**：入口突波＋`errors` 訊號＋失敗範例同時存在時，RB-03（80）仍排在 RB-04（70）前面，RB-04 只在 `also`。13c 的告警只有 latency 訊號所以主處方是 RB-04；測試 `test_open_decision_rb03_still_outranks_rb04_...` 把現況寫死。要改就是把 RB-04 在有 `ingress_surge` 時提到 80 以上，或讓 RB-03 在有 `ingress_surge` 時讓位。
+3. **放大者自己也被灌流量**（外部流量漲＋它又重試）：只轉 `(1 − 1/min(load, 扇出倍數))`，其餘算外部流量的份；規格沒有寫這個情況。
+4. 舊的 `(1 − 1/load)` 流量轉記規則沒有動；`amplifier` 標記是在它之上多加的判準。
