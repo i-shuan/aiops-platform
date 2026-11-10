@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel
 
+from aiops.engine.rca_types import EvidenceItem, Fact, RcaStatus
 from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
 
 
@@ -320,6 +321,11 @@ class PipelineContext:
     incidents: list[Incident] = field(default_factory=list)
     incidents_built: bool = False  # ensure_incidents 建過了：之後清單變空也不再從 anomalies 重建
     incident_ids: dict[str, int] = field(default_factory=dict)  # 事件群 fingerprint -> 已存的 id（持久化後填）
+    # 認知型 RCA（docs/COGNITIVE_RCA_DESIGN.md）：事實 → LLM 抽出的證據 → 機率排名。status 為 undetermined 時報告照出但沒有根因結論
+    rca_facts: list[Fact] = field(default_factory=list)
+    rca_evidence: list[EvidenceItem] = field(default_factory=list)
+    rca_status: RcaStatus = "ok"
+    rca_undetermined_reason: str = ""  # 連不上、逾時、回傳格式不合、驗證全數被拒 …
     rca_root_candidates: list[RootCandidate] = field(default_factory=list)  # 由 rca.root_cause.* 排序好
     rca_root_algorithm: str = ""
     # 根因演算法的結論說明，例如「證據不足」：沒給候選時報告要講清楚為什麼，不是讓段落默默消失
