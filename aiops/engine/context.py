@@ -403,6 +403,13 @@ class PipelineContext:
                                                          for c in self.rca_root_candidates]}
             if self.rca_mq or self.rca_mq_note:  # 沒有 messaging 資料時回傳的形狀跟以前一樣
                 root_cause["messaging"] = {"note": self.rca_mq_note, "edges": [e.to_dict() for e in self.rca_mq]}
+            if self.rca_facts or self.rca_evidence or self.rca_status != "ok":  # 舊引擎沒有這些，回傳形狀不變
+                root_cause["status"] = self.rca_status
+                root_cause["undetermined_reason"] = self.rca_undetermined_reason
+                out["facts"] = [{"kind": f.kind, "entity": f.entity, "value": f.value, "unit": f.unit,
+                                 "window": f.window, "detail": f.detail} for f in self.rca_facts]
+                out["evidence"] = [{"kind": e.kind, "entity": e.entity, "state": e.state, "confidence": e.confidence,
+                                    "quote": e.quote, "log_ts": e.log_ts} for e in self.rca_evidence]
             out.update(sections=[s.to_dict() for s in self.rca_sections], skipped=self.rca_skipped,
                        root_cause=root_cause,
                        runbook=self.rca_runbook,

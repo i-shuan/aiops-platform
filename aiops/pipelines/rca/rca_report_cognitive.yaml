@@ -1,0 +1,41 @@
+name: rca_report_cognitive
+description: "認知型 RCA：事實 → LLM 證據抽取 → 機率模型排名 → 報告 → LLM 戰情摘要（LLM 失效時報告照出、根因寫無法判定；舊的 rca_report 並存做對照）"
+nodes:
+  # 撈取三段沿用舊管線，參數與 rca_report.yaml 相同（場景 12 的 mutate 用 fetch_traces 這個名稱找節點）
+  - name: fetch_traces
+    operator: ingestion.incident_traces
+    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
+             follow_messaging: true, max_lag_minutes: 120}
+  - name: build_topology
+    operator: rca.build_dynamic_topology
+    params: {mode: merge, min_calls: 1}
+  - name: fetch_logs
+    operator: ingestion.incident_logs
+    params: {source_type: elasticsearch, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
+  # 證據層：原始資料 → 事實。確定性、不呼叫 LLM、不下結論
+  - name: facts
+    operator: rca.facts
+  # LLM 證據抽取（必經、沒有 noop）：供應商看節點 params 或環境變數 AIOPS_LLM_PROVIDER；沒設定、連不上、逾時、
+  # 格式不合、全數被拒 → rca_status=undetermined，報告照出。逾時後不重試（retries: 0）
+  - name: extract_evidence
+    operator: enrichment.extract_evidence
+    params: {timeout_seconds: 30, retries: 0}
+  # 機率排名：undetermined 時不排名、rca_root_note 寫「無法判定」
+  - name: root_cause
+    operator: rca.root_cause.bayes
+  - name: report
+    operator: rca.report
+    params:
+      sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
+                 propagation_path, facts, trace_evidence, log_patterns, similar_cases, suggested_actions]
+      section_params: {trace_evidence: {traces_datasource: apm-traces}}
+  # 戰情摘要：只吃已算好的機率、事實與證據；驗證不過退模板，旁路不影響根因結論
+  - name: narrator
+    operator: enrichment.rca_narrator
+    optional: true
+    params: {timeout_seconds: 30}
+  # 三行式止血摘要沿用舊的（noop 用模板、不連外）
+  - name: briefing
+    operator: enrichment.llm_briefing
+    optional: true
+    params: {provider: noop}
