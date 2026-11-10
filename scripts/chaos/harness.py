@@ -138,9 +138,57 @@ def before(incs: list[dict], entity: str, not_before: datetime) -> list[tuple[in
             if entity in i["incident"]["entities"] and datetime.fromisoformat(i["incident"]["start"]) < not_before]
 
 
-def rca(incident_id: int, mutate=None) -> dict:
-    """完整 rca_report（真實 ingestion.incident_traces／incident_logs、evidence 根因、段落、Runbook、三行摘要）。"""
-    wf = load_workflow(workflow_path("rca_report"))
+# ── RCA 引擎選擇（新舊並排，docs/COGNITIVE_RCA_DESIGN.md §6）──
+# legacy = rca_report（舊判斷層，預設，行為與輸出跟加這段之前逐列相同）；cognitive = rca_report_cognitive（主 session 建立）
+RCA_WORKFLOWS = {"legacy": "rca_report", "cognitive": "rca_report_cognitive"}
+_RCA = {"mode": "legacy", "llm": "faithful"}   # run.py 用 use_rca() 設；llm="yaml" = 不換供應商，照 YAML 原樣跑
+RCA_LOG: list[dict] = []                        # 每次 rca() 的關鍵數字（--compare 並排用）；呼叫端自己清
+
+
+class CognitiveUnavailable(RuntimeError):
+    """cognitive workflow 還沒建立：明確報錯，絕不偷偷退回 legacy。"""
+
+
+def use_rca(mode: str, llm: str = "faithful") -> None:
+    if mode not in RCA_WORKFLOWS:
+        raise ValueError(f"--rca 只能是 {'／'.join(RCA_WORKFLOWS)}，收到 {mode!r}")
+    _RCA.update(mode=mode, llm=llm)
+
+
+def cognitive_missing() -> str:
+    """cognitive workflow 不存在時回原因（給人看的一句話），存在回空字串。"""
+    from aiops.engine.errors import NotFound
+
+    try:
+        workflow_path(RCA_WORKFLOWS["cognitive"])
+    except NotFound:
+        return (f"cognitive workflow 尚未建立：找不到 aiops/pipelines/rca/{RCA_WORKFLOWS['cognitive']}.yaml"
+                "（主 session 在 rca.facts／enrichment.extract_evidence／rca.root_cause.bayes 三段完成後建立）")
+    return ""
+
+
+def _rca_summary(name: str, incident_id: int, ctx, out: dict) -> dict:
+    cands = out.get("root_cause", {}).get("candidates", [])
+    return {"workflow": name, "incident": incident_id, "status": getattr(ctx, "rca_status", ""),
+            "reason": getattr(ctx, "rca_undetermined_reason", ""), "algorithm": out.get("root_cause", {}).get("algorithm", ""),
+            "top": [(c["entity"], c["score"], (c.get("attribution") or {}).get("resource")) for c in cands[:3]],
+            "runbook": (out.get("runbook") or {}).get("id", "(無)"),
+            "evidence": [(e.kind, e.entity) for e in getattr(ctx, "rca_evidence", [])], "facts": len(getattr(ctx, "rca_facts", []))}
+
+
+def rca(incident_id: int, mutate=None, *, mode: str | None = None, llm: str | None = None) -> dict:
+    """完整 RCA 報告（真實 ingestion.incident_traces／incident_logs、根因、段落、Runbook、三行摘要）。
+    mode 不給就用 use_rca() 設的（預設 legacy = rca_report）。cognitive 時 LLM 節點換成腳本化假 LLM（scripted_llm.py，
+    模式 llm，預設 faithful）；workflow 還不存在就丟 CognitiveUnavailable。"""
+    mode, llm = mode or _RCA["mode"], llm or _RCA["llm"]
+    if mode == "cognitive" and (why := cognitive_missing()):
+        raise CognitiveUnavailable(why)
+    name = RCA_WORKFLOWS[mode]
+    wf = load_workflow(workflow_path(name))
+    if mode == "cognitive" and llm != "yaml":
+        from scripts.chaos import scripted_llm
+
+        scripted_llm.wire(wf, llm)
     if mutate:
         mutate(wf)
     ctx = Pipeline(wf, StorageHooks()).run(incident_id=incident_id)
@@ -148,6 +196,7 @@ def rca(incident_id: int, mutate=None) -> dict:
     out["_sections"] = {s["key"]: s["body"] for s in out.get("sections", [])}
     out["_errors"] = [f"{e.entity}: {e.message[:120]}" for e in ctx.errors]
     out["_ctx"] = ctx
+    RCA_LOG.append(_rca_summary(name, incident_id, ctx, out))
     return out
 
 
@@ -169,6 +218,7 @@ class Result:
     checks: list[Check] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     crash: str = ""
+    blocked: str = ""     # 前提不在（例如 cognitive 引擎還沒建立）：不是通過也不是平台失敗，明講沒跑
 
     def check(self, what: str, expected: str, actual, ok: bool, dead: bool = False) -> bool:
         self.checks.append(Check(what, expected, str(actual), bool(ok), dead))
@@ -178,6 +228,8 @@ class Result:
     def verdict(self) -> str:
         if self.crash:
             return "崩潰"
+        if self.blocked:
+            return f"未執行（{self.blocked}）"
         if not all(c.ok for c in self.checks if not c.dead):
             return "未通過"
         dead = [c for c in self.checks if c.dead]
