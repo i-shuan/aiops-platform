@@ -16,6 +16,7 @@ from aiops.engine.context import (
     PipelineContext,
     RecentNotification,
     Silence,
+    TargetError,
     TraceRow,
     TrainingExclusion,
 )
@@ -82,9 +83,12 @@ class StorageHooks:
         ctx.entity_last_seen = {k: as_utc(v) for k, v in Anomalies.entity_last_seen(ctx.pipeline, entities).items()}
 
         for row in ExternalAnomalies.pending(ctx.pipeline):  # 沒有偵測節點，但要記下是哪個外部來源判的
-            ctx.anomalies.append(AnomalyEvent(row["entity"], row["metric"], as_utc(row["ts"]), row["score"],
-                                              row["attrs"] or {}, row["value"], detector=f"external:{row['source']}"))
-            ctx.external_anomaly_ids.append(row["id"])
+            ctx.external_anomaly_ids.append(row["id"])  # 壞掉的那筆也標成已處理：留著的話每一輪都會再撞一次
+            try:
+                ctx.anomalies.append(AnomalyEvent(row["entity"], row["metric"], as_utc(row["ts"]), row["score"], row["attrs"] or {},
+                                                  row["value"], detector=f"external:{row['source']}"))
+            except ValueError as exc:  # 舊資料或繞過 API 寫進來的 NaN／Inf：丟掉這一筆並留紀錄，不讓它拖垮整輪
+                ctx.errors.append(TargetError(row["entity"], f"external:{row['source']}:{exc}"))
 
         if ctx.incident_id is not None:  # RCA：載入指定的事件群與佐證資料
             row = Incidents.get(ctx.incident_id)

@@ -1,6 +1,6 @@
 """DAO 共用的存取函式：回傳一律是 dict（Command 不會拿到 ORM 物件）。
 
-寫入類：create / create_many / update / upsert（用 write_session）
+寫入類：create / create_many / create_many_ignoring_duplicates / update / upsert（用 write_session）
 讀取類：get / find / find_one / max_of（用 read_session）
 節點之間不透過資料庫傳資料（tests/test_architecture.py 檢查）。
 """
@@ -43,6 +43,23 @@ def create_many(model: Any, rows: list[dict[str, Any]]) -> int:
         return 0
     with write_session() as s:
         s.add_all([model(**_clean(r)) for r in rows])
+    return len(rows)
+
+
+def create_many_ignoring_duplicates(model: Any, rows: list[dict[str, Any]]) -> int:
+    """整批新增，撞到唯一鍵的列跳過（INSERT ... ON CONFLICT DO NOTHING）：同一批寫兩次，第二次什麼都不會多。
+    不指定衝突的欄位：資料表還沒有唯一鍵（舊資料庫還沒跑 migration）時就是一般的 INSERT，不會因為找不到對應的鍵而失敗。
+    不拋 IntegrityError，所以可以放在 run_in_transaction 的交易裡（PostgreSQL 交易中一旦出錯，後面的語句全部作廢）。
+    每一列的鍵必須相同（executemany）。回傳這次要求寫入的筆數，不是實際新增的筆數（executemany 的 rowcount 不可靠）。"""
+    if not rows:
+        return 0
+    with write_session() as s:
+        dialect = s.get_bind().dialect.name
+        if dialect in ("postgresql", "sqlite"):
+            insert = (pg_insert if dialect == "postgresql" else sqlite_insert)(model)
+            s.execute(insert.on_conflict_do_nothing(), [_clean(r) for r in rows])
+        else:  # 其他資料庫沒有共通語法：退回一般新增（撞鍵會拋錯）
+            s.add_all([model(**_clean(r)) for r in rows])
     return len(rows)
 
 

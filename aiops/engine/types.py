@@ -4,7 +4,9 @@
 """
 from __future__ import annotations
 
+import math
 import uuid
+from numbers import Real
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -45,6 +47,17 @@ class AnomalyEvent:
     voted_by: tuple[str, ...] = ()
     # anomaly（越過門檻）或 warning（接近門檻的預警，偵測節點設了 warning_ratio 才會有）
     level: str = ANOMALY
+
+    def __post_init__(self) -> None:
+        """NaN／±Inf 在入口就拒絕：分數是 NaN 的事件排序、比大小、多數決全部靜默算錯（NaN 跟誰比都是 False），
+        寫進 JSON 欄位還會變成不合法的 JSON。偵測器算出非有限分數是 bug 或壞資料，要讓那條序列報錯，不是悄悄變成一筆異常。
+        bool 不是數值（True 會被當成 1.0 分）。"""
+        for name, number in (("score", self.score), ("value", self.value)):
+            if name == "value" and number is None:
+                continue  # 外部匯入的異常可以沒有原始值
+            if isinstance(number, bool) or not isinstance(number, Real) or not math.isfinite(number):
+                raise ValueError(f"AnomalyEvent.{name} 必須是有限數值，收到 {number!r}"
+                                 f"（entity={self.entity!r}, detector_node={self.detector_node!r}, ts={self.ts}）")
 
     def to_dict(self) -> dict[str, Any]:
         return {"entity": self.entity, "metric": self.metric, "ts": self.ts.isoformat(),

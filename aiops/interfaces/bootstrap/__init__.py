@@ -1,7 +1,11 @@
 import importlib
+import math
 import pkgutil
+from typing import Any
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from aiops.interfaces import api
@@ -26,7 +30,24 @@ def init_routers(app: FastAPI) -> None:
             app.include_router(router, dependencies=[Depends(require_token)])
 
 
+def _json_safe(value: Any) -> Any:
+    """NaN／±Infinity 換成字串：JSON 沒有這三個值，原樣放進回應會讓序列化失敗。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def init_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_: Request, exc: RequestValidationError):
+        # 跟 FastAPI 預設的 422 同一個形狀。差別只有一個：請求帶 NaN／Infinity 被擋下時，預設處理會把原值放進
+        # detail.input 再序列化，結果是序列化失敗、客戶端收到 500 而不是 422
+        return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
+
     @app.exception_handler(PlatformError)
     async def _platform_error(_: Request, exc: PlatformError):
         return JSONResponse(status_code=exc.status_code, content={"message": str(exc)})

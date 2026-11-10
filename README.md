@@ -563,6 +563,18 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0005_knowledge_golden_i
 psql -h <host> -U <user> -d aiops -f migrations/postgres/0006_service_edges_last_seen.sql
 ```
 
+```bash
+psql -h <host> -U <user> -d aiops -f migrations/postgres/0007_service_async_edges.sql
+```
+
+```bash
+psql -h <host> -U <user> -d aiops -f migrations/postgres/0008_anomalies_unique_key.sql
+```
+
+`0008` 替 `anomalies` 補上唯一鍵 `uq_anomalies_key`（pipeline, entity, metric, ts, detector_node）：同一輪被重跑（兩個 worker 重疊、寫入後行程被殺再重來）時，新版程式撞到鍵就跳過（`INSERT ... ON CONFLICT DO NOTHING`，留先寫的那筆），不會寫出兩份。**這個檔會刪資料**：建索引前先刪既有的重複列（同一個鍵留 `id` 最小的），刪幾筆印在 NOTICE；想先看會刪幾筆的查詢、回滾 SQL 都在檔案開頭。新版程式在還沒跑 `0008` 的資料庫上照常能寫（只是沒有去重效果）；舊版程式在跑過 `0008` 的資料庫上重跑同一輪會撞唯一鍵、那一輪失敗。
+
+> 實測（PostgreSQL 16.15 容器，`anomalies` 200 萬筆／295 MB，其中 1,050 組重複）：刪掉 1,050 筆重複列＋建索引共 7.7 秒（這段時間 `anomalies` 不能寫、可以讀），索引 129 MB；重複執行 81 ms、只出 NOTICE；另一個連線有未提交的寫入時等滿 5 秒報 `lock timeout` 放棄、什麼都沒改；回滾後再升級結果相同，索引定義跟程式自動建表的逐字一致。**限制**：鍵的四個字串欄位合計超過約 2,700 bytes 的列寫不進去（btree 上限；四欄全部塞滿中文才 3,072 bytes，全部塞滿 ASCII 是 1,024 bytes，實測 entity 60 字＋metric 200 字中文可以寫）。
+
 `0005` 把經驗庫升級成黃金事故庫：加 `verdict`（既有的列都是「確認為真、寫了處置」才進來的，回填 `true_positive`）、`severity`、`window_start`／`window_end`（從事件群快照回填）、`context`（JSONB＋GIN 索引；程式自動建的 JSON 欄位會轉成 JSONB）、`updated_at`，以及 (pipeline, window_start)、(verdict, window_start) 索引。已在 PostgreSQL 16 實跑過兩條路徑（舊 schema 升級＋回填時窗、程式自動建表後把 JSON 轉成 JSONB），連跑三次只有 NOTICE；仍請先在你的測試庫試一次再上正式庫。
 
 執行前先停掉排程與 API。`0004` 加上異常的等級欄位（`anomaly`／`warning`），既有資料一律是 `anomaly`。它帶 `lock_timeout = '5s'`：拿不到鎖就整個放棄（什麼都沒改），找空檔重跑；回滾 SQL 寫在檔案開頭的註解。
