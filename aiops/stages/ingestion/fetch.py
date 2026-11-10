@@ -21,6 +21,7 @@ import pandas as pd
 from aiops.engine.context import LogRecord, PipelineContext, SpanRecord, TargetError
 from aiops.engine.errors import BadRequest, InfrastructureError, NoDataError, NotFound
 from aiops.engine.mq import age_p95_ms, build_edges, consumer_entries, spread, unresolved_trace_ids
+from aiops.engine.params import positive
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.sources import get_datasource_spec, is_configured
@@ -114,8 +115,11 @@ class FetchOperator(BaseOperator):
     def __init__(self, lookback_minutes: int = 60, step_seconds: int = 60,
                  train_lookback_minutes: int | None = None, retrain_minutes: int = 1440,
                  lags_minutes: list[int] | None = None):
-        if lookback_minutes <= 0 or step_seconds <= 0:
-            raise ValueError("lookback_minutes、step_seconds 必須大於 0")
+        for key, value in (("lookback_minutes", lookback_minutes), ("step_seconds", step_seconds),
+                           ("retrain_minutes", retrain_minutes), ("train_lookback_minutes", train_lookback_minutes)):
+            if key == "train_lookback_minutes" and value is None:
+                continue  # 不寫 = 不抓訓練窗
+            positive(key, value)
         lags = [int(m) for m in (lags_minutes or [])]
         if any(m <= 0 for m in lags):
             raise ValueError("lags_minutes 必須都大於 0")

@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from aiops.engine.context import PipelineContext
+from aiops.engine.params import number
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import DEFAULT_SEVERITY, WARNING, GrafanaLinks, Incident, Notification, as_utc
 from aiops.stages._common import FATAL_TAG, ensure_incidents, tagged_with
@@ -117,7 +118,16 @@ class NotifyPayload(BaseOperator):
 
     def __init__(self, severity_thresholds: dict[str, float] | None = None, notify_warnings: bool = True,
                  links: dict | None = None):
-        self.thresholds = {k: float(v) for k, v in (severity_thresholds or DEFAULT_SEVERITY).items()}
+        if severity_thresholds is not None and (not isinstance(severity_thresholds, dict) or not severity_thresholds):
+            raise TypeError(f"severity_thresholds 必須是「嚴重度: 最低分數」的對照，不是 {severity_thresholds!r}")
+        unknown = sorted(set(severity_thresholds or ()) - set(DEFAULT_SEVERITY))
+        if unknown:  # 打錯的等級（p0、PO）會變成一個排不進升級順序的新等級
+            raise TypeError(f"severity_thresholds 有不認得的嚴重度 {unknown}；可用：{sorted(DEFAULT_SEVERITY)}")
+        self.thresholds = {k: number(f"severity_thresholds.{k}", v, minimum=0)
+                           for k, v in (severity_thresholds or DEFAULT_SEVERITY).items()}
+        ordered = [self.thresholds[k] for k in sorted(self.thresholds)]  # P0、P1、P2、P3
+        if any(high <= low for high, low in zip(ordered, ordered[1:])):
+            raise ValueError(f"severity_thresholds 必須 P0 > P1 > P2 > P3（越嚴重門檻越高），不是 {self.thresholds}")
         self.notify_warnings = bool(notify_warnings)
         self.links = dict(links or {})
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from aiops.engine.errors import WorkflowError
+from aiops.engine.errors import WorkflowError, WorkflowParamError
 
 
 class OperatorRegistry:
@@ -45,3 +45,5 @@ class OperatorRegistry:
             return op_cls(**(params or {}))
         except TypeError as e:
             raise WorkflowError(f"算子 {name} 的參數不合法：{e}") from e
+        except ValueError as e:  # 數值超出範圍（threshold: -3、window_minutes: 0）：以前原樣漏出去，API 會變 500
+            raise WorkflowParamError(f"算子 {name} 的參數不合法：{e}") from e

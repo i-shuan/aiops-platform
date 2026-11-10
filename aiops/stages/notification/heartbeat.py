@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from aiops.engine.context import PipelineContext
+from aiops.engine.params import positive
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.notification.payload import build_notifications
@@ -30,7 +31,7 @@ class Heartbeat(BaseOperator):
     scope = "batch"
 
     def __init__(self, resolve_after_minutes: float = 15):
-        self.quiet_after = timedelta(minutes=float(resolve_after_minutes))
+        self.quiet_after = timedelta(minutes=positive("resolve_after_minutes", resolve_after_minutes))
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         now = as_utc(ctx.now)

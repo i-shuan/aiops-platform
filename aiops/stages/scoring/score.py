@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from aiops.engine.context import PipelineContext
+from aiops.engine.params import positive
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import DEFAULT_SEVERITY
 from aiops.engine.operator import NodeInfo
@@ -18,7 +19,7 @@ class GoldenSignalsScorer(BaseOperator):
     scope = "batch"
 
     def __init__(self, boost: float = 1.5, signals: list[str] | None = None):
-        self.boost = float(boost)
+        self.boost = positive("boost", boost)  # 乘數：0 會把分數歸零、負數會讓事件群排到最後
         self.signals = set(signals or GOLDEN_SIGNALS)
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
@@ -37,7 +38,7 @@ class P0BoostScorer(BaseOperator):
 
     def __init__(self, entities: list[str] | None = None, boost: float = 10):
         self.entities = set(entities or [])
-        self.boost = float(boost)
+        self.boost = positive("boost", boost)
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         for inc in ensure_incidents(ctx):

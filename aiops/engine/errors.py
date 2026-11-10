@@ -36,3 +36,11 @@ class InfrastructureError(PlatformError):
 
 class WorkflowError(BadRequest):
     """Workflow 定義本身有錯（未註冊的算子、拼錯參數、順序不對）。啟動時就要擋下，不是執行期才發現。"""
+
+
+class WorkflowParamError(WorkflowError, ValueError):
+    """算子參數的值不合法（threshold: -3、window_minutes: 0）。
+
+    是 WorkflowError：載入 workflow 時就擋下、API 回 400。同時是 ValueError：算子的 __init__ 本來就丟 ValueError，
+    直接呼叫 OperatorRegistry.create 的程式照舊接得到，訊息也還在。
+    """

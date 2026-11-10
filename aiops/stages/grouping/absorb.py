@@ -15,6 +15,7 @@ from datetime import timedelta
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.operator import BaseOperator
+from aiops.engine.params import positive
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import Incident, as_utc
 from aiops.stages._common import ensure_incidents
@@ -32,7 +33,7 @@ class AbsorbOpenIncidents(BaseOperator):
     scope = "batch"
 
     def __init__(self, resolve_after_minutes: float = 15):
-        self.max_gap = timedelta(minutes=float(resolve_after_minutes))
+        self.max_gap = timedelta(minutes=positive("resolve_after_minutes", resolve_after_minutes))
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         opened = sorted(ctx.open_incidents, key=lambda o: o.incident.start)

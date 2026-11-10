@@ -5,6 +5,7 @@ execute 一律用「新建的演算法實例」跑，所以同一個算子可以
 from __future__ import annotations
 
 import io
+import math
 from abc import abstractmethod
 from typing import Any, ClassVar
 
@@ -61,6 +62,8 @@ class DetectorOperator(BaseOperator):
         if self.min_train_points < 1:
             raise TypeError("min_train_points 至少 1")
         self.params = params
+        # 建立時就檢查寫了的值在不在範圍內：節點 YAML 寫 threshold: -3 在載入 workflow 時就報錯，不是等到第一輪偵測
+        self.check_ranges()
         self.fitted = False
         # detect 過程中要讓維運看到、但不是異常的事（例如資料值超出物理可能被當成壞資料）。
         # execute 每次都新建演算法實例，所以這份清單只活一次 execute，不會跨序列、跨輪次累積
@@ -84,11 +87,21 @@ class DetectorOperator(BaseOperator):
 
     # ── 共用 ──
 
-    def validate_params(self) -> None:
-        """參數不合理就丟 ValueError。預設檢查 tunable 範圍。"""
+    def check_ranges(self) -> None:
+        """「寫了的值」合不合理（不管有沒有寫齊）：__init__ 會呼叫，所以節點 YAML、target overrides、調參提案
+        都在建立的當下擋掉。預設檢查 tunable 的範圍；有其他參數的演算法覆寫時記得呼叫 super()。"""
         for key, (_default, low, high) in self.tunable.items():
-            if key in self.params and not (low <= float(self.params[key]) <= high):
-                raise ValueError(f"{self.operator_name}.{key}={self.params[key]} 超出範圍 [{low}, {high}]")
+            if key not in self.params:
+                continue
+            value = self.params[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{self.operator_name}.{key} 必須是有限的數值，不是 {value!r}")
+            if not low <= value <= high:
+                raise ValueError(f"{self.operator_name}.{key}={value} 超出範圍 [{low}, {high}]")
+
+    def validate_params(self) -> None:
+        """各層參數合併之後、真的要用之前的檢查（範圍，加上「有沒有寫齊」）。不合理就丟 ValueError。"""
+        self.check_ranges()
 
     def check_override(self, override: dict[str, Any]) -> None:
         """target overrides 的載入期檢查：參數名稱要合法、合併後要通過範圍檢查；路由參數不准寫在 target 上。"""
@@ -129,8 +142,8 @@ class DetectorOperator(BaseOperator):
             ctx.log(f"detect:{key}:no-peers:abstain")  # peer_group 只撈到自己：沒得比就棄權，不投反對票
             return ctx
 
-        algo = type(self)(**self.effective_params(ctx))
         try:
+            algo = type(self)(**self.effective_params(ctx))
             algo.validate_params()
         except ValueError as e:
             raise BadRequest(str(e)) from e

@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from aiops.engine.context import PipelineContext, Silence
+from aiops.engine.params import positive
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, Incident, as_utc, gap_seconds
 from aiops.stages._common import ensure_incidents, tagged_with
@@ -60,7 +61,7 @@ class SameRootCauseSuppressor(BaseOperator):
 
     def __init__(self, window_minutes: float = 30, exempt_tags: list[str] | None = None):
         # exempt_tags：帶這些標籤的事件群不被當成症狀抑制（例如 [fatal]：踩到致命硬上限的服務就算下游也在告警，自己那張也要發）
-        self.window = float(window_minutes) * 60
+        self.window = positive("window_minutes", window_minutes) * 60
         self.exempt_tags = _tag_list("exempt_tags", exempt_tags)
 
     def _reason(self, inc: Incident, index: int, batch: list[Incident], edges: set[tuple[str, str]]) -> str | None:
@@ -100,7 +101,7 @@ class DedupSuppressor(BaseOperator):
                  escalate_until: str = "P0"):
         # escalate_tags：帶這些標籤的事件群視為升級（例如 [fatal]）——上一次通知的嚴重度還不到 escalate_until 就照發，
         # 不被冷卻擋掉；上一次已經是 escalate_until 才照常去重
-        self.cooldown = float(cooldown_minutes) * 60
+        self.cooldown = positive("cooldown_minutes", cooldown_minutes) * 60
         self.escalate_tags = _tag_list("escalate_tags", escalate_tags)
         self.escalate_until = str(escalate_until)
 

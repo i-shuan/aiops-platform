@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from aiops.engine.context import PipelineContext
+from aiops.engine.params import number, positive, whole
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import gap_seconds, merge_incidents
 from aiops.stages._common import ensure_incidents
@@ -15,7 +16,7 @@ class SameEntityGrouper(BaseOperator):
     scope = "batch"
 
     def __init__(self, window_minutes: float = 10):
-        self.window = float(window_minutes) * 60
+        self.window = positive("window_minutes", window_minutes) * 60
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         ctx.incidents = merge_incidents(
@@ -33,7 +34,7 @@ class TopologyChainGrouper(BaseOperator):
     scope = "batch"
 
     def __init__(self, window_minutes: float = 10):
-        self.window = float(window_minutes) * 60
+        self.window = positive("window_minutes", window_minutes) * 60
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incidents = ensure_incidents(ctx)
@@ -72,6 +73,9 @@ class MessagingLinkGrouper(BaseOperator):
     scope = "batch"
 
     def __init__(self, min_window_minutes: float = 10, max_window_minutes: float = 120, lag_factor: float = 1.5):
+        for key, value in (("min_window_minutes", min_window_minutes), ("max_window_minutes", max_window_minutes),
+                           ("lag_factor", lag_factor)):
+            number(key, value)
         if min_window_minutes < 0 or max_window_minutes < min_window_minutes or lag_factor <= 0:
             raise ValueError("min_window_minutes 不能小於 0；max_window_minutes 要大於等於 min_window_minutes；lag_factor 必須大於 0")
         self.min_window, self.max_window = float(min_window_minutes) * 60, float(max_window_minutes) * 60
@@ -106,8 +110,8 @@ class LotPathChainGrouper(BaseOperator):
     scope = "batch"
 
     def __init__(self, window_minutes: float = 60, min_lots: int = 1):
-        self.window = float(window_minutes) * 60
-        self.min_lots = int(min_lots)
+        self.window = positive("window_minutes", window_minutes) * 60
+        self.min_lots = whole("min_lots", min_lots)
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incidents = ensure_incidents(ctx)

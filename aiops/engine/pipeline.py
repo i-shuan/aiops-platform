@@ -30,12 +30,19 @@ logger = logging.getLogger("aiops.engine")
 SourceType = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
-class PeerSpec(BaseModel):
+class StrictModel(BaseModel):
+    """workflow 定義與 API 請求的共同基底：不認得的欄位直接報錯（YAML 載入失敗、API 回 422）。
+    Pydantic 預設會把多出來的欄位默默丟掉——`param:`（少了 s）、`windw_days:` 這種筆誤就變成「設定沒生效但也沒人知道」。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PeerSpec(StrictModel):
     source_type: SourceType
     query: str
 
 
-class PeerGroupSpec(BaseModel):
+class PeerGroupSpec(StrictModel):
     """動態同儕：query 撈回整群序列、依 by 標籤分成員。query 可用 ${屬性名} 引用 target 的 attrs。"""
 
     query: str
@@ -43,10 +50,8 @@ class PeerGroupSpec(BaseModel):
     source_type: str = ""  # 空 = 跟 target 同一個資料源
 
 
-class TargetSpec(BaseModel):
+class TargetSpec(StrictModel):
     # 拼錯欄位（例如 detector: 少了 s）直接報錯；不然白名單會被默默忽略、變成全部偵測器都跑
-    model_config = ConfigDict(extra="forbid")
-
     source_type: SourceType
     query: str
     entity: str | None = None
@@ -71,7 +76,7 @@ class TargetSpec(BaseModel):
                       {k: dict(v) for k, v in self.overrides.items()})
 
 
-class NodeSpec(BaseModel):
+class NodeSpec(StrictModel):
     name: str
     operator: str
     params: dict[str, Any] = Field(default_factory=dict)
@@ -80,7 +85,7 @@ class NodeSpec(BaseModel):
     optional: bool = False
 
 
-class Workflow(BaseModel):
+class Workflow(StrictModel):
     name: str
     description: str = ""
     nodes: list[NodeSpec] = Field(min_length=1)

@@ -16,12 +16,15 @@ import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 _PERCENTILES = {"p95": 95.0, "p99": 99.0}
 
 
 class EsMetricQuery(BaseModel):
+    # 打錯的鍵（fliter、value_feild）以前被默默丟掉：少了 filter 就變成整個 index 的平均，數字照出、沒人發現
+    model_config = ConfigDict(extra="forbid")
+
     index: str
     time_field: str = "@timestamp"
     value_field: str | None = None

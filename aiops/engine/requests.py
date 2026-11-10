@@ -1,15 +1,17 @@
-"""API 與手動動作的請求型別（Pydantic）。API 層與控制面（admin）算子共用，所以放在 engine。"""
+"""API 與手動動作的請求型別（Pydantic）。API 層與控制面（admin）算子共用，所以放在 engine。
+
+全部繼承 StrictModel：請求裡多了不認得的欄位（window_day 少了 s、threshold 放錯層）回 422，不會默默用預設值跑完。"""
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
-from aiops.engine.pipeline import PeerGroupSpec, PeerSpec, SourceType, TargetSpec
+from aiops.engine.pipeline import PeerGroupSpec, PeerSpec, SourceType, StrictModel, TargetSpec
 
 
-class TimeRangeIn(BaseModel):
+class TimeRangeIn(StrictModel):
     start: datetime
     end: datetime
     step_seconds: int = Field(60, gt=0)
@@ -21,7 +23,7 @@ class TimeRangeIn(BaseModel):
         return self
 
 
-class MetricIn(BaseModel):
+class MetricIn(StrictModel):
     source_type: SourceType  # 必填：漏寫回 400，不再默默退回 mock 假資料
     query: str
 
@@ -33,7 +35,7 @@ class MetricIn(BaseModel):
 WorkflowName = Field(pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
 
 
-class RunWorkflowRequest(BaseModel):
+class RunWorkflowRequest(StrictModel):
     workflow: str = WorkflowName
     # 不給就用 workflow 檔裡的 targets
     targets: list[TargetSpec] | None = None
@@ -41,27 +43,27 @@ class RunWorkflowRequest(BaseModel):
     now: datetime | None = None
 
 
-class RcaRequest(BaseModel):
+class RcaRequest(StrictModel):
     incident_id: int
     workflow: str = Field("rca_report", pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
 
 
-class IdRef(BaseModel):
+class IdRef(StrictModel):
     id: int
 
 
-class SourceRef(BaseModel):
+class SourceRef(StrictModel):
     source_type: str
 
 
-class UidRef(BaseModel):
+class UidRef(StrictModel):
     uid: str
 
 
 # ── 靜音與事件群 ──
 
 
-class SilenceCreate(BaseModel):
+class SilenceCreate(StrictModel):
     kind: Literal["mute", "maintenance", "exclusion"]
     start: datetime
     end: datetime
@@ -80,14 +82,14 @@ class SilenceCreate(BaseModel):
 # ── 欄位對照 ──
 
 
-class MappingSubmit(BaseModel):
+class MappingSubmit(StrictModel):
     source_type: str
     # 來源欄位 -> 標準欄位（ts／value／entity）
     fields: dict[str, str] = Field(min_length=1)
     submitter: str
 
 
-class MappingApprove(BaseModel):
+class MappingApprove(StrictModel):
     mapping_id: int
     approver: str
 
@@ -95,7 +97,7 @@ class MappingApprove(BaseModel):
 # ── 匯入與合成 ──
 
 
-class SpanIn(BaseModel):
+class SpanIn(StrictModel):
     trace_id: str
     service: str
     start: datetime
@@ -105,13 +107,13 @@ class SpanIn(BaseModel):
     parent_id: str | None = None
 
 
-class TraceMerge(BaseModel):
+class TraceMerge(StrictModel):
     spans: list[SpanIn] = Field(min_length=1)
     step_seconds: int = Field(60, gt=0)
     persist: bool = True
 
 
-class TopologyRefresh(BaseModel):
+class TopologyRefresh(StrictModel):
     """admin.topology_refresh：從 trace 來源撈 [end − lookback_minutes, end] 的 span，把服務呼叫邊沉澱進 service_edges。"""
 
     source_type: SourceType = "elasticsearch"
@@ -121,7 +123,7 @@ class TopologyRefresh(BaseModel):
     end: datetime | None = None  # 回放歷史用；不給 = 現在
 
 
-class LotStepIn(BaseModel):
+class LotStepIn(StrictModel):
     lot_id: str
     station: str
     equipment: str
@@ -136,12 +138,12 @@ class LotStepIn(BaseModel):
         return self
 
 
-class LotPathsMerge(BaseModel):
+class LotPathsMerge(StrictModel):
     steps: list[LotStepIn] = Field(min_length=1, max_length=50000)
     persist: bool = True
 
 
-class ExternalAnomalyIn(BaseModel):
+class ExternalAnomalyIn(StrictModel):
     external_id: str
     entity: str
     metric: str
@@ -151,7 +153,7 @@ class ExternalAnomalyIn(BaseModel):
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 
-class IngestAnomalies(BaseModel):
+class IngestAnomalies(StrictModel):
     pipeline: str
     source: str
     anomalies: list[ExternalAnomalyIn] = Field(min_length=1, max_length=5000)
@@ -160,7 +162,7 @@ class IngestAnomalies(BaseModel):
 # ── 調參 ──
 
 
-class ProposalCreate(BaseModel):
+class ProposalCreate(StrictModel):
     source: Literal["auto", "llm", "manual"]
     detector: str  # 算子名，例如 detector.zscore
     params: dict[str, Any] = Field(default_factory=dict)
@@ -171,7 +173,7 @@ class ProposalCreate(BaseModel):
     entity: str = Field("*", min_length=1, max_length=256)
 
 
-class ProposalBacktest(BaseModel):
+class ProposalBacktest(StrictModel):
     proposal_id: int
     metric: MetricIn
     time_range: TimeRangeIn
@@ -190,12 +192,12 @@ class ProposalBacktest(BaseModel):
                            peers=[PeerSpec(source_type=p.source_type, query=p.query) for p in self.peers])]
 
 
-class ProposalApprove(BaseModel):
+class ProposalApprove(StrictModel):
     proposal_id: int
     approver: str
 
 
-class FeedbackSubmit(BaseModel):
+class FeedbackSubmit(StrictModel):
     """兩種回饋：
     - 針對某個事件群：給 incident_uid（誤報、確認、或「有告警但太晚／太輕」的漏報）
     - 真正的漏報（平台根本沒告警）：不給 incident_uid，改給 pipeline + entity + time_range（事情實際發生的時段）
@@ -233,7 +235,7 @@ class FeedbackSubmit(BaseModel):
         return self
 
 
-class FeedbackPropose(BaseModel):
+class FeedbackPropose(StrictModel):
     feedback_id: int
     proposer: str
     detector: str | None = None
@@ -243,7 +245,7 @@ class FeedbackPropose(BaseModel):
     entity: str | None = None
 
 
-class SeriesProfile(BaseModel):
+class SeriesProfile(StrictModel):
     """序列體檢（admin.series_profile）：撈 days 天的序列，算 24h／168h 自相關、偏態、峰度。
     沒有日週期也沒有週週期時，產生「把 detector.hourly_baseline 從這個 target 排除」的建議（advisory，要改 YAML 才生效）。
     end 不給 = 現在；回放歷史資料時給資料的最後時間。"""
@@ -260,14 +262,14 @@ class SeriesProfile(BaseModel):
         return [TargetSpec(source_type=self.metric.source_type, query=self.metric.query, entity=self.entity)]
 
 
-class TuningMetricsQuery(BaseModel):
+class TuningMetricsQuery(StrictModel):
     """調參成效報表：每個核准過的調參，在核准前後各 window_days 天的事件群與誤報數。只看最近 lookback_days 天內核准的。"""
 
     window_days: int = Field(7, ge=1, le=90)
     lookback_days: int = Field(90, ge=1, le=365)
 
 
-class RulePromote(BaseModel):
+class RulePromote(StrictModel):
     """規則升級：同一層（偵測器 × 管線 × 實體）在 window_days 天內被核准調參 >= min_approvals 次，
     就用它目前的基準線產生一個 detector.rules 靜態規則的提案（仍要回測、核准才生效）。"""
 

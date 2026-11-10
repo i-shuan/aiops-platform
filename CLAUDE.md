@@ -229,6 +229,11 @@ nodes:
 
 **workflow 只能用名稱**：API 的 `workflow` 欄位只接受 `[A-Za-z0-9_-]+` 的內建名稱（`interfaces/runner.workflow_path`，在 `pipelines/` 所有子資料夾依名稱找檔，名稱重複直接報錯），絕不接受路徑；只有排程 CLI 可以用 `allow_file=True` 載入自己的 YAML 檔。
 
+**寫錯就在載入期報錯**（`tests/test_load_time_validation.py`）：
+ * 值不合理（`threshold: -3`、`window_minutes: 0`、`cooldown_minutes: -5`）由算子的 `__init__` 檢查，用 `engine/params` 的 `number`／`positive`／`whole` 丟 `ValueError`；`OperatorRegistry.create` 轉成 `WorkflowParamError`（是 `WorkflowError` 也是 `ValueError`）。新算子的窗口、冷卻、門檻、權重參數一律在 `__init__` 檢查，不准拖到 `execute`。
+ * 偵測器的 `tunable` 範圍由基底 `DetectorOperator.__init__` 的 `check_ranges()` 檢查（節點 YAML、target `overrides`、執行期合併後的參數都會經過）；需要額外檢查就覆寫 `check_ranges`，「合併後才知道齊不齊」的檢查（`detector.rules` 至少要有一條規則）才放 `validate_params`。
+ * 欄位打錯（`param:`、`optionl:`、`windw_days:`、ES 查詢的 `fliter`）：`aiops/engine`、`aiops/sources` 的 Pydantic 模型一律繼承 `engine/pipeline.StrictModel`（或自己設 `extra="forbid"`），測試會掃。
+
 **並發安全**：偵測器基準線（`detector_models`）與現行參數（`active_detector_configs`）用 `version` 欄位做樂觀鎖，寫入必須帶讀取當時的版本；版本已被別人推進就不覆蓋（基準線記在 audit，調參核准回 409 並把提案標成 stale）。
 
 ---

@@ -1,6 +1,7 @@
 import pandas as pd
 
 from aiops.engine.context import AnomalyResult
+from aiops.engine.params import number
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.detectors.base import DetectorOperator, limit_breach
 
@@ -25,11 +26,24 @@ class StaticRuleDetector(DetectorOperator):
     def can_evaluate(self, df: pd.DataFrame) -> bool:
         return self.has_rule  # require_rule=false 又沒有規則：不判也不投票（棄權），不是「看過了沒異常」
 
+    def check_ranges(self) -> None:
+        bounds = {}
+        for key in ("upper", "lower"):
+            if self.params.get(key) is not None:
+                bounds[key] = number(f"detector.rules 的 {key}", self.params[key])
+        if len(bounds) == 2 and bounds["lower"] >= bounds["upper"]:
+            raise ValueError(f"detector.rules 的 lower（{bounds['lower']:g}）必須小於 upper（{bounds['upper']:g}）")
+        consecutive = self.params.get("consecutive", 1)
+        if isinstance(consecutive, bool) or not isinstance(consecutive, int) or consecutive < 1:
+            raise ValueError(f"consecutive 必須 >= 1 的整數，不是 {consecutive!r}")
+        if not isinstance(self.params.get("require_rule", True), bool):
+            raise ValueError(f"require_rule 只能是 true／false，不是 {self.params['require_rule']!r}")
+
     def validate_params(self) -> None:
+        self.check_ranges()
+        # 「有沒有規則」要等各層合併完才知道（規則可以來自 target overrides 或核准的提案），所以不在建立時檢查
         if not self.has_rule and self.params.get("require_rule", True):
             raise ValueError("detector.rules 至少要給 upper 或 lower")
-        if int(self.params.get("consecutive", 1)) < 1:
-            raise ValueError("consecutive 必須 >= 1")
 
     def fit(self, df: pd.DataFrame) -> "StaticRuleDetector":
         self.fitted = True

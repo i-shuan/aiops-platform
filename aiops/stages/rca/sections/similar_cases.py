@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from aiops.engine.params import number
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.signature import incident_signature, jaccard
 from aiops.stages.rca.base import RcaSection
@@ -19,6 +20,11 @@ class SimilarCases(RcaSection):
                  w_metrics: float = 0.3, w_signals: float = 0.2, same_pipeline_bonus: float = 0.1):
         if top_k < 1 or not 0 <= min_similarity <= 1:
             raise ValueError("top_k 至少 1；min_similarity 必須在 0 到 1 之間")
+        for key, value in (("w_entities", w_entities), ("w_metrics", w_metrics), ("w_signals", w_signals),
+                           ("same_pipeline_bonus", same_pipeline_bonus)):
+            number(key, value, minimum=0)  # 負的權重會讓「越像」分數越低
+        if w_entities + w_metrics + w_signals <= 0:
+            raise ValueError("w_entities、w_metrics、w_signals 不能全是 0（什麼都比不出來）")
         self.top_k, self.min_similarity = int(top_k), float(min_similarity)
         self.weights = (float(w_entities), float(w_metrics), float(w_signals))
         self.bonus = float(same_pipeline_bonus)

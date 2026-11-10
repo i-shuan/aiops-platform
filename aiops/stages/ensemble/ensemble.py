@@ -32,6 +32,7 @@ workflow 裡沒有的偵測節點名稱也是。
 from __future__ import annotations
 
 from aiops.engine.context import PipelineContext
+from aiops.engine.params import whole
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent
 from aiops.engine.operator import BaseOperator, NodeInfo
@@ -50,8 +51,12 @@ class EnsembleOperator(BaseOperator):
             raise TypeError(f"strategy 只能是 {', '.join(STRATEGIES)}，不是 {strategy!r}")
         if tie_breaker not in TIE_BREAKERS:
             raise TypeError(f"tie_breaker 只能是 {', '.join(TIE_BREAKERS)}，不是 {tie_breaker!r}")
-        if strategy == "at_least" and (min_votes is None or int(min_votes) < 1):
+        if min_votes is not None:
+            whole("min_votes", min_votes)
+        if strategy == "at_least" and min_votes is None:
             raise TypeError("strategy=at_least 必須給 min_votes（至少 1）")
+        if strategy != "at_least" and min_votes is not None:  # 以前會被默默忽略：以為設了 2 票其實照 strategy 走
+            raise TypeError(f"min_votes 只有 strategy=at_least 才有作用（現在是 {strategy}）")
         self.strategy = strategy
         self.nodes = list(nodes) if nodes else None
         self.min_votes = int(min_votes) if min_votes is not None else None

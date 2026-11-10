@@ -52,7 +52,7 @@ class HardLimitDetector(DetectorOperator):
     def can_evaluate(self, df: pd.DataFrame) -> bool:
         return self.has_limit  # 這條序列沒訂任何界線：棄權（不進 detector_runs），不是「看過了沒事」
 
-    def validate_params(self) -> None:
+    def check_ranges(self) -> None:
         ceiling, lower = self._num("fatal_ceiling"), self._num("fatal_lower")
         top, bottom = self._num("plausible_max"), self._num("plausible_min")
         for key in ("max_rise", "max_drop", "max_deviation_ratio"):
