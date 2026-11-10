@@ -117,6 +117,16 @@ class RootCandidate:
 | RB-F1 製程機台 | `metric_tokens ∩ {"rf", "power", "pressure", "temp", "vacuum", "flow"}` 或 `signals` 含這些字 | 保留今天工廠那條：PM 紀錄與近期 recipe 變更 |
 | RB-00 保底 | 一條都沒命中 | 比對事件前後的變更紀錄（部署、設定、配方）；再附「這次沒有命中任何故障特徵」一句，讓人知道是保底 |
 
+**後續新增（日誌特徵處方，priority 介於 RB-07 與 RB-02 之間）**：`facts.log_patterns` 是嫌疑服務（第一名候選；沒有候選時是事件裡的實體）依暴增倍率排好的前 3 個錯誤日誌樣板。只在「問題在服務自己或它的資料庫／快取」（沒有主導的下游 `share < 0.3`，或歸因是 db／cache）且非 `insufficient` 時比對；樣板必須是突發的（正常期間沒出現，或頻率 ≥ 3 倍）。
+
+| id | 日誌關鍵字（不分大小寫，比對例外類型＋樣板＋範例） | 處方 |
+|---|---|---|
+| RB-09 記憶體耗盡（93） | `OutOfMemory`、`OOMKilled`、`Java heap space`、`GC overhead limit exceeded`… | 確認 OOMKilled／重啟與 heap 曲線；heap dump 找佔用物件；重啟並暫時調高 limit |
+| RB-10 連線池耗盡（92） | `ConnectionPoolExhausted`、HikariCP `Connection is not available, request timed out`、SQLAlchemy `QueuePool limit`、`too many connections／clients`… | 查池的 active／idle／pending 與上限；找佔著連線不還的呼叫；核對資料庫端 `max_connections` |
+| RB-11 死結／鎖等待（91） | `Deadlock`、`LockAcquisitionException`、`Lock wait timeout exceeded` | 到資料庫查死結紀錄；核對更新順序與批次作業；暫停互鎖批次、有限重試 |
+
+外部依賴主導（RB-01）時不看日誌：那時服務自己的連線池逾時是結果。11/3 真實資料的三個事件群（樣板分別是 `Unhandled exception in handler`、`ORA-<NUM>: TNS:Connect timeout occurred`、`Downstream tax-gw:<NUM> returned <NUM>`）都不命中，主處方不變。
+
 第一條建議維持今天的「優先處理可能的源頭：…」；候選有 `dependency` 時第一步加的那句下鑽提醒保留，接著才是命中規則的處方。
 11/3 預期：bill-svc → RB-01；ord-svc → RB-02；cart-api → `signals = {latency}`、沒有 dependency、`sample` 是 bill-svc 的 500（不是 cart-api 自己的）→ RB-03 不命中、RB-00 保底，報告寫明「沒有命中任何故障特徵」。
 

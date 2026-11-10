@@ -516,7 +516,10 @@ def test_rb07_stays_quiet_when_a_downstream_resource_explains_the_backlog_or_the
 
 def test_runbook_priorities_stay_unique_with_rb07_between_rb01_and_rb02():
     order = [r.id for r in sorted(RUNBOOK_RULES, key=lambda r: -r.priority)]
-    assert order[:3] == ["RB-01", "RB-07", "RB-02"] and len({r.priority for r in RUNBOOK_RULES}) == len(RUNBOOK_RULES)
+    # 原本斷言前三名剛好是 RB-01、RB-07、RB-02。日誌特徵處方（RB-09／10／11）插在 RB-07 與 RB-02 之間之後，
+    # 這條要守的語意沒變：RB-07 緊接在 RB-01 後面、而且排在 RB-02 前面；新處方的位置由 test_runbook_log_patterns.py 守
+    assert order[:2] == ["RB-01", "RB-07"] and order.index("RB-07") < order.index("RB-02")
+    assert len({r.priority for r in RUNBOOK_RULES}) == len(RUNBOOK_RULES)
 
 
 # ── 整段：根因 → 建議處置 → 三行摘要 → API 回傳 ──

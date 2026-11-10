@@ -210,7 +210,7 @@ curl -s -H "Authorization: ApiKey $ES_KEY" -H "Content-Type: application/json" "
 11. `alert.messaging_link`：窗長 = `clamp(lag × lag_factor, min_window_minutes, max_window_minutes)`，起點用 `<=`，無非同步邊時完全不動作；生產者「進行中但這輪安靜」不併（D3）。已在內建 `it_apm`／`it_otel`（`group_topology` 之後、`score_golden` 之前）與兩個 RCA YAML（`follow_messaging: true`、`max_lag_minutes: 120`）接上。
 12. 儲存的 lag 取最近一次 `admin.topology_refresh` 的值；舊版把消費者當同步邊寫進 `service_edges` 的列，由既有 prune 自然過期。
 13. 混沌：新增場景 12g（沉澱後同輪事件併卡）；模擬器沒有 lag 指標 target，`lag` 訊號只由單元測試涵蓋。
-14. 已發現但不在範圍：RB-03 對訊息消費者的處方字面是「檢查 Kafka RECEIVE（HTTP 失敗）」，措辭不貼切。
+14. ~~已發現但不在範圍：RB-03 對訊息消費者的處方字面是「檢查 Kafka RECEIVE（HTTP 失敗）」，措辭不貼切。~~ 已修（`RunbookFacts._failure`）：範例 trace 是訊息消費者時寫「訊息消費失敗，佇列 <名稱>」並請人看「訊息內容（payload、headers）」；HTTP 請求有狀態碼才寫「HTTP <碼>」，沒有狀態碼只寫「失敗」。
 
 ---
 

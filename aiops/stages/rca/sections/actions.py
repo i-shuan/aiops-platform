@@ -13,6 +13,15 @@
   RB-08 內部呼叫放大：第一名帶 attribution["amplifier"]（它對下游的扇出暴增，把下游灌爆）→ 查重試、迴圈、熔斷；擴容沒有用。
   RB-04 容量飽和：流量與延遲兩種訊號都在而且範例 trace 沒失敗（原規則），或第一名帶 attribution["ingress_surge"]
         （流量確定是外部入口打進來的）——後者不看範例 trace 有沒有失敗：被灌爆的服務本來就會拋錯。
+
+日誌特徵處方（RB-09 記憶體耗盡、RB-10 連線池耗盡、RB-11 死結／鎖等待）：trace 只看得到「慢了、錯了」，看不到為什麼；
+錯誤日誌的例外類型與訊息看得到。條件三個都要成立：
+  1. 問題在服務自己或它的資料庫／快取（`_local_fault`）：沒有單一下游主導（share < 0.3），或主導的是 db／cache。
+     外部服務主導（RB-01）時不看——那時服務自己的連線池逾時是結果，不是原因。
+  2. 樣板是嫌疑服務的（第一名候選；沒有候選時是事件裡的實體），而且在暴增倍率前 LOG_TOP_N 名。
+     別的服務的日誌不算：被灌爆的受害者滿地都是 pool exhausted，不能拿來開放大者的處方。
+  3. 樣板是「突發」的：正常期間沒出現過，或頻率達正常期間的 MIN_BURST_RATIO 倍。長年都在噴的 Deadlock 不是這次的原因。
+比對是整字關鍵字的正則（LOG_SIGNATURES），對象是例外類型＋樣板＋原始訊息範例；命中後排在泛用的 RB-02／RB-03 前面。
 """
 from __future__ import annotations
 
@@ -41,6 +50,46 @@ SIGNAL_TOKENS: dict[str, str] = {
     "fs": "saturation", "filesystem": "saturation",
     "lag": "lag", "backlog": "lag",  # 佇列積壓（kafka_consumer_lag、queue_backlog）：第五類，不併進 saturation
 }
+LOG_TOP_N = 3            # 只看嫌疑服務暴增倍率前幾名的樣板
+MIN_BURST_RATIO = 3.0    # 既有樣板要暴增到幾倍才算「這次事故的特徵」（新出現的樣板一律算）
+# 日誌特徵 -> 正則（不分大小寫）。故意寫得窄："worker pool exhausted"（執行緒池）不是連線池、"memory" 一個字不是 OOM
+LOG_SIGNATURES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("oom", re.compile(r"OutOfMemory|OOMKilled|Java heap space|GC overhead limit exceeded|Cannot allocate memory"
+                       r"|\bMemoryError\b|JavaScript heap out of memory", re.I)),
+    ("pool", re.compile(r"ConnectionPoolExhausted|Connection\s?Pool\w*(?:Exhausted|Timeout)"
+                        r"|connection pool (?:is |was )?(?:exhausted|full|timeout|timed out)"
+                        r"|Connection is not available, request timed out"  # HikariCP
+                        r"|QueuePool limit of size"                         # SQLAlchemy
+                        r"|Timeout waiting for (?:idle object|connection from pool)"
+                        r"|too many (?:connections|clients)|remaining connection slots are reserved"
+                        r"|CannotGetJdbcConnection|Unable to acquire JDBC Connection", re.I)),
+    ("deadlock", re.compile(r"Deadlock|LockAcquisitionException|Lock wait timeout exceeded|CannotAcquireLock", re.I)),
+)
+
+
+def match_log_signatures(patterns: list[dict]) -> dict[str, dict]:
+    """patterns 是嫌疑服務依暴增倍率排好的樣板（rank_patterns 的輸出）。回傳 特徵 -> 命中的那個樣板（倍率最高的一個）。
+    只看前 LOG_TOP_N 名裡「突發」的：新出現，或頻率達正常期間的 MIN_BURST_RATIO 倍。"""
+    hits: dict[str, dict] = {}
+    for pattern in patterns[:LOG_TOP_N]:
+        if not (pattern.get("new") or float(pattern.get("ratio", 0.0)) >= MIN_BURST_RATIO):
+            continue
+        text = " ".join(str(pattern.get(k, "")) for k in ("error_type", "template", "example"))
+        for key, regex in LOG_SIGNATURES:
+            if key not in hits and regex.search(text):
+                hits[key] = pattern
+    return hits
+
+
+def _log_evidence(pattern: dict | None) -> str:
+    """處方裡引用的日誌證據：例外類型、樣板、事件期間與正常期間的筆數。"""
+    if not pattern:
+        return ""
+    name = f"{pattern['error_type']}：" if pattern.get("error_type") else ""
+    burst = "正常期間沒出現過" if pattern.get("new") else f"正常期間 {pattern.get('baseline', 0):g} 筆，頻率 {pattern.get('ratio', 0):.0f} 倍"
+    return f"「{name}{pattern.get('template', '')}」事件期間 {pattern.get('during', 0):g} 筆（{burst}）"
+
+
 DISK_TOKENS = frozenset({"disk", "io", "iops", "inode", "fs", "filesystem"})
 FACTORY_TOKENS = frozenset({"rf", "power", "pressure", "temp", "temperature", "vacuum", "flow", "recipe", "chamber"})
 
@@ -70,8 +119,19 @@ class RunbookFacts:
     top: RootCandidate | None = None
     sample: SpanRecord | None = None
     sample_failed_resource: str = ""
+    # 嫌疑服務（第一名候選；沒有候選時是事件裡的實體）依暴增倍率排好的前 LOG_TOP_N 個錯誤日誌樣板（rank_patterns 的輸出）
     log_patterns: list[dict] = field(default_factory=list)
     insufficient: bool = False
+
+    @property
+    def log_hits(self) -> dict[str, dict]:
+        """日誌特徵（oom／pool／deadlock）-> 命中的樣板。只在問題出在服務自己或它的資料庫／快取時才看（見模組說明）。"""
+        return match_log_signatures(self.log_patterns) if _local_fault(self) else {}
+
+    @property
+    def consumer_sample(self) -> bool:
+        """範例 trace 的入口是訊息消費者（從佇列拿到訊息），不是 HTTP 請求。"""
+        return bool(self.sample) and self.sample.consumer
 
     @property
     def attribution(self) -> dict[str, Any]:
@@ -118,23 +178,47 @@ class RunbookFacts:
                                  and c.error and c.kind not in ("", "app")})
                 facts.sample_failed_resource = "、".join(failed)
         if ctx.rca_logs:
-            facts.log_patterns = rank_patterns(ctx.rca_logs, ctx.rca_logs_baseline, ctx.rca_log_window_minutes)[:3]
+            suspects = {facts.top.entity.lower()} if facts.top else {e.entity.lower() for e in incident.events}
+            ranked = rank_patterns(ctx.rca_logs, ctx.rca_logs_baseline, ctx.rca_log_window_minutes)
+            facts.log_patterns = [p for p in ranked if str(p["service"]).lower() in suspects][:LOG_TOP_N]
         return facts
+
+    def _failure(self) -> tuple[str, str]:
+        """範例 trace 是怎麼失敗的、該看它的什麼輸入。訊息消費者沒有 HTTP 狀態碼：以前一律寫「HTTP 失敗」，
+        Kafka 消費者的處方變成「檢查 Kafka RECEIVE（HTTP 失敗）的入參」。"""
+        if self.consumer_sample:
+            queue = f"佇列 {self.sample.queue}" if self.sample.queue else "佇列名稱未知"
+            return f"訊息消費失敗，{queue}", "訊息內容（payload、headers）"
+        if self.sample and self.sample.status_code:
+            return f"HTTP {self.sample.status_code}", "入參"
+        return "失敗", "入參"
 
     def fmt(self) -> dict[str, str]:
         """處方文字裡可以帶入的欄位。"""
         a = self.attribution
         mq = self.async_info
         amp, fan = self.amplifier, self.amplifier.get("fanout") or {}
-        return {"victim": amp.get("victim", ""), "fanout_before": str(fan.get("before", "?")), "fanout_during": str(fan.get("during", "?")),
+        hits = self.log_hits
+        failure, inputs = self._failure()
+        return {"failure": failure, "inputs": inputs,
+                "log_oom": _log_evidence(hits.get("oom")), "log_pool": _log_evidence(hits.get("pool")),
+                "log_deadlock": _log_evidence(hits.get("deadlock")),
+                "log_service": next((p["service"] for p in hits.values()), ""),
+                "db": a.get("resource") if a.get("kind") in ("db", "cache") else "資料庫",
+                "victim": amp.get("victim", ""), "fanout_before": str(fan.get("before", "?")), "fanout_during": str(fan.get("during", "?")),
                 "fanout_ratio": str(amp.get("fanout_ratio", "?")), "entry": self.ingress_surge.get("entry", ""),
                 "entity": self.top.entity if self.top else "", "resource": a.get("resource", ""),
                 "kind": "/".join(p for p in (a.get("kind", ""), a.get("subtype", "")) if p),
                 "endpoint": (self.sample.name if self.sample and self.sample.name else "範例 trace"),
-                "status": str(self.sample.status_code) if self.sample and self.sample.status_code else "失敗",
                 "queue": mq.get("queue") or "（佇列名稱未知）", "producer": mq.get("producer") or "（trace 未能辨識）",
                 "pub_window": mq.get("pub_window_text") or "（trace 未能還原）",
                 "lag": (mq.get("lag_text") or {}).get("during") or "未知"}
+
+
+def _local_fault(f: RunbookFacts) -> bool:
+    """問題在服務自己（沒有單一下游主導）或它的資料庫／快取：這時才拿日誌關鍵字開處方。
+    幾個服務一起變慢、證據不足以指認單一服務（RB-06）時不看：那時每個服務的日誌都只是症狀。"""
+    return not f.insufficient and (f.attribution.get("kind") in ("db", "cache") or f.share < 0.3)
 
 
 def _queue_backlog(f: RunbookFacts) -> bool:
@@ -174,6 +258,24 @@ RUNBOOK_RULES: tuple[Runbook, ...] = (
              "回到訊息發布時段 {pub_window} 查生產者 {producer} 當時的部署、設定變更與它的依賴——不是看消費者出事的那段時間",
              "抽查失敗訊息的內容與 dead-letter queue：是否有格式不合或毒訊息（poison message）反覆重試"),
             order=_queue_order),
+    Runbook("RB-09", "記憶體耗盡（OutOfMemory）", 93,
+            lambda f: "oom" in f.log_hits,
+            ("{log_service} 的錯誤日誌出現記憶體耗盡：{log_oom}。先確認實例是否被 OOMKilled／反覆重啟"
+             "（kubectl describe pod 的 Last State）與 heap、RSS 用量曲線",
+             "抓 heap dump 或記憶體 profile 找出佔用最多的物件；核對近期部署是否引入沒有上限的快取，或一次把整批資料載進記憶體的查詢",
+             "止血：重啟受影響的實例並暫時調高記憶體 limit（JVM 的 -Xmx）；這只是爭取時間，洩漏不修會再發生")),
+    Runbook("RB-10", "連線池耗盡", 92,
+            lambda f: "pool" in f.log_hits,
+            ("{log_service} 的錯誤日誌出現連線池耗盡：{log_pool}。查連線池的 active／idle／pending 數與上限（maxPoolSize），"
+             "確認是池子打滿，而不是 {db} 拒絕連線",
+             "找出佔著連線不還的呼叫：長交易、沒有關閉的連線（connection leak）、交易裡夾著外部 HTTP 呼叫；打開連線池的 leak detection",
+             "核對 {db} 端的連線數上限（max_connections）與目前連線數：所有實例的池上限加總不能超過它，調大池子之前先確認 {db} 扛得住")),
+    Runbook("RB-11", "資料庫死結／鎖等待", 91,
+            lambda f: "deadlock" in f.log_hits,
+            ("{log_service} 的錯誤日誌出現死結或鎖等待逾時：{log_deadlock}。到 {db} 查死結紀錄"
+             "（PostgreSQL log 的 deadlock detected、MySQL 的 SHOW ENGINE INNODB STATUS）找出互鎖的兩段 SQL",
+             "核對近期上線的交易是否用不同順序更新同一批資料列，或批次作業跟線上交易搶同一批資料",
+             "止血：先暫停互鎖的批次作業；應用端對死結錯誤做有限次數的重試，並把交易縮短")),
     Runbook("RB-02", "資料庫／快取查詢瓶頸或連線阻塞", 90,
             lambda f: f.attribution.get("kind") in ("db", "cache")
             and (f.share >= 0.5 or f.attribution.get("failures", {}).get("during", 0) > f.attribution.get("failures", {}).get("before", 0)),
@@ -189,7 +291,7 @@ RUNBOOK_RULES: tuple[Runbook, ...] = (
              "擴容 {victim} 沒有用，流量是 {entity} 放大出來的")),
     Runbook("RB-03", "應用程式內部邏輯異常或狀態機錯誤", 80,
             lambda f: "errors" in f.signals and f.sample_failed and (f.top is None or f.share < 0.3),
-            ("點下方範例 trace 檢查 {endpoint}（HTTP {status}）的入參與堆疊日誌",
+            ("點下方範例 trace 檢查 {endpoint}（{failure}）的{inputs}與堆疊日誌",
              "核對事故初發前 1 小時內 {entity} 是否有部署、設定變更或 feature flag 開啟",
              "若為新版本導致，建議立即回滾（rollback）")),
     Runbook("RB-04", "流量突波引發容量飽和", 70,
@@ -246,5 +348,6 @@ class SuggestedActions(RcaSection):
         ctx.rca_runbook = {"id": primary.id, "name": primary.name,
                            "actions": [a.format(**values) for a in primary.ordered(facts)],
                            "also": [rb.id for rb in hits[1:]],
-                           "signals": sorted(facts.signals)}
+                           "signals": sorted(facts.signals),
+                           "log_signatures": sorted(facts.log_hits)}
         return "\n".join(f"{i}. {a}" for i, a in enumerate(actions, 1))
