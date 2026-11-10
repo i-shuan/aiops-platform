@@ -103,6 +103,7 @@ trace traces tracing span spans log logs logging error errors exception exceptio
 latency throughput traffic saturation load slow query queries lock locks wait index cache health healthcheck check
 endpoint endpoints upstream downstream request requests response responses queue thread threads heap gc
 baseline threshold metric metrics alert alerts incident runbook ok e.g i.e vs
+loop loops tight policy storm throttle throttling fanout fan-out fan amplifier amplification ingress gateway
 """.split())
 
 
@@ -224,6 +225,9 @@ def briefing_whitelist(context: dict[str, Any]) -> set[str]:
         names.add(rc["attribution"]["resource"])
     mq = (rc.get("attribution") or {}).get("async") or {}  # 訊息佇列的另一端：處方會叫人回頭查生產者
     names.update(name for name in (mq.get("producer"), mq.get("consumer")) if name)
+    amp = (rc.get("attribution") or {}).get("amplifier") or {}  # 被放大者灌爆的下游：處方會叫人去保住它
+    surge = (rc.get("attribution") or {}).get("ingress_surge") or {}
+    names.update(name for name in (amp.get("victim"), amp.get("via"), surge.get("entry"), *(amp.get("victims") or [])) if name)
     st = context.get("sample_trace") or {}
     for key in ("endpoint", "failed_resource", "trace_id"):
         if st.get(key):
@@ -297,6 +301,29 @@ def _async_verify(rc: dict[str, Any]) -> str:
             f"trace 看不到訊息內容，不能排除 {rc['candidate']} 當時發出壞訊息，請抽查失敗訊息")
 
 
+def _amplifier_clause(rc: dict[str, Any]) -> str:
+    """摘要行的流量放大句。只引用 attribution["amplifier"]／["ingress_surge"] 裡現成的數字，數字守門才對得上。"""
+    a = rc.get("attribution") or {}
+    amp, surge = a.get("amplifier") or {}, a.get("ingress_surge") or {}
+    if amp:
+        fan = amp.get("fanout") or {}
+        return (f"{rc['candidate']} 把 {amp.get('victim')} 的流量放大到 {amp.get('load_ratio')} 倍：每處理一個請求呼叫 {amp.get('via')} "
+                f"{fan.get('before')}→{fan.get('during')} 次（扇出 {amp.get('fanout_ratio')} 倍）")
+    if surge:
+        return f"流量由外部入口 {surge.get('entry')} 打進來（{rc['candidate']} 流入 {surge.get('load_ratio')} 倍），沒有內部服務放大"
+    return ""
+
+
+def _amplifier_verify(rc: dict[str, Any]) -> str:
+    """第一名是流量放大者時的驗證行：下游的增量是被灌出來的，該排除的是下游本身，不是寫「確認它的程式」就完了。"""
+    amp = (rc.get("attribution") or {}).get("amplifier") or {}
+    if not amp:
+        return ""
+    silent = "" if amp.get("in_incident", True) else f"；{rc['candidate']} 自己沒有告警、不在事件裡"
+    return (f"{_PREFIX['verification_line']}{amp.get('victim')} 的自身耗時與錯誤增量是被灌流量造成的，已轉記給 {rc['candidate']}，"
+            f"排除 {amp.get('victim')} 本身的程式與容量{silent}")
+
+
 def briefing_template(context: dict[str, Any]) -> dict[str, str]:
     """不靠 LLM 的三行：全部從 attribution、runbook、範例 trace 拼，數字一定精確。"""
     rc = context.get("root_cause") or {}
@@ -312,6 +339,9 @@ def briefing_template(context: dict[str, Any]) -> dict[str, str]:
         verify = f"{_PREFIX['verification_line']}{rc['candidate']} 程式自身耗時沒有惡化，排除它本身的程式與機器"
         if st.get("failed_resource"):
             verify += f"；範例 trace {st['trace_id']} 入口 {st.get('status_code') or '失敗'}，失敗在 {st['failed_resource']}"
+    elif rc.get("candidate") and a.get("amplifier"):
+        summary = f"{_PREFIX['summary_line']}{_amplifier_clause(rc)}（分數 {rc['score']}）"
+        verify = _amplifier_verify(rc)
     elif rc.get("candidate"):
         summary = f"{_PREFIX['summary_line']}{rc['candidate']} 自身耗時或自身錯誤率上升（分數 {rc['score']}），沒有單一下游資源主導"
         verify = f"{_PREFIX['verification_line']}依 trace 佐證與日誌段落確認 {rc['candidate']} 的程式與近期變更"
@@ -324,6 +354,8 @@ def briefing_template(context: dict[str, Any]) -> dict[str, str]:
     if rc.get("candidate"):
         summary += _async_clause(rc)
         verify = _async_verify(rc) or verify
+        if rc.get("dependency") and a.get("amplifier") or a.get("ingress_surge") and not a.get("amplifier"):
+            summary += "；" + _amplifier_clause(rc)
     first = f"[{rb['id']}] {rb['actions'][0]}" if rb.get("actions") else "比對事件前後的變更紀錄（部署、設定、配方）"
     action = _PREFIX["action_line"] + first
     return {"summary_line": _clip(summary, _MAX_LINE), "action_line": _clip(action, _MAX_LINE),

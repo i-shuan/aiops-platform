@@ -12,6 +12,19 @@
      （例：流量 2 倍 -> 一半算在放大者）。這是近似：排隊延遲對負載不是線性的，理由文字會寫明轉了多少，讓人自己判斷
   沒有流量變化時（被呼叫端自己變慢、共同外部因素）這一步什麼都不做。
 
+扇出（指名「流量放大者」的判準，attribution["amplifier"]，Runbook RB-08 靠它）：
+  扇出 = 呼叫者→被呼叫者的呼叫數 ÷ 呼叫者自己的入口請求數（每處理一個請求打下游幾次）。事件期間 ÷ 事件前 >= min_fanout_ratio，
+  而且受害者自己的自身耗時或自身錯誤率增量過了下面的顯著門檻，才在放大者的候選上標 attribution["amplifier"]。
+  1. 上面第 2 步往上游走的時候，呼叫者自己流量也漲了、但它對這個下游的扇出也漲過門檻：它就是放大者，不再往上走
+     （外部流量漲 + 它又重試放大；這時只轉 (1 − 1/扇出倍數) 的增量，其餘是外部流量的份）
+  2. 放大者不在事件裡（它自己沒有症狀，沒有告警）：扇出判準成立才替它補一列候選並照轉分數；
+     不成立就跟以前一樣只寫在受害者的理由裡、不轉分數（它的入口請求不足 min_requests 也補不了）
+  3. 流量是外部入口打進來的（往上走到頭是沒有父 span 的請求）：沒有內部放大者，不轉分數，
+     在被灌流量的候選上標 attribution["ingress_surge"]（Runbook RB-04 靠它）
+  死區（都留有測試，tests/test_rca_amplifiers.py）：
+    a. 透過訊息佇列放大（生產者把訊息量放大）：非同步邊的呼叫者是 mq:<生產者>，不算流量倍數，不指名
+    b. 事件前這條呼叫邊不到 min_requests 筆（新上線的呼叫路徑）：算不出扇出倍數，不標 amplifier（流量轉記仍照舊規則做）
+
 訊息佇列（非同步邊，ctx.rca_mq；ingestion.incident_traces 開了 follow_messaging 才有，沒有就整段不做、輸出一字不差）：
   事件實體消費的訊息是更早之前發的，生產者有沒有問題要回到「這批訊息的發布時窗」看（MqEdge.pub_start~pub_end），
   對照組是發布時窗之前等長的一段——不是事件時窗、也不是事件前。
@@ -70,7 +83,8 @@ class EvidenceRootCause(RootCauseOperator):
     或入口失敗裡該資源失敗的佔比達到也填）、
     fallback（"rca.root_cause.topological"；沒有 trace 的場景改用它，空字串 = 不退回）、
     async_weight（1.0；訊息夾帶失敗轉記的比例，0 = 不轉記，只為消融對照）、
-    min_lag_seconds（60；訊息延遲 P95 到這個秒數、而且比事件前多一倍才標成積壓，見 stages/rca/mq.is_backlog）。
+    min_lag_seconds（60；訊息延遲 P95 到這個秒數、而且比事件前多一倍才標成積壓，見 stages/rca/mq.is_backlog）、
+    min_fanout_ratio（2.0；呼叫者對下游的扇出，事件期間 ÷ 事件前達到這個倍數才指名為流量放大者，見模組說明）。
 
     dependency 不改分數、不改排名：候選仍是服務（拓撲、傳播路徑、標準答案都不變），只多告訴人「該查的是它等的東西」。"""
 
@@ -78,7 +92,7 @@ class EvidenceRootCause(RootCauseOperator):
                  min_requests: int = 20, min_self_increase_ms: float = 5.0, min_self_increase_ratio: float = 0.2,
                  min_error_increase: float = 0.05, min_dominance: float = 1.1, min_load_ratio: float = 1.5,
                  min_dependency_share: float = 0.6, fallback: str = "rca.root_cause.topological",
-                 async_weight: float = 1.0, min_lag_seconds: float = 60.0):
+                 async_weight: float = 1.0, min_lag_seconds: float = 60.0, min_fanout_ratio: float = 2.0):
         if min(self_weight, error_weight, log_weight, min_self_increase_ms, min_self_increase_ratio, min_error_increase) < 0:
             raise ValueError("權重與門檻不能是負的")
         if min_requests < 1 or min_dominance < 1 or min_load_ratio <= 1:
@@ -89,6 +103,9 @@ class EvidenceRootCause(RootCauseOperator):
         if not 0 <= async_weight <= 1 or min_lag_seconds < 0:
             raise ValueError("async_weight 必須在 [0, 1]（0 = 不做訊息夾帶失敗轉記）；min_lag_seconds 不能是負的")
         self.async_weight, self.min_lag_seconds = float(async_weight), float(min_lag_seconds)
+        if min_fanout_ratio <= 1:
+            raise ValueError("min_fanout_ratio 必須大於 1（扇出沒變大就不是放大）")
+        self.min_fanout_ratio = float(min_fanout_ratio)
         self.self_weight, self.error_weight, self.log_weight = float(self_weight), float(error_weight), float(log_weight)
         self.min_requests = int(min_requests)
         self.min_self_ms, self.min_self_ratio = float(min_self_increase_ms), float(min_self_increase_ratio)
@@ -106,8 +123,21 @@ class EvidenceRootCause(RootCauseOperator):
         ctx.log(f"root_cause:evidence:insufficient:{why[:60]}")
         return []
 
-    def _amplifiers(self, spans, first_ts, start, end, base_min, dur_min) -> tuple[dict[str, float], dict[str, str]]:
-        """每個服務的流入流量倍數，以及被灌流量的服務的放大者（往上游走到第一個自己流量沒漲的呼叫者）。"""
+    def _fanout(self, before, during, caller: str, callee: str) -> dict | None:
+        """caller 每處理一個入口請求呼叫 callee 幾次：事件前、事件期間與兩者的倍數。任一邊樣本不足（含事件前這條邊太少）回 None。"""
+        nb, nd = sum(before.get(caller, {}).values()), sum(during.get(caller, {}).values())
+        cb, cd = before.get(callee, {}).get(caller, 0), during.get(callee, {}).get(caller, 0)
+        if min(nb, nd, cb) < self.min_requests:
+            return None
+        fb, fd = cb / nb, cd / nd
+        return {"via": callee, "before": fb, "during": fd, "ratio": fd / fb}
+
+    def _amplifiers(self, spans, first_ts, start, end, base_min, dur_min):
+        """回 (load, amplifier, fan, ingress)：
+        load      每個服務的流入流量倍數
+        amplifier 被灌流量的服務 -> 放大者（往上游走到第一個自己流量沒漲、或自己對下游扇出暴增的呼叫者）
+        fan       被灌流量的服務 -> 放大者那一跳的扇出（_fanout；算不出來就沒有這個鍵）；flooded = 放大者自己流量也漲了
+        ingress   被灌流量的服務 -> 外部入口服務（流量是外面打進來的，沒有內部放大者）"""
         before, during = inbound_callers(spans, first_ts, start), inbound_callers(spans, start, end)
         load: dict[str, float] = {}
         for svc in set(before) | set(during):
@@ -115,6 +145,8 @@ class EvidenceRootCause(RootCauseOperator):
             if nb >= self.min_requests and nd >= self.min_requests:
                 load[svc] = (nd / dur_min) / (nb / base_min)
         amplifier: dict[str, str] = {}
+        fan: dict[str, dict] = {}
+        ingress: dict[str, str] = {}
         for svc, ratio in load.items():
             if ratio < self.min_load_ratio:
                 continue
@@ -122,15 +154,49 @@ class EvidenceRootCause(RootCauseOperator):
             while hops < MAX_HOPS:
                 callers = {c: n for c, n in during.get(current, {}).items() if c not in (EXTERNAL_CALLER, UNKNOWN_CALLER)}
                 if not callers:
-                    break  # 流量來自外部入口（或呼叫者不在樣本裡，不知道是誰）：不能指認哪個服務放大的
+                    # 流量來自外部入口（或呼叫者不在樣本裡，不知道是誰）：不能指認哪個服務放大的。
+                    # 確定是外部打進來的（沒有父 span 的請求不少於孤兒）才記成入口突波
+                    external = during.get(current, {}).get(EXTERNAL_CALLER, 0)
+                    if external and external >= during.get(current, {}).get(UNKNOWN_CALLER, 0):
+                        ingress[svc] = current
+                    break
                 caller = max(callers, key=callers.get)
-                if load.get(caller, 0.0) >= self.min_load_ratio:
-                    current, hops = caller, hops + 1  # 呼叫者自己也被灌流量，再往上找
+                fo = self._fanout(before, during, caller, current)
+                flooded = load.get(caller, 0.0) >= self.min_load_ratio
+                if flooded and not (fo and fo["ratio"] >= self.min_fanout_ratio):
+                    current, hops = caller, hops + 1  # 呼叫者自己也被灌流量、扇出沒變：它只是轉手，再往上找
                     continue
-                if caller in load:  # 呼叫者流量沒漲，卻讓下游流量漲了：放大者
+                if caller in load:  # 呼叫者流量沒漲（或漲了但扇出也暴增），卻讓下游流量漲了：放大者
                     amplifier[svc] = caller
+                    if fo:
+                        fan[svc] = {**fo, "flooded": flooded}
                 break
-        return load, amplifier
+        return load, amplifier, fan, ingress
+
+    def _significant(self, r) -> bool:
+        """這一列自己（轉記前）的自身耗時或自身錯誤率增量過了顯著門檻。"""
+        return (r["self_raw"] >= max(self.min_self_ms, r["b"].self_ms_per_request * self.min_self_ratio)
+                or r["err_raw"] >= self.min_error_increase)
+
+    def _amplified(self, r, fo: dict | None) -> bool:
+        """指名流量放大者的判準：扇出倍數過門檻，而且受害者自己真的變慢或出錯。"""
+        return bool(fo) and fo["ratio"] >= self.min_fanout_ratio and self._significant(r)
+
+    def _amplifier(self, r, attribution: dict, load: dict[str, float], ingress: dict[str, str]) -> dict:
+        """attribution 補上 "amplifier"（這個候選把下游流量放大了）或 "ingress_surge"（它的流量是外部入口打進來的）。都沒有就原樣回傳。"""
+        hits = r.get("amp_of") or []
+        if hits:
+            victim, ms, err, fo = max(hits, key=lambda h: (h[1], h[2]))
+            attribution = {**attribution, "amplifier": {
+                "type": "traffic_amplifier", "victim": victim, "via": fo["via"], "load_ratio": round(load[victim], 2),
+                "fanout": {"before": round(fo["before"], 2), "during": round(fo["during"], 2)},
+                "fanout_ratio": round(fo["ratio"], 2), "moved_self_ms": round(ms, 1), "moved_error": round(err, 3),
+                "victims": sorted(h[0] for h in hits), "in_incident": not r.get("amp_added")}}
+        entry = ingress.get(r["entity"])
+        if entry is not None:
+            attribution = {**attribution, "ingress_surge": {"entry": entry, "load_ratio": round(load[r["entity"]], 2),
+                                                           "entry_load_ratio": round(load[entry], 2)}}
+        return attribution
 
     def _messaging(self, ctx, spans, rows: dict[str, dict]) -> None:
         """訊息佇列歸因（見模組說明）。原地改 rows：消費者列掛上它的邊與說明；生產者在發布時窗真的有異常時補一列，
@@ -236,16 +302,28 @@ class EvidenceRootCause(RootCauseOperator):
                                            f"{self.min_requests} 筆，trace 不足以比較")
 
         # 流量放大歸因：被灌流量的服務，增量中 (1 - 1/load) 轉給放大者
-        load, amplifier = self._amplifiers(spans, first_ts, start, end, base_min, dur_min)
+        load, amplifier, fan, ingress = self._amplifiers(spans, first_ts, start, end, base_min, dur_min)
+        for entity in list(rows):  # 放大者不在事件裡：扇出判準成立、它的入口請求也夠，才替它補一列
+            amp = amplifier.get(entity)
+            if amp is None or amp in rows or not self._amplified(rows[entity], fan.get(entity)):
+                continue
+            b, d = before.get(amp), during.get(amp)
+            if b and d and b.requests >= self.min_requests and d.requests >= self.min_requests:
+                rows[amp] = {"entity": amp, "b": b, "d": d, "self_raw": d.self_ms_per_request - b.self_ms_per_request,
+                             "err_raw": d.own_error_rate - b.own_error_rate, "moved_in": [], "moved_out": None,
+                             "amp_added": True}
         for r in rows.values():
             r["self_eff"], r["err_eff"] = r["self_raw"], r["err_raw"]
         for entity, r in rows.items():
             amp = amplifier.get(entity)
             if amp is None or amp not in rows:
                 if amp is not None:
-                    r["moved_out"] = (amp, 0.0, 0.0, load[entity])  # 放大者不在事件裡：只寫在理由裡，不轉分數
+                    r["moved_out"] = (amp, 0.0, 0.0, load[entity])  # 放大者不在事件裡、也補不了列：只寫在理由裡，不轉分數
                 continue
-            share = 1 - 1 / load[entity]
+            fo = fan.get(entity)
+            # 放大者自己流量也漲了（靠扇出才指名的）：下游的流量倍數裡有外部流量的份，只轉扇出造成的那一份
+            ratio = min(load[entity], fo["ratio"]) if fo and fo["flooded"] else load[entity]
+            share = 1 - 1 / ratio
             moved_self, moved_err = max(r["self_raw"], 0.0) * share, max(r["err_raw"], 0.0) * share
             r["self_eff"] -= moved_self
             r["err_eff"] -= moved_err
@@ -253,6 +331,13 @@ class EvidenceRootCause(RootCauseOperator):
             rows[amp]["self_eff"] += moved_self
             rows[amp]["err_eff"] += moved_err
             rows[amp]["moved_in"].append((entity, moved_self, load[entity]))
+            if fo:
+                r["fan_out"] = fo
+            if self._amplified(r, fo):
+                rows[amp].setdefault("amp_of", []).append((entity, moved_self, moved_err, fo))
+        for entity, entry in ingress.items():
+            if entity in rows:
+                rows[entity]["ingress"] = (entry, load[entity])
 
         if ctx.rca_mq:
             self._messaging(ctx, spans, rows)
@@ -290,7 +375,7 @@ class EvidenceRootCause(RootCauseOperator):
         for r in ordered_rows:
             dependency, attribution = self._dependency(r, kinds)
             out.append(RootCandidate(r["entity"], r["score"], self._reason(r, bursts, base_min, load, kinds),
-                                     dependency, self._async(r, attribution)))
+                                     dependency, self._amplifier(r, self._async(r, attribution), load, ingress)))
         return out
 
     def _dependency(self, r, kinds: dict[str, str]) -> tuple[str, dict]:
@@ -367,8 +452,20 @@ class EvidenceRootCause(RootCauseOperator):
             amp, ms, err, ratio = r["moved_out"]
             why += (f"；流量被 {amp} 放大到 {ratio:.2f} 倍，自身耗時增量中 {ms:.1f} ms、自身錯誤率中 {err:.0%} 推估為流量造成，改記在 {amp}"
                     if ms or err else f"；流量被 {amp} 放大到 {ratio:.2f} 倍（{amp} 不在事件裡，未轉分數）")
+            fo = r.get("fan_out")
+            if fo:
+                why += f"（{amp} 每處理一個請求呼叫 {fo['via']} {fo['before']:.2f}→{fo['during']:.2f} 次，扇出 {fo['ratio']:.2f} 倍）"
         for victim, ms, ratio in r["moved_in"]:
             why += f"；把 {victim} 的流量放大到 {ratio:.2f} 倍，承接 {victim} 自身耗時增量中的 {ms:.1f} ms"
+        for victim, _ms, err, fo in r.get("amp_of", ()):
+            why += (f"；流量放大者：每處理一個請求呼叫 {fo['via']} {fo['before']:.2f}→{fo['during']:.2f} 次（扇出 {fo['ratio']:.2f} 倍），"
+                    f"{victim} 的自身錯誤率增量中 {err:.0%} 也改記在這裡")
+        if r.get("amp_added"):
+            why += "；它不在事件裡（自己沒有告警），因為把下游的流量放大才補進候選"
+        if r.get("ingress"):
+            entry, ratio = r["ingress"]
+            why += (f"；流量是外部入口打進來的（往上游追到 {entry} 的外部請求，流入 {ratio:.2f} 倍），"
+                    "沒有內部服務把流量放大，不轉記")
         for edge in r.get("mq", ()):
             who = f"生產者 {edge.producer}" if edge.producer else "生產者未知"
             why += (f"；消費訊息佇列 {edge.queue or '（佇列名稱未知）'}（{who}）：延遲 P95 "
