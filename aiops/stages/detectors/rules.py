@@ -2,7 +2,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import DetectorOperator
+from aiops.stages.detectors.base import DetectorOperator, limit_breach
 
 
 @OperatorRegistry.register("detector.rules")
@@ -45,18 +45,10 @@ class StaticRuleDetector(DetectorOperator):
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
         self.validate_params()
-        upper, lower = self.params.get("upper"), self.params.get("lower")
-        v = df["value"]
-        excess = pd.Series(0.0, index=v.index)
         if not self.has_rule:  # require_rule=false 且這條序列沒有核准的規則：不判
-            return self._result(df, excess, excess > 0)
-        if upper is not None:
-            excess = excess.where(v <= upper, (v - upper) / max(abs(float(upper)), 1e-9))
-        if lower is not None:
-            excess = excess.where(v >= lower, (lower - v) / max(abs(float(lower)), 1e-9))
-        breach = excess > 0
-        # 連續違規的長度：遇到沒違規就歸零
-        run = breach.groupby((~breach).cumsum()).cumsum()
-        flagged = run >= int(self.params.get("consecutive", 1))
-        scores = (excess + breach.astype(float)).where(flagged, 0.0)  # 違規點分數 = 1 + 超出比例
+            none = pd.Series(0.0, index=df.index)
+            return self._result(df, none, none > 0)
+        # 違規點分數 = 1 + 超出比例；連續違規滿 consecutive 點才成立
+        scores, flagged = limit_breach(df["value"], self.params.get("upper"), self.params.get("lower"),
+                                       int(self.params.get("consecutive", 1)))
         return self._result(df, scores, flagged)

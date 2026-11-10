@@ -38,8 +38,15 @@ def _detector_cls(name: str) -> type[DetectorOperator]:
     return cls
 
 
+def _require_tunable(name: str) -> None:
+    """不收調參的偵測器（致命硬上限）：界線只認 workflow YAML，任何來源的提案（人工、自動、LLM、規則升級器）都拒絕。"""
+    if not _detector_cls(name).accepts_tuning:
+        raise BadRequest(f"{name} 不接受調參提案：它的界線只能寫在 workflow YAML（節點 params 或 target overrides）")
+
+
 def _check_params(name: str, params: dict) -> None:
     cls = _detector_cls(name)
+    _require_tunable(name)
     routing = sorted(ROUTING_PARAMS & set(params))
     if routing:
         raise BadRequest(f"{routing} 是節點的路由參數（對哪些實體跑），只能寫在 workflow YAML，不能透過調參修改")
@@ -64,6 +71,7 @@ def _load(proposal_id: int) -> dict:
 
 def _create_proposal(source: str, detector: str, params: dict, reason: str, proposer: str,
                      pipeline: str = ANY, entity: str = ANY) -> dict:
+    _require_tunable(detector)
     return Proposals.create({
         "source": source, "detector_name": detector, "params": params, "reason": reason, "proposer": proposer,
         "pipeline": pipeline, "entity": entity,

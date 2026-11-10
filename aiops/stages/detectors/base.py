@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 import numpy as np
 import pandas as pd
 
-from aiops.engine.context import AnomalyResult, DetectorState, PipelineContext
+from aiops.engine.context import AnomalyResult, DetectorState, PipelineContext, TargetError
 from aiops.engine.errors import BadRequest
 from aiops.engine.params import deep_merge
 from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, as_utc
@@ -31,6 +31,11 @@ class DetectorOperator(BaseOperator):
     tunable: ClassVar[dict[str, tuple[float, float, float]]] = {}
     # 不開放自動調參、但合法的參數（例如靜態規則的上下限）
     other_params: ClassVar[frozenset[str]] = frozenset()
+    # False：這個節點的事件不交給 detector.ensemble 表決（致命硬上限：單點踩線就成立，不能被統計多數決否決）。
+    # 排在 ensemble 前面的非投票節點必須列在 ensemble 的 bypass，載入期檢查；不然它會默默變成分母的一員
+    votes: ClassVar[bool] = True
+    # False：參數只認 YAML 與 target overrides，後台調參（含 LLM 抽規則、規則升級器）一律不套用、提案直接拒絕
+    accepts_tuning: ClassVar[bool] = True
 
     def __init__(self, **params: Any):
         routing = {k: params.pop(k) for k in ROUTING_PARAMS & set(params)}
@@ -57,6 +62,9 @@ class DetectorOperator(BaseOperator):
             raise TypeError("min_train_points 至少 1")
         self.params = params
         self.fitted = False
+        # detect 過程中要讓維運看到、但不是異常的事（例如資料值超出物理可能被當成壞資料）。
+        # execute 每次都新建演算法實例，所以這份清單只活一次 execute，不會跨序列、跨輪次累積
+        self.notes: list[str] = []
 
     # ── 演算法契約 ──
 
@@ -165,6 +173,9 @@ class DetectorOperator(BaseOperator):
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
         # 每一筆都帶著自己是哪個演算法、哪個節點抓到的（要交集／多數決就接 detector.ensemble）
         result = ctx.anomaly_result = algo.detect(df)
+        for note in algo.notes:  # 壞資料這類「沒判、但要有人知道」的事：進 audit 也進 errors，不默默吞掉
+            ctx.log(f"{algo.algorithm}:{key}:{note}")
+            ctx.errors.append(TargetError(target.entity, f"{algo.algorithm}:{key}:{note}"))
         warn_at = algo.param("threshold") * self.warning_ratio if self.warning_ratio else None
         for ts, value, score, flagged in zip(df["ts"], result.values, result.scores, result.is_anomaly):
             if flagged:
@@ -231,6 +242,9 @@ class DetectorOperator(BaseOperator):
         """
         allowed = {*self.tunable, *self.other_params}
         tuned = ctx.detector_params.get(self.state_key, {})
+        if tuned and not self.accepts_tuning:
+            ctx.log(f"params:{self.state_key}:tuning-not-accepted:{','.join(sorted(tuned))}")
+            tuned = {}
         unknown = sorted(set(tuned) - allowed)
         if unknown:
             ctx.log(f"params:{self.state_key}:ignored-unknown:{','.join(unknown)}")
@@ -283,7 +297,7 @@ def layer_params(cls: type[DetectorOperator], tuned: dict[str, Any], yaml_params
     演算法預設值由算子自己補（param()）。偵測（effective_params）與回測（admin.proposal_backtest）都走這裡，
     兩邊才會算出同一組參數——回測若少疊 YAML 那層，顯示的效果在正式偵測裡根本不會生效。
     調參資料裡演算法已經不認得的鍵（改版拿掉的）直接略過。"""
-    allowed = {*cls.tunable, *cls.other_params}
+    allowed = {*cls.tunable, *cls.other_params} if cls.accepts_tuning else set()  # 不收調參的算子：tuned 整層略過
     return deep_merge(deep_merge({k: v for k, v in tuned.items() if k in allowed}, yaml_params), override)
 
 
@@ -320,6 +334,24 @@ def scale_floor(scale: float, values: pd.Series | np.ndarray | None = None, min_
     floor = max(float(min_scale), abs(float(center)) * float(min_scale_ratio), 1.0 if integer else 0.0)
     out = max(float(scale) if np.isfinite(scale) else 0.0, floor)
     return out if out > 0 else 1.0
+
+
+def limit_breach(values: pd.Series, upper: float | None, lower: float | None,
+                 consecutive: int = 1) -> tuple[pd.Series, pd.Series]:
+    """靜態上下限的越線判斷（detector.rules 與 detector.hard_limit 共用；偵測器之間不准互相 import）。
+    回傳 (分數, 是否成立)：超過 upper 或低於 lower 算違規，連續違規段長度 >= consecutive 的點才成立；
+    成立點的分數 = 1 + 超出比例（相對於那條界線），其餘 0。NaN 不算違規，也會把連續段切斷。"""
+    v = values
+    excess = pd.Series(0.0, index=v.index)
+    if upper is not None:
+        excess = excess.where(~(v > upper), (v - upper) / max(abs(float(upper)), 1e-9))
+    if lower is not None:
+        excess = excess.where(~(v < lower), (lower - v) / max(abs(float(lower)), 1e-9))
+    breach = excess > 0
+    # 連續違規的長度：遇到沒違規就歸零
+    run = breach.groupby((~breach).cumsum()).cumsum()
+    flagged = run >= int(consecutive)
+    return (excess + breach.astype(float)).where(flagged, 0.0), flagged
 
 
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:

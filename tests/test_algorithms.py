@@ -118,20 +118,24 @@ def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
 
 @pytest.mark.parametrize("name", ["it_otel", "factory"])
 def test_default_detection_is_a_majority_vote_of_three_detectors(name):
-    """真實資料回放：多數決比聯集少 88% 的單點誤報。it_otel 與 factory 預設都是這個組合。"""
+    """真實資料回放：多數決比聯集少 88% 的警報分鐘數。it_otel 與 factory 預設都是這個組合。
+    雙軌制之後多了一個不投票的致命硬上限節點（fatal）：排在裁決前、列在 bypass，統計三票的組成不變。"""
     from aiops.interfaces.runner import workflow_path
 
     wf = load_workflow(workflow_path(name))
     ops = [n.operator for n in wf.nodes]
     assert ops[ops.index("detector.hourly_baseline"):ops.index("detector.new_only") + 1] == [
-        "detector.hourly_baseline", "detector.mad", "detector.quantile_drift", "detector.ensemble", "detector.new_only"]
+        "detector.hourly_baseline", "detector.mad", "detector.quantile_drift", "detector.hard_limit",
+        "detector.ensemble", "detector.new_only"]
     vote = next(n for n in wf.nodes if n.operator == "detector.ensemble")
-    assert vote.params == {"strategy": "majority"}
+    assert vote.params == {"strategy": "majority", "bypass": ["fatal"]}
     # it_otel 刻意用 min_weeks: 1（多數決下誤報較少）；factory 保留預設的安全退回
     hourly = next(n for n in wf.nodes if n.operator == "detector.hourly_baseline")
     assert hourly.params.get("min_weeks") == (1 if name == "it_otel" else None)
     pipeline = Pipeline(wf)
-    assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_mad", "detect_qdrift"]  # 投票節點不載基準線
+    assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_mad", "detect_qdrift", "fatal"]  # 投票節點不載基準線
+    voters = [n for n, op in pipeline.nodes if getattr(op, "has_baseline", False) and op.votes]
+    assert [n.name for n in voters] == ["detect", "detect_mad", "detect_qdrift"]  # 表決的仍然只有這三個
 
 
 # ── A.2 動態同儕 ──

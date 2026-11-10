@@ -14,7 +14,7 @@ from aiops.stages.detectors.base import DetectorOperator
 T0 = datetime(2026, 11, 8, tzinfo=timezone.utc)
 DETECTORS = [n for n in OperatorRegistry.names("detector.")
              if issubclass(OperatorRegistry.get(n), DetectorOperator)]
-SAMPLE = {"detector.rules": {"upper": 80}}
+SAMPLE = {"detector.rules": {"upper": 80}, "detector.hard_limit": {"fatal_ceiling": 80}}
 # 滾動平均／滾動分位數會稀釋單點尖峰，刻意的（它們抓的是持續偏移與尾端漂移）
 IGNORES_SINGLE_SPIKE = {"detector.chronic", "detector.quantile_drift"}
 

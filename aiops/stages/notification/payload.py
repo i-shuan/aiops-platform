@@ -13,13 +13,12 @@ from datetime import datetime
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.types import WARNING, GrafanaLinks, Incident, Notification, as_utc
-from aiops.stages._common import ensure_incidents
+from aiops.engine.types import DEFAULT_SEVERITY, WARNING, GrafanaLinks, Incident, Notification, as_utc
+from aiops.stages._common import FATAL_TAG, ensure_incidents, tagged_with
 from aiops.stages.notification.links import incident_links, links_config
 from aiops.engine.operator import BaseOperator
 
 UNASSIGNED_DEPT = "unassigned"
-DEFAULT_SEVERITY = {"P0": 10.0, "P1": 6.0, "P2": 3.0, "P3": 0.0}
 # 由輕到重；不在表上的（自訂等級）視為跟 P3 一樣
 SEVERITY_RANK = {WARNING: 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
 
@@ -83,6 +82,9 @@ def build_notifications(incident: Incident, preset: str, severity: str, ends_at:
         + (f"；收斂方式：{', '.join(tags)}" if tags else "")
     )
     annotations = {"summary": title, "description": description, **s, **urls}
+    fatal = tagged_with(incident, [FATAL_TAG])
+    if fatal:  # 致命硬上限踩線：接收端（值班、自動觸發 RCA 的 webhook）靠這個欄位知道不用等統計確認
+        annotations["fatal"] = ", ".join(fatal)
     if path:
         annotations["escalation_path"] = " -> ".join(path)
     return [

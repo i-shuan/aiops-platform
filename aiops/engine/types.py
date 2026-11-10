@@ -59,6 +59,10 @@ class AnomalyEvent:
                    tuple(d.get("voted_by", ())), d.get("level", ANOMALY))
 
 
+# 嚴重度門檻的預設值（分數 >= 門檻就是該等級）：alert.notify_payload 定嚴重度、alert.fatal_floor 換算地板分數都用這一份
+DEFAULT_SEVERITY = {"P0": 10.0, "P1": 6.0, "P2": 3.0, "P3": 0.0}
+
+
 @dataclass
 class Incident:
     events: list[AnomalyEvent]

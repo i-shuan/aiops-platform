@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 from aiops.engine.context import PipelineContext
 
@@ -17,3 +18,15 @@ class BaseOperator(ABC):
     @abstractmethod
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         """接收 Context，計算後修改並回傳 Context。"""
+
+
+@dataclass(frozen=True)
+class NodeInfo:
+    """Workflow 裡的一個節點（載入期檢查用）。算子若實作 check_workflow(nodes: list[NodeInfo])，引擎在建立管線時
+    把整條 workflow 的節點依序交給它：跨節點的設定錯誤（指到不存在的節點、排錯順序）在啟動時就丟
+    TypeError／ValueError（引擎包成 WorkflowError），不延到執行期。引擎自己不認得任何算子名稱。"""
+
+    name: str
+    operator: str
+    params: dict[str, Any]
+    op: BaseOperator

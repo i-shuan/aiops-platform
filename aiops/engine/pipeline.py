@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
 from aiops.engine.errors import InfrastructureError, NoDataError, PlatformError, WorkflowError
+from aiops.engine.operator import NodeInfo
 from aiops.engine.registry import OperatorRegistry
 
 logger = logging.getLogger("aiops.engine")
@@ -167,6 +168,16 @@ class Pipeline:
             raise WorkflowError(f"Workflow {workflow.name}：未知的節點 scope {unknown}")
         if [order[s] for s in scopes] != sorted(order[s] for s in scopes):
             raise WorkflowError(f"Workflow {workflow.name}：節點順序必須是 scope=target → batch → after_persist → after_finalize")
+        # 跨節點的設定（裁決的 bypass、致命地板要認哪些節點…）由算子自己檢查，引擎只負責把整條 workflow 交給它
+        infos = [NodeInfo(n.name, n.operator, dict(n.params), op) for n, op in self.nodes]
+        for n, op in self.nodes:
+            check = getattr(op, "check_workflow", None)
+            if check is None:
+                continue
+            try:
+                check(infos)
+            except (TypeError, ValueError) as e:
+                raise WorkflowError(f"Workflow {workflow.name} 節點 {n.name}（{n.operator}）：{e}") from e
         self.target_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "target"]
         self.batch_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "batch"]
         # 寫入成功之後才跑（通知）：資料庫寫不進去時整輪失敗，這些節點不會執行
@@ -264,7 +275,11 @@ class Pipeline:
                 skipped = {name: reason for name in self._detectors
                            if (reason := self._skip_reason(name, ctx.target)) is not None}
                 active = [d for d in self.detector_nodes if d[0] not in skipped]
-                ctx.baseline_nodes = [name for name, _ in active]  # fetch 看這個決定要不要抓訓練窗
+                # fetch 看這個決定要不要抓訓練窗。不需要歷史資料的節點（requires_training = False：人訂的上下限）不算：
+                # 它棄權的那幾輪不會存基準線，算進來的話 fetch 會每一輪都抓訓練窗、其他節點每一輪都重訓，
+                # 把正在發生的事故學成常態（11/3 真實資料回放：75 個異常點掉到 51 個）
+                ctx.baseline_nodes = [name for name, _ in active
+                                      if getattr(self._detectors[name][1], "requires_training", True)]
                 try:
                     # 被跳過的節點不載基準線與調參；也不會進 detector_runs，裁決時不算參與者
                     self.hooks.load_target(ctx, active)

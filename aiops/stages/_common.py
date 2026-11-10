@@ -14,3 +14,12 @@ def ensure_incidents(ctx: PipelineContext) -> list[Incident]:
             ctx.incidents = [Incident([e], score=e.score) for e in ctx.anomalies]
         ctx.incidents_built = True
     return ctx.incidents
+
+
+# alert.fatal_floor 打在事件群上的標籤前綴：fatal:<偵測節點名稱>
+FATAL_TAG = "fatal"
+
+
+def tagged_with(incident: Incident, tags) -> list[str]:
+    """事件群身上符合的標籤：完全相同、或是「<tag>:」開頭（fatal 會對到 fatal:fatal、fatal:overheat）。"""
+    return [t for t in incident.tags if any(t == tag or t.startswith(f"{tag}:") for tag in tags)]

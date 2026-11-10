@@ -125,6 +125,7 @@ aiops/
 │   │   ├── shift.py                 detector.shift：相鄰兩點跳變
 │   │   ├── peer.py                  detector.peer：跟同儕中位數的殘差比（同儕可寫死或動態分群）
 │   │   ├── rules.py                 detector.rules：人訂上下限加連續 N 點，不學習
+│   │   ├── hard_limit.py            detector.hard_limit：致命硬上限（雙軌制軌道一），單點踩線不投票、直通 P0
 │   │   └── new_only.py              detector.new_only：只留比最後一筆已存異常更新的，重跑不重複告警
 │   ├── ensemble/                    3. 多偵測器裁決
 │   │   └── ensemble.py              detector.ensemble：多個偵測節點投票（聯集／交集／多數決／至少 N 票）
@@ -290,6 +291,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_
 | `detector.shift` | 相鄰兩點跳變 | 突然換水位 | 跳上去之後的新水位不再報 |
 | `detector.peer` | 同時間同儕的中位數 | 同服務多個 Pod、同型號多台機台 | 同儕用 `peers` 寫死，或 `peer_group` 依標籤動態撈（Prometheus／VictoriaMetrics） |
 | `detector.rules` | 人訂的上下限、連續 N 點 | 有明確規格的指標 | `require_rule: false` 時只用核准的規則提案，沒有規則的序列不判 |
+| `detector.hard_limit` | 致命硬上限：絕對上下限（`fatal_ceiling`／`fatal_lower`）、一步的變化量（`max_rise`／`max_drop`）、偏離前 N 點中位數的倍數（`max_deviation_ratio`） | 微電弧、瞬斷這類「踩到就是出事」的單點事件。不投票、不被多數決否決，直接 P0（`it_otel`、`factory` 預設有這個節點，**沒在 target `overrides.fatal` 訂界線的序列不受影響**） | 界線只能由人寫在 YAML，後台調參改不到；兩次取樣之間發生又結束的尖峰看不到；界線附近抖動每次越線都算一筆（同一張卡）；`plausible_max`／`plausible_min` 以外的值當成壞資料不判、記進 `errors`（統計軌照樣會看到那個值） |
 | `detector.ensemble` | 前面幾個偵測節點的投票 | 想用交集／多數決壓誤報 | 接在偵測節點後面、`new_only` 前面；分母只算這條序列真的評估過資料的節點（見下方） |
 
 **分母底噪（`min_scale`／`min_scale_ratio`）**：`mad`、`zscore`、`hourly_baseline`、`quantile_drift`、`dod`／`wow` 的分母（MAD、標準差）都過 `stages/detectors/base.scale_floor`：取 max(算出來的值、`min_scale`、|中心| × `min_scale_ratio`、整數序列的 1 個單位)。以前 `mad` 在 MAD = 0 時除以 1e-6——失敗數序列 90% 是 0，平常 2 筆失敗就是 1,349,000 分（混沌場景 5 的誤報）；`zscore` 在 std = 0 時分數全 0，永遠不報。兩個都是 tunable（後台調參、節點 YAML、target `overrides` 都能改）：

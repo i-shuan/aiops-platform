@@ -65,6 +65,8 @@ class BaseOperator(ABC):
    * target 的 `detectors`／`overrides` 寫錯、節點的 include／exclude 寫了 workflow targets 裡沒有的實體，都在 `Pipeline.__init__`（API 傳入的 targets 在 `run()` 開頭）丟 `WorkflowError`，不准延到執行期。
    * `exclude_incidents`（預設 true）、`warning_ratio`（預設關）、`min_train_points`（預設 60）是基底層的節點行為參數（`NODE_PARAMS`）：同樣不進 `self.params`、target `overrides` 不能寫。訓練點數不到 `min_train_points` 的節點不學、不判、不進 `detector_runs`（冷啟動時幾十個點學到的基準線不可信）；不需要歷史資料的算子（`detector.rules`）設 `requires_training = False` 不受此限，剛上線的服務靠它兜底。訓練排除窗由 `StorageHooks` 放進 `ctx.training_exclusions`，基底 `_training_frame` 統一套用——演算法的 `fit` 不准自己去查事故或維護窗。
    * 事件等級只有 `ANOMALY`／`WARNING`（`engine/types.py`）。warning 由基底依 `threshold × warning_ratio` 產生，演算法只管回傳分數與越線旗標。
+   * **雙軌制**（`docs/DUAL_TRACK_DESIGN.md`）：統計軌是 `detector.ensemble` 多數決；致命軌是 `detector.hard_limit`（`votes = False`、`accepts_tuning = False`、`requires_training = False`），單點踩線就成立。不投票的偵測節點必須列進 ensemble 的 `bypass`（事件原樣留下、不進分母），由 `alert.fatal_floor` 把分數拉到 payload 的 P0 門檻並打上 `fatal:<節點>` 標籤。致命界線只認 YAML（節點 `params` 或 target `overrides`）：後台調參、規則升級器的提案一律拒絕。新增「不交給多數決」的偵測器照這個做，不准在 ensemble 或引擎裡寫死算子名稱。
+   * 需要看整條 workflow 才能驗的接線（引用的節點存不存在、前後順序）寫在算子的 `check_workflow(nodes: list[NodeInfo])`，引擎在 `Pipeline.__init__` 逐一呼叫，`TypeError`／`ValueError` 轉成 `WorkflowError`；不准延到 `execute` 才發現。
  * **節點 scope**：`target`（逐序列）→ `batch`（所有序列合併後）→ `after_persist`（資料庫寫入成功後才跑：所有 `notifier.*`）→ `after_finalize`（「已通知」與結案也寫成功後才跑：只有 `notifier.watchdog` 心跳，這一輪每一步都成功才續命）。順序錯在 `Pipeline.__init__` 報錯。
    * 寫入順序鐵律：異常點、事件群在 `hooks.persist_batch` 的**單一交易**落地（資料庫短暫斷線整筆回復後重試，`storage/db.run_in_transaction`），然後才送通知；通知都送出去了，引擎才呼叫 `hooks.finalize_batch` 記「已通知」與結案。推送失敗時事件群留在進行中，下一輪 `alert.heartbeat` 用同一組標籤補送（含 `endsAt`）。任何算子都不准在寫入前送出外部通知。
    * 資料斷流：這一輪抓不到資料（資料源丟 `NoDataError`、或抓回來是空的）的序列比例達到 workflow 的 `max_failed_target_ratio`（預設 1.0 = 全部）就是 `InfrastructureError`，`after_persist`／`after_finalize` 不執行、心跳不續命。只有 `engine/errors.NoDataError`（資料源與 `ingestion.fetch` 丟）算斷流：其他節點丟的 `NotFound`、查詢寫錯（`BadRequest`）、資料源回 200 但格式不對（`InvalidQueryError`）都只記錯誤。
@@ -79,7 +81,7 @@ class BaseOperator(ABC):
  * **Grouper（事件收斂）**：
    * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
    * 進行中事件群（`ctx.open_incidents`）由 `alert.absorb_open` 吸收新異常：一場事故從初發到結案只有一個 `incident_uid`。`ensure_incidents` 只建一次（`ctx.incidents_built`），清單被吸收光之後不准重建。
-   * 順序鐵律：收斂 → 計分 → `absorb_open` → 抑制 → `notify_payload` → `heartbeat` → `notifier.*`。升級（嚴重度只升不降）改了 labels 時，`heartbeat` 負責對舊 labels 送 `endsAt` 再送新的；Alertmanager 用整組 labels 辨識告警。
+   * 順序鐵律：收斂 → 計分（`alert.fatal_floor` 在這一段，必須在 `absorb_open` 之前）→ `absorb_open` → 抑制 → `notify_payload` → `heartbeat` → `notifier.*`。升級（嚴重度只升不降）改了 labels 時，`heartbeat` 負責對舊 labels 送 `endsAt` 再送新的；Alertmanager 用整組 labels 辨識告警。
  * **Suppressor（告警抑制）**：
    * 檢查靜音窗口（維護期）、冷卻時間（Dedup）、同根因；被抑制事件必須打上 `ctx.is_suppressed = True` 與具體原因。
  * **LLM Provider（智慧診斷）**：
