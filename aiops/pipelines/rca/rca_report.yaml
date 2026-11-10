@@ -7,7 +7,9 @@ nodes:
   # 時，基準窗 15 → 30 → 60 分鐘往前擴（只撈多出來的前段、窗口連續），報告會標出實際用了幾分鐘
   - name: fetch_traces
     operator: ingestion.incident_traces
-    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60}
+    # follow_messaging：事件實體是訊息消費者時，回到「這批訊息當初發布的時段」補撈生產者的 trace（最多往回 max_lag_minutes）
+    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
+             follow_messaging: true, max_lag_minutes: 120}
   # 用撈到的 span 現場還原服務呼叫關係，跟既有拓撲取聯集
   - name: build_topology
     operator: rca.build_dynamic_topology

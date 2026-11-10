@@ -73,9 +73,12 @@ def scenario_1() -> H.Result:
 from scripts.chaos import scen_detect_rca as D  # noqa: E402
 
 from scripts.chaos import scen_learning as L  # noqa: E402
+from scripts.chaos import scen_mq as Q  # noqa: E402
 
+# 場景函式回一個 Result，或一串（12 是 12a～12g 七個子場景，各自一列）
 SCENARIOS = {1: scenario_1, 2: D.scenario_2, 3: D.scenario_3, 4: D.scenario_4, 5: D.scenario_5,
-             6: L.scenario_6, 7: L.scenario_7, 8: L.scenario_8, 9: L.scenario_9, 10: L.scenario_10, 11: D.scenario_11}
+             6: L.scenario_6, 7: L.scenario_7, 8: L.scenario_8, 9: L.scenario_9, 10: L.scenario_10, 11: D.scenario_11,
+             12: Q.scenario_12}
 
 
 def run(numbers: list[int] | None = None) -> list[H.Result]:
@@ -84,7 +87,8 @@ def run(numbers: list[int] | None = None) -> list[H.Result]:
         if numbers and n not in numbers:
             continue
         try:
-            results.append(fn())
+            out = fn()
+            results += out if isinstance(out, list) else [out]
         except Exception as e:  # noqa: BLE001  場景自己崩潰也是結果：回報，不吞
             res = H.Result(n, fn.__doc__ or fn.__name__, "")
             res.crash = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}"

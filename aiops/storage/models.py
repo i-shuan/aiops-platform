@@ -191,6 +191,25 @@ class ServiceEdgeRow(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
+class ServiceAsyncEdgeRow(Base):
+    """從 trace 推導出的非同步邊（producer 發訊息、consumer 消費）與最近一次看到的延遲 P95。偵測的 alert.messaging_link 拿來
+    把「生產者先出事、消費者晚一點才出事」的兩群併成一件事。
+
+    為什麼不放進 service_edges：那張表的 (caller, callee) 會被當成同步呼叫、傳播方向是 callee -> caller；
+    非同步邊的方向剛好相反（生產者出事 -> 消費者晚點出事），放同一張表舊版程式會把它讀成同步拓撲。
+    寫入者：admin.topology_refresh（AsyncEdges.record）。messages 累加；lag_ms_p95 是最近一次刷新那個窗的值（覆蓋，不平均）。
+    migrations/postgres/0007。"""
+
+    __tablename__ = "service_async_edges"
+    __table_args__ = (UniqueConstraint("producer", "consumer"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    producer: Mapped[str] = mapped_column(String(256))
+    consumer: Mapped[str] = mapped_column(String(256))
+    messages: Mapped[int] = mapped_column(Integer, default=0)
+    lag_ms_p95: Mapped[float] = mapped_column(Float, default=0.0)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
 class LotPathRow(Base):
     """每個 Lot 依時間排好的機台路徑（MergeLotPathsCommand 寫入）。alerts、rca 從這裡推導機台間流向（lot_edges）。"""
 

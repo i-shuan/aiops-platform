@@ -27,6 +27,7 @@ from aiops.storage.db import run_in_transaction
 from aiops.storage.repository import (
     ActiveConfigs,
     Anomalies,
+    AsyncEdges,
     DetectorModels,
     ExternalAnomalies,
     Feedbacks,
@@ -69,6 +70,8 @@ class StorageHooks:
                                     for r in Notifications.since(cutoff.replace(tzinfo=None))]
         if not ctx.topology_explicit:
             ctx.topology = [(e["caller"], e["callee"]) for e in ServiceEdges.all()]
+            # 非同步邊跟著同一條規則：workflow 自己指定拓撲（含空清單 = 不要用）時不載
+            ctx.async_edges = {(e["producer"], e["consumer"]): float(e["lag_ms_p95"]) for e in AsyncEdges.all()}
         if not ctx.lot_edges_explicit:
             ctx.lot_edges = lot_edges_from_paths(LotPaths.paths())
 

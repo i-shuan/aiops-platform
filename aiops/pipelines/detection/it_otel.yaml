@@ -32,6 +32,9 @@ nodes:
     operator: alert.same_entity
   - name: group_topology
     operator: alert.topology_chain
+  # 訊息佇列：生產者先出事、消費者晚一點才出事的兩群併成一件事（非同步邊由 admin_topology_refresh 沉澱；沒有邊就不做事）
+  - name: group_messaging
+    operator: alert.messaging_link
   - name: score_golden
     operator: alert.golden_signals
   - name: score_p0

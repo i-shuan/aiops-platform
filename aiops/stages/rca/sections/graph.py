@@ -17,12 +17,14 @@ class RootCauseCandidates(RcaSection):
 
     def applies(self, incident, ctx):
         # 演算法明確說「證據不足」時也要出這一段：讓值班的人知道不是沒算，而是算了但不能指認
-        return bool(ctx.rca_root_candidates or ctx.rca_root_note)
+        return bool(ctx.rca_root_candidates or ctx.rca_root_note or ctx.rca_mq_note)
 
     def build(self, incident, ctx):
         lines = [f"{i}. {c.entity}：{c.reason}" for i, c in enumerate(ctx.rca_root_candidates, 1)]
         if ctx.rca_root_note:
             lines.append(ctx.rca_root_note)
+        if ctx.rca_mq_note:  # 看到訊息消費者但跨不了時窗：要講，不然值班的人以為生產者看過了
+            lines.append(ctx.rca_mq_note)
         algorithm = ctx.rca_root_algorithm.removeprefix("rca.root_cause.")
         return "\n".join(lines) + f"\n（排序方法：{algorithm}）"
 

@@ -14,11 +14,15 @@ def service_edges(spans: Iterable[Any]) -> Counter:
     上游的 client span 與下游的 server span 共用 trace，下游的 parent_id 就是上游那個 span 的 id，所以只靠
     span_id／parent_id 就能接起來，不需要 span.kind。同服務內的父子（handler -> db 查詢）不算。
     span 只要有 span_id、parent_id、service 三個屬性（批次匯入的 SpanIn 與 RCA 現抓的 SpanRecord 都有）。
+
+    訊息消費者（consumer = True）不算：它的 parent 是生產者的 send span，但那是非同步邊，生產者不等它。
+    收進來的話 propagation_edges 會把它翻成「消費者出事拖垮生產者」，方向剛好相反。非同步邊另外走 engine/mq.async_lags。
     """
     spans = list(spans)
     service_of = {s.span_id: s.service for s in spans if s.span_id}
     return Counter((service_of[s.parent_id], s.service) for s in spans
-                   if s.parent_id in service_of and service_of[s.parent_id] != s.service)
+                   if s.parent_id in service_of and service_of[s.parent_id] != s.service
+                   and not getattr(s, "consumer", False))
 
 
 def lot_edges_from_paths(paths: list[list[str]]) -> list[LotEdge]:

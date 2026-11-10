@@ -153,23 +153,30 @@ class Check:
     expected: str
     actual: str
     ok: bool
+    dead: bool = False   # 已知死區：預期這條不會過（等同 pytest 的 xfail(strict=True)），過了反而要報
 
 
 @dataclass
 class Result:
-    n: int
+    n: int | str
     title: str
     injected: str
     checks: list[Check] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     crash: str = ""
 
-    def check(self, what: str, expected: str, actual, ok: bool) -> bool:
-        self.checks.append(Check(what, expected, str(actual), bool(ok)))
+    def check(self, what: str, expected: str, actual, ok: bool, dead: bool = False) -> bool:
+        self.checks.append(Check(what, expected, str(actual), bool(ok), dead))
         return bool(ok)
 
     @property
     def verdict(self) -> str:
         if self.crash:
             return "崩潰"
-        return "通過" if all(c.ok for c in self.checks) else "未通過"
+        if not all(c.ok for c in self.checks if not c.dead):
+            return "未通過"
+        dead = [c for c in self.checks if c.dead]
+        if not dead:
+            return "通過"
+        # 死區斷言照樣列在表裡、照樣算沒過；哪天它過了，代表死區不見了，標記要拿掉（不准默默變綠）
+        return "死區消失（請移除標記）" if any(c.ok for c in dead) else "已知死區"
