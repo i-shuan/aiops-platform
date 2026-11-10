@@ -163,6 +163,40 @@ def test_llm_noop_never_builds_a_client():
     assert build_llm("noop") is None
 
 
+def test_legacy_llm_operators_still_default_to_noop():
+    """CLAUDE.md §1 第 3 條：舊引擎的 llm_summary／llm_briefing 預設 provider=noop（完全不連外、直接用模板）。
+    RCA 新算子（extract_evidence、rca_narrator）沒有 noop，不在這裡檢查；它們的降級是 rca_status=undetermined（各自的測試檔）。"""
+    import inspect
+
+    from aiops.engine.registry import OperatorRegistry
+    import aiops.stages.enrichment.summarizer  # noqa: F401 — 註冊算子
+
+    for name in ("enrichment.llm_summary", "enrichment.llm_briefing"):
+        assert inspect.signature(OperatorRegistry.get(name)).parameters["provider"].default == "noop", name
+
+
+# 告警路徑（偵測 → 收斂 → 計分 → 抑制 → 通知）的算子；rca 也列進來：證據層與機率模型不准 import enrichment
+# （docs/COGNITIVE_RCA_DESIGN.md 第 4 節），LLM 只能透過 ctx.rca_evidence 進到 RCA 判斷
+_NO_LLM_STAGES = ("ingestion", "detectors", "ensemble", "grouping", "scoring", "suppression", "notification", "rca")
+
+
+def test_alert_path_does_not_depend_on_llm():
+    """CLAUDE.md §1 第 3 條：告警路徑嚴禁依賴 LLM。
+    1. stages/ 底下除了 enrichment/ 本身，沒有任何模組 import aiops.stages.enrichment（引擎也不行）。
+    2. pipelines/detection/ 的告警 workflow 不准掛 enrichment.* 節點（LLM 掛了，告警照樣要送出去）。"""
+    import yaml
+
+    files = [f for d in _NO_LLM_STAGES for f in _py("stages", d)] + _py("engine")
+    bad = _violations(files, ["aiops.stages.enrichment"])
+    assert not bad, bad
+    detection = sorted((ROOT / "pipelines" / "detection").glob("*.yaml"))
+    assert detection
+    bad = [f"{p.name}: {n.get('name')} = {n.get('operator')}" for p in detection
+           for n in (yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("nodes") or []
+           if str(n.get("operator", "")).startswith("enrichment.")]
+    assert not bad, f"告警 workflow 不准依賴 LLM：{bad}"
+
+
 def test_no_insecure_model_serialization():
     """模型檔只能用安全格式（npz + allow_pickle=False）；pickle 系列讀回時可以執行任意程式。"""
     bad = _violations(_py(), ["pickle", "joblib", "dill", "cloudpickle", "shelve", "marshal"])
