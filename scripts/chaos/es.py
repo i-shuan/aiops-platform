@@ -75,6 +75,8 @@ class ChaosES:
         sub = series.get("aggs", {}).get("v")
         agg, field = (next(iter(sub.items())) if sub else ("count", {"field": None}))
         field = field["field"] if isinstance(field, dict) else None
+        den = series.get("aggs", {}).get("d")  # divide_by 的分母（一律 sum）
+        den_field = den["sum"]["field"] if den else None
         bounds = series["date_histogram"].get("extended_bounds") or {}
         b_lo = _ts(bounds["min"]) if bounds else lo
         b_hi = _ts(bounds["max"]) if bounds else hi
@@ -87,7 +89,7 @@ class ChaosES:
             ms = np.arange(m0 + i * per, m0 + (i + 1) * per)
             ms = ms[(ms >= 0) & (ms < w.minutes)]
             ms = ms[[(w.t0.timestamp() + int(m) * 60) >= lo.timestamp() and (w.t0.timestamp() + int(m) * 60) < hi.timestamp() for m in ms]] if len(ms) else ms
-            vals, n_docs = [], 0
+            vals, dens, n_docs = [], [], 0
             if svc in w.svcs and len(ms):
                 for which in ("success", "failure"):
                     if outcome and outcome != which:
@@ -100,6 +102,10 @@ class ChaosES:
                         vals += list(s_us[present])
                     elif field == "transaction.duration.summary.value_count":
                         vals += list(n[present].astype(float))
+                    if den_field == "transaction.duration.summary.value_count":
+                        dens += list(n[present].astype(float))
+                    elif den_field == "transaction.duration.summary.sum":
+                        dens += list(s_us[present])
             bucket = {"key": int(k) * 1000, "doc_count": n_docs}
             if sub:
                 if vals:
@@ -107,5 +113,7 @@ class ChaosES:
                     bucket["v"] = {"value": v}
                 else:
                     bucket["v"] = {"value": 0.0 if agg == "sum" else None}
+                if den:
+                    bucket["d"] = {"value": float(np.sum(dens)) if dens else 0.0}  # 真實 ES 的 sum 對空桶回 0.0
             buckets.append(bucket)
         return {"took": 1, "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}, "aggregations": {"series": {"buckets": buckets}}}

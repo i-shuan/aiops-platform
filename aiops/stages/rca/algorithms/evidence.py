@@ -73,6 +73,8 @@ MAX_HOPS = 10
 # 訊息夾帶失敗轉記的門檻：消費者事件期間自己失敗的入口，至少這個比例是在消費同一條邊的訊息才轉。
 # 不到一半代表它大部分的失敗跟這批訊息無關（同步請求也在失敗），不能把錯記到生產者頭上
 MIN_MESSAGE_SHARE = 0.5
+# attribution["others"]：主導資源以外，等待增量佔自身耗時增量這個比例以上的資源也列出來（1 成以下當雜訊）
+OTHER_RESOURCE_SHARE = 0.1
 
 
 @OperatorRegistry.register("rca.root_cause.evidence")
@@ -381,13 +383,23 @@ class EvidenceRootCause(RootCauseOperator):
     def _dependency(self, r, kinds: dict[str, str]) -> tuple[str, dict]:
         """單一下游資源佔了這個服務自身耗時增量（或入口失敗）的 min_dependency_share 以上，就是下鑽歸因。
         等待增量用 (事件期間 − 事件前) 的每請求 ms；失敗用事件期間「該資源失敗筆數 ÷ 入口失敗筆數」。兩個資源各佔一半就不填。
-        回 (報告用的字串, 結構化 attribution)：有資源葉節點就一定有 attribution（主導資源的數字），不夠主導時字串為空、by 為空。"""
+        回 (報告用的字串, 結構化 attribution)：attribution 是等待增量最大那個資源的數字，不夠主導時字串為空、by 為空。
+        - 沒有任何資源「等待變長或失敗變多」（例如事件前有呼叫 redis、事件期間程式在入口就崩潰，一次都沒呼叫到）：
+          回空的 attribution，報告不該出現一個跟這次事故無關的資源。
+        - 其他也有份的資源（等待增量佔自身耗時增量 OTHER_RESOURCE_SHARE 以上，或失敗變多）列在 attribution["others"]，
+          依佔比由大到小；沒有就不帶這個鍵。兩個資源各佔一半時，結構體兩個都看得到。"""
         b, d = r["b"], r["d"]
         resources = set(b.wait_ms_per_request) | set(d.wait_ms_per_request)
         if not resources:
             return "", {}
         inc = {res: d.wait_ms_per_request.get(res, 0.0) - b.wait_ms_per_request.get(res, 0.0) for res in resources}
-        top_res, top_ms = max(inc.items(), key=lambda kv: kv[1])
+        more_failures = {res: int(d.wait_failures.get(res, 0)) - int(b.wait_failures.get(res, 0)) for res in resources}
+        top_res, top_ms = max(sorted(inc.items()), key=lambda kv: kv[1])
+        if top_ms <= 0:  # 沒有資源變慢：改看誰的失敗變多；都沒有就是「資源跟這次事故無關」
+            top_res, grew = max(sorted(more_failures.items()), key=lambda kv: kv[1])
+            if grew <= 0:
+                return "", {}
+            top_ms = inc[top_res]
         by = ""
         if r["self_raw"] > 0 and top_ms > 0 and top_ms / r["self_raw"] >= self.min_dependency_share:
             by = "latency"
@@ -398,18 +410,32 @@ class EvidenceRootCause(RootCauseOperator):
                 if res is not None and n / entry_failures >= self.min_dependency_share:
                     top_res, by = res, "errors"
 
-        def _kind(k: int) -> str:
-            parts = (kinds.get(top_res) or "").split("/")
+        def _kind(res: str, k: int) -> str:
+            parts = (kinds.get(res) or "").split("/")
             return parts[k] if len(parts) > k else ""
 
+        def _share(res: str) -> float:
+            return round(min(max(inc.get(res, 0.0) / r["self_raw"], 0.0), 1.0), 3) if r["self_raw"] > 0 else 0.0
+
+        def _numbers(res: str) -> dict:
+            return {
+                "wait_ms": {"before": round(b.wait_ms_per_request.get(res, 0.0), 1),
+                            "during": round(d.wait_ms_per_request.get(res, 0.0), 1)},
+                "failures": {"before": int(b.wait_failures.get(res, 0)), "during": int(d.wait_failures.get(res, 0))},
+                "share": _share(res),
+            }
+
         attribution = {
-            "resource": top_res, "kind": _kind(0), "subtype": _kind(1), "by": by,
+            "resource": top_res, "kind": _kind(top_res, 0), "subtype": _kind(top_res, 1), "by": by,
             "self_ms": {"before": round(b.app_ms_per_request, 1), "during": round(d.app_ms_per_request, 1)},
-            "wait_ms": {"before": round(b.wait_ms_per_request.get(top_res, 0.0), 1),
-                        "during": round(d.wait_ms_per_request.get(top_res, 0.0), 1)},
-            "failures": {"before": int(b.wait_failures.get(top_res, 0)), "during": int(d.wait_failures.get(top_res, 0))},
-            "share": round(min(max(inc.get(top_res, 0.0) / r["self_raw"], 0.0), 1.0), 3) if r["self_raw"] > 0 else 0.0,
+            **_numbers(top_res),
         }
+        others = [res for res in sorted(resources - {top_res})
+                  if (inc[res] > 0 and _share(res) >= OTHER_RESOURCE_SHARE) or more_failures[res] > 0]
+        if others:
+            attribution["others"] = [
+                {"resource": res, "kind": _kind(res, 0), "subtype": _kind(res, 1), **_numbers(res)}
+                for res in sorted(others, key=lambda res: (-_share(res), res))]
         if not by:
             return "", attribution
         label = f"{top_res}（{kinds[top_res]}）" if kinds.get(top_res) else top_res

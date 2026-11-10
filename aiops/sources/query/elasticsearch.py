@@ -6,6 +6,13 @@ query 範例（就是 MetricTarget.query 的內容）：
 
 agg：avg／max／min／sum／count（文件數）／p95／p99。count 不需要 value_field。
 
+divide_by（只能配 agg=sum）：每一桶回 Σvalue_field ÷ Σdivide_by。預先聚合的指標（Elastic APM 的
+transaction.duration.summary.sum 是「這一分鐘所有請求的總耗時」）要除以筆數才是每筆請求的平均延遲：
+  {"index": "metrics-apm.transaction.1m-*", "agg": "sum", "value_field": "transaction.duration.summary.sum",
+   "divide_by": "transaction.duration.summary.value_count", "filter": {"term": {"service.name": "cart"}}}
+不除的話數值跟請求數成正比：每分鐘 0～3 筆的低流量服務，剛好 3 筆的那一分鐘會被當成延遲暴增 3 倍。
+分母是 0 或沒有資料的桶當成「沒資料」（不是 0）。
+
 有核准的欄位對照（field_map：來源欄位 -> 標準欄位）時，查詢可以省略欄位名稱：
 - 標準欄位 ts    -> 補成 time_field
 - 標準欄位 value -> 補成 value_field
@@ -29,6 +36,7 @@ class EsMetricQuery(BaseModel):
     time_field: str = "@timestamp"
     value_field: str | None = None
     agg: Literal["avg", "max", "min", "sum", "count", "p95", "p99"] = "avg"
+    divide_by: str | None = None  # 分母欄位：Σvalue_field ÷ Σdivide_by（見檔頭）
     # 原樣放進 bool.filter 的 ES query 子句
     filter: dict[str, Any] | list[dict[str, Any]] | None = None
 
@@ -36,6 +44,8 @@ class EsMetricQuery(BaseModel):
     def _value_field_required(self):
         if self.agg != "count" and not self.value_field:
             raise ValueError(f"agg={self.agg} 需要 value_field")
+        if self.divide_by is not None and (self.agg != "sum" or not self.divide_by.strip()):
+            raise ValueError("divide_by 只能配 agg=sum（Σvalue_field ÷ Σdivide_by），而且不能是空字串")
         if "/" in self.index or self.index.startswith("_"):
             raise ValueError(f"不合法的 index：{self.index}")
         return self
@@ -90,6 +100,8 @@ def build_search_body(q: EsMetricQuery, start: datetime, end: datetime, step_sec
         histogram["aggs"] = {"v": {"percentiles": {"field": q.value_field, "percents": [_PERCENTILES[q.agg]]}}}
     elif q.agg != "count":
         histogram["aggs"] = {"v": {q.agg: {"field": q.value_field}}}
+        if q.divide_by:
+            histogram["aggs"]["d"] = {"sum": {"field": q.divide_by}}
     return {"size": 0, "query": {"bool": {"filter": filters}}, "aggs": {"series": histogram}}
 
 
@@ -102,4 +114,11 @@ def bucket_value(q: EsMetricQuery, bucket: dict[str, Any]) -> float | None:
         raw = next(iter(values.values()), None)
     else:
         raw = v.get("value")
-    return None if raw is None else float(raw)
+    if raw is None:
+        return None
+    if q.divide_by:
+        denominator = (bucket.get("d") or {}).get("value")
+        if not denominator or float(denominator) <= 0:  # 這一桶沒有請求：沒資料，不是「延遲 0」
+            return None
+        return float(raw) / float(denominator)
+    return float(raw)

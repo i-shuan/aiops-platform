@@ -48,7 +48,9 @@ def scenario_2() -> H.Result:
         pre = sum(1 for d in es.trace_docs if d["service"]["name"] == "bill-svc" and d["processor"]["event"] == "transaction"
                   and inc - timedelta(minutes=15) <= _ts(d) < inc)
         r.check("世界資料：事故前 15 分鐘 bill-svc 入口請求 < 20", "< 20（約 8）", f"{pre} 筆", pre < 20)
-        wf = H.detection_workflow("it_otel", H.targets(["bill-svc", "pay-api"]))
+        # bill-svc 每分鐘 0～3 筆：延遲用「每筆請求的平均」（ES 查詢的 divide_by）。原本的 avg(summary.sum) 是當分鐘總耗時，
+        # 01:33 那一分鐘剛好 3 筆 = 平常的 3 倍，注入前就誤報（缺口 9）。世界資料與注入都沒動，只有這條 target 的查詢換了。
+        wf = H.detection_workflow("it_otel", H.targets(["bill-svc"], kind="latency_mean") + H.targets(["pay-api"]))
         rp = H.replay(wf, inc - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、事件群 {[(i['id'], i['incident']['entities']) for i in incs]}")
@@ -111,7 +113,7 @@ def scenario_3() -> H.Result:
     r.check("attribution.by 為空（沒有主導資源）", "''", repr(a.get("by")), a.get("by") == "")
     blob = json.dumps(a, ensure_ascii=False)
     both = "redis" in blob and "postgres" in blob
-    r.check("attribution 結構體記錄『兩個』資源的數值", "redis 與 postgres 都在 attribution 裡", f"attribution 只記單一 resource={a.get('resource')!r}", both)
+    r.check("attribution 結構體記錄『兩個』資源的數值", "redis 與 postgres 都在 attribution 裡", f"resource={a.get('resource')!r}（share {a.get('share')}）；others={[(o['resource'], o['share']) for o in a.get('others', [])]}", both)
     both_text = "redis" in reason and "postgres" in reason
     r.check("理由文字（reason）列出兩個資源的等待", "reason 含 redis 與 postgres", both_text, both_text)
     rb = _runbook(out)

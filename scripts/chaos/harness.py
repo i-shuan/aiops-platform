@@ -75,10 +75,15 @@ def es_for(world: World, trace_lo: datetime | None = None, trace_hi: datetime | 
 
 
 def metric_query(svc: str, kind: str = "latency") -> str:
-    """kind=latency：每分鐘 summary.sum 的平均（跟真實 ES target 一樣）；errors：每分鐘失敗請求數。"""
+    """kind=latency：每分鐘 summary.sum 的平均（跟真實 ES target 一樣）；errors：每分鐘失敗請求數；
+    latency_mean：Σsummary.sum ÷ Σvalue_count = 每筆請求的平均延遲（µs）。summary.sum 是當分鐘總耗時，數值跟請求數成正比，
+    每分鐘 0～3 筆的低流量服務某分鐘多來幾筆就被當成延遲暴增（場景 2 注入前的誤報），低流量 target 要用 latency_mean。"""
     if kind == "errors":
         return json.dumps({"index": "metrics-apm.transaction.1m-*", "agg": "sum", "value_field": "transaction.duration.summary.value_count",
                            "filter": [{"term": {"service.name": svc}}, {"term": {"event.outcome": "failure"}}]})
+    if kind == "latency_mean":
+        return json.dumps({"index": "metrics-apm.transaction.1m-*", "agg": "sum", "value_field": "transaction.duration.summary.sum",
+                           "divide_by": "transaction.duration.summary.value_count", "filter": {"term": {"service.name": svc}}})
     return json.dumps({"index": "metrics-apm.transaction.1m-*", "agg": "avg", "value_field": "transaction.duration.summary.sum",
                        "filter": {"term": {"service.name": svc}}})
 

@@ -25,6 +25,26 @@
 限制：`merge_context` 在 SQLite 用 `json_patch`（RFC 7396，巢狀物件會往下合併），PostgreSQL 用 `||`（只合頂層）；呼叫端只能靠頂層鍵區分。
 場景 10 的驗收用的是平台新 API `Knowledge.merge_context`；舊的「整包 `upsert(context=...)`」寫法仍然會覆蓋，README 已寫明不要那樣用。
 
+## 修復後之二（分支 `fix/chaos-2-3-5`，2026-11-10）：場景 2、3、5
+
+缺口清單的 6、7、9(2) 修掉，場景 1～11 全數通過（12e 仍是已知死區，13 全過）；總表 21 個子場景 **199／200 斷言**。
+
+| 場景 | 修復前 | 修復後 | 改了什麼 |
+|---|---|---|---|
+| 2 低流量注入前誤報（缺口 9） | 8／9（01:33 那分鐘 3 筆請求，總耗時 112,530 µs ≈ 平常 3 倍，hourly_baseline 與 MAD 都投票，分數 13.21 → P0 事件群） | **9／9**（注入前 0 個事件群；注入後照樣偵測、RB-02） | 根因在查詢不在偵測器：`avg(transaction.duration.summary.sum)` 是「當分鐘總耗時」，跟請求數成正比。`sources/query/elasticsearch.py` 的查詢新增 `divide_by`（只能配 `agg=sum`）：每桶回 Σvalue_field ÷ Σdivide_by = 每筆請求的平均延遲，分母為 0 的桶當成沒資料。場景 2 的 bill-svc target 改用這個查詢（注入與世界資料沒動） |
+| 3 兩個下游各 45%（缺口 6） | 6／7（`attribution` 只有 redis） | **7／7**（`resource=redis` share 0.452；`others=[postgres 0.448]`） | `rca.root_cause.evidence._dependency`：主導資源以外，等待增量佔自身耗時增量 10% 以上（`OTHER_RESOURCE_SHARE`）或失敗變多的資源列進 `attribution["others"]`（依佔比排序；沒有就不帶這個鍵，既有鍵不變）。LLM 白名單同步認得 `others` 的資源名 |
+| 5 沒有子 span 的崩潰（缺口 7） | 7／8（`attribution = {resource: redis, share: 0.0, wait 2.0→0.0}`） | **8／8**（`attribution = {}`） | 沒有任何資源「等待變長或失敗變多」時回空的 attribution。只有失敗變多、等待沒變長的資源仍然歸因（`by=errors` 不受影響） |
+
+測試：`tests/test_chaos_gap_fixes.py` 16 案 + 1 個 `xfail(strict=True)` 死區。
+
+**誠實披露**
+
+- **偵測器的死區還在**：把「當分鐘總耗時」直接餵給 MAD，稀疏流量下 3 筆請求的分鐘照樣被判異常（合成資料 51 個點），這是查詢選錯指標、不是演算法能救的，用 `xfail(strict=True)` 留著（`test_total_duration_of_a_sparse_service_does_not_alarm_on_a_three_request_minute`）。低流量 target 必須用 `divide_by`（或 histogram）。
+- **`divide_by` 不是全面建議**：把混沌全部延遲查詢都換成平均延遲時，場景 1（2／6）、8（4／8）、12g（5／7）、13a（4／13）、13b（11／13）反而出現注入前的新誤報，所以 harness 預設查詢沒動，只有場景 2 的低流量 target 換。那些新誤報的成因**沒有查**。
+- **真實資料對照（11/3、5 個服務、唯讀）**：原查詢 75 個異常點／3 個事件群（跟修復前逐筆相同）；全部換成 `divide_by` 查詢是 157 個異常點／4 個事件群（多一個 pay-api 14:20–14:24，歸因 postgresql 等待 6.3→56.0 ms、share 0.985；cart-api 提早到 14:50）。平均延遲比較敏感，多出來的是真事故還是誤報**沒有驗證**，正式 target（`it_otel.yaml`）沒有改。
+- 場景 5 的 `reason` 文字仍會列出「等待 redis 2.0→0.0 ms（-2.0）」這個事實（那是逐項數字，不是歸因）；清掉的只有結構化 `attribution`。
+- 缺口 9(5)（失敗數序列 MAD=0 的注入前誤報）在先前的底噪修補（`scale_floor`）後已經不再出現，這輪沒有動它。
+
 ## 這份驗收怎麼跑、什麼是真的、什麼不是
 
 | | 真實 | 不是真實（誠實披露） |

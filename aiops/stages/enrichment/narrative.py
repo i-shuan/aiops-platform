@@ -223,6 +223,7 @@ def briefing_whitelist(context: dict[str, Any]) -> set[str]:
         names.add(rc["candidate"])
     if (rc.get("attribution") or {}).get("resource"):
         names.add(rc["attribution"]["resource"])
+    names.update(o["resource"] for o in (rc.get("attribution") or {}).get("others") or [])  # 一起變慢的其他資源
     mq = (rc.get("attribution") or {}).get("async") or {}  # 訊息佇列的另一端：處方會叫人回頭查生產者
     names.update(name for name in (mq.get("producer"), mq.get("consumer")) if name)
     amp = (rc.get("attribution") or {}).get("amplifier") or {}  # 被放大者灌爆的下游：處方會叫人去保住它
