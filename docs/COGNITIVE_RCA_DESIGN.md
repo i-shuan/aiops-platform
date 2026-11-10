@@ -41,6 +41,30 @@ fetch_traces / build_topology / fetch_logs       （沿用既有 ingestion.incid
 不判斷是逾時還是時鐘偏移**）、`failed_without_failed_child`（入口失敗且底下沒有失敗子 span 的比例）、`traffic_drop`（下游流量變化）、
 `log_template_surge`、`mq_lag`。新增 kind 要在這份文件登記。
 
+證據層實際產出（`aiops/stages/rca/facts/`，`rca.facts` 算子）。事件期間 = [事件開始, 事件結束 + 1 分鐘)、基準期 = [主撈取窗開頭, 事件開始)，
+跟 `rca.root_cause.evidence` 同一套切法。`detail.n` = 事件期間的樣本數，`detail.n_before` = 基準期的；樣本不到 `min_requests`（預設 20）
+就**不產出**，原因寫進 `ctx.log`（`rca.facts:skip:<項目>:<原因>`）。值是負的、是 0 照樣產出——證據層不判斷「算不算異常」。
+`entity` 一律是「行為的主體」：呼叫邊的事實掛在呼叫端，下游寫在 `detail.callee`。
+
+| kind | entity | window | value（unit） | detail 主要鍵 |
+| :-- | :-- | :-- | :-- | :-- |
+| `entry_latency` | 服務 | incident | 入口 span 平均總耗時（ms） | `before`（基準不足為 null）、`during` |
+| `entry_failure_rate` | 服務 | incident | 入口失敗比例（ratio） | `before`、`during`、`failures` |
+| `failed_without_failed_child` | 服務 | incident | 入口失敗、且往下整條同步呼叫鏈沒有失敗 span 的筆數 ÷ 入口數（ratio） | `count`、`failures`、`share_of_failures`、`before` |
+| `self_time_delta` | 服務 | delta | 每請求自身耗時（區間聯集）事件 − 基準（ms） | `before`、`during`、`app_before`、`app_during`（扣掉資源等待） |
+| `wait_delta` | 服務 | delta | 每請求等某個資源葉節點的時間 事件 − 基準（ms） | `target`（資源名）、`target_kind`（db/oracle）、`before`、`during`、`failures_before`、`failures_during` |
+| `inbound_rate` | 服務 | delta | 每分鐘入口數 事件 ÷ 基準（ratio） | `before_per_min`、`during_per_min`、`by_caller`（`<external>`／`<unknown>`／`mq:<生產者>`／服務名 -> 前後筆數） |
+| `traffic_drop` | 呼叫端 | delta | 對 `callee` 的每分鐘呼叫數 事件 ÷ 基準（ratio；< 1 是變少、0 是不再呼叫，> 1 是變多） | `callee`、`before_per_min`、`during_per_min`、`calls_before`、`calls_during` |
+| `fanout_ratio` | 呼叫端 | delta | 每個入口請求打 `callee` 幾次 事件 ÷ 基準（ratio） | `callee`、`before`、`during`（每請求次數） |
+| `child_outlives_parent` | 父服務 | incident／baseline | 子 span 晚於父 span 結束最多幾 ms（ms）；超出 ≤ 1 ms（毫秒截斷）不算 | `parent`、`child`（服務名或資源名）、`count`、`n`（父子對數）、`share`、`p50_ms`、`max_ms`、`sample` |
+| `child_precedes_parent` | 父服務 | incident／baseline | 子 span 早於父 span 開始最多幾 ms（ms）；**新增**，跟上一項同樣只陳述事實 | 同上 |
+| `log_template_surge` | 服務 | delta | 錯誤日誌樣板每分鐘頻率 事件 ÷ 基準（ratio；基準 0 筆以 1 筆計） | `template`、`error_type`、`during`、`baseline`、`rate_during`、`rate_baseline`、`new`、`trace_id`、`sampled`；每服務最多 `max_templates_per_service` 個 |
+| `mq_lag` | 消費者 | incident | 事件期間被消費訊息的延遲 P95（ms） | `producer`、`queue`、`p50_ms`、`before`（基準期 P95，可能 null）、`failed`、`pub_start`、`pub_end`、`linked_by` |
+| `metric_shift` | 實體 | delta | 事件群原始時序（`ctx.rca_series`）事件平均 − 事件前平均（指標原單位）；**新增** | `metric`（查詢）、`before`、`during`、`before_std`、`during_max` |
+
+訊息消費者不是同步子 span（沿用 `spans._children_index`）：晚 20 分鐘被處理是 `mq_lag`，不會變成 `child_outlives_parent`。
+`ctx.rca_facts` 依 (kind, entity, window, detail) 排序，同一組輸入逐位元相同（輸入順序打亂也一樣）。
+
 ## 4. 檔案歸屬（每個 session 只動自己的）
 
 | 段 | 檔案 | 規則 |
