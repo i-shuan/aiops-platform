@@ -19,7 +19,8 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
 )
-from aiops.control_plane.learning import golden, threshold, tuning_rules
+from aiops.control_plane.learning import golden, snr_feedback, threshold, tuning_rules
+from aiops.control_plane.learning.segment import snr_nodes
 from aiops.control_plane.learning.replay import incident_series
 from aiops.control_plane.learning.replay import workflow_layers as _workflow_layers
 from aiops.engine.operator import BaseOperator
@@ -138,6 +139,12 @@ class ProposalBacktestOp(BaseOperator):
         if row["status"] not in ("pending", "backtested"):
             raise Conflict(f"提案狀態為 {row['status']}，不能再回測")
         cls = _detector_cls(row["detector_name"])
+        if snr_nodes(row["pipeline"], row["detector_name"]):
+            # R+SNR 節點（開了 snr、軟投票）：整段偵測重跑，單一偵測器的回測量不準（control_plane/learning/snr_feedback.py）
+            backtest = snr_feedback.backtest(ctx, row, req)
+            status = "backtested" if backtest["safety"]["passed"] else "rejected"
+            ctx.result = {"proposal": Proposals.update(req.proposal_id, status=status, backtest=backtest)}
+            return ctx
         if cls.requires_peers and not (req.peers or req.peer_group):
             raise BadRequest(f"{row['detector_name']} 回測需要 peers 或 peer_group")
         current_row = _effective_row(row["detector_name"], row["pipeline"], row["entity"])
@@ -349,13 +356,15 @@ class FeedbackProposeOp(BaseOperator):
         if fb["verdict"] == "true_positive":
             raise Conflict("這筆回饋確認是真異常，不需要調參")
         detector = req.detector or fb["detector_name"]
+        pipeline, entity = self._scope(req, fb)
+        if pipeline != ANY and (snr_nodes(pipeline, detector) if detector else snr_feedback.has_snr(pipeline)):
+            return self._propose_snr(ctx, req, fb, detector, pipeline, entity)
         if not detector:
             raise BadRequest("請指定偵測器")
         tunable = _detector_cls(detector).tunable
         if not tunable:
             raise BadRequest(f"{detector} 沒有可自動調整的參數，請走人工提案")
 
-        pipeline, entity = self._scope(req, fb)
         active = (_effective_row(detector, pipeline, entity) or {}).get("params", {})
         current = {k: float(active.get(k, default)) for k, (default, _lo, _hi) in tunable.items()}
         details: dict = {}
@@ -371,6 +380,21 @@ class FeedbackProposeOp(BaseOperator):
         ctx.result = {"proposal": proposal, "generated_by": generated_by, "rejected": rejected}
         if details:
             ctx.result["quantile"] = details
+        return ctx
+
+    @staticmethod
+    def _propose_snr(ctx: PipelineContext, req: FeedbackPropose, fb: dict, detector: str | None, pipeline: str,
+                     entity: str) -> PipelineContext:
+        """R+SNR 管線：誤報 -> 門檻倍率提案（整段重跑二分搜，黃金事故當上限）；漏報不在這裡（倍率下限 1，見 snr_feedback）。"""
+        if fb["verdict"] != "false_positive":
+            raise BadRequest(f"{pipeline} 是 R+SNR 管線：回饋閉環只處理誤報（門檻倍率只能往少誤報調）；"
+                             "漏報請改 YAML 的 p_fa／min_run，或對調過倍率的偵測器人工提案調回")
+        det, params, reason, details = snr_feedback.propose_scale(ctx, fb, detector, pipeline, entity)
+        _check_params(det, params)
+        proposal = _create_proposal("auto", det, params, f"來自回饋 #{fb['id']}（{fb['verdict']}）：{reason}",
+                                    req.proposer, pipeline, entity)
+        Feedbacks.link_proposal(fb["id"], proposal["id"])
+        ctx.result = {"proposal": proposal, "generated_by": "segment_bisect", "rejected": None, "snr": details}
         return ctx
 
     @staticmethod

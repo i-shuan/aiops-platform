@@ -46,6 +46,7 @@ class DetectorOperator(BaseOperator):
     def __init__(self, **params: Any):
         routing = {k: params.pop(k) for k in ROUTING_PARAMS & set(params)}
         behaviour = {k: params.pop(k) for k in NODE_PARAMS & set(params)}
+        scale = params.pop(THRESHOLD_SCALE, None)
         unknown = set(params) - set(self.tunable) - set(self.other_params)
         if unknown:
             allowed = sorted({*self.tunable, *self.other_params, *ROUTING_PARAMS, *NODE_PARAMS})
@@ -67,6 +68,7 @@ class DetectorOperator(BaseOperator):
         if self.min_train_points < 1:
             raise TypeError("min_train_points 至少 1")
         self.snr = _snr_config(behaviour.get("snr"), self.tunable, self.operator_name or type(self).__name__)
+        self.threshold_scale = _threshold_scale(scale, self.tunable, self.operator_name or type(self).__name__)
         self.params = params
         # 建立時就檢查寫了的值在不在範圍內：節點 YAML 寫 threshold: -3 在載入 workflow 時就報錯，不是等到第一輪偵測
         self.check_ranges()
@@ -197,9 +199,13 @@ class DetectorOperator(BaseOperator):
         if self.snr is not None:
             threshold, source = (float(snr_stats["threshold"]), str(snr_stats["threshold_source"])) if snr_stats \
                 else (algo.param("threshold"), "fallback")  # 舊基準線沒有 SNR 統計：照原本的 threshold，下次重訓才有
-            algo.params = {**algo.params, "threshold": threshold}
+            algo.params = {**algo.params, "threshold": threshold * algo.threshold_scale}
             db = snr_stats.get("snr_db") if snr_stats else None
-            ctx.log(f"snr:{key}:db={'n/a' if db is None else round(db, 2)}:threshold={round(threshold, 3)}:{source}")
+            ctx.log(f"snr:{key}:db={'n/a' if db is None else round(db, 2)}:threshold={round(threshold, 3)}:{source}"
+                    + (f":x{algo.threshold_scale:g}" if algo.threshold_scale != 1.0 else ""))
+        elif algo.threshold_scale != 1.0:
+            algo.params = {**algo.params, "threshold": algo.param("threshold") * algo.threshold_scale}
+            ctx.log(f"threshold-scale:{key}:x{algo.threshold_scale:g}")
 
         ctx.detector_runs.append(key)  # 真的評估過這段資料才算參與（沒抓到異常 = 反對票）
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
@@ -276,7 +282,7 @@ class DetectorOperator(BaseOperator):
         target 的 overrides[節點名稱] 最優先：同一個節點套到 50 個服務，個別服務要不同門檻就寫在自己的 target 上。
         調參資料裡已經不認得的參數（例如演算法改版拿掉的）直接略過並記錄，不讓整條序列失敗。
         """
-        allowed = {*self.tunable, *self.other_params}
+        allowed = tuning_keys(type(self))
         tuned = ctx.detector_params.get(self.state_key, {})
         if tuned and not self.accepts_tuning:
             ctx.log(f"params:{self.state_key}:tuning-not-accepted:{','.join(sorted(tuned))}")
@@ -325,6 +331,28 @@ ROUTING_PARAMS = frozenset({"include_entities", "exclude_entities"})
 #     門檻改由 p_fa 換算（取代 threshold）、並把逐點證據交給 ctx.detector_evidence（給 detector.soft_vote）
 NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio", "min_train_points", "snr"})
 SNR_STATE_KEY = "_snr"
+# 門檻倍率（調參用，回饋閉環的誤報提案改的就是它）：節點實際門檻 = (snr 換算的門檻，或沒開 snr 時的 threshold) × 倍率。
+# 範圍下限 1：調參只能讓節點變鈍（少誤報），不能比 YAML／p_fa 定的門檻更敏感——「可以誤報、不能漏報」，靈敏度的底線由 YAML 決定。
+# 有 threshold 的偵測器都收；寫在節點 YAML 或 target overrides 就跟其他鍵一樣鎖定、調參改不到。
+THRESHOLD_SCALE = "threshold_scale"
+THRESHOLD_SCALE_RANGE = (1.0, 1.0, 10.0)
+
+
+def tuning_keys(cls: type[DetectorOperator]) -> set[str]:
+    """調參（ctx.detector_params／核准的提案）可以帶哪些鍵：tunable、other_params，有 threshold 的再加門檻倍率。"""
+    keys = {*cls.tunable, *cls.other_params}
+    return keys | {THRESHOLD_SCALE} if "threshold" in cls.tunable else keys
+
+
+def _threshold_scale(raw: Any, tunable: dict[str, Any], name: str) -> float:
+    if raw is None:
+        return 1.0
+    if "threshold" not in tunable:
+        raise TypeError(f"{name} 沒有 threshold，不能設 {THRESHOLD_SCALE}")
+    _default, low, high = THRESHOLD_SCALE_RANGE
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or not low <= raw <= high:
+        raise ValueError(f"{name}.{THRESHOLD_SCALE}={raw!r} 超出範圍 [{low}, {high}]（只能 >= 1：調參只准往少誤報的方向）")
+    return float(raw)
 DEFAULT_MIN_TRAIN_POINTS = 60
 # 訓練排除事故窗後至少要剩這麼多點（或原本的一半），不然退回用全部資料
 EXCLUSION_MIN_KEEP = 30
@@ -336,11 +364,11 @@ def layer_params(cls: type[DetectorOperator], tuned: dict[str, Any], yaml_params
     演算法預設值由算子自己補（param()）。偵測（effective_params）與回測（admin.proposal_backtest）都走這裡，
     兩邊才會算出同一組參數——回測若少疊 YAML 那層，顯示的效果在正式偵測裡根本不會生效。
     調參資料裡演算法已經不認得的鍵（改版拿掉的）直接略過。"""
-    allowed = {*cls.tunable, *cls.other_params} if cls.accepts_tuning else set()  # 不收調參的算子：tuned 整層略過
+    allowed = tuning_keys(cls) if cls.accepts_tuning else set()  # 不收調參的算子：tuned 整層略過
     return deep_merge(deep_merge({k: v for k, v in tuned.items() if k in allowed}, yaml_params), override)
 
 
-# 分母底噪的兩個 tunable（mad、zscore、hourly_baseline、quantile_drift、compare 都有）：
+# 分母底噪的兩個 tunable（mad、zscore、hourly_baseline、quantile_drift 都有）：
 #   min_scale：絕對下限，單位跟指標一樣（失敗數填 0.5、延遲 µs 填 5000）；0 = 不用
 #   min_scale_ratio：相對下限，|中心值| × 這個比例（預設 1%：延遲 1,000,000 µs 的序列分母至少 10,000）
 SCALE_FLOOR_TUNABLE: dict[str, tuple[float, float, float]] = {
@@ -362,7 +390,7 @@ def scale_floor(scale: float, values: pd.Series | np.ndarray | None = None, min_
     整數序列（失敗數、請求數）MAD 常常是 0：1 筆就是最小有意義的變動，分母至少 1——不然 2 筆失敗會變成百萬分。
     中心與「是不是整數」預設從 values（訓練資料）算：中心取中位數；偵測時沒有訓練資料，就由 center／integer 傳進來
     （演算法在 fit 時記在基準線裡）。
-    三個下限都是 0（min_scale=0、min_scale_ratio=0、中心為 0 或非整數）時退回 1.0，跟 quantile_drift／compare
+    三個下限都是 0（min_scale=0、min_scale_ratio=0、中心為 0 或非整數）時退回 1.0，跟 quantile_drift
     既有的最後一層一致：寧可分數偏鈍，也不要除以趨近 0 的數把雜訊放大成異常。
     底噪只在 scale 小於它時起作用；正常波動的序列 scale 遠大於中心的 1%，分數一分不變。
     """
