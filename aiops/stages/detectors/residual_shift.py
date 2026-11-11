@@ -24,6 +24,7 @@ class ResidualShiftDetector(DetectorOperator):
     tz（時段用的時區，比照 hourly_baseline，預設 UTC）、min_slot_points（時段至少幾個訓練點才用它，預設 30）。"""
 
     algorithm = "residual_shift"
+    whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
     tunable = {"threshold": (4.0, 1.0, 20.0), **RESIDUAL_TUNABLE, **SCALE_FLOOR_TUNABLE}
     other_params = frozenset({"tz", "min_slot_points", "ref_points"})
 

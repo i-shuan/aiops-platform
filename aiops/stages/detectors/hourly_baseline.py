@@ -36,6 +36,7 @@ class HourlyBaselineDetector(DetectorOperator):
     全段 std 為 0（訓練期完全不變）時以前分數全 0（永遠不報），現在分母退到底噪。"""
 
     algorithm = "hourly_baseline"
+    whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
     tunable = {"threshold": (3.0, 1.0, 10.0), **SCALE_FLOOR_TUNABLE}
     other_params = frozenset({"tz", "min_points", "min_weeks"})
 

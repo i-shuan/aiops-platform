@@ -1,7 +1,10 @@
-"""三票多數決回測：A 現行（it_otel：hourly_baseline＋mad＋quantile_drift）對 R 新三票（it_otel_residual：
-hourly_baseline＋residual_shift＋residual_chronic），用 ES 的每分鐘請求數序列。
+"""四組偵測回測，用 ES 的每分鐘請求數序列：
+  A      it_otel               hourly_baseline＋mad＋quantile_drift，detector.ensemble 多數決
+  R      it_otel_residual      hourly_baseline＋residual_shift＋residual_chronic 多數決＋旁路漂移票
+  R+SNR  it_otel_residual_snr  R 的投票節點開 snr（p_fa 換算門檻）＋detector.soft_vote 軟投票
+  A+SNR  it_otel_snr           A 的投票節點開 snr＋detector.soft_vote 軟投票
 
-偵測走真的 Pipeline：從兩份 workflow YAML 取出偵測節點（fetch 之後到 detector.ensemble 為止，含 hard_limit 與 bypass），
+偵測走真的 Pipeline：從各 workflow YAML 取出偵測節點（fetch 之後到裁決節點為止，含 hard_limit 與 bypass），
 fetch 換成回放用的 replay.window（每輪給最近 60 分鐘，同 it_otel 的 lookback_minutes），基準線由記憶體版 Hooks 保存——
 第一輪沒有基準線時給訓練段 train_df、引擎訓練並交出 new_detector_states，之後每輪載入同一份（等同正式環境基準線還沒到期）。
 每 5 分鐘一輪（同 CronJob 週期）；一分鐘只要在任何一輪被 detector.ensemble 判成異常、或被 bypass 節點
@@ -41,7 +44,8 @@ warnings.filterwarnings("ignore")
 TZ = "Asia/Taipei"
 LOOKBACK, STEP = 60, 5
 SERVICES = ["mes-api", "wip-worker", "report-svc", "order-svc", "cart-api", "pay-api"]
-VARIANTS = {"A": "it_otel", "R": "it_otel_residual"}
+VARIANTS = {"A": "it_otel", "R": "it_otel_residual", "R+SNR": "it_otel_residual_snr", "A+SNR": "it_otel_snr"}
+VOTERS = ("detector.ensemble", "detector.soft_vote")
 INJECTIONS = {"step": np.full(20, 0.3), "ramp": np.r_[np.linspace(1.0, 0.3, 15), np.full(20, 0.3)],
               "mild": np.full(60, 0.8)}
 
@@ -85,11 +89,11 @@ class MemoryHooks:
 def detection_nodes(workflow: str) -> list[NodeSpec]:
     """workflow YAML 的偵測段：fetch 之後到 detector.ensemble（含），fetch 換成回放。裁決保留成員事件，才算得出各票。"""
     raw = yaml.safe_load(workflow_path(workflow).read_text(encoding="utf-8"))["nodes"]
-    stop = [n["operator"] for n in raw].index("detector.ensemble")
+    stop = next(i for i, n in enumerate(raw) if n["operator"] in VOTERS)
     nodes = [NodeSpec(name="fetch", operator="replay.window")]
     for n in raw[1:stop + 1]:
         params = dict(n.get("params") or {})
-        if n["operator"] == "detector.ensemble":
+        if n["operator"] in VOTERS:
             params["keep_members"] = True
         nodes.append(NodeSpec(name=n["name"], operator=n["operator"], params=params))
     return nodes
@@ -101,7 +105,7 @@ class Runner:
                                       targets=[TargetSpec(source_type="mock", query=f"rpm:{service}", entity=service)]),
                              MemoryHooks())
         self.train = train
-        vote = next(op for _, op in self.pipe.target_nodes if op.operator_name == "detector.ensemble")
+        vote = next(op for _, op in self.pipe.target_nodes if op.operator_name in VOTERS)
         # bypass 的節點（hard_limit、不投票的旁路漂移票）事件原樣留下，正式環境一樣會發告警：算進告警分鐘
         self.bypass = set(vote.bypass)
         self.voters = [n.name for n, op in self.pipe.target_nodes
@@ -121,7 +125,7 @@ class Runner:
                 k = pos.get(pd.Timestamp(e.ts))
                 if e.level != ANOMALY or k is None:
                     continue
-                if e.detector == "detector.ensemble" or e.detector_node in self.bypass:
+                if e.detector in VOTERS or e.detector_node in self.bypass:
                     verdict[k] = True
                 if e.detector_node in self.bypass:
                     member.setdefault(e.detector_node, np.zeros(n, bool))[k] = True
@@ -185,6 +189,9 @@ def run_service(service: str, df: pd.DataFrame) -> dict:
         r["基準線摘要"] = {k: {"noise": v.state["noise"], "lowo_share": v.state["profile"]["lowo_share"],
                            "slots_ready": v.state["profile"]["slots_ready"]}
                        for k, v in runner.pipe.hooks.states.items() if "noise" in v.state}
+        r["SNR"] = {k: {x: v.state["_snr"][x] for x in ("snr_db", "status", "noise_sigma", "signal_var", "threshold",
+                                                        "threshold_source")}
+                    for k, v in runner.pipe.hooks.states.items() if "_snr" in v.state}
         for kind in INJECTIONS:
             inj, s, length = inject(test, kind)
             # 只重跑看得到注入窗（含其後 60 分拖尾）的輪次；基準線沿用同一份（同一個訓練段）
@@ -210,7 +217,10 @@ def main() -> None:
     ap.add_argument("--cache", type=Path, required=True, help="序列 CSV 快取目錄（不要放在 repo 裡）")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--services", default=",".join(SERVICES))
+    ap.add_argument("--variants", default=",".join(VARIANTS), help="要跑的組別（逗號分隔）")
     args = ap.parse_args()
+    for key in [k for k in VARIANTS if k not in args.variants.split(",")]:
+        del VARIANTS[key]
     result = {}
     for service in args.services.split(","):
         result[service] = run_service(service, load_series(service, args.cache, args.secrets))

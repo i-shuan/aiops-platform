@@ -7,13 +7,14 @@ from __future__ import annotations
 import io
 import math
 from abc import abstractmethod
+from statistics import NormalDist
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 import pandas as pd
 
-from aiops.engine.context import AnomalyResult, DetectorState, PipelineContext, TargetError
+from aiops.engine.context import AnomalyResult, DetectorEvidence, DetectorState, PipelineContext, TargetError
 from aiops.engine.errors import BadRequest
 from aiops.engine.params import deep_merge
 from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, as_utc
@@ -38,6 +39,9 @@ class DetectorOperator(BaseOperator):
     votes: ClassVar[bool] = True
     # False：參數只認 YAML 與 target overrides，後台調參（含 LLM 抽規則、規則升級器）一律不套用、提案直接拒絕
     accepts_tuning: ClassVar[bool] = True
+    # True：分數是對「時段（週幾×小時）基準」算的，季節訊號已經扣掉，分數單位就是雜訊尺度（hourly_baseline、residual_*）。
+    # 開 snr 時決定門檻怎麼從 p_fa 換算（見 snr_threshold）；不開 snr 時沒有任何作用
+    whitened: ClassVar[bool] = False
 
     def __init__(self, **params: Any):
         routing = {k: params.pop(k) for k in ROUTING_PARAMS & set(params)}
@@ -62,6 +66,7 @@ class DetectorOperator(BaseOperator):
         self.min_train_points = int(behaviour.get("min_train_points", DEFAULT_MIN_TRAIN_POINTS))
         if self.min_train_points < 1:
             raise TypeError("min_train_points 至少 1")
+        self.snr = _snr_config(behaviour.get("snr"), self.tunable, self.operator_name or type(self).__name__)
         self.params = params
         # 建立時就檢查寫了的值在不在範圍內：節點 YAML 寫 threshold: -3 在載入 workflow 時就報錯，不是等到第一輪偵測
         self.check_ranges()
@@ -174,19 +179,36 @@ class DetectorOperator(BaseOperator):
                 ctx.log(f"train:{key}:too-few-points:{points}<{self.min_train_points}:keep-old-baseline")
             else:
                 train = candidate
+        snr_stats: dict[str, Any] | None = None
         if train is not None:
             algo.fit(train)
-            ctx.new_detector_states[key] = self._snapshot(algo, ctx, train, base_version, algo.training_points(train))
+            snapshot = self._snapshot(algo, ctx, train, base_version, algo.training_points(train))
+            if self.snr is not None:
+                snr_stats = fit_snr(algo, train, self.snr)
+                snapshot.state = {**snapshot.state, SNR_STATE_KEY: snr_stats}  # 跟基準線一起存、一起到期
+            ctx.new_detector_states[key] = snapshot
         else:
             assert state is not None
-            algo.load_state(state.state)
+            stored = dict(state.state)
+            snr_stats = stored.pop(SNR_STATE_KEY, None)  # 演算法自己的 load_state 看不到這一層
+            algo.load_state(stored)
             if state.artifact is not None:
                 algo.load_artifact(state.artifact_format, state.artifact)
+        if self.snr is not None:
+            threshold, source = (float(snr_stats["threshold"]), str(snr_stats["threshold_source"])) if snr_stats \
+                else (algo.param("threshold"), "fallback")  # 舊基準線沒有 SNR 統計：照原本的 threshold，下次重訓才有
+            algo.params = {**algo.params, "threshold": threshold}
+            db = snr_stats.get("snr_db") if snr_stats else None
+            ctx.log(f"snr:{key}:db={'n/a' if db is None else round(db, 2)}:threshold={round(threshold, 3)}:{source}")
 
         ctx.detector_runs.append(key)  # 真的評估過這段資料才算參與（沒抓到異常 = 反對票）
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
         # 每一筆都帶著自己是哪個演算法、哪個節點抓到的（要交集／多數決就接 detector.ensemble）
         result = ctx.anomaly_result = algo.detect(df)
+        if self.snr is not None:
+            ctx.detector_evidence[key] = DetectorEvidence(result.timestamps, list(result.scores), algo.param("threshold"),
+                                                          source, float(self.snr["p_fa"]),
+                                                          snr_stats.get("snr_db") if snr_stats else None)
         for note in algo.notes:  # 壞資料這類「沒判、但要有人知道」的事：進 audit 也進 errors，不默默吞掉
             ctx.log(f"{algo.algorithm}:{key}:{note}")
             ctx.errors.append(TargetError(target.entity, f"{algo.algorithm}:{key}:{note}"))
@@ -299,7 +321,10 @@ ROUTING_PARAMS = frozenset({"include_entities", "exclude_entities"})
 #   exclude_incidents（預設 true）：訓練基準線時排除這個實體的歷史事故與維護窗
 #   warning_ratio（預設不開）：分數超過「門檻 × 這個比例」但還沒越線時記成 warning（預警），例如 0.8
 #   min_train_points（預設 60 = 每分鐘一點的 1 小時）：訓練點數不到就不學、不判；requires_training=False 的算子不受影響
-NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio", "min_train_points"})
+#   snr（預設不開）：{p_fa: 目標逐點虛警率, tz: 時段時區, min_slot_points: 時段最少點數}。開了就算序列 SNR、
+#     門檻改由 p_fa 換算（取代 threshold）、並把逐點證據交給 ctx.detector_evidence（給 detector.soft_vote）
+NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio", "min_train_points", "snr"})
+SNR_STATE_KEY = "_snr"
 DEFAULT_MIN_TRAIN_POINTS = 60
 # 訓練排除事故窗後至少要剩這麼多點（或原本的一半），不然退回用全部資料
 EXCLUSION_MIN_KEEP = 30
@@ -517,3 +542,87 @@ def calibrated_scale(stats: dict[str, float], threshold: float, max_tail_factor:
     noise, tail = float(stats["noise"]), float(stats["tail_q"]) / threshold
     calibrated = min(max(noise, tail), noise * max_tail_factor)
     return scale_floor(calibrated, None, min_scale, min_scale_ratio, center=level, integer=integer)
+
+
+# ── 序列 SNR 與「由 p_fa 換算門檻」（節點參數 snr 開了才用）──
+#
+# 序列層 SNR（fit 時算、跟基準線一起存在 state 的 "_snr"）：
+#   signal = 訓練期每個點對應的 168 格（週幾×小時）季節基準的變異數（點數加權；時段不足的點照 seasonal_baseline 的退回）
+#   noise  = (1.4826 × MAD(殘差))²，殘差 = 原值 − 季節基準（留一週算，見 fit_seasonal_profile）
+#   SNR_dB = 10·log10(signal / noise)
+#   noise 為 0（殘差幾乎不動）：σ 改用 scale_floor 的底噪（|水位| × 1%、整數序列 1，都沒有就 1.0），noise_floored = True，不除以 0。
+#   資料不足（168 格一格都不夠 min_slot_points）：status = insufficient，snr_db = None；signal 為 0（時段基準全一樣）：
+#   status = flat，snr_db = None。兩種情況門檻照常算（門檻不依賴序列 SNR，見下）。
+#
+# 門檻（取代寫死的 threshold）：
+#   whitened 節點（分數已經是「偏離 / 雜訊尺度」）：threshold = z_{1−p_fa/2}，常態雙尾分位數（p_fa = 0.001 -> 3.29）。
+#     Neyman–Pearson：固定虛警率時門檻只由雜訊分布決定；SNR 決定的是抓不抓得到（檢出率），不是門檻該放哪。
+#     序列 SNR 在這裡不進門檻，照實不硬塞。
+#   沒白化的節點（mad、quantile_drift、zscore…）：理論上它們「看到的雜訊」= 雜訊 + 沒扣掉的季節訊號，
+#     帶寬應該是 z·σ_n·√(1+SNR)；但它們的分數單位不是 σ_n（mad 的分母是原值的 MAD），這條式子換不到它們的單位。
+#     替代：threshold = max(z_{1−p_fa/2}, 訓練期該節點分數的 1−p_fa 經驗分位數)——同一個 p_fa、直接量季節訊號撐大了多少，
+#     效果就是 √(1+SNR) 那一項的實測版。
+
+
+def _snr_config(raw: Any, tunable: dict[str, Any], name: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise TypeError(f"{name} 的 snr 必須是 {{p_fa: ..., tz: ...}}，不是 {raw!r}")
+    unknown = sorted(set(raw) - {"p_fa", "tz", "min_slot_points"})
+    if unknown:
+        raise TypeError(f"{name} 的 snr 沒有 {unknown}；可用：p_fa、tz、min_slot_points")
+    if "threshold" not in tunable:
+        raise TypeError(f"{name} 沒有 threshold，不能用 snr 換算門檻")
+    p_fa = raw.get("p_fa")
+    if isinstance(p_fa, bool) or not isinstance(p_fa, (int, float)) or not 0 < float(p_fa) < 0.5:
+        raise ValueError(f"{name} 的 snr.p_fa 必須在 0 到 0.5 之間（不含），例如 0.001；現在是 {p_fa!r}")
+    tz = parse_tz(raw.get("tz", "UTC"), f"{name} 的 snr")
+    slots = int(raw.get("min_slot_points", 30))
+    if slots < 2:
+        raise TypeError(f"{name} 的 snr.min_slot_points 至少要 2")
+    return {"p_fa": float(p_fa), "tz": tz, "min_slot_points": slots}
+
+
+def gaussian_threshold(p_fa: float) -> float:
+    """雙尾常態分位數 z_{1−p_fa/2}：雜訊是常態、分數 = |偏離| / σ 時，逐點虛警率剛好是 p_fa。"""
+    return float(NormalDist().inv_cdf(1.0 - p_fa / 2.0))
+
+
+def series_snr(df: pd.DataFrame, tz: ZoneInfo, min_slot_points: int) -> dict[str, Any]:
+    """序列層 SNR（定義見上面的註解）。回傳可 JSON 序列化的 dict。"""
+    profile, resid = fit_seasonal_profile(df, tz, min_slot_points)
+    values = df["value"].astype(float)
+    baseline = seasonal_baseline(df["ts"], profile)
+    signal = float(np.var(baseline)) if len(baseline) else 0.0
+    r = resid[np.isfinite(resid)]
+    sigma = float(np.median(np.abs(r - np.median(r))) * _MAD_TO_STD_RES) if len(r) else 0.0
+    floored = sigma <= 0
+    if floored:
+        sigma = scale_floor(0.0, values)
+    out = {"signal_var": signal, "noise_sigma": sigma, "noise_floored": floored,
+           "slots_ready": int(profile["slots_ready"]), "lowo_share": profile["lowo_share"], "points": int(len(df))}
+    if profile["slots_ready"] == 0:
+        return {**out, "status": "insufficient", "snr_lin": None, "snr_db": None}
+    if signal <= 0:
+        return {**out, "status": "flat", "snr_lin": 0.0, "snr_db": None}
+    snr_lin = signal / sigma ** 2
+    return {**out, "status": "ok", "snr_lin": snr_lin, "snr_db": float(10 * math.log10(snr_lin))}
+
+
+def snr_threshold(algo: DetectorOperator, train: pd.DataFrame, p_fa: float) -> tuple[float, str]:
+    """由 p_fa 換算門檻（跟節點分數同單位）。whitened 節點用常態分位數；沒白化的取常態分位數與訓練期分數經驗分位數的大者。"""
+    z = gaussian_threshold(p_fa)
+    if type(algo).whitened:
+        return z, "gaussian"
+    algo.params = {**algo.params, "threshold": z}
+    scores = np.asarray(algo.detect(train).scores, dtype=float)
+    scores = scores[np.isfinite(scores)]
+    empirical = float(np.quantile(scores, 1.0 - p_fa)) if len(scores) else 0.0
+    return max(z, empirical), "empirical" if empirical > z else "gaussian"
+
+
+def fit_snr(algo: DetectorOperator, train: pd.DataFrame, cfg: dict[str, Any]) -> dict[str, Any]:
+    stats = series_snr(train, cfg["tz"], cfg["min_slot_points"])
+    threshold, source = snr_threshold(algo, train, cfg["p_fa"])
+    return {**stats, "p_fa": cfg["p_fa"], "threshold": threshold, "threshold_source": source}

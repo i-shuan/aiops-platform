@@ -34,6 +34,7 @@ class ResidualChronicDetector(DetectorOperator):
     min_run（預設 1）：滾動平均要連續越線幾個點才成立，給不投票、單獨發告警的旁路節點用（只認 YAML，調參改不到）。"""
 
     algorithm = "residual_chronic"
+    whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
     tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 3.0, 1440.0), **RESIDUAL_TUNABLE, **SCALE_FLOOR_TUNABLE}
     other_params = frozenset({"tz", "min_slot_points", "min_run"})
 
