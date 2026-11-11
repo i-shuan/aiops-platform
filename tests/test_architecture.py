@@ -214,7 +214,7 @@ def test_rca_sections_and_root_cause_algorithms_are_registered_not_hardcoded():
 
     load_all()
     assert len(OperatorRegistry.names("rca.section.")) >= 9
-    assert {"rca.root_cause.topological", "rca.root_cause.pagerank", "rca.root_cause.cross_correlation"} <= set(
+    assert {"rca.root_cause.topological", "rca.root_cause.evidence", "rca.root_cause.llm"} <= set(
         OperatorRegistry.names("rca.root_cause."))
 
 

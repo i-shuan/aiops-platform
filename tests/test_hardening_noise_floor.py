@@ -13,8 +13,7 @@ import pytest
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, is_integer_series, scale_floor
 
-FLOORED = ["detector.mad", "detector.zscore", "detector.hourly_baseline", "detector.quantile_drift", "detector.dod",
-           "detector.wow"]
+FLOORED = ["detector.mad", "detector.zscore", "detector.hourly_baseline", "detector.quantile_drift"]
 T0 = datetime(2026, 11, 2, tzinfo=timezone.utc)
 
 

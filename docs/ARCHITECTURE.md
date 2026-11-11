@@ -17,7 +17,7 @@
                                   ▼
 RCA 管線（新舊並排）
   舊：fetch_traces / build_topology / fetch_logs
-        → rca.root_cause.evidence（規則＋PageRank／拓撲／互相關）
+        → rca.root_cause.evidence（規則＋拓撲 fallback）
         → rca.report（含 Runbook 比對矩陣）→ llm_summary / llm_briefing（可 noop）
   新：fetch_traces / build_topology / fetch_logs
         → rca.facts（事實）→ enrichment.extract_evidence（LLM 抽證據）
@@ -28,9 +28,9 @@ RCA 管線（新舊並排）
 
 | 階段 | 舊做什麼 | 新做什麼 |
 | :-- | :-- | :-- |
-| 偵測（detector.*） | MAD／Z-Score／分位數／同儕等算子，基準線存 DB | 不動 |
+| 偵測（detector.*） | MAD／Z-Score／分位數／168 時段等算子，基準線存 DB | 不動 |
 | 收斂／計分／抑制／通知 | 事件群、靜音、冷卻、Alertmanager | 不動；仍**嚴禁依賴 LLM** |
-| 證據撈取 | `ingestion.incident_series/traces/logs`、拓撲沉澱 | 不動 |
+| 證據撈取 | `ingestion.incident_traces/logs`、拓撲沉澱（`incident_series` 保留但目前沒掛在管線上） | 不動 |
 | 事實（證據層） | 解讀混在 `spans.py`／`evidence.py`（子 span 晚結束直接記成時鐘偏移） | 【新】`rca.facts` 只陳述事實（如 `child_outlives_parent=13000 ms`），確定性、不呼叫 LLM |
 | 日誌理解 | `logs.py` 樣板與暴增排序，只當旁證 | 【新】`enrichment.extract_evidence`：LLM 把日誌讀成封閉詞表證據，`quote` 必須逐字出現在原日誌 |
 | 根因排名 | 規則與圖演算法疊加分數；傳導上限 `MAX_HOPS=10` | 【新】`rca.root_cause.bayes`：noisy-OR 後驗，環先縮點、不遞迴，同輸入同排名 |
@@ -138,7 +138,7 @@ aiops/
 │  ├─ ingestion/fetch.py             # ingestion.fetch／incident_series／incident_traces／incident_logs
 │  ├─ detectors/                     # 異常偵測
 │  │  ├─ base.py                     # DetectorOperator：載基準線、調參、warning、訓練排除；演算法只寫 fit／detect
-│  │  ├─ mad.py／zscore.py／hourly_baseline.py／quantile_drift.py／chronic.py／shift.py／compare.py／peer.py
+│  │  ├─ mad.py／zscore.py／hourly_baseline.py／quantile_drift.py／residual_shift.py／residual_chronic.py
 │  │  ├─ rules.py                    # 規則偵測，不需訓練
 │  │  ├─ hard_limit.py               # 致命軌：單點踩線成立、不投票、界線只認 YAML
 │  │  └─ new_only.py                 # 只報新出現的實體
@@ -158,7 +158,7 @@ aiops/
 │  │  │   ├─ observe.py              #   事實／證據 → 觀測
 │  │  │   ├─ priors.py               #   手設先驗（附出處註解、可調）
 │  │  │   └─ operator.py             #   算子；證據不足回空清單＋rca_root_note
-│  │  ├─ algorithms/                 # 【舊】evidence.py（約 520 行）、pagerank.py、topological.py、causal.py（實為互相關）
+│  │  ├─ algorithms/                 # 【舊】evidence.py（約 520 行）、topological.py
 │  │  └─ sections/                   # overview／evidence／graph／log_patterns／similar_cases；【舊】actions.py（Runbook 矩陣）
 │  └─ enrichment/                    # LLM（唯一可連外的 stages 目錄）
 │     ├─ base.py／registry.py／providers.py   # BaseLLM.complete、LLMError、@register 供應商
@@ -177,7 +177,7 @@ aiops/
 │
 ├─ pipelines/                        # 流程只在 YAML 宣告，名稱全域唯一
 │  ├─ detection/                     # factory／it_apm／it_otel／metrics_only
-│  ├─ rca/                           # rca_report.yaml、rca_report_correlation.yaml；【新】rca_report_cognitive.yaml（待建）
+│  ├─ rca/                           # rca_report.yaml；【新】rca_report_cognitive.yaml（待建）
 │  └─ control/                       # admin_*.yaml（核准、回測、靜音、拓撲沉澱…共 20 支）
 │
 └─ interfaces/                       # 入口（零業務邏輯，嚴禁 if／for／try）

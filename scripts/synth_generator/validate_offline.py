@@ -8,7 +8,7 @@ python -m scripts.synth_generator.validate_offline synth-out/nov03_cascade [--js
    跟同一段時間 trace 的平均耗時對照（同一個狀態函數，應該對得起來）
 3. 偵測器回放（真的 Pipeline + 註冊的偵測算子）：latency 跑 mad、quantile_drift；qps 跑 hourly_baseline（訓練 14 天、min_weeks 2）；
    error_rate 三個一起跑看 ensemble 多數決能不能濾掉單點毛刺。印出事件區間內／外的警報點數
-4. RCA：事件期間的延遲異常組成 Incident，用 rca.root_cause.topological、pagerank、cross_correlation 排名
+4. RCA：事件期間的延遲異常組成 Incident，用 rca.root_cause.topological 排名（pagerank、cross_correlation 已移除）
 5. log：模擬 Grafana 沿 _source 逐層走 error.exception.message 的取值
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ import json
 import sys
 import warnings
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +33,6 @@ from aiops.engine.topology import service_edges
 from aiops.engine.types import Incident
 from aiops.interfaces.runner import load_all
 from aiops.sources.elasticsearch import _span
-from aiops.stages.rca.algorithms.causal import CrossCorrelationRootCause, _prepared, best_lag
-from aiops.stages.rca.algorithms.pagerank import PageRankRootCause
 from aiops.stages.rca.algorithms.topological import TopologicalRootCause
 
 warnings.filterwarnings("ignore")
@@ -232,14 +230,7 @@ def main(argv=None) -> int:
         print("    各實體最早異常：" + "  ".join(f"{e}={t:%H:%M}" for e, t in sorted(first.items(), key=lambda kv: kv[1])))
         ctx = PipelineContext(pipeline="synth_rca", now=datetime.now(timezone.utc))
         ctx.topology = sorted(edges)
-        s0, s1 = incident.start - timedelta(minutes=30), incident.end + timedelta(minutes=10)  # 同 incident_series 預設
-        for ent in incident.entities:
-            df = _SERIES[(ent, "latency_ms")]
-            ctx.rca_series[(ent, "latency_ms")] = df[(df.ts >= s0) & (df.ts <= s1)].reset_index(drop=True)
-        algos = [("topological", TopologicalRootCause()), ("pagerank", PageRankRootCause()),
-                 ("cross_correlation(max_lag=10)", CrossCorrelationRootCause()),
-                 ("cross_correlation(max_lag=20)", CrossCorrelationRootCause(max_lag_points=20)),
-                 ("cross_correlation(max_lag=20,min_corr=0.2)", CrossCorrelationRootCause(20, 0.2))]
+        algos = [("topological", TopologicalRootCause())]
         for label, algo in algos:
             cands = algo.rank(incident, ctx)
             top = cands[0] if cands else None
@@ -248,25 +239,6 @@ def main(argv=None) -> int:
             for c in cands[:3]:
                 print(f"        {c.entity:9} score={c.score:.3f}  {c.reason}")
             rca[label] = [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason} for c in cands]
-        print("    互相關兩兩明細（max_lag=20；lag>0 = 左邊領先右邊）。diff = 平台的做法（一階差分後標準化）；"
-              "level = 不差分直接標準化（只是診斷，平台沒有這樣算）：")
-        prepared = {k[0]: _prepared(v) for k, v in ctx.rca_series.items()}
-        levels = {k[0]: v.set_index("ts")["value"].astype(float) for k, v in ctx.rca_series.items()}
-        pairs = {}
-        ents = sorted(prepared)
-        for i, a in enumerate(ents):
-            for b in ents[i + 1:]:
-                j = pd.concat([prepared[a], prepared[b]], axis=1, join="inner").dropna()
-                x, y = j.iloc[:, 0].to_numpy(), j.iloc[:, 1].to_numpy()
-                x, y = (x - x.mean()) / (x.std() or 1), (y - y.mean()) / (y.std() or 1)
-                lag, r = best_lag(x, y, 20)
-                jl = pd.concat([levels[a], levels[b]], axis=1, join="inner").dropna()
-                xl, yl = jl.iloc[:, 0].to_numpy(), jl.iloc[:, 1].to_numpy()
-                xl, yl = (xl - xl.mean()) / (xl.std() or 1), (yl - yl.mean()) / (yl.std() or 1)
-                lag_l, r_l = best_lag(xl, yl, 20)
-                print(f"        {a:9} vs {b:9} diff: lag={lag:+3d} r={r:+.2f}   level: lag={lag_l:+3d} r={r_l:+.2f}")
-                pairs[f"{a}|{b}"] = {"diff": {"lag": lag, "r": round(r, 3)}, "level": {"lag": lag_l, "r": round(r_l, 3)}}
-        rca["pairs_max_lag_20"] = pairs
     result["rca"] = rca
 
     # 5. log 欄位

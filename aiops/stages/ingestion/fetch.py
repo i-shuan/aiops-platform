@@ -83,7 +83,7 @@ def _group(ctx: PipelineContext, start: datetime, end: datetime, step: int) -> t
     if not others:
         # 單一副本的服務：資料是有的，只是沒有同儕可以比。不是「沒資料」（不算斷流），也不擋住其他偵測節點；
         # 記成這條序列的錯誤讓人看到，同儕偵測器看到沒有 peer_* 欄位會棄權
-        msg = f"peer_group 只撈到自己（{g.by}={me}），沒有同儕可以比；detector.peer 這一輪棄權"
+        msg = f"peer_group 只撈到自己（{g.by}={me}），沒有同儕可以比；需要同儕的偵測器（requires_peers）這一輪棄權"
         if all(e.message != msg for e in ctx.errors):  # 偵測窗與訓練窗各抓一次，只記一筆
             ctx.errors.append(TargetError(t.entity, msg))
     return others, [members[m] for m in others]
@@ -164,6 +164,7 @@ class IncidentSeriesFetch(BaseOperator):
     同一個資料源連不上一次後，剩下用它的序列直接略過，不再一條條等逾時。
     （偵測流程的 ingestion.fetch 不在此列：拿不到資料就判斷不了，那一輪照規則失敗，由 notifier.watchdog 的心跳斷掉來通知。）
     params: before_minutes、after_minutes、step_seconds、max_series（避免一個大事件群把資料源打爆）。
+    保留給新 RCA 引擎餵時序事實（ctx.rca_series -> rca/facts/series.py），目前沒有掛在任何管線上。
     """
 
     scope = "batch"
@@ -199,7 +200,7 @@ class IncidentSeriesFetch(BaseOperator):
                 logger.warning("incident_series：%s 連不上，略過用它的時序：%s", source_type, e)
                 skipped.append({"entity": entity, "metric": metric, "reason": str(e)})
                 ctx.errors.append(TargetError(f"node:{self.node_name or 'incident_series'}",
-                                              f"{source_type} 連不上，RCA 不含用它的時序（互相關根因可能排不出來）：{e}"))
+                                              f"{source_type} 連不上，RCA 不含用它的時序：{e}"))
             except (NotFound, BadRequest) as e:
                 # 少一條序列，根因演算法就可能排錯：一律列在報告裡；查詢不合法是設定錯誤，另外記進 errors
                 ctx.log(f"incident_series:skip:{entity}:{e}")

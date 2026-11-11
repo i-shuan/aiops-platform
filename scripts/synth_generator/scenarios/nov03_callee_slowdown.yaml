@@ -1,6 +1,6 @@
 # 劇本：bill-svc 呼叫的 tax-gw 變慢（callee_slowdown）。根因在最下游，延遲往上游 caller 傳。
 # 只寫根因自己的偏移；ord-svc、cart-api、api-gw 變慢是呼叫樹加總出來的（同一分鐘，沒有 lag）。
-# 方向 callee -> caller，跟平台 propagation_edges 同向，拓撲／PageRank 應該指向 bill-svc。
+# 方向 callee -> caller，跟平台 propagation_edges 同向，拓撲排序應該指向 bill-svc。
 name: nov03_callee_slowdown
 namespace: genslowdown
 seed: 42

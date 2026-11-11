@@ -9,7 +9,7 @@ nodes:
     params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
 
   # 異常檢測：三個偵測器各自判斷，再由 detector.ensemble 多數決（超過一半同意才算異常）。
-  # 要換演算法就換這裡的節點（detector.zscore / mad / shift / peer / rules / chronic / dod / wow / quantile_drift）。
+  # 要換演算法就換這裡的節點（detector.zscore / mad / rules / quantile_drift / residual_shift / residual_chronic）。
   - name: detect
     operator: detector.hourly_baseline
     params: {tz: Asia/Taipei}

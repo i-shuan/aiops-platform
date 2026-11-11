@@ -76,16 +76,15 @@ def test_root_cause_is_ranked_first(tmp_path_factory, name, seed):
 
 
 def test_graph_algorithms_still_miss_load_amplification(tmp_path_factory):
-    """對照組：同一份資料，拓撲排序與 PageRank 仍然排錯（方向假設相反）。這是新算子存在的理由，留著當回歸基準。"""
+    """對照組：同一份資料，拓撲排序仍然排錯（方向假設相反）。這是新算子存在的理由，留著當回歸基準。"""
     out = _generate(tmp_path_factory, "nov03_cascade", 42)
     truth = json.loads((out / "ground_truth.json").read_text(encoding="utf-8"))
     gt = truth["incidents"][0]
     incident = _incident(gt)
     ctx = PipelineContext(pipeline="rca", now=incident.end)
     ctx.topology = [tuple(e) for e in truth["service_edges"]]  # 劇本真正的呼叫邊（trace 還原出來的也是這 4 條）
-    for algo in ("rca.root_cause.topological", "rca.root_cause.pagerank"):
-        ranked = OperatorRegistry.create(algo, {}).rank(incident, ctx)
-        assert ranked and ranked[0].entity != gt["root_cause"], algo
+    ranked = OperatorRegistry.create("rca.root_cause.topological", {}).rank(incident, ctx)
+    assert ranked and ranked[0].entity != gt["root_cause"]
 
 
 def test_quiet_control_scenario_never_names_a_suspect(tmp_path_factory):

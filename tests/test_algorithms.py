@@ -1,4 +1,4 @@
-"""路線 A：168 時段基準線、動態同儕、同比／環比、分位數漂移、多偵測器裁決、模型檔（artifact）存儲。"""
+"""路線 A：168 時段基準線、動態同儕、lag 欄位、分位數漂移、多偵測器裁決、模型檔（artifact）存儲。"""
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import peer_probe  # 測試專用的 requires_peers 偵測器（tests/ 在 sys.path 上）
 from aiops.engine.context import PeerGroup, PipelineContext, Target
 from aiops.engine.errors import BadRequest, WorkflowError
 from aiops.engine.operator import BaseOperator
@@ -161,15 +162,16 @@ def test_peer_group_errors_are_clear():
 
 
 def test_peer_detector_works_with_a_dynamic_group(tmp_path, now):
-    ctx = _run_yaml(tmp_path, """name: dyn_peer
+    """引擎的同儕路徑（peer_group -> peer_* 欄位 -> requires_peers 偵測器）；偵測器用測試專用的 peer_probe。"""
+    ctx = _run_yaml(tmp_path, f"""name: dyn_peer
 nodes:
-  - {name: fetch, operator: ingestion.fetch, params: {lookback_minutes: 60, train_lookback_minutes: 1440}}
-  - {name: peer, operator: detector.peer}
+  - {{name: fetch, operator: ingestion.fetch, params: {{lookback_minutes: 60, train_lookback_minutes: 1440}}}}
+  - {{name: peer, operator: {peer_probe.NAME}}}
 targets:
-  - {source_type: mock, query: 'cpu{pod="pod-0"}', entity: pod-0, attrs: {service: cart},
-     peer_group: {query: 'cpu{service="${service}"}', by: pod}}
+  - {{source_type: mock, query: 'cpu{{pod="pod-0"}}', entity: pod-0, attrs: {{service: cart}},
+     peer_group: {{query: 'cpu{{service="${{service}}"}}', by: pod}}}}
 """, now)
-    assert ctx.anomalies and all(a.detector == "detector.peer" for a in ctx.anomalies) and not ctx.errors
+    assert ctx.anomalies and all(a.detector == peer_probe.NAME for a in ctx.anomalies) and not ctx.errors
 
 
 def _prom(series):
@@ -206,23 +208,36 @@ def test_fetch_lags_line_up_with_the_past():
         FetchOperator(step_seconds=120, lags_minutes=[1])
 
 
-def test_day_over_day_flags_a_jump_that_yesterday_did_not_have():
-    ctx = PipelineContext(pipeline="p", now=SUNDAY, target=Target("mock", "seasonal:x", "e"))
-    # 只用平日（週二～週四）訓練：週一跟週日比本來就差很多（週末效應），那種落差要用 detector.wow
-    train = fetch_target_frame(ctx, SUNDAY + timedelta(days=2), SUNDAY + timedelta(days=5), 60, [1440])
-    test = fetch_target_frame(ctx, SUNDAY + timedelta(days=5), SUNDAY + timedelta(days=5, hours=6), 60, [1440])
-    test.loc[100, "value"] += 25
-    result = OperatorRegistry.get("detector.dod")().fit(train).detect(test)
-    assert result.is_anomaly[100] and sum(result.is_anomaly) <= 3
+@OperatorRegistry.register("test.lag_probe")
+class _LagProbe(DetectorOperator):
+    """測試專用：需要上週同一時刻（lag_10080）的偵測器。同比／環比偵測器已移除，基底的 lag 檢查仍要有人測。"""
+    algorithm = "lag_probe"
+    tunable = {"threshold": (3.0, 1.0, 20.0)}
+
+    def required_lags(self):
+        return [10080]
+
+    def fit(self, df):
+        self.fitted = True
+        return self
+
+    def get_state(self):
+        return {}
+
+    def load_state(self, state):
+        self.fitted = True
+        return self
+
+    def detect(self, df):
+        scores = (df["value"] - df["lag_10080"]).abs()
+        return self._result(df, scores, scores > self.param("threshold"))
 
 
-def test_compare_detectors_need_the_lag_column(now):
+def test_lag_detectors_need_the_lag_column(now):
     ctx = PipelineContext(pipeline="p", now=now, target=Target("mock", "q", "e"))
     ctx.raw_df = _seasonal_frame(SUNDAY, 60)
-    with pytest.raises(BadRequest, match="lags_minutes"):
-        OperatorRegistry.get("detector.wow")().execute(ctx)
-    assert OperatorRegistry.get("detector.wow")().required_lags() == [10080]
-    assert OperatorRegistry.get("detector.dod")(offset_minutes=60).required_lags() == [60]
+    with pytest.raises(BadRequest, match="lags_minutes 包含 \[10080\]"):
+        OperatorRegistry.get("test.lag_probe")().execute(ctx)
 
 
 def test_quantile_drift_sees_a_fatter_tail_with_the_same_average():
@@ -234,8 +249,10 @@ def test_quantile_drift_sees_a_fatter_tail_with_the_same_average():
     tail -= tail.mean() - 100  # 平均拉回 100
     test = pd.DataFrame({"ts": pd.date_range(SUNDAY + timedelta(days=3), periods=300, freq="60s"), "value": tail})
     drift = OperatorRegistry.get("detector.quantile_drift")().fit(train).detect(test)
-    chronic = OperatorRegistry.get("detector.chronic")().fit(train).detect(test)
-    assert sum(drift.is_anomaly) > 100 and sum(chronic.is_anomaly) == 0
+    # 對照：只看平均的統計（滾動 30 點平均 vs 訓練平均，尺度 std/√30，門檻 3）一點都看不出來，因為平均沒變
+    rolling = test["value"].rolling(30, min_periods=30).mean()
+    mean_score = ((rolling - base.mean()).abs() / (base.std() / np.sqrt(30))).fillna(0.0)
+    assert sum(drift.is_anomaly) > 100 and int((mean_score > 3).sum()) == 0
 
 
 # ── A.4 多偵測器裁決 ──

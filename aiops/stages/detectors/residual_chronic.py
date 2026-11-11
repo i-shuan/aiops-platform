@@ -1,6 +1,6 @@
 """殘差漂移票：看「扣掉週期基準後的殘差」的滾動平均是否持續偏離 0。
 
-detector.chronic 拿滾動平均跟「整段訓練期平均」比，流量有日夜週期時，每個上班時段都整段偏離（單獨每週標四、五千分鐘）。
+滾動平均跟「整段訓練期平均」比（已移除的 detector.chronic），流量有日夜週期時，每個上班時段都整段偏離（單獨每週標四、五千分鐘）。
 這裡先白化（base.fit_seasonal_profile），殘差的滾動平均在正常時段應該在 0 附近；15 分鐘慢滑、持續低兩成一小時，
 殘差會一路偏離，滾動平均跟著累積。
 
@@ -29,7 +29,7 @@ from aiops.stages.detectors.base import (RESIDUAL_TUNABLE, SCALE_FLOOR_TUNABLE, 
 
 @OperatorRegistry.register("detector.residual_chronic")
 class ResidualChronicDetector(DetectorOperator):
-    """params: threshold（預設 3，同 detector.chronic）、window（滾動窗點數，預設 30，同 chronic）、fpr、max_tail_factor、
+    """params: threshold（預設 3）、window（滾動窗點數，預設 30）、fpr、max_tail_factor、
     min_scale／min_scale_ratio（tunable）；tz、min_slot_points（同 residual_shift）；
     min_run（預設 1）：滾動平均要連續越線幾個點才成立，給不投票、單獨發告警的旁路節點用（只認 YAML，調參改不到）。"""
 

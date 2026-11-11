@@ -9,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
+import peer_probe  # 測試專用的 requires_peers 偵測器
 import test_architecture as arch  # tests/ 在 sys.path 上（pytest 預設 prepend 匯入模式）
-from aiops.engine.context import DetectorState, PipelineContext, SpanRecord, Target
+from aiops.engine.context import DetectorState, PeerRef, PipelineContext, SpanRecord, Target
 from aiops.engine.errors import InfrastructureError, NotFound
 from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow
@@ -129,7 +130,7 @@ def test_rules_without_a_rule_abstains_instead_of_vetoing():
     assert [a.voted_by for a in ctx.anomalies] == [("z",)]
 
 
-@pytest.mark.parametrize("op", ["detector.quantile_drift", "detector.chronic"])
+@pytest.mark.parametrize("op", ["detector.quantile_drift", "detector.residual_chronic"])
 def test_window_longer_than_the_data_abstains(op):
     """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權。"""
     ctx = _vote([NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="w", operator=op, params={"window": 600})])
@@ -159,11 +160,11 @@ def solo_group(monkeypatch):
 
 
 def test_peer_group_with_only_itself_is_not_data_starvation(solo_group):
-    """G8（已修）：單一副本的服務 peer_group 只撈到自己 -> 記成那條序列的錯誤、detector.peer 棄權，不算斷流。"""
+    """G8（已修）：單一副本的服務 peer_group 只撈到自己 -> 記成那條序列的錯誤、需要同儕的偵測器棄權，不算斷流。"""
     targets = [TargetSpec(source_type="mock", query="m", entity=e, attrs={"pod": "pod-0"},
                           peer_group={"query": f"grp_{e}", "by": "pod"}) for e in ("a", "b")]
     ctx = Pipeline(Workflow(name="gap_q8", targets=targets, nodes=[
-        NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="p", operator="detector.peer")])).run(now=T0)
+        NodeSpec(name="fetch", operator="ingestion.fetch"), NodeSpec(name="p", operator=peer_probe.NAME)])).run(now=T0)
     assert sorted(e.entity for e in ctx.errors) == ["a", "b"]  # 記成這兩條序列的錯誤，不是整輪斷流
 
 
@@ -230,16 +231,19 @@ def _ctx(raw, train=None, state=None):
     return c
 
 
-def test_cold_start_gate_counts_usable_points_for_lag_detectors():
-    """G11（已修）：冷啟動門檻數的是 training_points（lag／同儕有值的列），100 列只有 2 列有上週的值 -> 不學、不判。"""
+def test_cold_start_gate_counts_usable_points_for_peer_detectors():
+    """G11（已修）：冷啟動門檻數的是 training_points（lag／同儕有值的列），100 列只有 2 列有同儕的值 -> 不學、不判。
+    （原本用同比偵測器的 lag 欄位，它已移除；改用測試專用的同儕偵測器，同一條基底路徑）"""
     train = _frame(100)
-    train["lag_10080"] = float("nan")
-    train.loc[98:, "lag_10080"] = [50.0, 51.0]
+    train["peer_0"] = float("nan")
+    train.loc[98:, "peer_0"] = [50.0, 51.0]
     raw = _frame(30, 500.0)
-    raw["lag_10080"] = 50.0
-    op = OperatorRegistry.create("detector.wow")
+    raw["peer_0"] = 50.0
+    op = OperatorRegistry.create(peer_probe.NAME)
     op.node_name = "n"
-    assert op.execute(_ctx(raw, train)).detector_runs == []
+    ctx = _ctx(raw, train)
+    ctx.target = Target("mock", "q", "svc", {}, [PeerRef("mock", "p0")])
+    assert op.execute(ctx).detector_runs == []
 
 
 def test_retrain_with_too_few_points_keeps_using_the_old_baseline():

@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+import peer_probe  # tests/ 在 sys.path 上
 from aiops.engine.errors import BadRequest, Conflict, NotFound
 from aiops.engine.requests import (
     ExternalAnomalyIn,
@@ -125,7 +126,7 @@ def test_backtest_compares_current_and_proposed_on_the_same_data(now):
 
 
 def test_backtest_needs_peers_for_peer_detectors_and_known_proposal(now):
-    pid = _propose("detector.peer")
+    pid = _propose(peer_probe.NAME)  # 測試專用的 requires_peers 偵測器
     with pytest.raises(BadRequest, match="peers"):
         _backtest(pid, now)
     with pytest.raises(NotFound):

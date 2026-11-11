@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import peer_probe  # 測試專用的 requires_peers 偵測器（tests/ 在 sys.path 上）
 from aiops.engine.context import DetectorState, PeerRef, PipelineContext, Target
 from aiops.engine.errors import BadRequest
 from aiops.engine.registry import OperatorRegistry
@@ -16,7 +17,7 @@ DETECTORS = [n for n in OperatorRegistry.names("detector.")
              if issubclass(OperatorRegistry.get(n), DetectorOperator)]
 SAMPLE = {"detector.rules": {"upper": 80}, "detector.hard_limit": {"fatal_ceiling": 80}}
 # 滾動平均／滾動分位數會稀釋單點尖峰，刻意的（它們抓的是持續偏移與尾端漂移）
-IGNORES_SINGLE_SPIKE = {"detector.chronic", "detector.quantile_drift", "detector.residual_chronic"}
+IGNORES_SINGLE_SPIKE = {"detector.quantile_drift", "detector.residual_chronic"}
 
 
 def _df(values, **cols):
@@ -110,49 +111,6 @@ def test_mad_constant_training_does_not_divide_by_zero():
     assert r.is_anomaly[29] and r.scores[29] == 6.745
 
 
-def test_shift_constant_series_is_quiet_and_only_the_jump_point_is_flagged():
-    assert not any(_algo("detector.shift").fit(_df([5.0] * 30)).detect(_df([5.0] * 30)).is_anomaly)
-    noisy = [50 + (i % 3) * 0.5 for i in range(60)]
-    step = noisy[:30] + [v + 20 for v in noisy[30:]]
-    flagged = [i for i, f in enumerate(_algo("detector.shift").fit(_df(noisy)).detect(_df(step)).is_anomaly) if f]
-    assert flagged == [30]  # 跳上去之後是新水位，不再報
-
-
-def test_chronic_catches_small_sustained_drift_that_zscore_misses():
-    base = [50 + (i % 5 - 2) * 0.5 for i in range(120)]
-    drift = base[:60] + [v + 1.0 for v in base[60:]]
-    assert not any(_algo("detector.zscore").fit(_df(base)).detect(_df(drift)).is_anomaly)
-    assert any(_algo("detector.chronic", window=20).fit(_df(base)).detect(_df(drift)).is_anomaly)
-    drop = base[:60] + [v - 1.0 for v in base[60:]]
-    assert any(_algo("detector.chronic", window=20).fit(_df(base)).detect(_df(drop)).is_anomaly)
-
-
-def test_chronic_edge_cases():
-    assert not any(_algo("detector.chronic", window=30).fit(_df([50.0, 51.0, 49.0])).detect(_df([80.0] * 10)).is_anomaly)
-    assert not any(_algo("detector.chronic", window=5).fit(_df([50.0] * 40)).detect(_df([50.0] * 40)).is_anomaly)
-
-
-def test_peer_ignores_shared_spike_and_catches_lone_deviation():
-    base = [50.0] * 60
-    fit_df = _df(base, peer_0=[50.5] * 60)
-    shared = _df(SPIKE, peer_0=SPIKE)
-    lone = _df(SPIKE, peer_0=base)
-    assert not any(_algo("detector.peer").fit(fit_df).detect(shared).is_anomaly)
-    assert _algo("detector.peer").fit(fit_df).detect(lone).is_anomaly[30]
-
-
-def test_peer_tolerates_missing_points_and_a_single_crazy_peer():
-    peers = [50.0] * 60
-    peers[10] = np.nan
-    assert not any(_algo("detector.peer").fit(_df([50.0] * 60, peer_0=peers, peer_1=[50.5] * 60))
-                   .detect(_df([50.0] * 60, peer_0=peers, peer_1=[50.5] * 60)).is_anomaly)
-    train = _df([50.0] * 60, peer_0=[50.0] * 60, peer_1=[51.0] * 60, peer_2=[49.0] * 60)
-    crazy = _df([50.0] * 60, peer_0=[50.0] * 60, peer_1=[90.0] * 60, peer_2=[49.0] * 60)
-    assert not any(_algo("detector.peer").fit(train).detect(crazy).is_anomaly)  # 中位數不被一個壞同儕帶偏
-    with pytest.raises(ValueError):
-        _algo("detector.peer").fit(_df([50.0] * 10))
-
-
 def test_rules_need_consecutive_breaches_and_bounds():
     det = _algo("detector.rules", consecutive=3).fit(_df([0.0]))
     assert det.detect(_df([50, 85, 50, 85, 85, 85, 50])).is_anomaly == [False] * 5 + [True, False]
@@ -168,7 +126,7 @@ def test_execute_needs_fetch_first_and_peers_when_required():
     with pytest.raises(BadRequest, match="ingestion.fetch"):
         OperatorRegistry.create("detector.zscore").execute(PipelineContext("p", T0, Target("mock", "q", "e")))
     with pytest.raises(BadRequest, match="同儕"):
-        OperatorRegistry.create("detector.peer").execute(_ctx(_df(SPIKE, peer_0=50.0)))
+        OperatorRegistry.create(peer_probe.NAME).execute(_ctx(_df(SPIKE, peer_0=50.0)))  # target 沒有 peers
 
 
 def test_execute_emits_events_and_saves_new_baseline():

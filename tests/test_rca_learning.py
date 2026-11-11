@@ -1,4 +1,4 @@
-"""路線 B：RCA 根因演算法可抽換（拓撲、PageRank、時序互相關）、段落註冊、漏報補錄、歷史事故經驗庫、
+"""路線 B：RCA 根因演算法可抽換（拓撲、證據融合）、段落註冊、漏報補錄、歷史事故經驗庫、
 調參成效報表、規則升級器。"""
 from datetime import datetime, timedelta, timezone
 
@@ -8,7 +8,7 @@ import pytest
 
 from aiops.engine.context import KnowledgeCase, PipelineContext, Target
 from aiops.engine.errors import WorkflowError
-from aiops.engine.pipeline import Pipeline, load_workflow
+from aiops.engine.pipeline import NodeSpec, Pipeline, Workflow, load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
 from aiops.engine.signature import metric_names
@@ -41,20 +41,9 @@ def _rank(name, ctx, **params):
 CHAIN = [("svc-a", "svc-b"), ("svc-b", "svc-c")]  # a 呼叫 b、b 呼叫 c：c 出事會一路拖垮 b、a
 
 
-def test_topological_and_pagerank_agree_on_a_simple_chain():
+def test_topological_finds_the_bottom_of_a_simple_chain():
     ctx = _ctx([_ev("svc-a", 0, 2), _ev("svc-b", 1, 8), _ev("svc-c", 2, 3)], CHAIN)
     assert _rank("rca.root_cause.topological", ctx)[0] == "svc-c"
-    assert _rank("rca.root_cause.pagerank", ctx)[0] == "svc-c"
-
-
-def test_pagerank_prefers_the_root_that_drags_down_more_services():
-    """兩個都沒有異常上游的源頭：x 拖垮三個呼叫端，y 誰都沒影響、只是比較早出現。
-    拓撲啟發式只看先後會把 y 排第一；PageRank 看影響範圍會把 x 排第一。"""
-    topology = [("d1", "x"), ("d2", "x"), ("d3", "x"), ("y", "z")]  # z 沒異常
-    events = [_ev("y", 0, 4), _ev("x", 3, 4), _ev("d1", 4, 2), _ev("d2", 4, 2), _ev("d3", 5, 2)]
-    ctx = _ctx(events, topology)
-    assert _rank("rca.root_cause.topological", ctx)[0] == "y"
-    assert _rank("rca.root_cause.pagerank", ctx)[0] == "x"
 
 
 def _reasons(name, ctx):
@@ -66,13 +55,14 @@ def test_graph_reasons_say_when_the_entity_started_relative_to_the_whole_inciden
     理由要同時寫出它自己的首次異常時間與事件群最早時間、差幾分鐘。"""
     ctx = _ctx([_ev("svc-a", 6, 2), _ev("svc-b", 10, 8), _ev("svc-c", 22, 3), _ev("svc-c", 25, 9)], CHAIN)
     first_c, earliest = (T + timedelta(minutes=22)).isoformat(), (T + timedelta(minutes=6)).isoformat()
-    for algo in ("rca.root_cause.topological", "rca.root_cause.pagerank"):
-        reasons = _reasons(algo, ctx)
-        assert f"首次異常 {first_c}（事件群最早是 {earliest}，晚 16 分鐘）" in reasons["svc-c"], algo
-        assert "最早 " + first_c not in reasons["svc-c"], algo
-        assert "最高分數 9.00" in reasons["svc-c"], algo
-    assert "上游沒有其他異常" in _reasons("rca.root_cause.topological", ctx)["svc-c"]
-    assert f"首次異常 {earliest}（事件群中最早）" in _reasons("rca.root_cause.pagerank", ctx)["svc-a"]
+    reasons = _reasons("rca.root_cause.topological", ctx)
+    assert f"首次異常 {first_c}（事件群最早是 {earliest}，晚 16 分鐘）" in reasons["svc-c"]
+    assert "最早 " + first_c not in reasons["svc-c"]
+    assert "最高分數 9.00" in reasons["svc-c"]
+    assert "上游沒有其他異常" in reasons["svc-c"]
+    # 根因本身就是事件群最早的實體時，理由寫「事件群中最早」
+    first = _ctx([_ev("svc-c", 6, 3), _ev("svc-b", 10, 8), _ev("svc-a", 22, 2)], CHAIN)
+    assert f"首次異常 {earliest}（事件群中最早）" in _reasons("rca.root_cause.topological", first)["svc-c"]
 
 
 def test_topological_reason_still_says_when_an_entity_is_outside_the_graph():
@@ -84,31 +74,7 @@ def test_topological_reason_still_says_when_an_entity_is_outside_the_graph():
 
 def test_graph_algorithms_give_nothing_without_a_graph():
     ctx = _ctx([_ev("a", 0, 2), _ev("b", 1, 3)])
-    assert _rank("rca.root_cause.topological", ctx) == [] and _rank("rca.root_cause.pagerank", ctx) == []
-
-
-def _series(values, start=T - timedelta(minutes=30)):
-    return pd.DataFrame({"ts": pd.date_range(start, periods=len(values), freq="60s"), "value": values})
-
-
-def test_cross_correlation_finds_who_moves_first():
-    rng = np.random.default_rng(7)
-    leader = np.cumsum(rng.normal(0, 1, 120))
-    follower = np.roll(leader, 3) + rng.normal(0, 0.1, 120)  # 晚 3 個點、形狀一樣
-    ctx = _ctx([_ev("db", 0, 3), _ev("api", 2, 6)])
-    ctx.rca_series = {("db", "latency"): _series(leader), ("api", "latency"): _series(follower)}
-    op = OperatorRegistry.create("rca.root_cause.cross_correlation", {})
-    candidates = op.rank(ctx.incidents[0], ctx)
-    assert [c.entity for c in candidates] == ["db"] and "api（3 點" in candidates[0].reason
-
-
-def test_cross_correlation_stays_quiet_when_series_are_unrelated_or_missing():
-    rng = np.random.default_rng(3)
-    ctx = _ctx([_ev("a", 0, 3), _ev("b", 1, 3)])
-    ctx.rca_series = {("a", "latency"): _series(rng.normal(0, 1, 120)), ("b", "latency"): _series(rng.normal(0, 1, 120))}
-    assert _rank("rca.root_cause.cross_correlation", ctx, min_corr=0.6) == []
-    ctx.rca_series = {("a", "latency"): _series(rng.normal(0, 1, 120))}
-    assert _rank("rca.root_cause.cross_correlation", ctx) == []  # 只有一個實體的時序
+    assert _rank("rca.root_cause.topological", ctx) == []
 
 
 def test_incident_series_refetches_only_events_that_know_their_source():
@@ -161,7 +127,7 @@ def _rca(incident_id, root="rca.root_cause.topological", workflow="rca_report", 
 
 def test_switching_the_root_cause_algorithm_is_only_a_yaml_change(now):
     inc = _chain_incident(now, "pr")
-    for algo in ("rca.root_cause.topological", "rca.root_cause.pagerank"):
+    for algo in ("rca.root_cause.topological", "rca.root_cause.evidence"):
         out = _rca(inc["id"], algo, now=now)
         sections = {s["key"]: s["body"] for s in out["sections"]}
         assert out["root_cause"]["algorithm"] == algo and out["root_cause"]["candidates"][0]["entity"] == "svc-c"
@@ -169,11 +135,15 @@ def test_switching_the_root_cause_algorithm_is_only_a_yaml_change(now):
         assert sections["propagation_path"].startswith("svc-c（")
 
 
-def test_correlation_report_runs_end_to_end_and_degrades_without_enough_series(now):
+def test_incident_series_runs_end_to_end_on_a_stored_incident(now):
+    """ingestion.incident_series 目前沒掛在任何管線上（保留給新 RCA 引擎的 metric_shift 事實）：
+    在最小 workflow 裡從資料庫載入事件群、重抓那個實體的時序，不出錯。"""
     ctx = run_context("metrics_only", now=now, strict=False)
-    out = run("rca_report_correlation", incident_id=_first_incident_id(ctx))
-    assert out["root_cause"]["algorithm"] == "rca.root_cause.cross_correlation"
-    assert "root_cause_candidates" in out["skipped"] and not out.get("errors")  # 只有一個實體，比不出先後
+    wf = Workflow(name="series_only", nodes=[NodeSpec(
+        name="series", operator="ingestion.incident_series", optional=True,
+        params={"before_minutes": 30, "after_minutes": 10, "step_seconds": 60, "max_series": 20})])
+    out = Pipeline(wf, StorageHooks()).run(incident_id=_first_incident_id(ctx), now=now).to_result()
+    assert out["series_fetch"] == {"fetched": 1, "skipped": []} and not out.get("errors")
 
 
 def _first_incident_id(ctx):

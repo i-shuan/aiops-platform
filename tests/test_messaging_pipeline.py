@@ -598,7 +598,7 @@ def test_builtin_it_workflows_link_messaging_after_topology_and_before_scoring_a
     assert ops.index("alert.topology_chain") < link_at < ops.index("alert.golden_signals") < ops.index("alert.absorb_open")
 
 
-@pytest.mark.parametrize("name", ["rca_report", "rca_report_correlation"])
+@pytest.mark.parametrize("name", ["rca_report"])
 def test_builtin_rca_workflows_follow_messaging(name):
     node = next(n for n in load_workflow(workflow_path(name)).nodes if n.name == "fetch_traces")
     assert (node.operator, node.params["follow_messaging"], node.params["max_lag_minutes"]) \

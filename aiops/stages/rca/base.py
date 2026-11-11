@@ -1,7 +1,7 @@
 """RCA 的兩種可抽換零件：
 
 1. 根因演算法（rca.root_cause.*）：繼承 RootCauseOperator，只寫 rank()，把候選根因排好放進 ctx.rca_root_candidates。
-   換演算法 = 在 rca_report.yaml 換一個節點（topological／pagerank／cross_correlation），報告段落不用改。
+   換演算法 = 在 rca_report.yaml 換一個節點（evidence／topological／llm／bayes），報告段落不用改。
 2. 報告段落（rca.section.*）：繼承 RcaSection，寫 applies()（資料夠不夠）與 build()（內容）。
    資料不夠就略過（記在 ctx.rca_skipped），不輸出空殼。新段落 = 新檔案 + 註冊，rca.report 的 sections 清單就能用。
 

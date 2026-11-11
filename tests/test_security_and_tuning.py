@@ -16,7 +16,7 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
 )
-from aiops.stages.detectors.chronic import ChronicDetector
+from aiops.stages.detectors.quantile_drift import QuantileDriftDetector
 from aiops.stages.enrichment import registry
 from aiops.stages.enrichment.base import BaseLLM
 from aiops.stages.enrichment.providers import build_llm
@@ -259,24 +259,24 @@ def test_deep_merge_merges_nested_dicts_and_leaves_inputs_alone():
     assert base["thresholds"]["upper"] == 3.0 and override == {"thresholds": {"upper": 5.0}}
 
 
-def _chronic_ctx(tuned):
+def _rolling_ctx(tuned):
     ctx = PipelineContext(pipeline="p", now=None)
     ctx.detector_params["detect"] = tuned
     return ctx
 
 
 def test_yaml_keys_are_locked_but_other_keys_take_the_tuned_value():
-    op = ChronicDetector(threshold=5.0)
+    op = QuantileDriftDetector(threshold=5.0)
     op.node_name = "detect"
-    ctx = _chronic_ctx({"threshold": 2.0, "window": 10})
+    ctx = _rolling_ctx({"threshold": 2.0, "window": 10})
     assert op.effective_params(ctx) == {"threshold": 5.0, "window": 10}  # YAML 沒寫 window，所以吃調參
     assert any("yaml-locked:threshold" in line for line in ctx.audit)
 
 
 def test_unknown_tuned_keys_are_ignored_instead_of_failing():
-    op = ChronicDetector()
+    op = QuantileDriftDetector()
     op.node_name = "detect"
-    ctx = _chronic_ctx({"threshold": 2.0, "removed_in_new_version": 1})
+    ctx = _rolling_ctx({"threshold": 2.0, "removed_in_new_version": 1})
     assert op.effective_params(ctx) == {"threshold": 2.0}
     assert any("ignored-unknown:removed_in_new_version" in line for line in ctx.audit)
 
@@ -309,7 +309,7 @@ def test_spike_in_the_test_segment_is_scored(now):
 
 
 def test_rolling_detectors_get_warmup_points_that_are_not_scored(now):
-    bt = _backtest(_propose("detector.chronic", {"threshold": 3.0, "window": 30}), now, 0.3)
+    bt = _backtest(_propose("detector.quantile_drift", {"threshold": 3.0, "window": 30}), now, 0.3)
     assert bt["warmup_points"] == 29
 
 

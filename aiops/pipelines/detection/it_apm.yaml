@@ -6,7 +6,7 @@ nodes:
     operator: ingestion.fetch
     params: {lookback_minutes: 60, train_lookback_minutes: 1440, retrain_minutes: 1440}
 
-  # 異常檢測：隨時換成 detector.mad / detector.shift / detector.peer / detector.rules / detector.chronic
+  # 異常檢測：隨時換成 detector.mad / detector.quantile_drift / detector.hourly_baseline / detector.rules
   - name: detect
     operator: detector.zscore
   - name: new_only

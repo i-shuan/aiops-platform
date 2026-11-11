@@ -1,6 +1,6 @@
 """現場還原呼叫關係：用 ingestion.incident_traces 撈到的 span，算出事件當下服務之間的呼叫邊，注入 ctx.topology。
 
-接在根因演算法（rca.root_cause.topological／pagerank）前面，它們就能用「案發當下真的有發生的呼叫」排根因，
+接在根因演算法（rca.root_cause.topological）前面，它們就能用「案發當下真的有發生的呼叫」排根因，
 而不是只靠事先存好的拓撲（可能過時，或根本沒有）。邊的算法跟批次匯入 trace 時一樣（engine/topology.service_edges）：
 子 span 的 parent_id 指到別的服務的 span，就是一次跨服務呼叫。
 

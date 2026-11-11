@@ -1,6 +1,6 @@
 """殘差突變票：看「扣掉週期基準後的殘差」的相鄰差。
 
-detector.shift 看原始值的相鄰差，每天 09:00／19:00 的流量階梯切換都會舉牌；這裡先白化（base.fit_seasonal_profile：
+原始值的相鄰差（已移除的 detector.shift）每天 09:00／19:00 的流量階梯切換都會舉牌；這裡先白化（base.fit_seasonal_profile：
 原值 − 該 週幾×小時 的訓練平均），每天固定的切換在殘差裡相鄰差接近 0，只有「這個時段不該有的斷崖」才會跳。
 門檻依序列自己的殘差雜訊伸縮（base.noise_stats／calibrated_scale）：分數 = |Δe| / σ*，σ* 由訓練期 |Δe| 的
 MAD 與 1−fpr 分位數決定，threshold 的意義不變。跳上去之後是新水位，不再報（持續偏離交給 residual_chronic）。
@@ -20,7 +20,7 @@ from aiops.stages.detectors.base import (RESIDUAL_TUNABLE, SCALE_FLOOR_TUNABLE, 
 
 @OperatorRegistry.register("detector.residual_shift")
 class ResidualShiftDetector(DetectorOperator):
-    """params: threshold（預設 4，同 detector.shift）、fpr、max_tail_factor、min_scale／min_scale_ratio（tunable）；
+    """params: threshold（預設 4）、fpr、max_tail_factor、min_scale／min_scale_ratio（tunable）；
     tz（時段用的時區，比照 hourly_baseline，預設 UTC）、min_slot_points（時段至少幾個訓練點才用它，預設 30）。"""
 
     algorithm = "residual_shift"

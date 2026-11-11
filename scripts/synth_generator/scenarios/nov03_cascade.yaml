@@ -1,6 +1,6 @@
 # 劇本：cart-api 重試風暴（load_amplification）。根因在上游，往下游 ord-svc、bill-svc 擴散。
 # 傳播方向是 caller -> callee（負載放大），跟平台 engine/topology.propagation_edges 的 callee -> caller 相反，
-# 拓撲／PageRank 很可能會排錯；這正是這份資料要量出來的。
+# 拓撲排序很可能會排錯；這正是這份資料要量出來的。
 name: nov03_cascade
 namespace: gencascade
 seed: 42

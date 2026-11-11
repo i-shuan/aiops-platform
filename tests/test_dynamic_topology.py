@@ -331,30 +331,6 @@ def test_malformed_record_in_the_middle_leaves_no_partial_data(monkeypatch):
     assert ctx.rca_logs == [] and ctx.result["log_fetch"]["skipped"].startswith("KeyError")
 
 
-@pytest.mark.parametrize("preprocess", ["diff", "hybrid"])
-def test_correlation_with_topology_and_no_edges_degrades_to_no_candidates(preprocess):
-    import numpy as np
-    import pandas as pd
-
-    walk = np.cumsum(np.random.default_rng(7).normal(size=90))
-    ts = pd.date_range(T, periods=80, freq="60s")
-    ctx = PipelineContext(pipeline="rca", now=T)
-    # 偵測器在 a 變異常時標 a、b 晚 3 分才變異常時標 b（跟實際行為一樣，兩個實體的事件時間不同）
-    incident = Incident([AnomalyEvent("a", "latency", T + timedelta(minutes=m), 5.0) for m in range(20, 60)] +
-                        [AnomalyEvent("b", "latency", T + timedelta(minutes=m + 3), 5.0) for m in range(20, 60)])
-    ctx.rca_series = {("a", "latency"): pd.DataFrame({"ts": ts, "value": walk[3:83]}),
-                      ("b", "latency"): pd.DataFrame({"ts": ts, "value": walk[:80]})}  # b 比 a 慢 3 點
-
-    def rank(use_topology):
-        params = {"use_topology": use_topology, "preprocess": preprocess}
-        return OperatorRegistry.create("rca.root_cause.cross_correlation", params).rank(incident, ctx)
-
-    assert [c.entity for c in rank(False)] == ["a"]  # 不看拓撲：a 領先
-    assert rank(True) == []  # 看拓撲但沒有任何邊：不丟例外、也不硬湊候選（報告略過這一段）
-    ctx.topology = [("b", "a")]
-    assert [c.entity for c in rank(True)] == ["a"]  # 有邊且相鄰：照常排
-
-
 # ── 算子：降級，不擋報告 ──
 
 

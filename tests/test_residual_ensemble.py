@@ -154,10 +154,11 @@ def test_residual_shift_is_quiet_at_the_daily_switches_where_plain_shift_fires(t
     train, test = three_weeks
     near = _near_switch(test["ts"])
     rshift = _create("detector.residual_shift").fit(train)
-    plain = OperatorRegistry.create("detector.shift").fit(train)
     r_flags = np.array(rshift.detect(test).is_anomaly)
-    p_flags = np.array(plain.detect(test).is_anomaly)
-    assert p_flags[near].sum() >= 10  # 原本的 shift：每個平日 09:00／19:00 都舉牌
+    # 對照組：原始值的一階跳變（相鄰差 ÷ 訓練期相鄰差的標準差 > 4，沒有白化）
+    diff_std = train["value"].diff().dropna().std(ddof=0)
+    p_flags = (test["value"].diff().fillna(0.0).abs() / diff_std > 4).to_numpy()
+    assert p_flags[near].sum() >= 10  # 原值的跳變：每個平日 09:00／19:00 都舉牌
     assert r_flags[near].sum() == 0
     assert r_flags.mean() < 0.002
 
@@ -185,9 +186,11 @@ def test_residual_chronic_is_quiet_on_a_normal_week_and_catches_a_mild_sustained
 
 
 def test_plain_chronic_flags_whole_office_hours_on_the_same_data(three_weeks):
-    """對照組（問題本身）：chronic 拿滾動平均跟整段訓練平均比，上班時段整段都偏離。"""
+    """對照組（問題本身）：原始值的滾動 30 點平均跟整段訓練平均比（尺度 std/√30，門檻 3），上班時段整段都偏離。"""
     train, test = three_weeks
-    flags = np.array(OperatorRegistry.create("detector.chronic").fit(train).detect(test).is_anomaly)
+    mean, std = train["value"].mean(), train["value"].std(ddof=0)
+    rolling = test["value"].rolling(30, min_periods=30).mean()
+    flags = ((rolling - mean).abs() / (std / np.sqrt(30)) > 3).to_numpy()
     assert flags.mean() > 0.3
 
 

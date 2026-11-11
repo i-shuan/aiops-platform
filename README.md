@@ -65,7 +65,7 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 | 目錄 | 是什麼 |
 |---|---|
 | `aiops/engine/` | 底座：`PipelineContext`（強型別）、Pipeline 引擎、算子註冊中心、`BaseOperator`、錯誤型別、請求模型 |
-| `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`）、`rca/`（`rca_report`、`rca_report_correlation`）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
+| `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`）、`rca/`（`rca_report` 等）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
 | `aiops/stages/` | 管線算子，依執行順序分段：`ingestion` → `detectors` → `ensemble` → `grouping` → `scoring` → `suppression` → `rca` → `enrichment`（LLM，含 `noop`）→ `notification` |
 | `aiops/control_plane/` | 控制面手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） |
 | `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch`；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
@@ -106,8 +106,7 @@ aiops/
 │   │   ├── factory.yaml             工廠：Lot 履歷收斂，沒有黃金訊號與同根因抑制
 │   │   └── metrics_only.yaml        只有時序指標，沒有 trace 與拓撲
 │   ├── rca/                         RCA 診斷管線
-│   │   ├── rca_report.yaml          針對一個事件群產生 RCA 報告（根因用拓撲）
-│   │   └── rca_report_correlation.yaml  RCA 報告（根因用時序互相關）
+│   │   └── rca_report.yaml          針對一個事件群產生 RCA 報告（根因用拓撲）
 │   └── control/                     控制面手動動作
 │       └── admin_*.yaml             18 個，每個手動動作一個，API 呼叫時載入
 ├── stages/                          管線算子，依執行順序分段（套件名稱不能以數字開頭，順序寫在 stages/__init__.py）
@@ -119,11 +118,7 @@ aiops/
 │   │   ├── zscore.py                detector.zscore：偏離訓練期平均幾個標準差
 │   │   ├── mad.py                   detector.mad：中位數與 MAD，比 zscore 耐尖峰
 │   │   ├── hourly_baseline.py       detector.hourly_baseline：一週 168 時段各自一條基準線，可設時區
-│   │   ├── compare.py               detector.dod／wow：跟昨天／上週同一時刻比
 │   │   ├── quantile_drift.py        detector.quantile_drift：滾動 p95 漂移，抓尾端變慢
-│   │   ├── chronic.py               detector.chronic：滾動平均跟基準比，抓小幅持續偏移
-│   │   ├── shift.py                 detector.shift：相鄰兩點跳變
-│   │   ├── peer.py                  detector.peer：跟同儕中位數的殘差比（同儕可寫死或動態分群）
 │   │   ├── rules.py                 detector.rules：人訂上下限加連續 N 點，不學習
 │   │   ├── hard_limit.py            detector.hard_limit：致命硬上限（雙軌制軌道一），單點踩線不投票、直通 P0
 │   │   └── new_only.py              detector.new_only：只留比最後一筆已存異常更新的，重跑不重複告警
@@ -139,9 +134,7 @@ aiops/
 │   │   ├── base.py                  兩種契約：RootCauseOperator（寫 rank()）、RcaSection（寫 applies()／build()）
 │   │   ├── report.py                rca.report：依 sections 清單組裝報告，資料不足的段落略過
 │   │   ├── algorithms/              根因演算法（換節點就換演算法）
-│   │   │   ├── topological.py       topological（預設）：傳播圖上沒有異常上游的實體，依最早出現排序
-│   │   │   ├── pagerank.py          pagerank：反向傳播圖上的 Personalized PageRank
-│   │   │   └── causal.py            cross_correlation：事件時段原始時序的時間位移互相關，看誰領先
+│   │   │   └── topological.py       topological（預設）：傳播圖上沒有異常上游的實體，依最早出現排序
 │   │   └── sections/                報告段落
 │   │       ├── overview.py          摘要、時間軸、受影響實體、黃金訊號
 │   │       ├── graph.py             可能的源頭、傳播路徑
@@ -276,7 +269,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_
 - **參數合併**：演算法預設值 ← 後台核准的調參 ← YAML 的 `params`，逐個鍵合併。**YAML 寫了的鍵是鎖定的**，不會被後台調參蓋掉；沒寫的鍵才吃調參。想讓某個參數交給後台調，就不要寫在 YAML。
 - **調參分層**：核准的參數有 (偵測器, 管線, 實體) 三個維度，`*` 代表不限定。套用時取最具體的一層：管線×實體 > 管線 > 實體 > 全域。回饋轉提案可用 `scope: entity | pipeline | global` 選層級（預設 `pipeline`）。不同層的提案互不使對方過期。
 - **回測跟偵測同一組參數**：提案有指定管線時，回測會讀那條管線的 YAML，疊上該偵測器節點的 `params`（鎖定鍵）與該實體 target 的 `overrides`；被 YAML 鎖住的鍵提案改了也不會生效，結果的 `workflow.locked` 會列出來、`current_anomalies` 與 `proposed_anomalies` 會一樣。
-- **回測切段**：回測資料前 `train_ratio`（預設 0.7）拿來訓練、後面拿來測試，只計算測試段的異常，避免用同一段資料訓練又評分。滾動窗的偵測器（如 `chronic`）會往前多帶 `warmup_points()` 個點讓窗口湊滿，這些點不計分。
+- **回測切段**：回測資料前 `train_ratio`（預設 0.7）拿來訓練、後面拿來測試，只計算測試段的異常，避免用同一段資料訓練又評分。滾動窗的偵測器（如 `quantile_drift`）會往前多帶 `warmup_points()` 個點讓窗口湊滿，這些點不計分。
 - **LLM 供應商**：放一個檔案到 `aiops/stages/enrichment/`，用 `@register("名稱")` 登記即可，啟動時自動掃描載入，不用改其他地方。
 
 ### 偵測演算法一覽
@@ -285,16 +278,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_
 |---|---|---|---|
 | `detector.zscore`、`mad` | 整段訓練期一組平均（中位數） | 沒有週期的指標 | 有日週期的指標會在高峰／低谷誤報或漏報 |
 | `detector.hourly_baseline` | 一週 168 個時段各自一組平均與標準差 | 流量、交易量這類有日週期／週末效應的指標（`it_otel`、`factory` 預設，與 `mad`、`quantile_drift` 一起多數決） | **冷啟動：流量類指標建議累積 3~4 週再信任它**。每個「週幾幾點」要看過至少 `min_weeks`（預設 2）週才會啟用，不夠的時段**自動退回全段統計（等同 `zscore`）**，所以 7 天訓練時整條等於 `zscore`，不會更吵但也還沒有週期效果。啟用：`train_lookback_minutes: 20160` 以上並把 `step_seconds` 調大（Prometheus 單次查詢約 11000 點上限）。時區用 `tz` 設，台灣設 `Asia/Taipei` |
-| `detector.dod`、`wow` | 跟昨天／上週同一時刻的差值 | 要「跟昨天比」「跟上週比」 | `fetch` 要設 `lags_minutes`；`dod` 跨週末會變遲鈍，有週末效應用 `wow` |
 | `detector.quantile_drift` | 滾動 p95（可調）跟平常比 | 延遲：平均沒變、最慢那批越來越慢 | 單一尖峰不會觸發（刻意的） |
-| `detector.chronic` | 滾動平均跟基準比 | 小幅但持續的偏移 | 單一尖峰不會觸發（刻意的） |
-| `detector.shift` | 相鄰兩點跳變 | 突然換水位 | 跳上去之後的新水位不再報 |
-| `detector.peer` | 同時間同儕的中位數 | 同服務多個 Pod、同型號多台機台 | 同儕用 `peers` 寫死，或 `peer_group` 依標籤動態撈（Prometheus／VictoriaMetrics） |
 | `detector.rules` | 人訂的上下限、連續 N 點 | 有明確規格的指標 | `require_rule: false` 時只用核准的規則提案，沒有規則的序列不判 |
 | `detector.hard_limit` | 致命硬上限：絕對上下限（`fatal_ceiling`／`fatal_lower`）、一步的變化量（`max_rise`／`max_drop`）、偏離前 N 點中位數的倍數（`max_deviation_ratio`） | 微電弧、瞬斷這類「踩到就是出事」的單點事件。不投票、不被多數決否決，直接 P0（`it_otel`、`factory` 預設有這個節點，**沒在 target `overrides.fatal` 訂界線的序列不受影響**） | 界線只能由人寫在 YAML，後台調參改不到；兩次取樣之間發生又結束的尖峰看不到；界線附近抖動每次越線都算一筆（同一張卡）；`plausible_max`／`plausible_min` 以外的值當成壞資料不判、記進 `errors`（統計軌照樣會看到那個值） |
 | `detector.ensemble` | 前面幾個偵測節點的投票 | 想用交集／多數決壓誤報 | 接在偵測節點後面、`new_only` 前面；分母只算這條序列真的評估過資料的節點（見下方） |
 
-**分母底噪（`min_scale`／`min_scale_ratio`）**：`mad`、`zscore`、`hourly_baseline`、`quantile_drift`、`dod`／`wow` 的分母（MAD、標準差）都過 `stages/detectors/base.scale_floor`：取 max(算出來的值、`min_scale`、|中心| × `min_scale_ratio`、整數序列的 1 個單位)。以前 `mad` 在 MAD = 0 時除以 1e-6——失敗數序列 90% 是 0，平常 2 筆失敗就是 1,349,000 分（混沌場景 5 的誤報）；`zscore` 在 std = 0 時分數全 0，永遠不報。兩個都是 tunable（後台調參、節點 YAML、target `overrides` 都能改）：
+**分母底噪（`min_scale`／`min_scale_ratio`）**：`mad`、`zscore`、`hourly_baseline`、`quantile_drift` 的分母（MAD、標準差）都過 `stages/detectors/base.scale_floor`：取 max(算出來的值、`min_scale`、|中心| × `min_scale_ratio`、整數序列的 1 個單位)。以前 `mad` 在 MAD = 0 時除以 1e-6——失敗數序列 90% 是 0，平常 2 筆失敗就是 1,349,000 分（混沌場景 5 的誤報）；`zscore` 在 std = 0 時分數全 0，永遠不報。兩個都是 tunable（後台調參、節點 YAML、target `overrides` 都能改）：
 
 | 參數 | 預設 | 範圍 | 意思 |
 |---|---|---|---|
@@ -358,7 +347,7 @@ targets:
 
 `loose` 等於兩個偵測器取聯集，非常吵，只在「寧可多報」的服務用。
 
-動態同儕的寫法（自己是 `attrs[by]`，沒有就用 `entity`；`${屬性}` 會用 target 的 attrs 代入）：
+動態同儕的寫法（自己是 `attrs[by]`，沒有就用 `entity`；`${屬性}` 會用 target 的 attrs 代入）。內建的同儕偵測器 `detector.peer` 已移除：`peers`／`peer_group` 是引擎層的機制，給 `requires_peers = True` 的偵測器用，目前沒有內建算子使用它：
 
 ```yaml
 targets:
@@ -381,7 +370,7 @@ targets:
 
 > 真實 ES（11/3 13:50–16:20Z，共 11,283 span／3,761 條 trace）：上限 2000 時舊做法只涵蓋 13:50–14:16（10 分鐘格 3／15），新做法涵蓋整段（15／15，每 10 分鐘 129–138 個 span），抽到的 666 條 trace 全部完整；上限 5000 時舊做法 7／15、新做法 15／15。抽樣多花 0.7–1.1 秒（多了每桶一次候選查詢）。這批 trace 沒有跨服務呼叫，所以兩種做法的邊都是 0，邊的準確度要等有串 trace context 的資料才量得到。
 
-> 真實資料（11/3 事件，14:05–16:20Z）：撈到 10,167 個 span、3,389 條 trace，**跨服務呼叫 0 條**——這批 trace 每條都只在一個服務裡（下游只有 redis、postgresql、oracle、tax-gw），所以拓撲與 PageRank 仍排不出根因。機制本身是通的，缺的是有串接 trace context 的資料。
+> 真實資料（11/3 事件，14:05–16:20Z）：撈到 10,167 個 span、3,389 條 trace，**跨服務呼叫 0 條**——這批 trace 每條都只在一個服務裡（下游只有 redis、postgresql、oracle、tax-gw），所以拓撲排序（與當時的 PageRank，已移除）仍排不出根因。機制本身是通的，缺的是有串接 trace context 的資料。
 
 `rca_report.yaml` 的 `root_cause` 節點決定根因怎麼排序，報告段落只負責呈現：
 
@@ -389,10 +378,8 @@ targets:
 |---|---|---|
 | `rca.root_cause.evidence`（`rca_report` 預設） | 這一輪撈到的 span：各服務**自身耗時**（span 耗時扣掉等下游的時間，定義見下方）與自身錯誤率的增量；被上游放大流量的服務，增量按流量倍數轉給放大者；前幾名拉不開或資料不足就回「證據不足」不指認。沒有 trace 的場景（工廠）退回 topological 並寫明；trace 來源連不上（例如 ES 重啟）則不退回、直接證據不足。候選的自身耗時增量裡，單一下游資源（`span.type` 是 db／external 的葉節點：Oracle、Redis、第三方 API）的等待佔 `min_dependency_share`（0.6）以上，就填 `dependency` 下鑽（例如 `tax-gw:443（external/http）`）：候選仍是服務、排名不變，報告與建議處置會說「去查它等的東西，不是它的程式」 | `ingestion.incident_traces`（已接好） |
 | `rca.root_cause.topological` | 傳播圖上沒有異常上游的實體，依最早出現排序 | 拓撲或 Lot 流向 |
-| `rca.root_cause.pagerank` | 反向傳播圖上的 Personalized PageRank：拖垮越多下游、越異常的上游排越前 | 拓撲或 Lot 流向 |
-| `rca.root_cause.cross_correlation` | 事件時段原始時序的時間位移互相關：誰的波動領先別人。前處理 `preprocess` 可選 `diff`（預設，一階差分）或 `hybrid`（只在異常時段保留穩健 z 分數、其他歸零） | 前面要有 `ingestion.incident_series`（`rca_report_correlation.yaml` 已經接好）；這是相關不是因果 |
 
-**互相關的 `diff` vs `hybrid`（`min_corr` 固定 0.5，沒有降低）：**一階差分在「整段水位抬高」（高原）的事件只剩兩個邊緣，相關被雜訊淹沒；`hybrid` 把異常時段的波形完整保留、平常時段一律歸零（日夜週期不會變成假相關），遮罩來源是事件群裡同實體的異常點，前後擴 `mask_expand_minutes`（預設 5）分鐘；遮罩內少於 `min_mask_points`（預設 20）個點的實體不參與。
+**歷史對照：時序互相關（`rca.root_cause.cross_correlation` 與 `rca_report_correlation.yaml` 已移除，數字保留作歷史對照）的 `diff` vs `hybrid`（`min_corr` 固定 0.5，沒有降低）：**一階差分在「整段水位抬高」（高原）的事件只剩兩個邊緣，相關被雜訊淹沒；`hybrid` 把異常時段的波形完整保留、平常時段一律歸零（日夜週期不會變成假相關），遮罩來源是事件群裡同實體的異常點，前後擴 `mask_expand_minutes`（預設 5）分鐘；遮罩內少於 `min_mask_points`（預設 20）個點的實體不參與。
 
 | 資料 | 真實根因 | `diff`（max_lag 10/20/30） | `hybrid`（max_lag 10） | `hybrid`（max_lag 20/30） |
 |---|---|---|---|---|
@@ -410,7 +397,7 @@ targets:
 
 拓撲限制確實去掉了不相干的配對（`load_amplification` 的 api-gw 累計分數從 2.95 降到 0.99），但沒有改變第一名：根因跟下游同一分鐘變慢時，相鄰服務之間 ±1 點的先後是雜訊。**兩套標準答案 0／2 命中，所以預設不切。** 沒有任何拓撲邊時，`use_topology: true` 不會丟例外，結果是沒有候選、段落略過。
 
-**`hybrid` 的已知限制**（都有對應的 `xfail(strict=True)` 測試，見 `tests/test_rca_hybrid_limits.py`）：
+**`hybrid` 的已知限制**（當時有對應的 `xfail(strict=True)` 測試 `tests/test_rca_hybrid_limits.py`，已隨算子移除）：
 
 - **短事故／毛刺**：遮罩內不到 `min_mask_points`（20）個點的實體不參與。4 分鐘的毛刺遮罩內只有 14 點，直接排除；12 分鐘的階梯有 22 點，可以。
 - **仍在持續的高原被遮罩切斷**：事件標在第 20～59 分、高原維持到第 79 分時，遮罩（前後各擴 5 分）在第 64 分把高原從中間切斷，兩個實體共用的切口台階主導相關性，最佳 lag 變 0（r≈0.98），lag 0 的配對不列入，真實的 3 點領先被蓋掉。同一組波形若事件涵蓋到高原結束就正常。
@@ -426,7 +413,7 @@ targets:
 | ＋自身錯誤率（預設） | ✓／✓ | ✓／✓（cart-api 1.50、ord-svc 0.40、bill-svc 0.28） |
 | ＋日誌權重 0.5／1.0 | ✓／✓ | ✓／✓（1.0 時 cart-api 1.89 對 ord-svc 1.39，差距縮小） |
 | 只看自身錯誤率 | ✓／✓ | ✓／✓ |
-| 對照：topological／PageRank | ✓／✓ | ✗ bill-svc／✗ ord-svc |
+| 對照：topological／PageRank（PageRank 已移除，數字保留作歷史對照） | ✓／✓ | ✗ bill-svc／✗ ord-svc |
 
 - **沒有流量放大歸因時**，load_amplification 是 cart-api +184 ms、ord-svc +171 ms，差 8%，只能回「證據不足」；加上歸因（ord-svc、bill-svc 流入流量 2.09 倍，由 cart-api 放大）後才排對。歸因是近似：被灌流量的服務增量中 (1 − 1/流量倍數) 算給放大者，理由文字會寫出轉了多少毫秒。
 - **測試套件**（`tests/test_rca_evidence.py`）：正式劇本縮短到事故當天、3 個 seed（42、7、2026）× 兩種機制，第 1 名全部命中；把流量放大歸因關掉，load_amplification 會紅。
@@ -616,19 +603,19 @@ SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
 
 平台的拓撲是 (caller, callee)，傳播方向是 **callee → caller**（`engine/topology.propagation_edges`：下游出事拖垮上游）。劇本的方向必須講清楚，所以分兩種：
 
-| mechanism | 根因在哪 | 劇本寫什麼 | 訊號長什麼樣 | 拓撲／PageRank 會怎樣 |
+| mechanism | 根因在哪 | 劇本寫什麼 | 訊號長什麼樣 | 拓撲排序會怎樣 |
 |---|---|---|---|---|
 | `callee_slowdown`（`nov03_callee_slowdown.yaml`） | 最下游的服務（bill-svc 呼叫的 tax-gw 變慢） | 只寫根因自己的偏移；不准寫上游 | 上游的整段耗時本來就包含下游，**同一分鐘**一起變慢（trace 是加總出來的，不另外造） | 跟平台同向，應該指向最下游 |
 | `load_amplification`（`nov03_cascade.yaml`） | 上游（cart-api 連線池耗盡、重試風暴） | 根因要有 `call_multiplier > 1`（對下游的呼叫次數放大）；下游各自的 lag 與偏移 | 下游請求量立刻上升，下游自己的處理時間在 lag 之後才上升；上游的整段耗時也包含下游的變慢 | 跟平台反向，**預期會指錯人**——這正是這份資料要量的 |
 
 離線驗證的實際結果（seed 42，事件 11/3 14:05Z 起；拓撲由 trace 用平台的 `_span` 與 `service_edges` 還原，四條邊與劇本 DAG 完全一致）：
 
-| 劇本（真實根因） | topological | pagerank | cross_correlation（預設 `min_corr: 0.5`） |
+| 劇本（真實根因） | topological | pagerank（已移除） | cross_correlation（已移除；當時預設 `min_corr: 0.5`） |
 |---|---|---|---|
 | `nov03_callee_slowdown`（bill-svc） | bill-svc ✓ | bill-svc ✓ | 排不出（所有服務同一分鐘變慢，互相關最佳位移是 0） |
 | `nov03_cascade`（cart-api） | bill-svc ✗ | ord-svc ✗ | 排不出（差分後 \|r\| 最高 0.35）；降到 `min_corr: 0.2` 才排出 cart-api |
 
-互相關排不出來的原因：平台先做一階差分再算相關，緩升 10 分鐘的波形差分之後幾乎只剩雜訊（cart-api 對 bill-svc 差分後 r=0.25）；不差分直接比水位是 r=0.98、cart-api 領先 11 點。這是演算法的前處理問題，不是資料沒有先後。
+pagerank、cross_correlation 已移除，這兩欄數字保留作歷史對照。互相關當時排不出來的原因：平台先做一階差分再算相關，緩升 10 分鐘的波形差分之後幾乎只剩雜訊（cart-api 對 bill-svc 差分後 r=0.25）；不差分直接比水位是 r=0.98、cart-api 領先 11 點。這是演算法的前處理問題，不是資料沒有先後。
 
 #### 指標的物理特性
 
@@ -733,17 +720,17 @@ helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiop
 
 ## 目前狀態
 
-已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、11 個偵測算子（見上表，含 168 時段基準線、同比／環比、分位數漂移、動態同儕、多偵測器裁決）、工廠 Lot 收斂、RCA（可抽換的根因演算法：拓撲、PageRank、時序互相關；10 個段落含歷史相似案例與錯誤日誌樣式比對）、訓練排除歷史事故窗、warning／anomaly 兩級告警、自我健康心跳、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、規則升級器、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
+已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、偵測算子（見上表，含 168 時段基準線、分位數漂移、多偵測器裁決）、工廠 Lot 收斂、RCA（可抽換的根因演算法：證據融合、拓撲、LLM 判斷、貝氏；10 個段落含歷史相似案例與錯誤日誌樣式比對）、訓練排除歷史事故窗、warning／anomaly 兩級告警、自我健康心跳、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、規則升級器、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
 
 **演算法還沒在真實資料上驗證過**，還沒有任何誤報率或根因準確度的數字；先別把「測試全過」當成「演算法有用」。計畫中的真實資料驗收有三項：
 
 1. 168 時段基準線 vs 舊 zscore：同一段真實時序整週回放，比較尖峰時段與離峰時段各跳幾次。
 2. 多偵測器裁決：聯集 vs 多數決濾掉多少單一算法的毛刺，留下的是不是大尖峰。
-3. RCA：拓撲 vs 時序互相關，對一次真實發生的延遲尖峰各自排出的第一候選，以及互相關的領先點數與相關係數有沒有意義（同時有流量不等於因果）。
+3. RCA：根因演算法對一次真實發生的延遲尖峰排出的第一候選（原本計畫對照的時序互相關已移除）。
 
 這三項卡在上面的唯讀 ES key 還沒建。ES 裡實際有哪些服務、多少筆資料、涵蓋哪幾天，也還沒有確認過，以查到的為準。
 
-演算法的效果只用合成資料（mock）驗證過：`seasonal:` 開頭的 mock query 會產生依時間戳決定、有日週期與週末效應的資料，其他 mock query 是一段雜訊加一個尖峰。在真實指標上的誤報率、互相關排出的根因準不準，都還沒驗證。
+演算法的效果只用合成資料（mock）驗證過：`seasonal:` 開頭的 mock query 會產生依時間戳決定、有日週期與週末效應的資料，其他 mock query 是一段雜訊加一個尖峰。在真實指標上的誤報率、根因排得準不準，都還沒驗證。
 
 已在本機 rancher-desktop 叢集實測：平台（容器）跑在 K8s、資料存在 PostgreSQL、CronJob 排程、Alertmanager 分流與結案、Grafana 顯示、API 等待資料庫啟動。
 

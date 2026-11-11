@@ -1,35 +1,38 @@
+"""測試專用的同儕偵測器（requires_peers = True）。
+
+正式的同儕偵測器已移除，但引擎的同儕路徑（target 的 peers／peer_group、ingestion.fetch 的 peer_* 欄位、
+基底「沒有同儕就棄權／報錯」、training_points 只算同儕有值的列、回測要帶 peers）還在。這個算子只是讓那些路徑有東西可以測；
+註冊成 test.* 名稱，不進 tests/test_detectors.py 的 detector.* 契約清單。
+
+算法：自己跟同儕中位數的差，跟訓練期這個差的中位數比，尺度是差的 MAD（MAD 為 0 時用 1）。
+"""
 import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.detectors.base import DetectorOperator
 
+NAME = "test.peer_probe"
 _MAD_TO_STD = 1.4826
 
 
 def _deviation(df: pd.DataFrame) -> pd.Series:
     peers = df[[c for c in df.columns if c.startswith("peer_")]]
     if peers.shape[1] == 0:
-        raise ValueError("peer 偵測器需要至少一個 peer_* 欄位")
+        raise ValueError("需要至少一個 peer_* 欄位")
     return df["value"] - peers.median(axis=1, skipna=True)
 
 
-@OperatorRegistry.register("detector.peer")
-class PeerDetector(DetectorOperator):
-    """同儕比對：跟同一群（同服務其他 Pod、同型號其他機台）同時間的中位數比。
-
-    大家一起變高（例如流量尖峰）不算異常；只有自己偏離同儕、而且偏得比平常多才算。
-    target 要有 peers。params: threshold（偏離量是平常偏離幅度 MAD 的幾倍）。
-    """
-
-    algorithm = "peer"
+@OperatorRegistry.register(NAME)
+class PeerProbe(DetectorOperator):
+    algorithm = "peer_probe"
     requires_peers = True
     tunable = {"threshold": (4.0, 1.0, 20.0)}
 
     def training_points(self, df: pd.DataFrame) -> int:
-        return int(_deviation(df).notna().sum())  # 同儕那一刻沒值的列算不出偏離量，不算訓練點
+        return int(_deviation(df).notna().sum())  # 同儕那一刻沒值的列不算訓練點
 
-    def fit(self, df: pd.DataFrame) -> "PeerDetector":
+    def fit(self, df: pd.DataFrame) -> "PeerProbe":
         d = _deviation(df).dropna()
         self.center_ = float(d.median())
         self.mad_ = float((d - self.center_).abs().median() * _MAD_TO_STD)
@@ -40,14 +43,12 @@ class PeerDetector(DetectorOperator):
         self._require_fitted()
         return {"center": self.center_, "mad": self.mad_}
 
-    def load_state(self, state: dict) -> "PeerDetector":
+    def load_state(self, state: dict) -> "PeerProbe":
         self.center_, self.mad_ = float(state["center"]), float(state["mad"])
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
-        d = _deviation(df)
-        # 平常完全一致（MAD=0）時，用 1 當尺度，避免除以 0
-        scores = ((d - self.center_).abs() / (self.mad_ or 1.0)).fillna(0.0)
+        scores = ((_deviation(df) - self.center_).abs() / (self.mad_ or 1.0)).fillna(0.0)
         return self._result(df, scores, scores > self.param("threshold"))
