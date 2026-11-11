@@ -260,6 +260,25 @@ nodes:
    👉 寫入 `aiops/storage/models.py`，只能透過 `aiops/storage/repository.py` 操作讀寫；並在 `migrations/postgres/` 補一支可重複執行的 SQL（沒有 Alembic，既有 PostgreSQL 靠它升級）。
  * **要調整執行步驟與算法超參數？**
    👉 寫入 `aiops/pipelines/<detection|rca|control>/<scene>.yaml`（名稱在 `pipelines/` 內必須唯一），完全不改動任何 Python 程式碼。
+ * **要改 Grafana 的畫面（儀表板、面板連動、資料源）？**
+   👉 只改 `deploy/helm/aiops-grafana/files/`（儀表板 JSON、`datasource.yaml`）與 chart 的 values，用 `helm upgrade` 部署。不改 Grafana 映像檔、不自製外掛。
+ * **要讓人在畫面上填東西（回饋表單、核准）？**
+   👉 表單頁寫在自研平台（`aiops/interfaces/`，靜態頁放 `aiops/interfaces/static/`，送出走既有的 `/api/` 端點與 token 驗證）；Grafana 只放「連過去」的連結（告警卡片的 `feedback_url` 註解，基底網址來自 `AIOPS_PUBLIC_URL`）。
+
+### 周邊元件守則：只動 Helm chart，不動別人的映像檔
+
+本 repo 部署的東西分兩種，改法不同：
+
+| 元件 | 可以改什麼 | 嚴格禁止事項 |
+| :--- | :--- | :--- |
+| **自研平台**（`aiops/`，映像檔 `aiops-platform`） | 程式碼、映像檔、`deploy/helm/aiops-platform` | — |
+| **Grafana**（`deploy/helm/aiops-grafana`） | chart 的 `files/`、templates、values | 嚴禁改官方映像檔、自製或 fork 外掛、進 pod 手動改設定；嚴禁放告警規則、Contact Point、業務邏輯（只顯示） |
+| **Alertmanager**（`deploy/helm/aiops-alertmanager`） | chart 的 values（路由、receiver） | 嚴禁改官方映像檔 |
+| **Elasticsearch**（開發叢集 `es-test`） | 這個 repo 沒有它的 chart；要調整就先把 chart 找回來或整理進 `deploy/helm/` 再改 | 嚴禁改映像檔；平台與 Grafana 對它**只讀**（`tests/test_architecture.py`），寫入合成資料只能由人跑 `scripts/synth_generator/es_writer` |
+
+ 1. **需求先問「chart 做不做得到」**：做得到就只改 chart；做不到（要新頁面、新 API、新資料）就做在自研平台，周邊元件只加設定或連結。不准為了一個功能去換周邊元件的映像檔。
+ 2. **所有改動都要回到 repo**：不准只在叢集上 `kubectl edit`／在 Grafana UI 手改而沒有對應的 chart 變更；部署一律 `helm upgrade`。
+ 3. **機密不進 chart**：values 與 `files/` 不得有金鑰、密碼，一律來自既有的 Secret。
 
 ---
 
