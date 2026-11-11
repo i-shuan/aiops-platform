@@ -20,6 +20,14 @@ spec:
       containers:
         - name: grafana
           image: {{ .Values.image }}
+          {{- with .Values.featureToggles }}
+          # 功能開關只能寫在 grafana.ini 的 [feature_toggles]（環境變數只能覆寫設定檔已有的鍵）；
+          # 官方映像檔的 /run.sh 會把容器參數原樣傳給 grafana server，cfg:段落.鍵=值 就是命令列覆寫，不用換掉 grafana.ini
+          args:
+            {{- range $k, $v := . }}
+            - {{ printf "cfg:feature_toggles.%s=%v" $k $v | quote }}
+            {{- end }}
+          {{- end }}
           ports:
             - {name: http, containerPort: 3000}
           envFrom:

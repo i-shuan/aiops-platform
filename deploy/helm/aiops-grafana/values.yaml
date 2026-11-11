@@ -20,6 +20,13 @@ devSecretEnv: {}
 env:
   GF_PLUGINS_PREINSTALL_DISABLED: "true"                  # 不讓 Grafana 自己連外網裝預設外掛
 
+# Grafana 功能開關（[feature_toggles]），以容器參數 cfg:feature_toggles.<名稱>=<值> 帶入，不換映像檔、不換 grafana.ini。
+# 用環境變數 GF_FEATURE_TOGGLES_<名稱> 無效：Grafana 只讓環境變數覆寫設定檔裡已經存在的鍵
+featureToggles:
+  # 關掉新版告警導覽：開著時 Alerting → Alert groups 頁要找 alert-activity 導覽項目，匿名檢視者的導覽清單沒有它，
+  # 頁面標題會顯示「Page not found」（內容正常）。關掉後這頁改用 groups，標題正常；代價是告警頁回到舊版導覽排版
+  alertingNavigationV2: false
+
 # 不登入也能看（唯讀 Viewer）。預設關；內網 demo 才開
 anonymousViewer: false
 

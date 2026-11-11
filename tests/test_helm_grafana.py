@@ -69,10 +69,10 @@ def test_no_dead_references_to_removed_engine():
 def test_dashboards_read_only_from_provisioned_datasources():
     uids = {d["uid"] for d in _datasources()}
     boards = list((CHART / "files" / "dashboards").glob("*.json"))
-    assert [b.stem for b in boards] == ["apm-overview"]
+    assert sorted(b.stem for b in boards) == ["aiops-incidents", "apm-overview"]  # 新增事件群儀表板（只讀 aiops-alertmanager）
     for board in boards:
         d = json.loads(board.read_text(encoding="utf-8"))
-        used = {(p.get("datasource") or {}).get("uid") for p in d["panels"]}
+        used = {(p.get("datasource") or {}).get("uid") for p in d["panels"] if p["type"] != "text"}  # 說明用的 text 面板沒有資料源
         used |= {(v.get("datasource") or {}).get("uid") for v in d.get("templating", {}).get("list", []) if v.get("datasource")}
         assert used <= uids, f"{board.name} 用了沒定義的資料源：{used - uids}"
         assert d["panels"] and all(p["type"] != "text" or "iframe" not in json.dumps(p) for p in d["panels"])

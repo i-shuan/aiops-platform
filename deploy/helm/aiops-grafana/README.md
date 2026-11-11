@@ -17,7 +17,12 @@
 | `apm-metrics`、`apm-traces`、`apm-logs` | Elasticsearch | APM 資料（只讀） |
 | `aiops-alertmanager` | Alertmanager | 顯示平台推送的告警 |
 
-儀表板：**APM 總覽：metrics → trace → log**（`apm-overview`），5 個面板，只靠 ES。
+儀表板（都在 `files/dashboards/`）：
+
+- **APM 總覽：metrics → trace → log**（`apm-overview`），6 個面板，只靠 ES。面板之間有連動：點 ① 的一條線（一支 API）→ ③ 只列這支 API 超過門檻的慢請求；點 ③ 的 `trace.id` → 下面列這條 trace 的每一段，④ 的 log 也只剩這條 trace 的。變數 `slow_ms`（慢請求門檻，預設 1000）、`trace`（`*` = 不篩）；右上「清除 API 與 trace 篩選」還原。
+- **AIOps 事件群**（`aiops-incidents`）：說明頁，連到 Alerting → Active notifications（`/alerting/groups`，`aiops-alertmanager`）看平台推送的事件群。values 的 `featureToggles.alertingNavigationV2: false` 是為了這一頁：開著時匿名檢視者看到的標題是「Page not found」。Grafana 的 Alert list 面板讀不到外部 Alertmanager，所以不是面板列表。
+
+回饋表單不在 Grafana：告警卡片的 `feedback_url` 註解連到平台自己的回饋頁（平台設了 `AIOPS_PUBLIC_URL` 才有）。
 
 ## 部署
 
