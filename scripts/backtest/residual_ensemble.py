@@ -4,7 +4,8 @@ hourly_baseline＋residual_shift＋residual_chronic），用 ES 的每分鐘請�
 偵測走真的 Pipeline：從兩份 workflow YAML 取出偵測節點（fetch 之後到 detector.ensemble 為止，含 hard_limit 與 bypass），
 fetch 換成回放用的 replay.window（每輪給最近 60 分鐘，同 it_otel 的 lookback_minutes），基準線由記憶體版 Hooks 保存——
 第一輪沒有基準線時給訓練段 train_df、引擎訓練並交出 new_detector_states，之後每輪載入同一份（等同正式環境基準線還沒到期）。
-每 5 分鐘一輪（同 CronJob 週期）；一分鐘只要在任何一輪被 detector.ensemble 判成異常就算告警分鐘。
+每 5 分鐘一輪（同 CronJob 週期）；一分鐘只要在任何一輪被 detector.ensemble 判成異常、或被 bypass 節點
+（不投票、單獨發告警）判成異常，就算告警分鐘。「各票」也列出 bypass 節點自己的分鐘數。
 
 訓練／測試切分：資料 >= 17 天用 14 天訓練，其餘 7 天。三種注入（測試期中段某個平日 11–13 點）：
   step  瞬間 ×0.3 持續 20 分    ramp  15 分鐘線性滑到 ×0.3 再維持 20 分    mild  ×0.8 持續 60 分
@@ -100,8 +101,11 @@ class Runner:
                                       targets=[TargetSpec(source_type="mock", query=f"rpm:{service}", entity=service)]),
                              MemoryHooks())
         self.train = train
+        vote = next(op for _, op in self.pipe.target_nodes if op.operator_name == "detector.ensemble")
+        # bypass 的節點（hard_limit、不投票的旁路漂移票）事件原樣留下，正式環境一樣會發告警：算進告警分鐘
+        self.bypass = set(vote.bypass)
         self.voters = [n.name for n, op in self.pipe.target_nodes
-                       if getattr(op, "has_baseline", False) and getattr(op, "votes", True)]
+                       if getattr(op, "has_baseline", False) and n.name not in self.bypass]
 
     def flags(self, test: pd.DataFrame, rounds) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         n = len(test)
@@ -117,8 +121,10 @@ class Runner:
                 k = pos.get(pd.Timestamp(e.ts))
                 if e.level != ANOMALY or k is None:
                     continue
-                if e.detector == "detector.ensemble":
+                if e.detector == "detector.ensemble" or e.detector_node in self.bypass:
                     verdict[k] = True
+                if e.detector_node in self.bypass:
+                    member.setdefault(e.detector_node, np.zeros(n, bool))[k] = True
                 elif e.detector_node in member:
                     member[e.detector_node][k] = True
         return verdict, member

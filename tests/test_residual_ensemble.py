@@ -217,6 +217,23 @@ def test_residual_chronic_keeps_the_trained_window_until_retrain(three_weeks):
     assert result.scores[28] == 0 and result.scores[29] != 0  # 照舊的 30 點窗口
 
 
+def test_min_run_needs_the_drift_to_persist(three_weeks):
+    """min_run：滾動平均連續越線 N 點才成立（不投票的旁路漂移票用）；沒撐滿的點分數歸 0。"""
+    train, test = three_weeks
+    s = _weekday_noon(test)
+    mild = test.copy()
+    mild.loc[s:s + 59, "value"] *= 0.8
+    window = mild.iloc[s:s + 60].reset_index(drop=True)
+    state = _create("detector.residual_chronic").fit(train).get_state()
+    every = np.array(_create("detector.residual_chronic").load_state(state).detect(window).is_anomaly)
+    persist = _create("detector.residual_chronic", min_run=10).load_state(state).detect(window)
+    flags = np.array(persist.is_anomaly)
+    first = int(np.argmax(every))
+    assert every.any() and flags.any()
+    assert int(np.argmax(flags)) == first + 9  # 第 10 個連續越線點才成立
+    assert not any(persist.scores[:first + 9])
+
+
 # ── 載入期參數檢查 ──
 
 
@@ -231,6 +248,7 @@ def test_residual_chronic_keeps_the_trained_window_until_retrain(three_weeks):
     ("detector.residual_chronic", {"window": 2}, WorkflowParamError),
     ("detector.residual_chronic", {"fpr": 0.0}, WorkflowParamError),
     ("detector.residual_chronic", {"tz": "nowhere"}, WorkflowError),
+    ("detector.residual_chronic", {"min_run": 0}, WorkflowError),
 ])
 def test_bad_params_fail_at_load_time(name, params, error):
     with pytest.raises(error):
@@ -258,11 +276,13 @@ def _detection_nodes(name: str) -> list[NodeSpec]:
 def test_it_otel_residual_loads_with_three_complementary_votes_and_fatal_bypass():
     pipe = Pipeline(load_workflow(workflow_path("it_otel_residual")))
     ops = {n.name: n.operator for n, _ in pipe.target_nodes}
-    voters = [n.name for n, op in pipe.target_nodes if getattr(op, "has_baseline", False) and op.votes]
+    vote = next(op for n, op in pipe.target_nodes if n.operator == "detector.ensemble")
+    voters = [n.name for n, op in pipe.target_nodes if getattr(op, "has_baseline", False) and n.name not in vote.bypass]
     assert [ops[v] for v in voters] == ["detector.hourly_baseline", "detector.residual_shift",
                                         "detector.residual_chronic"]
-    vote = next(op for n, op in pipe.target_nodes if n.operator == "detector.ensemble")
-    assert vote.strategy == "majority" and vote.bypass == {"fatal"}
+    assert vote.strategy == "majority" and vote.bypass == {"fatal", "detect_drift_solo"}
+    solo = next(op for n, op in pipe.target_nodes if n.name == "detect_drift_solo")
+    assert solo.operator_name == "detector.residual_chronic" and solo.min_run > 1
     # 原本的 it_otel 不動：還是 hourly + mad + quantile_drift
     original = [n.operator for n in load_workflow(workflow_path("it_otel")).nodes]
     assert {"detector.mad", "detector.quantile_drift"} <= set(original)
@@ -291,6 +311,15 @@ def _majority_minutes(train: pd.DataFrame, window: pd.DataFrame) -> tuple[int, s
     batch = Pipeline(wf).run(now=window["ts"].iloc[-1].to_pydatetime() + timedelta(seconds=30), strict=True)
     verdicts = [e for e in batch.anomalies if e.detector == "detector.ensemble" and e.level == ANOMALY]
     return len(verdicts), {n for e in verdicts for n in e.voted_by}
+
+
+def _alert_minutes(train: pd.DataFrame, window: pd.DataFrame) -> int:
+    """這一輪會發告警的分鐘：裁決通過的 ∪ bypass 節點（旁路漂移票、致命硬上限）自己的事件。"""
+    _Frames.raw, _Frames.train = window.reset_index(drop=True), train
+    wf = Workflow(name="residual_test", nodes=_detection_nodes("it_otel_residual"),
+                  targets=[TargetSpec(source_type="mock", query="rpm", entity="svc")])
+    batch = Pipeline(wf).run(now=window["ts"].iloc[-1].to_pydatetime() + timedelta(seconds=30), strict=True)
+    return len({e.ts for e in batch.anomalies if e.level == ANOMALY})
 
 
 def test_pipeline_majority_is_silent_across_the_0900_switch_and_catches_a_cliff(three_weeks):
@@ -326,13 +355,25 @@ def test_mild_drop_on_a_busy_series_reaches_majority(three_weeks):
     assert caught >= 25 and {"detect", "detect_rchronic"} <= voters
 
 
-@pytest.mark.xfail(strict=True, reason="死區（ES 回測 report-svc mild 0/60）：低流量、雜訊大的序列持續低兩成（約 -8 筆／分，"
+@pytest.mark.xfail(strict=True, reason="多數決的死區（ES 回測 report-svc mild 0/60；告警由旁路漂移票補上，見下一個測試）：低流量、雜訊大的序列持續低兩成（約 -8 筆／分，"
                                         "約 1.3 個時段標準差）只有 residual_chronic 看得到；hourly_baseline 與 residual_shift "
                                         "都不投票，三票多數決過不了。")
 def test_mild_drop_on_a_low_traffic_noisy_series_reaches_majority():
     train, window = _low_traffic_mild()
     caught, _ = _majority_minutes(train, window)
     assert caught >= 30
+
+
+def test_low_traffic_mild_drop_is_caught_by_the_solo_drift_track():
+    """不漏報：多數決過不了（上面的 xfail），旁路漂移票（min_run 分鐘持續偏離）單獨發告警。"""
+    train, window = _low_traffic_mild()
+    assert _alert_minutes(train, window) >= 10
+
+
+def test_solo_drift_track_stays_quiet_on_a_normal_day(three_weeks):
+    train, test = three_weeks
+    s = _weekday_noon(test)
+    assert _alert_minutes(train, test.iloc[s:s + 60]) == 0
 
 
 def test_low_traffic_mild_drop_is_seen_by_the_drift_vote_alone():

@@ -25,6 +25,13 @@ nodes:
   - name: detect_rchronic
     operator: detector.residual_chronic
     params: {tz: Asia/Taipei}
+  # 旁路漂移票（不投票、單獨發告警，列在 vote 的 bypass）：低流量、雜訊大的序列持續低兩成時，只有漂移票看得到，
+  # 多數決永遠湊不到第二票（ES 回測 report-svc 0/60）。這個節點的殘差滾動平均要連續越線 min_run 分鐘才成立，
+  # 寧可多吵一點也不漏報。min_run 是「延遲 vs 誤報」的旋鈕（回測：10 分 -> report-svc 第 22 分鐘抓到，
+  # 訓練 14 天的序列每週多 0～4 分鐘；訓練只有 7 天的序列每週 13～25 件），見 docs/RESIDUAL_SNR_ENSEMBLE.md。
+  - name: detect_drift_solo
+    operator: detector.residual_chronic
+    params: {tz: Asia/Taipei, min_run: 10}
   # 雙軌制・軌道一（致命硬上限）：物理／業務上「踩到就是出事」的界線，單點成立、不交給多數決。
   # 預設不做事：只有在 target 的 overrides.fatal 訂了界線的序列才會判（見下面 targets 的範例）。
   # 它不投票（vote 的 bypass），事件原樣留下，score_fatal 直接拉到 P0。界線只認 YAML，後台調參改不到。
@@ -32,7 +39,7 @@ nodes:
     operator: detector.hard_limit
   - name: vote
     operator: detector.ensemble
-    params: {strategy: majority, bypass: [fatal]}
+    params: {strategy: majority, bypass: [fatal, detect_drift_solo]}
   - name: new_only
     operator: detector.new_only
 

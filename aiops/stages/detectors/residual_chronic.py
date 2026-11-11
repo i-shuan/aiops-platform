@@ -30,11 +30,12 @@ from aiops.stages.detectors.base import (RESIDUAL_TUNABLE, SCALE_FLOOR_TUNABLE, 
 @OperatorRegistry.register("detector.residual_chronic")
 class ResidualChronicDetector(DetectorOperator):
     """params: threshold（預設 3，同 detector.chronic）、window（滾動窗點數，預設 30，同 chronic）、fpr、max_tail_factor、
-    min_scale／min_scale_ratio（tunable）；tz、min_slot_points（同 residual_shift）。"""
+    min_scale／min_scale_ratio（tunable）；tz、min_slot_points（同 residual_shift）；
+    min_run（預設 1）：滾動平均要連續越線幾個點才成立，給不投票、單獨發告警的旁路節點用（只認 YAML，調參改不到）。"""
 
     algorithm = "residual_chronic"
     tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 3.0, 1440.0), **RESIDUAL_TUNABLE, **SCALE_FLOOR_TUNABLE}
-    other_params = frozenset({"tz", "min_slot_points"})
+    other_params = frozenset({"tz", "min_slot_points", "min_run"})
 
     def __init__(self, **params: Any):
         super().__init__(**params)
@@ -42,6 +43,9 @@ class ResidualChronicDetector(DetectorOperator):
         self.min_slot_points = int(params.get("min_slot_points", 30))
         if self.min_slot_points < 2:
             raise TypeError("detector.residual_chronic 的 min_slot_points 至少要 2")
+        self.min_run = int(params.get("min_run", 1))
+        if not 1 <= self.min_run <= 1440:
+            raise TypeError("detector.residual_chronic 的 min_run 要在 1 到 1440 之間（1 = 越線就算）")
 
     def _rolling(self, resid) -> pd.Series:
         w = int(self.param("window"))
@@ -87,4 +91,11 @@ class ResidualChronicDetector(DetectorOperator):
         rolling = self._rolling(seasonal_residual(df, self.profile_))
         rolling.index = df.index
         scores = (rolling.abs() / scale).fillna(0.0)
-        return self._result(df, scores, scores > self.param("threshold"))
+        flagged = scores > self.param("threshold")
+        if self.min_run > 1:
+            # 持續越線 min_run 個點才成立（不投票的旁路節點用：單票就發，所以要求偏離撐得夠久）。
+            # 沒撐滿的點分數歸 0，warning_ratio 也不會把它們記成預警
+            run = flagged.groupby((~flagged).cumsum()).cumsum()
+            flagged = run >= self.min_run
+            scores = scores.where(flagged, 0.0)
+        return self._result(df, scores, flagged)
