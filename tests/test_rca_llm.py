@@ -225,8 +225,14 @@ def test_build_llm_configuration(monkeypatch):
     with pytest.raises(LLMError, match="未知"):
         build_llm("mystery", "m")
     monkeypatch.setenv("AIOPS_LLM_API_KEY", "k")
+    monkeypatch.delenv("AIOPS_LLM_BASE_URL", raising=False)
+    for provider in ("openai", "anthropic"):  # 沒寫端點：不預設送到官方公網端點（M4），要明確寫出來
+        with pytest.raises(LLMError, match="base_url"):
+            build_llm(provider, "m")
+    assert isinstance(build_llm("openai", "m", "https://api.openai.com"), OpenAICompatibleLLM)
+    assert isinstance(build_llm("anthropic", "m", "https://api.anthropic.com"), AnthropicLLM)
+    monkeypatch.setenv("AIOPS_LLM_BASE_URL", "http://vllm.llm.svc:8000")  # 環境變數給的內網端點也算明寫
     assert isinstance(build_llm("openai", "m"), OpenAICompatibleLLM)
-    assert isinstance(build_llm("anthropic", "m"), AnthropicLLM)
 
 
 def test_parse_json_reply_strips_fences_and_rejects_non_objects():

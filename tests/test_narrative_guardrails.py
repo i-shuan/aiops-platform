@@ -193,6 +193,7 @@ def test_json_mode_sets_response_format_only_for_openai_compatible(monkeypatch):
     AnthropicLLM("k", "m", client=httpx.Client(transport=httpx.MockTransport(anthropic))).complete("s", "p")
     assert "response_format" not in seen
     monkeypatch.setenv("AIOPS_LLM_API_KEY", "k")
-    assert build_llm("openai", "m", json_mode=True).json_mode is True
-    assert build_llm("openai", "m").json_mode is False
-    assert not hasattr(build_llm("anthropic", "m", json_mode=True), "json_mode")
+    url = "https://llm.example.internal"  # 端點必須明寫：沒寫不會預設送到公網（見 test_llm_hardening）
+    assert build_llm("openai", "m", url, json_mode=True).json_mode is True
+    assert build_llm("openai", "m", url).json_mode is False
+    assert not hasattr(build_llm("anthropic", "m", url, json_mode=True), "json_mode")
