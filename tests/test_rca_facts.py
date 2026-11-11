@@ -288,6 +288,41 @@ def test_mq_lag_skipped_when_too_few_messages():
     assert not ctx.rca_facts and any(s.startswith("rca.facts:skip:mq_lag:billing:") for s in _skips(ctx))
 
 
+# ───────────── 訊息生產者在發布時段的數字 ─────────────
+def _producer_spans(slow_ms=400.0) -> list[SpanRecord]:
+    """order-api：發布時窗（T−20 分 ～ T）每筆等 orders-db slow_ms；它之前等長的一段（T−40 ～ T−20）等 20 ms。"""
+    sp = Spans()
+    pub = T - timedelta(minutes=20)
+    sp.many("order-api", pub - timedelta(minutes=20), 40, 50, kids=[("orders-db", 5, 20, {"resource": True})])
+    sp.many("order-api", pub, 40, 30 + slow_ms, kids=[("orders-db", 5, slow_ms, {"resource": True})])
+    return sp.spans
+
+
+def test_producer_window_compares_the_publish_window_with_the_stretch_before_it():
+    ctx = _run(spans=_producer_spans(), mq=[_edge()], entities=("billing",))
+    own, = _of(ctx, "producer_self_time_delta", "order-api")
+    wait, = _of(ctx, "producer_wait_delta", "order-api", target="orders-db")
+    assert own.window == wait.window == "publish" and own.detail["consumer"] == "billing" and own.detail["queue"] == "orders"
+    assert round(own.value) == 380 and round(wait.value) == 380                 # 發布時段每筆多等 380 ms
+    assert (round(wait.detail["before"]), round(wait.detail["during"])) == (20, 400)
+    assert (own.detail["n_before"], own.detail["n"]) == (40, 40) and wait.detail["target_kind"] == "db/oracle"
+    assert "anomalous" not in own.detail and "abnormal" not in own.detail      # 只陳述數字，有沒有異常是判斷
+
+
+def test_producer_window_skipped_without_enough_producer_requests():
+    ctx = _run(spans=_producer_spans()[:10], mq=[_edge()], entities=("billing",))
+    assert not _of(ctx, "producer_self_time_delta")
+    assert any(s.startswith("rca.facts:skip:producer_window:order-api:") for s in _skips(ctx))
+
+
+def test_producer_window_needs_a_known_producer_and_is_counted_once():
+    from dataclasses import replace
+    unknown = replace(_edge(), producer="")                     # 只有 message.age：不知道是誰發的
+    assert not _of(_run(spans=_producer_spans(), mq=[unknown], entities=("billing",)), "producer_self_time_delta")
+    twice = [_edge(), replace(_edge(), consumer="shipping")]    # 同一個生產者、同一個發布時窗發給兩個消費者
+    assert len(_of(_run(spans=_producer_spans(), mq=twice, entities=("billing",)), "producer_self_time_delta")) == 1
+
+
 # ───────────── 原始時序位移 ─────────────
 def _series(n_before=10, n_during=10):
     ts = [T - timedelta(minutes=n_before - i) for i in range(n_before)] + [T + timedelta(minutes=i) for i in range(n_during)]

@@ -25,7 +25,7 @@ from aiops.engine.rca_types import Fact
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.rca.base import need_incident
 from aiops.stages.rca.facts.logs import log_facts
-from aiops.stages.rca.facts.mq import mq_facts
+from aiops.stages.rca.facts.mq import mq_facts, producer_facts
 from aiops.stages.rca.facts.series import series_facts
 from aiops.stages.rca.facts.spans import span_facts
 from aiops.stages.rca.facts.windows import windows
@@ -58,6 +58,7 @@ class FactsOperator(BaseOperator):
             *log_facts(ctx.rca_logs, ctx.rca_logs_baseline, ctx.rca_log_window_minutes, ctx.rca_logs_sampled,
                        self.min_log_count, self.max_templates_per_service, skips),
             *mq_facts(ctx.rca_mq, self.min_messages, skips),
+            *producer_facts(ctx.rca_spans, ctx.rca_mq, self.min_requests, skips),
             *series_facts(ctx.rca_series, w, self.min_series_points, skips),
         ]
         ctx.rca_facts = sort_facts(facts)

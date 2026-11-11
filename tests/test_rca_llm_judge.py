@@ -141,7 +141,9 @@ def test_valid_judgement_is_ranked_by_confidence_and_keeps_what_it_cited():
     top, second = ctx.rca_root_candidates
     assert (top.entity, top.score) == ("payment", 0.8) and (second.entity, second.score) == ("checkout", 0.15)
     assert "LLM 判斷" in top.reason and "80%" in top.reason and "F2、F1、E1" in top.reason
-    assert top.attribution == {"judge": "llm", "cause": "cpu", "cites": ["F2", "F1", "E1"]}
+    assert top.attribution == {}  # 沒有指名資源：跟舊判斷層一樣是空的；類型與引用記在稽核紀錄
+    [adopted] = [a for a in ctx.audit if a.startswith("root_cause.llm 採用") and '"entity": "payment"' in a]
+    assert '"cause": "cpu"' in adopted and '"cites": ["F2", "F1", "E1"]' in adopted
     assert second.dependency == "payment" and second.attribution["resource"] == "payment"
     assert any("採用 2、拒絕 0" in a for a in ctx.audit)
 
@@ -173,7 +175,9 @@ def test_numbers_inside_names_and_cite_ids_are_not_checked_and_ratios_may_be_per
 def test_resource_not_in_the_cited_facts_is_cleared_but_the_candidate_stays():
     [c] = _rank(_ctx(), model="bad_resource").rca_root_candidates
     assert c.entity == "checkout" and c.dependency == ""
-    assert c.attribution["resource_dropped"] == "redis-cache" and "resource" not in c.attribution
+    ctx = _rank(_ctx(), model="bad_resource")
+    assert "resource" not in c.attribution
+    assert any('"resource_dropped": "redis-cache"' in a for a in ctx.audit if a.startswith("root_cause.llm 採用"))
 
 
 def test_one_candidate_per_entity_and_top_k_caps_the_list():
@@ -290,3 +294,126 @@ def test_named_resource_gets_its_numbers_copied_from_the_facts():
         "failures": {"before": 0, "during": 1191}, "self_ms": {"before": 40.2, "during": 40.1}, "share": 0.99}
     assert judge.resource_numbers("checkout", "no-such-db", facts) == {}       # 沒有對應的事實：不編數字
     assert judge.resource_numbers("payment", "pay-gw:443", facts) == {}        # 別的服務的等待不算它的
+
+
+# ── 同一個實體指了兩個資源（兩個下游各佔一半）：合併成一個候選，兩個資源都記下來 ──
+
+
+def _rows(*facts: Fact) -> list[dict]:
+    return judge.fact_rows(list(facts), 50)
+
+
+def _split_ctx() -> PipelineContext:
+    ctx = _ctx(evidence=False)
+    ctx.topology = []
+    ctx.rca_facts = [
+        Fact(kind="self_time_delta", entity="checkout", value=1000.0, unit="ms", window="delta",
+             detail={"before": 37.0, "during": 1037.0, "app_before": 30.0, "app_during": 130.0}),
+        Fact(kind="wait_delta", entity="checkout", value=450.0, unit="ms", window="delta",
+             detail={"target": "postgres", "target_kind": "db/postgresql", "before": 5.0, "during": 455.0}),
+        Fact(kind="wait_delta", entity="checkout", value=452.0, unit="ms", window="delta",
+             detail={"target": "redis", "target_kind": "db/redis", "before": 2.0, "during": 454.0}),
+    ]
+    return ctx
+
+
+def test_same_entity_with_two_resources_is_merged_and_keeps_both():
+    facts = judge.fact_rows(_split_ctx().rca_facts, 50)
+    raw = [{"entity": "checkout", "confidence": 0.5, "subtype": "dependency", "resource": "redis",
+            "reason": "等待 redis 的增量為 452 ms", "cites": ["F1", "F3"]},
+           {"entity": "checkout", "confidence": 0.5, "subtype": "dependency", "resource": "postgres",
+            "reason": "等待 postgres 的增量為 450 ms", "cites": ["F1", "F2"]},
+           {"entity": "checkout", "confidence": 0.4, "subtype": "dependency", "resource": "redis",
+            "reason": "重複的那一筆", "cites": ["F3"]}]
+    accepted, rejected = judge.validate_candidates(raw, facts, [], {"checkout"})
+    assert not rejected and [(c["entity"], c["resource"]) for c in accepted] == [("checkout", "redis"), ("checkout", "postgres")]
+    [m] = judge.merge_by_entity(accepted)
+    assert m["confidence"] == 0.5 and m["resources"] == ["redis", "postgres"] and m["cites"] == ["F1", "F3", "F2"]
+    a = judge.resource_attribution("checkout", m["resources"], facts, m["cites"])
+    assert a["resource"] == "redis" and a["share"] == 0.452 and a["by"] == ""       # 沒有單一主導資源
+    assert [o["resource"] for o in a["others"]] == ["postgres"] and a["others"][0]["share"] == 0.45
+
+
+def test_single_named_resource_says_how_it_dominates():
+    facts = judge.fact_rows(_external_ctx().rca_facts, 10)
+    a = judge.resource_attribution("checkout", ["pay-gw:443"], facts, [])
+    assert a["by"] == "latency" and a["kind"] == "external" and "others" not in a
+    assert judge.resource_attribution("checkout", [], facts, []) == {}
+
+
+# ── 放大者、外部流量、非同步：欄位由事實填，不由 LLM 填 ──
+
+
+def test_amplifier_numbers_come_from_the_fanout_fact():
+    facts = _rows(
+        Fact(kind="fanout_ratio", entity="order", value=25.0, unit="ratio", window="delta",
+             detail={"callee": "payment", "before": 1.0, "during": 25.0}),
+        Fact(kind="inbound_rate", entity="payment", value=22.87, unit="ratio", window="delta",
+             detail={"by_caller": {"order": {"before": 100, "during": 2500}}}))
+    assert judge.amplifier_attribution("order", facts, ["F1"], in_incident=False) == {
+        "type": "traffic_amplifier", "victim": "payment", "via": "payment", "load_ratio": 22.87,
+        "fanout": {"before": 1.0, "during": 25.0}, "fanout_ratio": 25.0, "victims": ["payment"], "in_incident": False}
+    assert judge.amplifier_attribution("payment", facts, [], True) == {}      # 沒有它的扇出事實：不替 LLM 補數字
+    flat = _rows(Fact(kind="fanout_ratio", entity="order", value=1.0, unit="ratio", window="delta",
+                      detail={"callee": "payment", "before": 1.0, "during": 1.0}))
+    assert judge.amplifier_attribution("order", flat, ["F1"], True) == {}     # 扇出沒變大就不是放大
+
+
+def test_ingress_entry_is_the_service_whose_external_traffic_grew():
+    facts = _rows(
+        Fact(kind="inbound_rate", entity="gw", value=6.0, unit="ratio", window="delta",
+             detail={"by_caller": {"<external>": {"before": 100, "during": 600}}}),
+        Fact(kind="inbound_rate", entity="payment", value=5.8, unit="ratio", window="delta",
+             detail={"by_caller": {"order": {"before": 100, "during": 580}}}))
+    assert judge.ingress_attribution("payment", facts) == {"entry": "gw", "entry_load_ratio": 6.0, "load_ratio": 5.8}
+    assert judge.ingress_attribution("payment", facts[1:]) == {}             # 沒有外部進來變多的事實
+
+
+def _mq_ctx() -> PipelineContext:
+    from aiops.engine.context import MqEdge
+    ctx = _ctx(evidence=False)
+    ctx.rca_mq = [MqEdge(producer="order", consumer="worker", queue="q", messages=40, lag_ms_p50=1.2e6, lag_ms_p95=1.2e6,
+                         pub_start=NOW - timedelta(minutes=25), pub_end=NOW - timedelta(minutes=5), linked_by="parent",
+                         lag_ms_p95_before=1.2e6, failed=20)]
+    return ctx
+
+
+def test_async_role_follows_what_the_llm_cited():
+    ctx = _mq_ctx()
+    facts = _rows(
+        Fact(kind="producer_wait_delta", entity="order", value=380.0, unit="ms", window="publish",
+             detail={"target": "orders-db", "target_kind": "db/postgresql", "before": 20.0, "during": 400.0, "consumer": "worker"}),
+        Fact(kind="producer_self_time_delta", entity="order", value=380.0, unit="ms", window="publish",
+             detail={"before": 50.0, "during": 430.0, "app_before": 30.0, "app_during": 30.0, "consumer": "worker"}),
+        Fact(kind="wait_delta", entity="order", value=-380.0, unit="ms", window="delta",
+             detail={"target": "orders-db", "target_kind": "db/postgresql", "before": 400.0, "during": 20.0}))
+    producer = judge.async_attribution_for("order", ctx, facts, ["F1"], 60.0)
+    assert producer["role"] == "producer" and producer["queue"] == "q" and producer["backlog"] is False  # 固定延遲不是積壓
+    assert judge.async_attribution_for("order", ctx, facts, ["F3"], 60.0) == {}   # 沒引用發布時段的事實：不當它是生產者
+    consumer = judge.async_attribution_for("worker", ctx, facts, [], 60.0)
+    assert consumer["role"] == "consumer" and "suspect_payload" not in consumer
+    # 消費者被判成自己出錯、這批訊息又真的有消費失敗：trace 看不到訊息內容，標記要人工抽查
+    assert judge.async_attribution_for("worker", ctx, facts, [], 60.0, "error")["suspect_payload"] is True
+    assert "suspect_payload" not in judge.async_attribution_for("worker", ctx, facts, [], 60.0, "dependency")
+    # 同一個資源有事件時窗與發布時段兩筆：用 LLM 引用的那一筆（生產者當時在等 orders-db）
+    cited = judge.resource_numbers("order", "orders-db", facts, ["F1", "F2"])
+    assert cited["wait_ms"] == {"before": 20.0, "during": 400.0} and cited["share"] == 1.0
+
+
+def test_candidate_outside_the_incident_is_labelled_and_attribution_is_empty_without_resource():
+    ctx = _ctx()
+    ctx.incidents = [Incident(events=[AnomalyEvent(entity="checkout", metric="latency", ts=NOW, score=6.0)])]
+    top = _rank(ctx, model="ok").rca_root_candidates[0]
+    assert top.entity == "payment" and "它不在事件裡" in top.reason and top.attribution == {}
+
+
+def test_min_lag_seconds_is_checked_at_load_time():
+    with pytest.raises(WorkflowParamError):
+        OperatorRegistry.create("rca.root_cause.llm", {"provider": "test-judge", "min_lag_seconds": -1})
+
+
+def test_resource_without_wait_numbers_stays_out_of_attribution():
+    """LLM 把被灌爆的下游服務填在 resource（取自 fanout_ratio 的 callee）：沒有等待數字，不進 attribution。"""
+    facts = _rows(Fact(kind="fanout_ratio", entity="order", value=25.0, unit="ratio", window="delta",
+                       detail={"callee": "payment", "before": 1.0, "during": 25.0}))
+    assert judge.resource_attribution("order", ["payment"], facts, ["F1"]) == {}

@@ -9,6 +9,15 @@ LLM 的每個候選都要過驗證，不過就丟掉並記原因（ctx.log）：
   3. cites 至少引用一筆，且每個編號（F<n> 事實／E<n> 日誌證據）都真的送進過 prompt
   4. reason 裡的數字要能在它引用的事實裡找到（容許四捨五入、比例寫成百分比）；找不到 = LLM 自己算或編的
   5. resource（選填）要是它引用的事實裡出現過的資源名稱；不是就把這一欄清掉（候選保留）
+同一個實體 LLM 給了好幾個候選（各指一個資源：兩個下游各佔一半）時合併成一個候選：dependency 留空（沒有單一主導資源），
+attribution 記等待佔比最大的那個、其餘放 others——跟舊判斷層同一個形狀。
+
+attribution 只放舊判斷層定義過的鍵（報告的「建議處置」靠它配 Runbook），數字一律從事實抄，不讓 LLM 填：
+  resource／kind／subtype／wait_ms／failures／self_ms／share／by／others   LLM 指名了資源
+  amplifier       LLM 判 amplifier，而且有這個實體的 fanout_ratio 事實（扇出變大）
+  ingress_surge   LLM 判 ingress_surge，而且有從 <external> 進來、變多的 inbound_rate 事實
+  async           候選是某條佇列邊的消費者，或 LLM 引用了生產者發布時段的事實而候選是那個生產者
+都沒有就是空的 {}（跟舊判斷層一樣：沒有外部資源就沒有歸因）。LLM 選的類型與引用編號寫在 reason 與 ctx.log。
 
 結果怎麼寫：
   - LLM 沒設定、連不上、逾時、不是 JSON、格式不合、候選全部被拒 → rca_status = "undetermined"，原因寫進
@@ -26,7 +35,7 @@ import re
 from typing import Any
 
 from aiops.engine.context import PipelineContext, RootCandidate
-from aiops.engine.params import positive, whole
+from aiops.engine.params import number, positive, whole
 from aiops.engine.rca_types import EvidenceItem, Fact
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import Incident, as_utc
@@ -35,6 +44,7 @@ from aiops.stages.enrichment.evidence_extractor import (LLM_ALL_REJECTED, LLM_BA
                                                         CallFailure, check_provider, complete_with_policy,
                                                         known_entities, resolve_provider)
 from aiops.stages.rca.base import RootCauseOperator, first_seen
+from aiops.stages.rca.mq import async_attribution
 
 logger = logging.getLogger("aiops.enrichment")
 
@@ -63,7 +73,12 @@ FACT_GLOSSARY: dict[str, str] = {
     "child_outlives_parent": "下游還在跑、呼叫端已經結束的比例（呼叫端逾時放棄的跡象）",
     "child_precedes_parent": "下游 span 開始時間早於上游的比例（時鐘或非同步的跡象）",
     "log_template_surge": "一個錯誤日誌樣板的每分鐘頻率暴增倍率；detail.new = 事件前沒出現過",
-    "mq_lag": "訊息從 detail.producer 發出到 entity 消費的延遲 p95（ms）；detail.before 是事件前",
+    "mq_lag": "訊息從 detail.producer 發出到 entity 消費的延遲 p95（ms）；detail.before 是事件前；"
+              "detail.pub_start～pub_end 是事件期間被消費的那批訊息當初發布的時段，detail.failed 是其中消費失敗的則數",
+    "producer_self_time_delta": "訊息生產者在發布時段（detail.pub_start～pub_end）每個請求花在自己身上的時間增量（ms，"
+                                "發布時段 − 它之前等長的一段）；detail.own_failure_rate_* 是它自己產生的失敗比例。"
+                                "注意：其他事實比的是事件時窗，這一筆比的是發布時段",
+    "producer_wait_delta": "訊息生產者在發布時段每個請求花在等 detail.target 的時間增量（ms，發布時段 − 它之前等長的一段）",
     "metric_shift": "detail.metric 這條指標的平均值位移（事件期間 − 事件前）",
 }
 
@@ -74,6 +89,14 @@ SYSTEM = (
     "熔斷打開、呼叫端逾時代表呼叫端是被害者；一個服務把對下游的呼叫放大時，根因是放大的那個服務，不是被灌爆的下游。"
     "呼叫圖的 resources 是服務依賴的資源（資料庫、快取、外部 API），它們不是可以指認的實體："
     "一個服務的時間都花在等某個資源（或對它的呼叫大量失敗）時，候選填那個服務、subtype 選 dependency、resource 填資源名稱。"
+    "指認放大者（subtype amplifier）時，被灌爆而真的變慢或出錯的下游也要列在後面當候選（信心給低）：它需要先被保住。"
+    "入口服務的流量是從 <external> 進來變多、沿路每條呼叫邊的 fanout_ratio 都接近 1 時，是外部流量暴增而不是誰放大："
+    "候選填真的變慢或出錯的那個服務、subtype 選 ingress_surge；入口服務只是把流量轉進來，不要排第一。"
+    "呼叫圖有 async 邊時：消費者處理的訊息是生產者在 mq_lag 的 pub_start～pub_end 發的，那個時段通常早於事件時窗。"
+    "先看 producer_self_time_delta／producer_wait_delta：生產者在發布時段明顯變慢、出錯或卡在某個資源，"
+    "而消費者的失敗是處理這批訊息時發生的，根因是生產者（resource 填它當時在等的資源）；"
+    "生產者在發布時段沒有異常就不要怪它——這時消費者若是處理訊息失敗、自己的依賴又沒變慢，"
+    "要在 reason 寫明 trace 看不到訊息內容、需人工抽查失敗訊息與 dead-letter queue 並核對生產者在發布時段的變更。"
     "資料不足以分辨時，回空的 candidates 並在 note 說明缺什麼，不要硬給答案。只輸出 JSON，不要其他文字。"
 )
 
@@ -214,11 +237,12 @@ def _resources(cited: list[dict]) -> set[str]:
 
 def validate_candidates(raw: list[Any], facts: list[dict], evidence: list[dict],
                         entities: set[str]) -> tuple[list[dict], list[dict]]:
-    """回傳 (通過的, 被拒的)。通過的每項是整理好的 dict；被拒的是 {"item": 原樣, "reason": 原因}。同一個實體只留第一個。"""
+    """回傳 (通過的, 被拒的)。通過的每項是整理好的 dict；被拒的是 {"item": 原樣, "reason": 原因}。
+    同一個 (實體, 資源) 只留第一個；同一個實體指了不同資源的都留下，由 merge_by_entity 合併。"""
     by_id = {r["id"]: r for r in [*facts, *evidence]}
     accepted: list[dict] = []
     rejected: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
 
     def reject(item: Any, why: str) -> None:
         rejected.append({"item": item, "reason": why})
@@ -253,36 +277,59 @@ def validate_candidates(raw: list[Any], facts: list[dict], evidence: list[dict],
         if bad is not None:
             reject(item, f"reason 裡的數字 {bad} 在引用的事實裡找不到")
             continue
-        if entity in seen:
-            continue
-        seen.add(entity)
         resource = item.get("resource") if isinstance(item.get("resource"), str) else ""
         dropped = ""
         if resource and resource not in _resources(cited):
             dropped, resource = resource, ""
+        if (entity, resource) in seen:
+            continue
+        seen.add((entity, resource))
         accepted.append({"entity": entity, "confidence": float(conf), "subtype": subtype, "reason": reason.strip(),
                          "cites": list(dict.fromkeys(cites)), "resource": resource, "resource_dropped": dropped})
     return accepted, rejected
+
+
+def merge_by_entity(accepted: list[dict]) -> list[dict]:
+    """同一個實體的多個候選（各指一個資源）併成一個：信心取最大的那個（不相加：LLM 是把同一個判斷拆成幾種可能），
+    類型用信心最高那筆的，理由與引用依序串起來，resources 是指過的資源（去重、保序）。輸入要先依信心排好。"""
+    out: dict[str, dict] = {}
+    for c in accepted:
+        m = out.get(c["entity"])
+        if m is None:
+            out[c["entity"]] = {**c, "resources": [c["resource"]] if c["resource"] else [], "reasons": [c["reason"]]}
+            continue
+        if c["resource"] and c["resource"] not in m["resources"]:
+            m["resources"].append(c["resource"])
+        if c["reason"] not in m["reasons"]:
+            m["reasons"].append(c["reason"])
+        m["cites"] = list(dict.fromkeys([*m["cites"], *c["cites"]]))
+        m["resource_dropped"] = m["resource_dropped"] or c["resource_dropped"]
+    return list(out.values())
 
 
 def _pair(detail: dict, before: str, during: str, cast=lambda v: round(float(v), 1)) -> dict:
     return {"before": cast(detail.get(before) or 0), "during": cast(detail.get(during) or 0)}
 
 
-def resource_numbers(entity: str, resource: str, facts: list[dict]) -> dict:
+_WAIT = {"wait_delta": "self_time_delta", "producer_wait_delta": "producer_self_time_delta"}  # 等待事實 -> 同一個時窗的自身耗時事實
+
+
+def resource_numbers(entity: str, resource: str, facts: list[dict], cites: list[str] | tuple[str, ...] = ()) -> dict:
     """LLM 指名了資源時，把那個資源的數字從事實原樣抄進 attribution（鍵名跟舊判斷層相同：報告的「建議處置」
     靠 kind／share／failures 配 Runbook）。指名哪個資源是 LLM 的判斷；數字只抄不算，除了 share：
-    等待增量 ÷ 自身耗時增量，兩個都是同一個實體的事實值。找不到對應的 wait_delta（資源取自 callee／queue）就回空。"""
+    等待增量 ÷ 同一個時窗的自身耗時增量。同一個資源有事件時窗與發布時段兩筆時，用 LLM 引用的那一筆。
+    找不到對應的等待事實（資源取自 callee／queue）就回空。"""
     mine = [f for f in facts if f["entity"] == entity]
-    wait = next((f for f in mine if f["kind"] == "wait_delta" and (f.get("detail") or {}).get("target") == resource), None)
-    if wait is None:
+    waits = [f for f in mine if f["kind"] in _WAIT and (f.get("detail") or {}).get("target") == resource]
+    if not waits:
         return {}
+    wait = next((f for f in waits if f["id"] in cites), waits[0])
     d = wait["detail"]
     kind = str(d.get("target_kind") or "").split("/")
     out: dict[str, Any] = {"kind": kind[0], "subtype": kind[1] if len(kind) > 1 else "",
                            "wait_ms": _pair(d, "before", "during"),
                            "failures": _pair(d, "failures_before", "failures_during", int)}
-    own = next((f for f in mine if f["kind"] == "self_time_delta"), None)
+    own = next((f for f in mine if f["kind"] == _WAIT[wait["kind"]]), None)
     if own is not None:
         out["self_ms"] = _pair(own.get("detail") or {}, "app_before", "app_during")
         total = float(own["value"])
@@ -290,17 +337,87 @@ def resource_numbers(entity: str, resource: str, facts: list[dict]) -> dict:
     return out
 
 
+def resource_attribution(entity: str, resources: list[str], facts: list[dict], cites: list[str]) -> dict:
+    """指名一個資源：那個資源的數字，by = latency（等待變長）／errors（只有失敗變多）。
+    指名兩個以上（沒有單一主導）：等待佔比最大的當主、其餘放 others，by 留空。
+    沒有等待事實的名稱（LLM 把被灌爆的下游服務填在 resource）不進 attribution：舊判斷層的 resource 一定帶著
+    wait_ms／self_ms，三行摘要的模板照這個讀；只留在候選的 dependency 字串。"""
+    rows = [{"resource": r, **n} for r in resources if (n := resource_numbers(entity, r, facts, cites))]
+    if not rows:
+        return {}
+    rows.sort(key=lambda r: -float(r.get("share", 0.0)))  # 穩定排序：佔比相同維持 LLM 給的順序
+    top, others = rows[0], rows[1:]
+    if others:
+        return {**top, "by": "", "others": others}
+    slower = top["wait_ms"]["during"] > top["wait_ms"]["before"]
+    return {**top, "by": "latency" if slower else "errors" if top["failures"]["during"] > top["failures"]["before"] else ""}
+
+
+def amplifier_attribution(entity: str, facts: list[dict], cites: list[str], in_incident: bool) -> dict:
+    """LLM 判這個實體是流量放大者時，把扇出數字從 fanout_ratio 事實抄出來（優先用它引用的那筆，否則扇出倍數最大的）。
+    沒有扇出變大的事實就回空：不替 LLM 的說法補數字。"""
+    rows = [f for f in facts if f["kind"] == "fanout_ratio" and f["entity"] == entity and float(f["value"]) > 1.0
+            and (f.get("detail") or {}).get("callee")]
+    if not rows:
+        return {}
+    rows.sort(key=lambda f: (f["id"] not in cites, -float(f["value"])))
+    d, victim = rows[0]["detail"], rows[0]["detail"]["callee"]
+    load = next((float(f["value"]) for f in facts if f["kind"] == "inbound_rate" and f["entity"] == victim), None)
+    return {"type": "traffic_amplifier", "victim": victim, "via": victim,
+            **({"load_ratio": round(load, 2)} if load is not None else {}),
+            "fanout": {"before": round(float(d.get("before") or 0), 2), "during": round(float(d.get("during") or 0), 2)},
+            "fanout_ratio": round(float(rows[0]["value"]), 2),
+            "victims": sorted({f["detail"]["callee"] for f in rows}), "in_incident": in_incident}
+
+
+def ingress_attribution(entity: str, facts: list[dict]) -> dict:
+    """LLM 判外部流量暴增時：入口 = 從 <external> 進來的流量變多、倍數最大的那個服務。沒有這種事實就回空。"""
+    def external_ratio(f: dict) -> float:
+        ext = ((f.get("detail") or {}).get("by_caller") or {}).get("<external>") or {}
+        return float(f["value"]) if ext.get("during", 0) > ext.get("before", 0) else 0.0
+
+    inbound = [f for f in facts if f["kind"] == "inbound_rate"]
+    entries = sorted((f for f in inbound if external_ratio(f) > 1.0), key=lambda f: (-external_ratio(f), f["entity"]))
+    if not entries:
+        return {}
+    own = next((float(f["value"]) for f in inbound if f["entity"] == entity), None)
+    return {"entry": entries[0]["entity"], "entry_load_ratio": round(float(entries[0]["value"]), 2),
+            **({"load_ratio": round(own, 2)} if own is not None else {})}
+
+
+def async_attribution_for(entity: str, ctx: PipelineContext, facts: list[dict], cites: list[str],
+                          min_lag_seconds: float, cause: str = "") -> dict:
+    """候選在哪條佇列邊上：LLM 引用了生產者發布時段的事實（或 mq_lag）而候選就是那條邊的生產者 → producer；
+    候選是某條邊的消費者 → consumer。延遲、發布時窗、是否積壓跟舊判斷層用同一個 stages/rca/mq.async_attribution。
+    suspect_payload：LLM 判消費者自己出錯（cause = error）、這批訊息又真的有消費失敗、而且知道是誰發的——
+    trace 看不到訊息內容，分不出是消費者的程式還是生產者發的內容有問題（已知死區），建議處置據此多開一條抽查失敗訊息。"""
+    cited = [f for f in facts if f["id"] in cites]
+    as_producer = any(f["kind"].startswith("producer_") and f["entity"] == entity for f in cited) or any(
+        f["kind"] == "mq_lag" and (f.get("detail") or {}).get("producer") == entity for f in cited)
+    edges = sorted(ctx.rca_mq, key=lambda e: (e.consumer, e.producer, e.queue, e.pub_start))
+    if as_producer:
+        edge = next((e for e in edges if e.producer == entity and e.consumer != entity), None)
+        if edge is not None:
+            return async_attribution(edge, "producer", min_lag_seconds)
+    edge = next((e for e in edges if e.consumer == entity), None)
+    if edge is None:
+        return {}
+    suspect = cause == "error" and bool(edge.producer) and edge.producer != entity and edge.failed > 0
+    return async_attribution(edge, "consumer", min_lag_seconds, suspect_payload=suspect)
+
+
 @OperatorRegistry.register("rca.root_cause.llm")
 class LLMRootCause(RootCauseOperator):
     """呼叫圖＋事實＋日誌證據 → LLM 判斷根因（見模組說明）。
     params：provider（不寫看環境變數 AIOPS_LLM_PROVIDER；沒有 noop）、model、base_url、json_mode（預設 true）、
     timeout_seconds（預設 60：prompt 比證據抽取長）、retries（預設 0）、max_facts（最多送幾筆事實，預設 150；
-    依證據層的固定排序取前面幾筆，超過的只告訴 LLM 筆數）、top_k（最多幾個候選，預設 5）。
+    依證據層的固定排序取前面幾筆，超過的只告訴 LLM 筆數）、top_k（最多幾個候選，預設 5）、
+    min_lag_seconds（訊息延遲 P95 到這個秒數、而且比事件前多一倍才在 attribution.async 標成積壓，預設 60，跟舊判斷層一樣）。
     """
 
     def __init__(self, provider: str | None = None, model: str | None = None, base_url: str | None = None,
                  json_mode: bool = True, timeout_seconds: float = 60.0, retries: int = 0, max_facts: int = 150,
-                 top_k: int = 5):
+                 top_k: int = 5, min_lag_seconds: float = 60.0):
         check_provider(provider)
         self.provider, self.model, self.base_url, self.json_mode = provider, model, base_url, bool(json_mode)
         self.timeout = positive("timeout_seconds", timeout_seconds)
@@ -309,6 +426,7 @@ class LLMRootCause(RootCauseOperator):
             raise ValueError(f"retries 不能大於 {MAX_RETRIES}，不是 {self.retries}")
         self.max_facts = whole("max_facts", max_facts)
         self.top_k = whole("top_k", top_k)
+        self.min_lag_seconds = number("min_lag_seconds", min_lag_seconds, minimum=0)
 
     def rank(self, incident: Incident, ctx: PipelineContext) -> list[RootCandidate]:
         if ctx.rca_status == "undetermined":
@@ -351,15 +469,39 @@ class LLMRootCause(RootCauseOperator):
             ctx.rca_root_note = f"LLM 判斷證據不足，不指認根因：{note.strip() or 'LLM 沒有說明原因'}"[:400]
             return []
         accepted.sort(key=lambda c: -c["confidence"])  # 穩定排序：信心相同時維持 LLM 給的順序
-        return [RootCandidate(
-            c["entity"], round(c["confidence"], 4),
-            f"{c['reason']}（LLM 判斷，自評信心 {c['confidence']:.0%}；引用 {'、'.join(c['cites'])}）",
-            c["resource"],
-            # cause 是 LLM 選的根因類型；subtype 這個鍵留給資源的種類（http、postgresql），跟舊判斷層同義
-            {"judge": "llm", "cause": c["subtype"], "cites": c["cites"],
-             **({"resource": c["resource"], **resource_numbers(c["entity"], c["resource"], facts)} if c["resource"] else {}),
-             **({"resource_dropped": c["resource_dropped"]} if c["resource_dropped"] else {})},
-        ) for c in accepted[:self.top_k]]
+        in_incident = set(incident.entities)
+        out: list[RootCandidate] = []
+        for c in merge_by_entity(accepted)[:self.top_k]:
+            entity, cites = c["entity"], c["cites"]
+            attribution = resource_attribution(entity, c["resources"], facts, cites)
+            notes: list[str] = []
+            if c["subtype"] == "amplifier":
+                amp = amplifier_attribution(entity, facts, cites, entity in in_incident)
+                if amp:
+                    attribution["amplifier"] = amp
+                    notes.append(f"流量放大者：每處理一個請求呼叫 {amp['victim']} 的次數由 {amp['fanout']['before']:g} 次"
+                                 f"變成 {amp['fanout']['during']:g} 次")
+            if c["subtype"] == "ingress_surge":
+                surge = ingress_attribution(entity, facts)
+                if surge:
+                    attribution["ingress_surge"] = surge
+                    notes.append(f"流量是外部入口 {surge['entry']} 打進來的")
+            mq = async_attribution_for(entity, ctx, facts, cites, self.min_lag_seconds, c["subtype"])
+            if mq:
+                attribution["async"] = mq
+            if entity not in in_incident:
+                notes.append("它不在事件裡，是依 trace 事實補進候選的")
+            label = SUBTYPES.get(c["subtype"], "").split("（")[0]
+            reason = ("；".join(c["reasons"]) + "".join(f"；{n}" for n in notes)
+                      + f"（LLM 判斷{f'：{label}' if label else ''}，自評信心 {c['confidence']:.0%}；引用 {'、'.join(cites)}）")
+            # dependency 有值 = attribution 帶著那個資源的等待數字（舊判斷層的合約，三行摘要模板照這個讀）
+            dependency = attribution["resource"] if "resource" in attribution and "others" not in attribution else ""
+            ctx.log("root_cause.llm 採用：" + json.dumps(
+                {"entity": entity, "confidence": c["confidence"], "cause": c["subtype"], "cites": cites,
+                 "resources": c["resources"], **({"resource_dropped": c["resource_dropped"]} if c["resource_dropped"] else {})},
+                ensure_ascii=False))
+            out.append(RootCandidate(entity, round(c["confidence"], 4), reason, dependency, attribution))
+        return out
 
     @staticmethod
     def _undetermined(ctx: PipelineContext, code: str, detail: str) -> list[RootCandidate]:
