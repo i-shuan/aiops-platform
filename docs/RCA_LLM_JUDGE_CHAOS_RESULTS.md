@@ -2,6 +2,9 @@
 
 # RCA 三引擎並排混沌測試結果（場景 1–13）
 
+> **歷史紀錄**：「機率模型」欄的 `rca_report_cognitive`／`rca.root_cause.bayes` 之後已移除（它前面必須靠 LLM 抽證據，當不了離線備援；
+> 程式在 git 歷史與 tag 1.1）。現在只剩舊引擎（`rca_report`，確定性備援）與 LLM 判斷（`rca_report_llm`，主力）；數字保留作對照，沒有重跑。
+
 - 日期：2026-11-10
 - 分支：`arch/cognitive-rca`（未 commit）
 - 三個引擎：**舊引擎**（`rca_report`）、**機率模型**（`rca_report_cognitive`，bayes）、**LLM 判斷**（`rca_report_llm`，呼叫圖＋事實＋日誌證據一起交給 LLM）

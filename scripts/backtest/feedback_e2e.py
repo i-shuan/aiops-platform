@@ -16,6 +16,14 @@
 只用唯讀 API key（從 secrets.local.yaml 讀進行程環境變數，不印出、不寫檔）、只打 _search；資料不送外部服務。
 
   python scripts/backtest/feedback_e2e.py --secrets <secrets.local.yaml> --workdir <repo 外的暫存目錄> --service pay-api
+
+離線模式（--synthetic，不連 ES、不需要資料庫伺服器）：資料源換成 mock，序列由這支腳本依「時間戳」產生
+（mes-api 的形狀：台北平日 09–19 點 291、其餘 135，週末 145／75，分鐘雜訊 N(0, 9)）。誤報來源是測試週裡的
+「批次報表凸起」（上班時段 +54、5 分鐘，時間點由固定種子抽出），三種注入跟 ES 模式一樣。
+
+留出驗證（CLAUDE.md §100.5）：測試期切兩半。前半是「用來調整的資料」——只標記前半的事件群、黃金事故只有前半的
+三場注入；後半是「沒用來調整的資料」——另一組三場注入與自己的凸起，從頭到尾不標記、提案看不到。「後」的數字兩半分開報。
+ES 模式測試期只有 3 天、湊不到兩組注入時，只有前半（照實標成沒有留出驗證）。
 """
 from __future__ import annotations
 
@@ -40,6 +48,11 @@ TZ = "Asia/Taipei"
 INJECT = {"step": np.full(20, 0.3), "ramp": np.r_[np.linspace(1.0, 0.3, 15), np.full(20, 0.3)], "mild": np.full(60, 0.8)}
 EVENT_GAP = 10
 TAIL_MINUTES = 60  # 注入結束後這麼久的告警算「拖尾」，不算誤報也不算檢出
+SOURCE = {"type": "elasticsearch"}  # --synthetic 時換成 mock
+SYNTH_QUERY = "synth:rpm"
+SYNTH_START = pd.Timestamp("2026-10-12 00:00", tz=TZ).tz_convert("UTC")  # 週一
+SYNTH_DAYS = 21
+SYNTH_BUMPS = 10  # 測試週的批次報表凸起數（前後兩半各約一半；平日上班時段、彼此與注入至少隔 2 小時，一週放得下的量）
 
 
 def es_query(service: str) -> str:
@@ -48,25 +61,30 @@ def es_query(service: str) -> str:
                        "filter": {"term": {"service.name": service}}}, separators=(",", ":"))
 
 
-def configure_env(secrets: Path, db_path: Path) -> None:
-    cfg = yaml.safe_load(secrets.read_text(encoding="utf-8"))["es"]
-    os.environ["AIOPS_ES_URL"] = cfg["url"]
-    os.environ["AIOPS_ES_API_KEY"] = cfg["AIOPS_ES_API_KEY"]  # 只放進這個行程的環境變數，不印出、不寫檔
+def configure_env(secrets: Path | None, db_path: Path) -> None:
+    if secrets is not None:
+        cfg = yaml.safe_load(secrets.read_text(encoding="utf-8"))["es"]
+        os.environ["AIOPS_ES_URL"] = cfg["url"]
+        os.environ["AIOPS_ES_API_KEY"] = cfg["AIOPS_ES_API_KEY"]  # 只放進這個行程的環境變數，不印出、不寫檔
     os.environ["AIOPS_DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
     os.environ["AIOPS_NOTIFIER"] = "log"
     for var in ("AIOPS_ALERTMANAGER_URL", "AIOPS_LLM_PROVIDER"):
         os.environ.pop(var, None)
 
 
-def plan_injections(test_start: pd.Timestamp, test_end: pd.Timestamp) -> dict[str, tuple[pd.Timestamp, int]]:
-    """三種注入各放在測試期內不同的平日時段（台北 11:00、15:00、隔天 11:00…），彼此間隔至少 3 小時。"""
+def plan_injections(test_start: pd.Timestamp, test_end: pd.Timestamp,
+                    after: pd.Timestamp | None = None) -> dict[str, tuple[pd.Timestamp, int]]:
+    """三種注入各放在測試期內不同的平日時段（台北 11:00、15:00、隔天 11:00…），彼此間隔至少 3 小時。
+    測試期一開始留 8 小時（線上偵測剛起步）；after 給了就只放在 after 之後（留出驗證那一組，偵測早就在跑，留 3 小時）。"""
     slots = []
-    day = test_start.tz_convert(TZ).normalize()
+    day = (after or test_start).tz_convert(TZ).normalize()
+    lead = pd.Timedelta(hours=3 if after is not None else 8)
+    test_start = max(test_start, after) if after is not None else test_start
     while day < test_end and len(slots) < 3:
         if day.day_of_week < 5:
             for hour in (11, 15):
                 t = (day + pd.Timedelta(hours=hour)).tz_convert("UTC")
-                if test_start + pd.Timedelta(hours=8) <= t <= test_end - pd.Timedelta(hours=3):
+                if test_start + lead <= t <= test_end - pd.Timedelta(hours=3):
                     slots.append(t)
         day += pd.Timedelta(days=1)
     if len(slots) < 3:
@@ -76,8 +94,10 @@ def plan_injections(test_start: pd.Timestamp, test_end: pd.Timestamp) -> dict[st
 
 def install_injection(query: str, plan: dict[str, tuple[pd.Timestamp, int]]) -> None:
     from aiops.sources.elasticsearch import ElasticsearchSpec
+    from aiops.sources.mock import MockSpec
 
-    real = ElasticsearchSpec.fetch_data
+    spec = MockSpec if SOURCE["type"] == "mock" else ElasticsearchSpec
+    real = spec.fetch_data
     factors = {}
     for kind, (start, length) in plan.items():
         for k, f in enumerate(INJECT[kind]):
@@ -91,7 +111,56 @@ def install_injection(query: str, plan: dict[str, tuple[pd.Timestamp, int]]) -> 
         mult = np.array([factors.get(t, 1.0) for t in ts])
         return df.assign(value=np.round(df["value"].astype(float).to_numpy() * mult))
 
-    ElasticsearchSpec.fetch_data = fetch
+    spec.fetch_data = fetch
+
+
+def synth_bumps(test_start: pd.Timestamp, test_end: pd.Timestamp, avoid: list[tuple[pd.Timestamp, int]]) -> list[pd.Timestamp]:
+    """測試週裡的批次報表凸起：平日 09:30～18:00 之間（台北），固定種子抽時間點，避開注入時窗前後 2 小時。"""
+    rng = np.random.default_rng(20261112)
+    out: list[pd.Timestamp] = []
+    for _attempt in range(200_000):
+        if len(out) >= SYNTH_BUMPS:
+            break
+        t = test_start + pd.Timedelta(minutes=int(rng.integers(0, int((test_end - test_start).total_seconds() // 60))))
+        loc = t.tz_convert(TZ)
+        if loc.day_of_week >= 5 or not (9.5 <= loc.hour + loc.minute / 60 <= 18):
+            continue
+        if any(abs((t - s).total_seconds()) < 7200 + n * 60 for s, n in avoid) or any(abs((t - b).total_seconds()) < 7200 for b in out):
+            continue
+        out.append(t.floor("min"))
+    if len(out) < SYNTH_BUMPS:
+        raise SystemExit(f"測試期放不下 {SYNTH_BUMPS} 個凸起（只放得下 {len(out)} 個）：調小 SYNTH_BUMPS")
+    return sorted(out)
+
+
+def synth_values(ts: pd.DatetimeIndex, bumps: list[pd.Timestamp]) -> np.ndarray:
+    from aiops.sources.mock import _splitmix
+
+    loc = ts.tz_convert(TZ)
+    office, weekend = (loc.hour >= 9) & (loc.hour < 19), loc.day_of_week >= 5
+    level = np.where(weekend, np.where(office, 145.0, 75.0), np.where(office, 291.0, 135.0))
+    minute = (ts.as_unit("s").asi8 // 60).astype(np.uint64)
+    u1 = (_splitmix(minute, 13) + 0.5) / 2.0**53
+    u2 = (_splitmix(minute, 17) + 0.5) / 2.0**53
+    v = level + 9.0 * np.sqrt(-2 * np.log(u1)) * np.cos(2 * np.pi * u2)
+    for b in bumps:
+        v = v + 54.0 * ((ts >= b) & (ts < b + pd.Timedelta(minutes=5)))
+    return np.round(v)
+
+
+def install_synthetic(bumps: list[pd.Timestamp]) -> None:
+    from aiops.sources.mock import MockSpec
+
+    real = MockSpec.fetch_data
+
+    def fetch(self, q, start, end, step, field_map=None):
+        if q != SYNTH_QUERY:
+            return real(self, q, start, end, step, field_map)
+        ts = pd.date_range(pd.Timestamp(start).ceil(f"{step}s"), pd.Timestamp(end), freq=f"{step}s", inclusive="left")
+        ts = ts[(ts >= SYNTH_START) & (ts < SYNTH_START + pd.Timedelta(days=SYNTH_DAYS))]
+        return pd.DataFrame({"ts": ts, "value": synth_values(ts, bumps)})
+
+    MockSpec.fetch_data = fetch
 
 
 def fresh_db() -> None:
@@ -127,7 +196,7 @@ def online(service: str, query: str, test_start, test_end) -> list[pd.Timestamp]
     from aiops.storage.hooks import StorageHooks
 
     pipe = Pipeline(load_workflow(workflow_path("it_otel")), StorageHooks())
-    target = TargetSpec(source_type="elasticsearch", query=query, entity=service)
+    target = TargetSpec(source_type=SOURCE["type"], query=query, entity=service)
     minutes: set[pd.Timestamp] = set()
     now = test_start + pd.Timedelta(minutes=60)
     errors = 0
@@ -166,8 +235,9 @@ def score(minutes, plan, test_start, test_end) -> dict:
     return out
 
 
-def label(plan) -> dict:
-    """腳本代替人：跟注入時窗重疊的事件群標 true_positive，其他標 false_positive。"""
+def label(plan, until: pd.Timestamp | None = None) -> dict:
+    """腳本代替人：跟注入時窗重疊的事件群標 true_positive，其他標 false_positive。
+    until 給了就只標「在它之前開始」的事件群（留出那一半不標，提案看不到）。"""
     from aiops.engine.requests import FeedbackSubmit
     from aiops.engine.types import Incident
     from aiops.interfaces.runner import run
@@ -178,6 +248,8 @@ def label(plan) -> dict:
     for row in Incidents.created_since(datetime(2000, 1, 1)):
         inc = Incident.from_dict(row["incident"], uid=row["uid"])
         a, b = pd.Timestamp(inc.start), pd.Timestamp(inc.end)
+        if until is not None and a >= until:
+            continue
         real = any(a <= we and b >= ws for ws, we in windows)
         verdict = "true_positive" if real else "false_positive"
         fb = run("admin_feedback_submit", request=FeedbackSubmit(
@@ -209,7 +281,7 @@ def loop(service, query, labels, data_start, test_end, train_ratio, rounds) -> l
             break
         p = res["proposal"]
         candidates = (res.get("snr") or {}).get("candidates", [])
-        req = ProposalBacktest(proposal_id=p["id"], metric={"source_type": "elasticsearch", "query": query},
+        req = ProposalBacktest(proposal_id=p["id"], metric={"source_type": SOURCE["type"], "query": query},
                                entity=service, time_range={"start": data_start.to_pydatetime(), "end": (test_end - pd.Timedelta(seconds=1)).to_pydatetime()},
                                train_ratio=train_ratio)
         bt = run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=test_end.to_pydatetime())["proposal"]
@@ -254,7 +326,7 @@ def reject_demo(service, query, data_start, test_end, train_ratio, rounds) -> di
     pid = run("admin_proposal_create", request=ProposalCreate(
         source="manual", detector=pick["detector"], params={**current, "threshold_scale": scale}, proposer="e2e",
         reason=f"示範：超過黃金事故安全上限 {pick['golden_safe_max']}", pipeline="it_otel", entity=service))["proposal"]["id"]
-    req = ProposalBacktest(proposal_id=pid, metric={"source_type": "elasticsearch", "query": query}, entity=service,
+    req = ProposalBacktest(proposal_id=pid, metric={"source_type": SOURCE["type"], "query": query}, entity=service,
                            time_range={"start": data_start.to_pydatetime(), "end": (test_end - pd.Timedelta(seconds=1)).to_pydatetime()},
                            train_ratio=train_ratio)
     bt = run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=test_end.to_pydatetime())["proposal"]
@@ -284,47 +356,75 @@ def approved_configs() -> list[dict]:
 def main() -> None:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--secrets", type=Path, required=True)
+    ap.add_argument("--secrets", type=Path, help="ES 模式必填（secrets.local.yaml）")
+    ap.add_argument("--synthetic", action="store_true", help="離線：mock 資料源＋腳本產生的序列，不連 ES")
     ap.add_argument("--workdir", type=Path, required=True, help="SQLite 檔與結果放這裡（repo 外）")
     ap.add_argument("--service", default="pay-api")
     ap.add_argument("--rounds", type=int, default=6)
     args = ap.parse_args()
+    if not args.synthetic and args.secrets is None:
+        ap.error("ES 模式需要 --secrets（離線請用 --synthetic）")
     args.workdir.mkdir(parents=True, exist_ok=True)
-    configure_env(args.secrets, args.workdir / "before.db")
+    configure_env(None if args.synthetic else args.secrets, args.workdir / "before.db")
 
     from aiops.interfaces.runner import load_all
-    from scripts.backtest.es_series import load_series
 
     load_all()
-    query = es_query(args.service)
-    df = load_series(args.service, args.workdir / "cache", args.secrets)
-    train_days = 14 if len(df) / 1440 >= 17 else 7
-    data_start = df["ts"].iloc[0]
+    if args.synthetic:
+        SOURCE["type"] = "mock"
+        service, query = "synth-svc", SYNTH_QUERY
+        data_start, train_days = SYNTH_START, 14
+        test_end = SYNTH_START + pd.Timedelta(days=SYNTH_DAYS) - pd.Timedelta(minutes=1)
+    else:
+        from scripts.backtest.es_series import load_series
+
+        service, query = args.service, es_query(args.service)
+        df = load_series(service, args.workdir / "cache", args.secrets)
+        train_days = 14 if len(df) / 1440 >= 17 else 7
+        data_start, test_end = df["ts"].iloc[0], df["ts"].iloc[-1]
     test_start = data_start + pd.Timedelta(days=train_days)
-    test_end = df["ts"].iloc[-1]
-    train_ratio = round(train_days * 1440 / len(df), 3)
-    plan = plan_injections(test_start, test_end)
-    install_injection(query, plan)
-    result = {"service": args.service, "train_days": train_days, "test": [test_start.isoformat(), test_end.isoformat()],
-              "injections": {k: (s.isoformat(), n) for k, (s, n) in plan.items()}}
+    split = test_start + (test_end - test_start) / 2
+    split = split.floor("h")
+    plan = plan_injections(test_start, split)
+    try:
+        holdout = plan_injections(split, test_end, after=split)
+    except SystemExit:
+        holdout = {}  # 測試期太短（ES 只有 3 天）：沒有留出那一組，照實記
+    every = {**plan, **{f"{k}_holdout": v for k, v in holdout.items()}}
+    if args.synthetic:
+        install_synthetic(synth_bumps(test_start, test_end, list(every.values())))
+    INJECT.update({f"{k}_holdout": INJECT[k] for k in list(holdout)})
+    install_injection(query, every)
+    tune_end = split - pd.Timedelta(seconds=1)  # 回測只用前半（調整用的資料），後半提案看不到
+    train_ratio = round(train_days * 86400 / (tune_end - data_start).total_seconds(), 3)
+    result = {"mode": "synthetic" if args.synthetic else "elasticsearch", "service": service, "train_days": train_days,
+              "test": [test_start.isoformat(), test_end.isoformat()], "split": split.isoformat(),
+              "injections": {k: (s.isoformat(), n) for k, (s, n) in every.items()},
+              "holdout": bool(holdout)}
+
+    def halves(minutes):
+        out = {"tuning_half": score([m for m in minutes if m < split], plan, test_start, split)}
+        if holdout:
+            out["holdout_half"] = score([m for m in minutes if m >= split], {f"{k}_holdout": v for k, v in holdout.items()},
+                                        split, test_end)
+        return out
 
     print("1. 線上偵測（前）", flush=True)
     fresh_db()
-    before = online(args.service, query, test_start, test_end)
-    result["before"] = score(before, plan, test_start, test_end)
+    before = online(service, query, test_start, test_end)
+    result["before"] = halves(before)
     print("  ", json.dumps(result["before"], ensure_ascii=False), flush=True)
-    print("2. 標記", flush=True)
-    labels = label(plan)
+    print("2. 標記（只標前半）", flush=True)
+    labels = label(plan, until=split)
     result["labels"] = {k: len(v) for k, v in labels.items()}
     print("  ", result["labels"], flush=True)
     print("3. 回饋閉環", flush=True)
-    result["rounds"] = loop(args.service, query, labels, data_start, test_end, train_ratio, args.rounds)
+    result["rounds"] = loop(service, query, labels, data_start, tune_end, train_ratio, args.rounds)
     print("4. 防護罩示範", flush=True)
-    result["reject_demo"] = reject_demo(args.service, query, data_start, test_end, train_ratio, result["rounds"])
+    result["reject_demo"] = reject_demo(service, query, data_start, tune_end, train_ratio, result["rounds"])
     print("  ", json.dumps(result["reject_demo"], ensure_ascii=False)[:600], flush=True)
     approved = {r["proposal_id"] for r in result["rounds"] if r.get("approved") is True}
-    configs = [c for c in approved_configs() if c["proposal_id"] in approved]  # 只帶回饋閉環核准的
-    result["approved_configs"] = configs
+    result["approved_configs"] = [c for c in approved_configs() if c["proposal_id"] in approved]
 
     print("5. 線上偵測（後：同一份平台狀態，帶著標記、黃金事故與核准的調參）", flush=True)
     after_db = args.workdir / "after.db"
@@ -333,11 +433,11 @@ def main() -> None:
     from aiops.storage import db
 
     db.configure(os.environ["AIOPS_DATABASE_URL"])
-    after = online(args.service, query, test_start, test_end)
-    result["after"] = score(after, plan, test_start, test_end)
+    after = online(service, query, test_start, test_end)
+    result["after"] = halves(after)
     print("  ", json.dumps(result["after"], ensure_ascii=False), flush=True)
-    (args.workdir / f"feedback_e2e_{args.service}.json").write_text(json.dumps(result, ensure_ascii=False, indent=1,
-                                                                               default=str), encoding="utf-8")
+    (args.workdir / f"feedback_e2e_{service}.json").write_text(json.dumps(result, ensure_ascii=False, indent=1,
+                                                                          default=str), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,7 @@
-# 殘差白化＋自適應門檻的三票多數決＋旁路漂移票（it_otel_residual）
+# 殘差白化＋自適應門檻＋SNR 軟投票（it_otel 的偵測段：R+SNR）
+
+> **現況（`feat/adopt-r-snr`）**：it_otel 已採用 R+SNR；誤報走回饋閉環（門檻倍率提案、整段回測、黃金事故防護罩、人核准），
+> 見「採用」「誤報走回饋閉環」兩節。下面的回測數字是演進過程（R -> R+SNR）量的，各節註明 commit。
 
 > **驗收優先序**：不准漏報（6 條序列 × step／ramp／mild 每一格至少成立一次告警），可以誤報但要照實報。
 > 最後的設定（三票多數決＋不投票的旁路漂移票 `min_run: 10`）**18 格全部抓到**；代價集中在訓練只有 7 天的兩條序列
@@ -63,7 +66,7 @@
 
 | 參數 | 類別 | 何時生效 | 說明 |
 | :--- | :--- | :--- | :--- |
-| `threshold` | tunable | detect 時，立刻 | 意義跟其他偵測器一樣（分數門檻），`warning_ratio` 照它算。預設沿用 `shift` 的 4、`chronic` 的 3，沒有為這批資料改 |
+| `threshold` | tunable | detect 時，立刻 | 意義跟其他偵測器一樣（分數門檻），`warning_ratio` 照它算。預設 4（突變）與 3（漂移），沿用當時既有的 `detector.shift`／`detector.chronic`（兩者已在 ae1accc 移除），沒有為這批資料改 |
 | `fpr` | tunable（1e-5～0.1） | 下次重訓 | 分位數是在訓練資料上量的 |
 | `max_tail_factor` | tunable（1～20） | detect 時，立刻 | 尾巴校正上限 |
 | `min_scale`／`min_scale_ratio` | tunable | detect 時，立刻 | 同其他偵測器 |
@@ -77,7 +80,7 @@
 
 偵測器每一輪只看到 lookback 的 60 分鐘、跨輪不能留狀態。CUSUM 的累積和每輪都得從窗口開頭重算（變成「窗口內的累積和」），
 多一個漂移量 k 要定，分數在訓練期的分布還跟起算點有關，沒辦法像滾動平均那樣直接在訓練期殘差上量出「平常會偏到哪」來校正門檻。
-滾動平均記憶長度固定，`warmup_points`／`can_evaluate` 也沿用 `chronic` 的寫法。代價：慢滑要累積幾分鐘才過門檻（見 ramp 的首次告警）。
+滾動平均記憶長度固定，`warmup_points`／`can_evaluate` 也沿用舊 `detector.chronic`（已移除）的寫法。代價：慢滑要累積幾分鐘才過門檻（見 ramp 的首次告警）。
 
 ### 4. `residual_shift` 的 `ref_points`
 
@@ -217,7 +220,7 @@ A 在 mes-api、cart-api 的 100% 檢出不能當優點看：那兩條 A 每週�
   - 資料不足（168 格一格都湊不到 `min_slot_points`）：`status: insufficient`、`snr_db: null`；時段基準全一樣：`status: flat`、`snr_db: null`。
 - **逐點 SNR 證據**：snr(t) = 該節點統計量的偏離 / 該統計量的雜訊尺度 = 節點自己的分數（連續值）。開了 `snr` 的節點把它放進
   `ctx.detector_evidence[節點]`（`DetectorEvidence`：timestamps、snr、threshold、threshold_source、p_fa、series_snr_db），
-  audit 也記一行 `snr:<節點>:db=…:threshold=…:<來源>`。之後要餵貝葉斯就讀這個欄位。
+  audit 也記一行 `snr:<節點>:db=…:threshold=…:<來源>`。之後要餵機率模型就讀這個欄位。
 - **開關**：節點參數 `snr: {p_fa: 0.001, tz: Asia/Taipei}`（`NODE_PARAMS`，不進演算法、target overrides 不能寫、調參改不到）。
   沒開的節點行為與輸出完全不變（`ctx.detector_evidence` 沒有它、state 沒有 `"_snr"`，`tests/test_snr_soft_vote.py` 逐算子對過）。
   舊基準線沒有 `"_snr"` 時照原本的 `threshold` 判（`threshold_source: fallback`），下次重訓才有。
@@ -242,7 +245,7 @@ A 在 mes-api、cart-api 的 100% 檢出不能當優點看：那兩條 A 每週�
   但它們的分數單位不是 σₙ（`mad` 的分母是原值的 MAD、`quantile_drift` 是滾動分位數的 MAD），這條式子換不到它們的單位，
   所以改用替代：**直接在訓練期量它們分數的 1−p_fa 分位數**（同一個 p_fa）。這就是 √(1+SNR) 那一項的實測版——下面的數字顯示
   經驗門檻確實隨 SNR 變大（mes-api 19 dB → mad 門檻 6.63；pay-api 13 dB → 3.71）。
-- 所以 SNR 在這版的角色是：**序列層的診斷值**（每條序列一個 SNR_dB）＋**逐點連續證據**（給軟投票、之後給貝葉斯），不是門檻的乘數。
+- 所以 SNR 在這版的角色是：**序列層的診斷值**（每條序列一個 SNR_dB）＋**逐點連續證據**（給軟投票、之後給機率模型），不是門檻的乘數。
 
 ### 四組對照（ES 6 條序列，同一批資料、同一套回放）
 
@@ -328,6 +331,111 @@ report-svc 3.82／4.69（全部 e）。
 - 原本的「殘差 MAD 當雜訊尺度＋fpr 尾巴校正」（R）跟「p_fa 常態分位數」（R+SNR）其實是同一件事的兩種估法：
   前者在訓練期量真實的尾巴（自相關、週間誤差都算進去），後者假設常態。這批資料上前者安靜很多，後者靈敏一點。
 
+## 採用：it_otel 的偵測段 = R+SNR（分支 `feat/adopt-r-snr`）
+
+- `aiops/pipelines/detection/it_otel.yaml` 的偵測段就是上面的 R+SNR：hourly_baseline＋residual_shift＋residual_chronic（開 snr）、
+  `detector.soft_vote`（votes 2）、旁路 `fatal`（hard_limit）與 `detect_drift_solo`（residual_chronic，min_run 10）。
+- 比較用的 `it_otel_residual`／`it_otel_snr`／`it_otel_residual_snr` 三條 YAML 已刪；R、A、A+SNR 改成 `scripts/backtest/variants.py`
+  由 it_otel 改出來的對照變體。本文件前面四組並列的數字是在 commit `67a29a1` 量的；改成變體之後在 pay-api 重跑四組，數字逐項相同。
+- `factory`（hourly＋mad＋quantile_drift 布林多數決）、`it_apm`／`metrics_only`（zscore）沒動：R+SNR 只在每分鐘請求數上驗過。
+
+## 誤報走回饋閉環（R+SNR 節點）
+
+### 為什麼原本的閉環對 R+SNR 無效
+
+開了 snr 的節點門檻由 p_fa 換算（`snr` 是節點參數，調參改不到）；告警是軟投票加總或旁路單獨成立。原本的分位數反推只調單一偵測器的
+`threshold`，回測與黃金事故防護罩也只用單一偵測器的 fit／detect 重跑——繞過了基底 execute 的 p_fa 換算，也看不到軟投票。
+
+### 調什麼、怎麼調
+
+- **調參鍵 `threshold_scale`**（基底層，有 `threshold` 的偵測器都收；範圍 1～10，預設 1）：節點門檻 = (p_fa 換算的門檻，或沒開 snr 時的
+  threshold) × 倍率。**下限 1 = 只能往少誤報調**，靈敏度的底線由 YAML（p_fa、min_run）決定。分層跟其他調參一樣：
+  (偵測器, 管線, 實體)，存在 `active_detector_configs.params`；寫在 YAML 或 target overrides 就鎖定。
+- 同一條管線裡同一個演算法的節點吃同一份（CLAUDE.md §2 既有限制）：`detect_rchronic` 與旁路 `detect_drift_solo` 都是 residual_chronic。
+- **整段重跑**（`control_plane/learning/segment.py`）：用正式的 Pipeline 跑管線所有 target 節點（三票、軟投票、旁路），
+  資料、訓練排除窗、調參由 SegmentHooks 給，不碰資料庫；訓練一次，換倍率只重跑 detect（倍率與 p_fa 門檻都在 detect 時才套）。
+- **提案**（`admin.feedback_propose`，`snr_feedback.propose_scale`）：誤報集合 = 這條管線這個實體所有標成 false_positive 的事件群。
+  對每個收調參的偵測器：先二分搜**黃金事故的安全上限**（最大到多少倍率每一場黃金事故都還有告警），再在 [現行, 上限] 裡二分搜
+  「誤報告警分鐘降到最低」的最小倍率；挑「完全消失的誤報場數最多 > 少掉的分鐘最多 > 倍率最小」的偵測器。
+  一個提案只改一個偵測器（一列一個偵測器）：軟投票下另外兩票可能還湊得到 2 票等值，剩下的分鐘數寫在 reason，
+  核准後對還在叫的事件群再送一次誤報回饋，會換下一個偵測器。漏報回饋直接拒絕並說明（倍率下限 1）。
+- **回測**（`admin.proposal_backtest`）：整段偵測在 time_range 測試段的告警分鐘與事件數（現行 vs 提案）。
+- **黃金事故防護罩**：整段重跑每一場黃金事故，提案讓任何一場從「有告警」變成「沒告警」就 rejected，核准一律 409。
+- **人核准**才寫進 `active_detector_configs`；樂觀鎖、stale 規則不變。資料表形狀沒改（見 docs/DATABASE_SCHEMA.md）。
+
+### 離線驗證（合成序列，`scripts/backtest/feedback_e2e.py --synthetic`）
+
+不需要資料庫伺服器、不連 ES：mock 資料源＋腳本產生的序列（mes-api 的形狀，分鐘雜訊 N(0, 9)），誤報來源是測試週的「批次報表凸起」
+（上班時段 +54、5 分鐘，固定種子抽 10 個時間點），全部走平台本身的 it_otel Pipeline＋StorageHooks（SQLite 檔）、
+admin_feedback_submit／propose、proposal_backtest／approve。測試週切兩半：
+
+- **用來調整的資料（前半）**：只標記前半的事件群（19 場誤報、3 場注入 = 黃金事故），回測時窗也只到前半。
+- **沒用來調整的資料（後半，留出驗證）**：另一組三場注入與 3 個凸起，從頭到尾不標記、提案與回測看不到。
+- 「後」沿用同一份平台狀態（標記、黃金事故、核准的調參），只清掉異常點、基準線、通知，同一段測試期重跑。
+
+| | 前半（調整用）前 | 前半 後 | **後半（留出）前** | **後半 後** |
+| :--- | :--- | :--- | :--- | :--- |
+| 誤報 分/週 | 251.0 | 12.1 | 43.5 | **0.0** |
+| 誤報 件/週 | 40.5 | 6.1 | 13.8 | **0.0** |
+| step（×0.3 20 分） | 20/20（0） | 20/20（0） | 20/20（0） | **19/20（0）** |
+| ramp（15 分滑到 ×0.3） | 32/35（3） | 27/35（8） | 30/35（5） | **24/35（11）** |
+| mild（×0.8 60 分） | 60/60（0） | 53/60（0） | 60/60（0） | **36/60（20）** |
+
+核准了三輪（每輪都通過防護罩）：hourly_baseline ×4.91（回測 392 -> 344 分）、residual_chronic ×2.85（344 -> 176）、
+residual_shift ×1.29（176 -> 170）；第四輪沒有偵測器能再讓誤報變少，停。
+
+- 兩半都**沒有漏報**（每種注入都還有告警），誤報在留出那一半也降到 0——不是只在調整用的資料上有效。
+- **代價是延遲**：防護罩只保證「還抓得到」，不保證「一樣快」。留出那一半的 mild 從第 0 分鐘變成第 20 分鐘才成立、只抓到 36/60，
+  ramp 從第 5 分鐘變第 11 分鐘。這是「只准往少誤報調到不漏為止」的直接後果；要限制延遲，防護罩得加「首次告警延遲不准超過 N 分」，
+  這次沒做。
+- 「提案會漏抓黃金事故 -> 核准被拒」：這組合成資料的注入都很強（×0.3、×0.8），任何單一偵測器調到 10 倍都不會讓一場黃金事故消失，
+  腳本的示範步驟照實記成 skipped。這條路徑由 `tests/test_feedback_snr.py::test_a_scale_that_would_lose_the_golden_incident_is_rejected_and_cannot_be_approved`
+  驗（黃金事故是 ×0.9 持續 60 分、主要靠漂移票）：residual_chronic ×10 -> 回測 rejected、核准 409、現行參數沒變。
+- 合成序列的凸起形狀、雜訊、注入都是腳本定的；這組數字只證明閉環的機制接得通、在沒看過的同類資料上有效，不代表真實流量。
+
+### ES 序列的端到端（延後，未驗證）
+
+上一輪在 pay-api（ES）跑過兩次，**數字都不採用**：第一次撞到下面的 ES 補桶 bug（每輪一筆假的掉到 0）；第二次修好 bug 之後，
+「後」用的是空的資料庫，標記全部遺失——訓練排除窗會排除「還沒標記的事件群」、但不排除「已標成誤報的」（StorageHooks 既有規則），
+空資料庫等於重跑時偵測器比正式環境更敏感，量偏。腳本已改成沿用同一份平台狀態（`carry_over`），ES 模式還沒用新版跑過。
+
+## ES 資料源補桶 bug（`0a3379a` 已修）
+
+`aiops/sources/query/elasticsearch.py` 的 date_histogram：range 是 `[start, end)`，`extended_bounds.max` 卻是 `end`，最後補出來的那一桶
+一定在 range 外、一定是空的。avg 回 null 會被丟掉；**sum／count 回 0**——每分鐘請求數這類序列每一輪偵測的最後一點都是假的掉到 0，
+pay-api 線上每 5 分鐘一輪因此每輪一筆誤報（每週約 1951 分鐘）。修法：補桶只補到 `end − step`。離線回測工具直接查 ES、
+沒走平台的資料源，所以先前的回測數字不受影響；延遲（avg、sum÷筆數）序列不受影響。
+
+## 混沌回歸（只跑過一次，之後的改動未重跑）
+
+在 `e0ccc5e`（it_otel 剛換成 R+SNR）跑過 1–13＋24，對照 `67a29a1`（it_otel 還是 hourly＋mad＋qdrift）：
+
+- 1–12、24 逐列相同（1–13 的基準 199/200；24 是 48/51，兩個失敗改動前就有）。
+- **13c 從 7/7 掉到 0/2**：ingress-gw 的延遲序列在 11:43（注入 12:00 前）三票各自部分越線、軟投票加總過 2 而告警，拓撲收斂把
+  payment-svc 併進這張提早開的卡，注入的突波被吸收進去；場景找不到「注入之後開的事件群」，後面 RCA 的 5 條斷言沒跑到。
+  突波本身有告警（不是漏報），但卡片開早了、RCA 沒做到。原因：R+SNR 的常態分位數門檻（3.29）＋軟投票只在每分鐘請求數上驗過，
+  重尾的延遲序列會多誤報。場景輸入與斷言沒動。
+- 之後的改動（刪 7 個算子、修 ES 補桶、誤報回饋閉環、移除 bayes、場景 24 改對 rca_report_llm）都**還沒重跑**——混沌資料庫暫停中。
+
+## 常數與門檻的來源揭露（CLAUDE.md §100.5）
+
+「調整用的資料」= ES 6 條合成序列（mes-api、wip-worker、report-svc、order-svc、cart-api、pay-api）；沒有另外一批留出的真實序列。
+
+| 常數 | 值 | 來源 | 驗證的資料 | 留出驗證 |
+| :--- | :--- | :--- | :--- | :--- |
+| residual_shift `threshold` | 4 | 沿用既有 `detector.shift` 的預設 | ES 6 條 | 未驗證泛化 |
+| residual_chronic `threshold`／`window` | 3／30 | 沿用既有 `detector.chronic` 的預設 | ES 6 條 | 未驗證泛化 |
+| `fpr` | 0.001 | 逐點虛警率的慣用量級；沒有掃 | ES 6 條 | 未驗證泛化 |
+| `max_tail_factor` | 3 | 防事故混進訓練撐大尾巴的上限；沒有掃 | ES 6 條 | 未驗證泛化 |
+| `min_slot_points` | 30 | 半小時（時段 60 點的一半） | ES 6 條 | 未驗證泛化 |
+| `p_fa`（snr） | 0.001 | 同 fpr；換算 z = 3.29 是常態分位數 | ES 6 條 | 未驗證泛化；延遲序列上偏吵（混沌 13c） |
+| soft_vote `votes` | 2 | 對應三票過二的票數，不是掃出來的 | ES 6 條 | 未驗證泛化 |
+| drift_solo `min_run` | 10 | **在 ES 6 條上掃 1／5／10／15／20／30 選的**（延遲 vs 誤報），是用調整用的資料選的 | ES 6 條 | **沒有留出驗證**：選值的資料跟回報的資料是同一批 |
+| `threshold_scale` 範圍 | 1～10 | 下限 1 是「只往少誤報」的規則；上限 10 是二分搜的範圍，沒有物理意義 | — | — |
+| 二分搜 `SEARCH_STEPS` | 12 | [1, 10] 切到約 0.002 的解析度 | — | — |
+| `WARMUP_POINTS` | 60 | 同 it_otel 的 lookback 60 分鐘 | — | — |
+| 回饋提案「誤報分鐘最少」的選法 | — | 機制，不是門檻 | 合成序列（前半） | 合成序列後半：誤報 43.5 -> 0 分/週、沒有漏報（見上表） |
+
 ## 沒達標與沒驗證的項目
 
 **不漏報（硬條件）**：18 格全部至少成立一次告警，達標。首次告警延遲：step 0～2 分、ramp 5～10 分、mild 0～22 分（report-svc 最慢）。
@@ -347,6 +455,10 @@ report-svc 3.82／4.69（全部 e）。
 
 **沒驗證**
 
+- **混沌回歸**：只在 `e0ccc5e` 跑過一次（13c 掉分，見「混沌回歸」）；之後的改動都沒重跑（資料庫暫停）。場景 24 改對 rca_report_llm 之後未實跑。
+- **ES 序列的回饋閉環端到端**：延後；上一輪的 pay-api 數字因為量測方法有錯不採用（見「ES 序列的端到端」）。
+- **回饋閉環只在合成序列上驗過**（離線，有留出驗證）；沒有在真實或 ES 序列上驗過誤報下降與不漏報。
+- **防護罩不管延遲**：調鈍之後首次告警可能變慢很多（合成留出的 mild：0 -> 20 分），目前沒有延遲上限。
 - **SNR 的消融沒做**：R+SNR 對 R 的差異是「門檻 3.29」與「軟投票」兩項合起來的，沒拆開量各自貢獻多少。
 - **A+SNR 放寬掃描只跑了 report-svc**：votes 1.5／1 對其他五條的誤報沒量。
 - **軟投票沒有 warning 級、沒有單票上限**：一票 2 倍門檻就單獨成立；要不要加上限（例如每票最多算 1.5 票）沒驗證。

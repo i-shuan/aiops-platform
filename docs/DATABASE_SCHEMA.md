@@ -295,11 +295,22 @@
 | `detector.mad` | `median`、`mad`、`integer` |
 | `detector.quantile_drift` | `center`、`scale`、`quantile` |
 | `detector.hourly_baseline` | `buckets`（時段編號字串 → `[平均, 標準差, 點數, 週數]`，共 168 格）、`global`、`tz`、`buckets_ready`、`min_weeks`、`integer` |
+| `detector.residual_shift` | `profile`（見下）、`noise`（`noise`、`tail_q`、`fpr`、`points`）、`level`、`integer` |
+| `detector.residual_chronic` | `profile`、`noise`、`window`、`level` |
 
-其他算子（`shift`、`chronic`、`dod`、`wow`、`peer`、`rules`、`hard_limit`）各有自己的鍵。`state` 內只能是 JSON；非 JSON 的模型本體放 `artifact`。
+`profile`（時段基準，`stages/detectors/base.fit_seasonal_profile`）：`tz`、`min_slot_points`、`slots`（週幾×小時編號字串 → `[平均, 點數]`）、
+`hours`（一天中的小時 → `[平均, 點數]`）、`global`、`slots_ready`、`hours_ready`、`lowo_share`。
+
+**節點開了 `snr`（節點參數）時**，不管哪個算子，`state` 另外多一個頂層鍵 `"_snr"`（基底寫入，演算法自己的 `load_state` 看不到這層）：
+`signal_var`、`noise_sigma`、`noise_floored`、`slots_ready`、`lowo_share`、`points`、`status`（`ok`／`insufficient`／`flat`）、
+`snr_lin`、`snr_db`（資料不足時是 null）、`p_fa`、`threshold`、`threshold_source`（`gaussian`／`empirical`）。
+沒開 snr 的節點沒有這個鍵；舊基準線沒有這個鍵時照節點原本的 `threshold` 判，下次重訓才補上。
+
+其他算子（`rules`、`hard_limit`）各有自己的鍵。`state` 內只能是 JSON；非 JSON 的模型本體放 `artifact`。
 
 ### 17.4 `tuning_proposals.params`、`active_detector_configs.params`
 參數名 → 值的物件，鍵只能是該偵測器 `tunable` 範圍內的參數，且在載入期檢查範圍。例：`{"threshold": 4.5, "min_scale": 5000}`。`include_entities`、`exclude_entities` 等路由參數會被拒絕。
+有 `threshold` 的偵測器另外收 `threshold_scale`（門檻倍率，1～10，預設 1；R+SNR 節點的誤報回饋提案改的就是它），例：`{"threshold_scale": 2.85}`。
 
 ### 17.5 `tuning_proposals.backtest`
 ```json
@@ -309,6 +320,9 @@
  "safety": {"passed": true, "missed_golden": [], "skipped_oldest": 0}}
 ```
 `safety.passed` 為 false（會漏抓已確認的真異常）時，提案狀態是 `rejected`，不能核准。`workflow.locked` 列出被 YAML 鎖住、提案改了也不會生效的鍵。`safety` 內部欄位以程式為準（`control_plane/learning/golden.py`）。
+R+SNR 節點（管線裡這個偵測器的節點開了 snr）的提案是**整段回測**（`control_plane/learning/snr_feedback.py`），形狀不同：
+多 `"mode": "segment"`、`entity`、`test_days`、`current_events`／`proposed_events`、`current_minutes_per_week`／`proposed_minutes_per_week`；
+沒有 `warmup_points`、`current_params`、`missed_windows`；`safety` 也多 `"mode": "segment"`，每場黃金事故記的是整段偵測的告警分鐘。
 
 ### 17.6 `incident_knowledge.context`
 擴充資訊的物件，頂層鍵由寫入者決定，追加用 `merge_context`（資料庫端合併頂層鍵）。確認真異常時固定會寫入 `series`（事件群的序列清單，每項含實體、資料源、查詢），另外可放根因下鑽、範例 trace id、tags、處方註記。
@@ -320,4 +334,5 @@ target 的 `attrs` 原樣複製：`dept`、`signal`（`latency`／`errors`／`tr
 - JSON 欄位的鍵集合，我只核對了開發資料庫裡有資料的表（`incidents`、`anomalies`、`detector_models`）和程式碼；`tuning_proposals`、`incident_knowledge`、`field_mappings`、`external_anomalies`、`lot_paths` 的開發資料庫是空的，它們的形狀來自程式碼與請求驗證，沒有對照實際資料。
 - 第 17.3 節只列了四個算子的 `state`，其餘算子的鍵沒逐一核對。
 - `tuning_proposals.source` 的 `feedback`、`profile` 值，是從程式裡寫入的位置看到的，建立 API 的驗證只收 `auto`、`llm`、`manual`。
-- 這份文件對應 main（tag 1.1）的模型。進行中的分支若改了模型（例如殘差三票的偵測器 `state`），要另外更新。
+- 這份文件對應 main（tag 1.1）的模型，加上分支 `feat/adopt-r-snr` 的 JSON 形狀補充（residual 兩個偵測器的 `state`、`"_snr"`、
+  `threshold_scale`、整段回測）。表與欄位沒有改；這些補充只對照了程式碼與單元測試，沒有對照實際資料庫裡的資料。
