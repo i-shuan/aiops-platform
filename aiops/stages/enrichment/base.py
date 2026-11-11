@@ -22,6 +22,8 @@ class BaseLLM(ABC):
 
 def parse_json_reply(text: str) -> dict[str, Any]:
     """模型常把 JSON 包在 ```json 區塊裡；去掉後解析，不是物件就丟 LLMError。"""
+    if not isinstance(text, str):  # content: null（拒答、token 用完、tool call）也是「回應格式錯」，不是程式錯誤
+        raise LLMError(f"LLM 回應不是文字（{type(text).__name__}）")
     try:
         data = json.loads(_FENCE.sub("", text.strip()))
     except json.JSONDecodeError as e:

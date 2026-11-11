@@ -57,6 +57,9 @@ SYSTEM = (
 )
 
 
+MIN_QUOTE_CHARS = 12  # 引文最短字數（見 validate_items）
+
+
 class _Timeout(Exception):
     pass
 
@@ -88,6 +91,10 @@ def call_llm(llm: BaseLLM, system: str, prompt: str, timeout: float) -> str:
         return pool.submit(llm.complete, system, prompt).result(timeout=timeout)
     except FutureTimeout as e:
         raise _Timeout() from e
+    except LLMError:
+        raise
+    except Exception as e:  # noqa: BLE001  供應商實作自己的 bug（回應形狀跟預期不同）也算「呼叫失敗」，不准讓整份報告失敗
+        raise LLMError(f"供應商回應無法處理（{type(e).__name__}：{e}）") from e
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -225,11 +232,27 @@ def validate_items(raw: list[Any], lines: list[SentLine], entities: set[str]) ->
         if not isinstance(quote, str) or not quote.strip():
             reject(item, "缺少 quote")
             continue
-        # 先看 LLM 指的那一筆，再看全部：只要逐字出現在送入的任一筆原文就算數，log_ts 取實際找到的那筆
-        cited = by_id.get(item.get("line")) if isinstance(item.get("line"), str) else None
-        hit = cited if cited is not None and quote in cited.text else next((l for l in lines if quote in l.text), None)
+        quote = quote.strip()
+        line_id = item.get("line")
+        if line_id is not None and (not isinstance(line_id, str) or line_id not in by_id):
+            reject(item, f"line 不是送入的日誌編號：{line_id!r}")
+            continue
+        # 引文只在「entity 自己的日誌」裡找：A 服務的日誌提到 B（例如記下來的 user-agent、下游回傳的字串）不是 B 的證據，
+        # 那段文字是誰都可以寫進去的。先看 LLM 指的那一筆，再看同一個服務的其他筆；log_ts 取實際找到的那筆
+        own = [l for l in lines if l.service == entity]
+        cited = by_id.get(line_id) if isinstance(line_id, str) else None
+        if cited is not None and cited.service != entity:
+            reject(item, f"引用的日誌 {cited.id} 是 {cited.service} 的，不能當 {entity} 的證據")
+            continue
+        hit = cited if cited is not None and quote in cited.text else next((l for l in own if quote in l.text), None)
         if hit is None:
-            reject(item, "quote 沒有逐字出現在送入的日誌裡（視為幻覺）")
+            elsewhere = next((l for l in lines if quote in l.text), None)
+            reject(item, f"quote 只出現在 {elsewhere.service} 的日誌裡，不能當 {entity} 的證據" if elsewhere is not None
+                   else "quote 沒有逐字出現在送入的日誌裡（視為幻覺）")
+            continue
+        # 太短的片段（一個字母、一個常見字）幾乎每筆日誌都有，「逐字出現」沒有任何約束力；整筆原文本來就短的不受此限
+        if len(quote) < MIN_QUOTE_CHARS and quote != hit.text.strip():
+            reject(item, f"quote 太短（{len(quote)} 字，至少 {MIN_QUOTE_CHARS} 字或整筆原文）：{quote!r}")
             continue
         key = (kind, entity, state, quote)
         if key in seen:
@@ -286,7 +309,11 @@ class EvidenceExtractor(BaseOperator):
         raw = reply.get("evidence")
         if not isinstance(raw, list):
             return self._undetermined(ctx, LLM_BAD_SCHEMA, "LLM 回應缺少 evidence 陣列")
-        accepted, rejected = validate_items(raw, lines, entities)
+        try:
+            accepted, rejected = validate_items(raw, lines, entities)
+        except Exception as e:  # noqa: BLE001  欄位型別怪到驗證自己出錯：照「格式不合」處理，報告照出
+            logger.exception("extract_evidence 驗證例外")
+            return self._undetermined(ctx, LLM_BAD_SCHEMA, f"LLM 回應的欄位型別無法驗證（{type(e).__name__}）")
         ctx.log(f"extract_evidence：送入 {len(patterns)} 個樣板、{len(lines)} 筆原文；LLM 回 {len(raw)} 項，"
                 f"採用 {len(accepted)}、拒絕 {len(rejected)}")
         for r in rejected:

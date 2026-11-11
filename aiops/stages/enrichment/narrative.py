@@ -41,7 +41,8 @@ def validate(reply: dict[str, Any], sections: list[dict[str, str]], incident_ent
         if not isinstance(c, dict) or not isinstance(c.get("text"), str) or not c["text"].strip():
             return "claim 缺少 text"
         evidence = c.get("evidence")
-        if not isinstance(evidence, list) or not evidence or not set(evidence) <= keys:
+        if (not isinstance(evidence, list) or not evidence or not all(isinstance(k, str) for k in evidence)
+                or not set(evidence) <= keys):
             return f"claim 引用了不存在的段落：{evidence}"
 
     text = summary + "\n" + "\n".join(c["text"] for c in claims)

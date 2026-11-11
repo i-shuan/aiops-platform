@@ -166,10 +166,12 @@ def test_made_up_number_names_the_number():
 
 def test_numbers_inside_names_and_cite_ids_are_not_checked_and_ratios_may_be_percent():
     cited = [{"id": "F3", "kind": "entry_failure_rate", "entity": "ord-svc-2", "value": 0.2}]
-    assert judge.unsupported_number("ord-svc-2 失敗率 20%（F3），連到 tax-gw:443", cited) is None
-    assert judge.unsupported_number("ord-svc-2 失敗率 0.2", cited) is None
-    assert judge.unsupported_number("ord-svc-2 失敗率 55%", cited) == "55"
-    assert judge.unsupported_number("ord-svc-2 多花了 20 ms", cited) == "20"  # 沒有 % 就不能拿比例乘 100 來對
+    names = ["tax-gw:443", "ord-svc-2"]  # 送進 prompt 的名稱（實體、資源）；由 known_names 從事實與實體清單算出
+    assert judge.unsupported_number("ord-svc-2 失敗率 20%（F3），連到 tax-gw:443", cited, names) is None
+    assert judge.unsupported_number("ord-svc-2 失敗率 20%（F3），連到 tax-gw:443", cited) == "2"  # 沒送過的名稱不放行
+    assert judge.unsupported_number("ord-svc-2 失敗率 0.2", cited, names) is None
+    assert judge.unsupported_number("ord-svc-2 失敗率 55%", cited, names) == "55"
+    assert judge.unsupported_number("ord-svc-2 多花了 20 ms", cited, names) == "20"  # 沒有 % 就不能拿比例乘 100 來對
 
 
 def test_resource_not_in_the_cited_facts_is_cleared_but_the_candidate_stays():

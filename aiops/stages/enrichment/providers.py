@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -50,9 +53,12 @@ class OpenAICompatibleLLM(BaseLLM):
             body.pop("temperature")
             payload = _post(self.client, self.url, self.headers, body)
         try:
-            return payload["choices"][0]["message"]["content"]
+            content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError("LLM 回應缺少 choices[0].message.content") from e
+        if not isinstance(content, str):  # null：模型拒答、推理 token 用完、回的是 tool call
+            raise LLMError(f"LLM 回應的 content 不是文字（{type(content).__name__}）")
+        return content
 
 
 class AnthropicLLM(BaseLLM):
@@ -74,7 +80,7 @@ class AnthropicLLM(BaseLLM):
         })
         try:
             return "".join(block["text"] for block in payload["content"] if block.get("type") == "text")
-        except (KeyError, TypeError) as e:
+        except (KeyError, TypeError, AttributeError) as e:  # block 不是 dict、text 不是字串
             raise LLMError("LLM 回應缺少 content") from e
 
 
@@ -83,17 +89,53 @@ def _noop(_model: str, _base_url: str, _api_key: str | None) -> None:
     return None  # 完全不連外，呼叫端直接用模板
 
 
+_IPV4 = re.compile(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})")
+
+
+def checked_base_url(provider: str, base_url: str, api_key: str | None) -> str:
+    """送出資料之前確認「送去哪」是人明確寫的（節點 base_url 或環境變數 AIOPS_LLM_BASE_URL）。
+    prompt 裡有被監控服務的日誌原文；以前沒寫 base_url 就預設官方公網端點，本來要打內網模型卻漏設時，
+    日誌會靜默送到公網。現在沒寫就丟 LLMError（呼叫端標成 llm_not_configured／退回模板），要用官方端點請明寫網址。
+    另外：帶金鑰時不准用 http:// 連到本機與內網以外的主機（金鑰與日誌會以明文經過網路）。"""
+    url = (base_url or "").strip()
+    if not url:
+        raise LLMError(f"provider={provider} 沒有設定 base_url（節點參數或環境變數 AIOPS_LLM_BASE_URL）："
+                       "不會預設送到公網端點，要用官方端點請明確寫出網址")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise LLMError(f"base_url 必須是 http(s)://主機 的網址，不是 {url!r}")
+    if parts.scheme == "http" and api_key and not _is_internal_host(parts.hostname):
+        raise LLMError(f"base_url 用 http:// 連到外部主機 {parts.hostname}，金鑰與日誌會以明文傳送；請改用 https://")
+    return url
+
+
+def _is_internal_host(host: str) -> bool:
+    """本機、私有網段、叢集內的服務名稱（沒有點、或 .svc／.local／.internal／.localhost／.test 結尾）。"""
+    host = host.lower().strip("[]")
+    if host == "localhost" or "." not in host and ":" not in host:
+        return True
+    if host.endswith((".svc", ".svc.cluster.local", ".local", ".internal", ".localhost", ".test")):
+        return True
+    if ":" in host:  # IPv6 字面值：只認 loopback、link-local（fe80::/10）、unique-local（fc00::/7）
+        return host == "::1" or host.startswith(("fe8", "fe9", "fea", "feb", "fc", "fd"))
+    m = _IPV4.fullmatch(host)
+    if m is None or any(int(o) > 255 for o in m.groups()):
+        return False  # 不是 IPv4 字面值的一般網域名稱：當成外部
+    ip = ipaddress.IPv4Address(host)
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
 @register("openai")
 def _openai(model: str, base_url: str, api_key: str | None) -> BaseLLM:
     # OpenAI 相容端點（內網閘道、vLLM、Ollama 的 /v1）可以沒有金鑰
-    return OpenAICompatibleLLM(api_key, model, base_url or "https://api.openai.com")
+    return OpenAICompatibleLLM(api_key, model, checked_base_url("openai", base_url, api_key))
 
 
 @register("anthropic")
 def _anthropic(model: str, base_url: str, api_key: str | None) -> BaseLLM:
     if not api_key:
         raise LLMError("provider=anthropic 需要環境變數 AIOPS_LLM_API_KEY")
-    return AnthropicLLM(api_key, model, base_url or "https://api.anthropic.com")
+    return AnthropicLLM(api_key, model, checked_base_url("anthropic", base_url, api_key))
 
 
 def build_llm(provider: str, model: str | None = None, base_url: str | None = None,
