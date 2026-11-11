@@ -1,6 +1,6 @@
 """真實資料源 Spec：用 httpx.MockTransport 模擬伺服器，涵蓋成功與各種錯誤的分工。"""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -136,6 +136,25 @@ def test_es_date_histogram_to_dataframe():
     assert seen["body"]["aggs"]["series"]["date_histogram"]["fixed_interval"] == "60s"
     assert {"term": {"service.name": "cart"}} in seen["body"]["query"]["bool"]["filter"]
     assert df["value"].tolist() == [0.5, 0.9]  # 空格子丟掉
+
+
+def test_es_padded_buckets_stay_inside_the_range_so_sum_never_gets_a_fake_trailing_zero():
+    """range 是 [start, end)：extended_bounds 補桶只能補到 end − step。以前補到 end，那一桶一定在 range 外、一定是空的，
+    sum／count 回 0——每分鐘請求數這類序列每一輪最後一點都是假的「掉到 0」（ES 回放 pay-api：每輪一筆誤報）。"""
+    seen = {}
+
+    def handler(req):
+        seen.update(body=json.loads(req.content))
+        return httpx.Response(200, json={"aggregations": {"series": {"buckets": [
+            {"key": 1762560000000, "doc_count": 1, "v": {"value": 21.0}}]}}})
+
+    q = json.dumps({"index": "m", "agg": "sum", "value_field": "transaction.duration.summary.value_count"})
+    ElasticsearchSpec("http://es", client=_client(handler)).fetch_data(q, START, END, 60)
+    hist = seen["body"]["aggs"]["series"]["date_histogram"]
+    rng = next(f["range"]["@timestamp"] for f in seen["body"]["query"]["bool"]["filter"] if "range" in f)
+    end = datetime.fromisoformat(rng["lt"])
+    assert datetime.fromisoformat(hist["extended_bounds"]["max"]) == end - timedelta(seconds=60)
+    assert datetime.fromisoformat(hist["extended_bounds"]["min"]) == datetime.fromisoformat(rng["gte"])
 
 
 def test_es_count_and_percentile():

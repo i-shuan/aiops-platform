@@ -20,7 +20,7 @@ transaction.duration.summary.sum 是「這一分鐘所有請求的總耗時」�
 查詢裡明確寫的欄位一律優先，對照只補沒寫的。
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
@@ -93,7 +93,10 @@ def build_search_body(q: EsMetricQuery, start: datetime, end: datetime, step_sec
             "field": q.time_field,
             "fixed_interval": f"{step_seconds}s",
             "min_doc_count": 0,
-            "extended_bounds": {"min": start.isoformat(), "max": end.isoformat()},
+            # range 是含頭不含尾（lt end）：最後一個補出來的桶必須是 end − step，不能是 end。以前補到 end，那一桶永遠
+            # 在 range 之外、一定是空的；avg 回 null 會被丟掉沒事，sum／count 卻回 0——每一輪最後一點都是假的「掉到 0」
+            "extended_bounds": {"min": start.isoformat(),
+                                "max": max(start, end - timedelta(seconds=step_seconds)).isoformat()},
         }
     }
     if q.agg in _PERCENTILES:
