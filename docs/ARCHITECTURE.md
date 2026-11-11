@@ -128,7 +128,9 @@ it_otel 改成 R+SNR 之後，在 `e0ccc5e` 上實跑過一次 1–13＋24：**1
 - 場景 24（LLM 全掛）24a down／24b slow／24c garbage／24d hallucinate／24e faithful 對照：改成對 `rca_report_llm` 驗，
   斷言條件不變；**改寫後未實跑**（混沌資料庫暫停中）。改寫前在 cognitive 管線上的最後一次結果是 48／51（24b 逾時 60 秒、
   24e 熔斷證據沒進 ctx.rca_evidence，兩個都是改寫前就存在的失敗）。
-- 判斷節點的假 LLM 模式（`judge_faithful`／`judge_hallucinate`）用平台真的 `rca_judge` 驗證離線測過
+- 離線版場景 24：`tests/test_llm_outage_pipeline.py` 用出貨的 rca_report_llm.yaml（rca.facts 之後的節點、參數原樣、LLM 節點照場景 24 接）
+  驗 down／garbage／hallucinate／slow（逾時）／沒設定 都是報告照出、undetermined＋原因代碼、沒有候選、不重試，faithful 對照組 ok；
+  三段撈取與 rca.facts 不在離線版裡（資料直接放進 ctx）。判斷節點的假 LLM 模式（`judge_faithful`／`judge_hallucinate`）用平台真的 `rca_judge` 驗證離線測過
   （`tests/test_scripted_llm_judge.py`），沒有在場景裡跑過。
 - 假 LLM（`scripted_llm.py`）只測平台怎麼處理 LLM 輸出，**不代表真模型抽取與判斷的品質**；真模型品質尚無人驗。
 
