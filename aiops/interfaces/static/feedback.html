@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>事件回饋</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2430; --mute:#5d6878; --line:#d5dae3; --accent:#2f6fb5; --bad:#b3261e; --badbg:#fdecea; --ok:#1b6e3c; --okbg:#e7f4ec; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1d2128; --ink:#e7eaf0; --mute:#9aa4b2; --line:#343b47; --accent:#6ea8e6; --bad:#f2a29b; --badbg:#3a1f1d; --ok:#8fd3a8; --okbg:#1c3325; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 "Microsoft JhengHei","Segoe UI",system-ui,sans-serif; padding:24px 16px 40px; }
+  main { max-width:680px; margin:0 auto; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:22px 22px 26px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { margin:0 0 18px; color:var(--mute); font-size:14px; }
+  label, legend { display:block; font-weight:600; margin:16px 0 6px; padding:0; }
+  .hint { font-weight:400; color:var(--mute); font-size:13px; }
+  input[type=text], input[type=password], textarea { width:100%; padding:9px 10px; font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; }
+  textarea { min-height:84px; resize:vertical; }
+  fieldset { border:0; margin:0; padding:0; }
+  .choice { display:flex; gap:8px; align-items:flex-start; padding:8px 10px; border:1px solid var(--line); border-radius:6px; margin-bottom:6px; font-weight:400; cursor:pointer; }
+  .choice input { margin-top:5px; }
+  button { margin-top:20px; padding:10px 18px; font:inherit; font-weight:600; color:#fff; background:var(--accent); border:0; border-radius:6px; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  :focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+  #result { margin-top:16px; padding:10px 12px; border-radius:6px; display:none; white-space:pre-wrap; word-break:break-word; }
+  #result.ok { display:block; background:var(--okbg); color:var(--ok); }
+  #result.bad { display:block; background:var(--badbg); color:var(--bad); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>事件回饋</h1>
+  <p class="sub">告訴平台這張告警對不對。回饋會進學習閉環：誤報用來調參，確認的真異常連同處置寫進歷史事故經驗庫。</p>
+  <form id="form" novalidate>
+    <label for="incident_uid">事件群 <span class="hint">（從告警卡片的連結帶入）</span></label>
+    <input type="text" id="incident_uid" name="incident_uid" autocomplete="off" required>
+
+    <fieldset>
+      <legend>這張告警是？</legend>
+      <label class="choice"><input type="radio" name="verdict" value="true_positive" required> <span>真的有異常 <span class="hint">— 告警正確</span></span></label>
+      <label class="choice"><input type="radio" name="verdict" value="false_positive"> <span>誤報 <span class="hint">— 當時沒有問題</span></span></label>
+      <label class="choice"><input type="radio" name="verdict" value="missed"> <span>有異常，但告警太晚或太輕 <span class="hint">— 算漏報</span></span></label>
+    </fieldset>
+
+    <label for="text">說明 <span class="hint">（必填：你看到什麼、為什麼這樣判斷）</span></label>
+    <textarea id="text" name="text" maxlength="4000" required></textarea>
+
+    <div id="tp_fields" hidden>
+      <label for="resolution">當時怎麼處理 <span class="hint">（選填；有填才會進歷史相似案例）</span></label>
+      <textarea id="resolution" name="resolution" maxlength="4000"></textarea>
+      <label for="root_cause">根因 <span class="hint">（選填；有填根因就要一起填處理方式）</span></label>
+      <input type="text" id="root_cause" name="root_cause" maxlength="1000" autocomplete="off">
+    </div>
+
+    <label for="author">你的名字或帳號</label>
+    <input type="text" id="author" name="author" autocomplete="username" required>
+
+    <label for="token">API token <span class="hint">（平台的存取金鑰；只留在這個分頁，關掉就清除）</span></label>
+    <input type="password" id="token" name="token" autocomplete="off" required>
+
+    <button type="submit" id="submit">送出回饋</button>
+    <div id="result" role="status" aria-live="polite"></div>
+  </form>
+</main>
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("form");
+  var result = document.getElementById("result");
+  var tp = document.getElementById("tp_fields");
+  var button = document.getElementById("submit");
+  var field = function (id) { return document.getElementById(id); };
+
+  var uid = new URLSearchParams(location.search).get("incident_uid");
+  if (uid) { field("incident_uid").value = uid; }
+  try {
+    field("token").value = sessionStorage.getItem("aiops_token") || "";
+    field("author").value = sessionStorage.getItem("aiops_author") || "";
+  } catch (e) { /* 無痕或封鎖儲存：照常運作，只是不記 */ }
+
+  form.addEventListener("change", function () {
+    var v = form.elements.verdict.value;
+    tp.hidden = v !== "true_positive";
+  });
+
+  function show(ok, message) {
+    result.className = ok ? "ok" : "bad";
+    result.textContent = message;
+  }
+
+  function reason(body, status) {
+    var d = body && body.detail;
+    if (typeof d === "string") { return d; }
+    if (Array.isArray(d)) { return d.map(function (x) { return x.msg || JSON.stringify(x); }).join("；"); }
+    return "HTTP " + status;
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var verdict = form.elements.verdict.value;
+    var payload = {
+      incident_uid: field("incident_uid").value.trim(),
+      verdict: verdict,
+      text: field("text").value.trim(),
+      author: field("author").value.trim()
+    };
+    var token = field("token").value.trim();
+    if (!payload.incident_uid || !verdict || !payload.text || !payload.author || !token) {
+      show(false, "事件群、判定、說明、名字與 API token 都要填。");
+      return;
+    }
+    if (verdict === "true_positive") {
+      var resolution = field("resolution").value.trim();
+      var rootCause = field("root_cause").value.trim();
+      if (rootCause && !resolution) { show(false, "寫了根因也要寫當時怎麼處理。"); return; }
+      if (resolution) { payload.resolution = resolution; }
+      if (rootCause) { payload.root_cause = rootCause; }
+    }
+    try {
+      sessionStorage.setItem("aiops_token", token);
+      sessionStorage.setItem("aiops_author", payload.author);
+    } catch (e) { /* 同上 */ }
+    button.disabled = true;
+    show(true, "送出中…");
+    fetch("/api/v1/tuning/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (body) {
+        if (r.ok) { show(true, "已收到回饋，謝謝。"); form.elements.text.value = ""; }
+        else { show(false, "沒有送出：" + reason(body, r.status)); }
+      });
+    }).catch(function () {
+      show(false, "連不上平台，回饋沒有送出。請稍後再試。");
+    }).then(function () { button.disabled = false; });
+  });
+})();
+</script>
+</body>
+</html>

@@ -14,6 +14,9 @@ api:
 env:
   AIOPS_NOTIFIER: alertmanager
   AIOPS_ALERTMANAGER_URL: http://aiops-alertmanager.aiops-platform.svc:9093
+  # 人從瀏覽器點得到的平台網址（例：https://aiops.example.internal）。有設，告警卡片才會多一條 feedback_url
+  # 連到平台的回饋頁（/feedback）；空字串 = 不產生連結
+  AIOPS_PUBLIC_URL: ""
 
 # 放機密環境變數的 Secret（chart 不建）：AIOPS_API_TOKEN（必填）、AIOPS_DATABASE_URL（正式必填）、
 # AIOPS_ES_API_KEY、AIOPS_PROMETHEUS_TOKEN、AIOPS_ALERTMANAGER_TOKEN、AIOPS_LLM_API_KEY、AIOPS_FALLBACK_WEBHOOK…

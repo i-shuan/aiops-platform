@@ -16,6 +16,7 @@ from urllib.parse import quote, urlencode
 from aiops.engine.types import GrafanaLinks, as_utc
 
 GRAFANA_URL_ENV = "AIOPS_GRAFANA_URL"
+PUBLIC_URL_ENV = "AIOPS_PUBLIC_URL"
 
 
 def grafana_base_url() -> str | None:
@@ -85,3 +86,11 @@ def incident_links(cfg: GrafanaLinks, entities: list[str], start: datetime, end:
         out[f"grafana_{name}_url"] = explore_url(cfg.base_url, uid, lucene_any("service.name", entities), start, end,
                                                  cfg.pad_minutes)
     return out
+
+
+def feedback_url(incident_uid: str) -> str | None:
+    """告警卡片上的「回饋」連結：平台自己的回饋頁（interfaces/static/feedback.html）。
+    基底網址只從環境變數 AIOPS_PUBLIC_URL 讀（人從瀏覽器點得到的平台網址，只有部署知道）；沒設回 None = 不產生連結。
+    表單在平台、Grafana 只顯示這條連結（CLAUDE.md 周邊元件守則：不在 Grafana 放表單或外掛）。"""
+    base = os.environ.get(PUBLIC_URL_ENV, "").strip().rstrip("/")
+    return f"{base}/feedback?{urlencode({'incident_uid': incident_uid})}" if base else None
