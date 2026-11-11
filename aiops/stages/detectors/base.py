@@ -8,6 +8,7 @@ import io
 import math
 from abc import abstractmethod
 from typing import Any, ClassVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 import pandas as pd
@@ -392,3 +393,127 @@ def unpack_arrays(fmt: str, data: bytes) -> dict[str, np.ndarray]:
         raise ValueError(f"不支援的模型檔格式：{fmt}")
     with np.load(io.BytesIO(data), allow_pickle=False) as npz:
         return {k: npz[k] for k in npz.files}
+
+
+# ── 時序白化（殘差偵測器共用）──
+# 「原值 y(t) − 該 週幾×小時 時段的基準」= 殘差 e(t)。每天固定的 09:00／19:00 階梯、週末低谷都被扣掉，
+# 剩下的才交給「看相鄰差」或「看持續偏離」的演算法。偵測器之間不准互相 import，所以白化寫成這裡的純函式，
+# 每個殘差算子自己學、自己存（基準線以節點名稱持久化），不去讀 hourly_baseline 的狀態。
+#
+# 時段資料不足時的退回順序（每個點各自退）：週幾×小時（168 格）→ 一天中的小時（24 格，平日週末混算）→ 全段平均。
+# 「夠不夠」= 那一格的訓練點數 >= min_slot_points。退到哪一層記在 state 的 slots_ready／hours_ready。
+
+SLOTS_PER_WEEK = 168
+_WEEK = pd.Timedelta(days=7)
+
+
+def parse_tz(name: Any, operator: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(str(name))
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise TypeError(f"{operator} 的 tz 不是合法時區：{name!r}") from e
+
+
+def _local_slots(ts: pd.Series, tz: ZoneInfo) -> tuple[np.ndarray, np.ndarray]:
+    t = pd.to_datetime(ts)
+    t = t.dt.tz_localize("UTC") if t.dt.tz is None else t
+    local = t.dt.tz_convert(tz)
+    return (local.dt.day_of_week * 24 + local.dt.hour).to_numpy(), local.dt.hour.to_numpy()
+
+
+def fit_seasonal_profile(df: pd.DataFrame, tz: ZoneInfo, min_slot_points: int) -> tuple[dict[str, Any], np.ndarray]:
+    """學 週幾×小時 的平均，回傳 (profile, 訓練期殘差)。
+
+    訓練期殘差用「留一週」算：某一格有 2 週以上的資料時，每個點扣的是「同一格、別週」的平均，
+    不是含自己在內的平均——否則訓練殘差會小得不真實（7 天裡每格只看過一次時，殘差只剩那一小時內的雜訊），
+    接下來用它學的雜訊尺度會偏小、測試期一換週就誤報。只有 1 週的格子沒得留，用含自己的平均（尺度偏樂觀，
+    state 的 lowo_share 記有多少比例的點是留一週算的）。用平均不用中位數，是為了留一週能用加總直接扣掉。"""
+    slot, hour = _local_slots(df["ts"], tz)
+    v = df["value"].astype(float).to_numpy()
+    ts = pd.to_datetime(df["ts"])
+    week = ((ts - ts.min()) // _WEEK).to_numpy().astype(int)
+    frame = pd.DataFrame({"s": slot, "h": hour, "w": week, "v": v})
+    by_slot = frame.groupby("s")["v"].agg(["sum", "count"])
+    by_slot_week = frame.groupby(["s", "w"])["v"].agg(["sum", "count"])
+    by_hour = frame.groupby("h")["v"].agg(["mean", "count"])
+    profile = {
+        "tz": str(tz), "min_slot_points": int(min_slot_points),
+        "slots": {str(int(s)): [float(r["sum"] / r["count"]), int(r["count"])] for s, r in by_slot.iterrows()},
+        "hours": {str(int(h)): [float(r["mean"]), int(r["count"])] for h, r in by_hour.iterrows()},
+        "global": float(v.mean()) if len(v) else 0.0,
+    }
+    profile["slots_ready"] = sum(1 for _m, n in profile["slots"].values() if n >= min_slot_points)
+    profile["hours_ready"] = sum(1 for _m, n in profile["hours"].values() if n >= min_slot_points)
+
+    base = seasonal_baseline(df["ts"], profile)
+    s_sum = by_slot["sum"].reindex(slot).to_numpy()
+    s_cnt = by_slot["count"].reindex(slot).to_numpy()
+    sw = by_slot_week.reindex(pd.MultiIndex.from_arrays([slot, week]))
+    other_cnt = s_cnt - sw["count"].to_numpy()
+    lowo = (other_cnt >= min_slot_points) & (s_cnt >= min_slot_points)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        other_mean = (s_sum - sw["sum"].to_numpy()) / other_cnt
+    base = np.where(lowo, other_mean, base)
+    profile["lowo_share"] = round(float(lowo.mean()) if len(lowo) else 0.0, 3)
+    return profile, v - base
+
+
+def seasonal_baseline(ts: pd.Series, profile: dict[str, Any]) -> np.ndarray:
+    """每個時間點該扣的基準：週幾×小時 → 小時 → 全段（點數不到 min_slot_points 就往下一層退）。"""
+    tz = parse_tz(profile["tz"], "seasonal_profile")
+    need = int(profile["min_slot_points"])
+    slot, hour = _local_slots(ts, tz)
+    slots, hours, fallback = profile["slots"], profile["hours"], float(profile["global"])
+    out = np.empty(len(slot))
+    for i, (s, h) in enumerate(zip(slot, hour)):
+        m, n = slots.get(str(int(s)), (0.0, 0))
+        if n < need:
+            m, n = hours.get(str(int(h)), (0.0, 0))
+            if n < need:
+                m = fallback
+        out[i] = m
+    return out
+
+
+def seasonal_residual(df: pd.DataFrame, profile: dict[str, Any]) -> np.ndarray:
+    return df["value"].astype(float).to_numpy() - seasonal_baseline(df["ts"], profile)
+
+
+# ── 自適應尺度（殘差偵測器共用）──
+# 分數 = |統計量| / 尺度，統計量 > threshold 就舉牌。threshold 的意義跟其他偵測器一樣（分數門檻、warning_ratio
+# 也照它算），自適應的是分母：
+#   1. 雜訊尺度 σ = 1.4826 × MAD(訓練期統計量)：常態下等於標準差，但不會被訓練期的尖峰拉大（MAD 為 0 就是 0，交給底噪）。
+#   2. 尾巴校正：σ* = max(σ, Q_{1−fpr}(|訓練期統計量|) / threshold)，上限 σ × max_tail_factor。
+#      意思是「訓練期最多只有 fpr 比例的點會超過門檻」：雜訊近似常態的序列 Q/threshold < σ，σ* = σ，分數就是穩健 z；
+#      尾巴比常態肥（流量切換點、每週不完全一樣）的序列分母自動放大，不用每條手調 threshold。
+#      上限是防「訓練期混進沒被排除的事故」：尾巴被事故撐大到 σ 的好幾倍時，寧可吵一點也不要整條序列失明。
+#   3. 底噪：再跟 scale_floor（min_scale、|序列水位| × min_scale_ratio、整數序列 1）取大，跟其他偵測器同一套。
+# 統計量的分布直接在訓練期殘差上量（滾動平均就量滾動平均），所以殘差的自相關、時段基準的週間誤差都已經算進去，
+# 不用 std/√window 那種「點與點獨立」的假設。
+
+RESIDUAL_TUNABLE: dict[str, tuple[float, float, float]] = {
+    "fpr": (0.001, 1e-5, 0.1),            # 訓練期允許超過門檻的點比例（逐點虛警率目標）
+    "max_tail_factor": (3.0, 1.0, 20.0),  # 尾巴校正最多把 σ 放大幾倍
+}
+_MAD_TO_STD_RES = 1.4826
+
+
+def noise_stats(stat: np.ndarray, fpr: float) -> dict[str, float]:
+    """fit 時量訓練期統計量：σ（1.4826 × MAD）與 |統計量| 的 1−fpr 分位數。存進基準線。
+    MAD 為 0（訓練期幾乎不動）時不退標準差：標準差會被訓練期裡那幾個跳點自己撐大，等於把異常學成雜訊；
+    σ = 0 時 calibrated_scale 的上限也是 0，直接落到底噪（跟 detector.mad 的 MAD=0 一樣）。
+    fpr 改了要等下次重訓才生效（分位數是在訓練資料上量的）；threshold、max_tail_factor、底噪在 detect 時才套，改了立刻生效。"""
+    raw = np.asarray(stat, dtype=float)
+    raw = raw[np.isfinite(raw)]
+    if not len(raw):
+        return {"noise": 0.0, "tail_q": 0.0, "fpr": float(fpr), "points": 0}
+    noise = float(np.median(np.abs(raw - np.median(raw))) * _MAD_TO_STD_RES)
+    return {"noise": noise, "tail_q": float(np.quantile(np.abs(raw), 1.0 - fpr)), "fpr": float(fpr), "points": int(len(raw))}
+
+
+def calibrated_scale(stats: dict[str, float], threshold: float, max_tail_factor: float, *, min_scale: float,
+                     min_scale_ratio: float, level: float, integer: bool) -> float:
+    """σ* = clip(Q_{1−fpr} / threshold, 下限 σ, 上限 σ × max_tail_factor)，再套 scale_floor 底噪。"""
+    noise, tail = float(stats["noise"]), float(stats["tail_q"]) / threshold
+    calibrated = min(max(noise, tail), noise * max_tail_factor)
+    return scale_floor(calibrated, None, min_scale, min_scale_ratio, center=level, integer=integer)

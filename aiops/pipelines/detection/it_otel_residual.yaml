@@ -1,0 +1,104 @@
+name: it_otel_residual
+description: "IT：同 it_otel，但多數決三票換成 週期＋殘差突變＋殘差漂移（有日夜／週末週期的流量序列用）"
+
+nodes:
+  # 注意 Prometheus 單次查詢上限約 11000 點：step 60 秒抓 7 天是 10081 點，剛好在上限內。
+  # 流量類指標建議累積 3~4 週再信任 168 時段基準線（要更長就把 train_lookback_minutes 加大、step_seconds 調大）。
+  - name: fetch
+    operator: ingestion.fetch
+    params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
+
+  # 異常檢測：三票互補，再由 detector.ensemble 多數決（超過一半同意才算異常）。跟 it_otel 的差別只在這三票：
+  #   週期票 detector.hourly_baseline：該 週幾×小時 的平均與標準差（同 it_otel）
+  #   突變票 detector.residual_shift：扣掉該時段基準後的殘差，看相鄰差（瞬間斷崖）；每天固定的 09:00／19:00 切換被扣掉，不舉牌
+  #   漂移票 detector.residual_chronic：殘差的 30 分鐘滾動平均（慢滑、持續低兩成）
+  # 殘差兩票的門檻依序列自己的殘差雜訊自動伸縮（fpr = 訓練期允許超過門檻的點比例），不用每條序列手調 threshold。
+  # 殘差兩票的雜訊尺度在訓練期殘差上量：訓練窗 2 週以上時是「留一週」量的（扣別週同時段的平均）；只有 7 天時
+  # 每個時段只看過一次，量到的雜訊偏小（偏吵），train_lookback_minutes 建議 20160 以上。
+  # 回測與數字：docs/RESIDUAL_SNR_ENSEMBLE.md（scripts/backtest/residual_ensemble.py 可重跑）。
+  - name: detect
+    operator: detector.hourly_baseline
+    params: {tz: Asia/Taipei, min_weeks: 1}
+  - name: detect_rshift
+    operator: detector.residual_shift
+    params: {tz: Asia/Taipei}
+  - name: detect_rchronic
+    operator: detector.residual_chronic
+    params: {tz: Asia/Taipei}
+  # 雙軌制・軌道一（致命硬上限）：物理／業務上「踩到就是出事」的界線，單點成立、不交給多數決。
+  # 預設不做事：只有在 target 的 overrides.fatal 訂了界線的序列才會判（見下面 targets 的範例）。
+  # 它不投票（vote 的 bypass），事件原樣留下，score_fatal 直接拉到 P0。界線只認 YAML，後台調參改不到。
+  - name: fatal
+    operator: detector.hard_limit
+  - name: vote
+    operator: detector.ensemble
+    params: {strategy: majority, bypass: [fatal]}
+  - name: new_only
+    operator: detector.new_only
+
+  # ── 以下是批次層（所有序列的異常合併後）──
+  - name: group_entity
+    operator: alert.same_entity
+  - name: group_topology
+    operator: alert.topology_chain
+  # 訊息佇列：生產者先出事、消費者晚一點才出事的兩群併成一件事（非同步邊由 admin_topology_refresh 沉澱；沒有邊就不做事）
+  - name: group_messaging
+    operator: alert.messaging_link
+  - name: score_golden
+    operator: alert.golden_signals
+  - name: score_p0
+    operator: alert.p0_boost
+    params: {entities: []}
+  # 軌道一的事件：分數至少拉到 payload 的 P0 門檻，並打上 fatal:<節點> 標籤（通知 annotations.fatal）
+  - name: score_fatal
+    operator: alert.fatal_floor
+    params: {nodes: [fatal], severity: P0}
+  # 進行中的事件群吸收這一輪的新異常：一場事故從頭到尾只有一個 incident_uid、一張卡（不再每 30 分鐘另開一張）
+  - name: absorb_open
+    operator: alert.absorb_open
+  - name: suppress_window
+    operator: alert.suppress_window
+  - name: suppress_root_cause
+    operator: alert.suppress_same_root_cause
+    params: {exempt_tags: [fatal]}  # 踩到致命硬上限的服務就算下游也在告警，自己那張也要發
+  - name: suppress_dedup
+    operator: alert.suppress_dedup
+    # escalate_tags：30 分鐘內才發過 P2／P3 的實體踩到致命硬上限，照發 P0（上一張已經是 P0 才去重）
+    params: {cooldown_minutes: 30, escalate_tags: [fatal]}
+
+  # 定嚴重度、產生通知內容。links = 深度連結：設定了環境變數 AIOPS_GRAFANA_URL 才會在卡片 annotations 加
+  # grafana_dashboard_url（APM 總覽鎖在事故的服務與時間）、grafana_traces_url／grafana_logs_url（Explore 查詢）
+  - name: payload
+    operator: alert.notify_payload
+    params:
+      severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}
+      links: {dashboard: d/apm-overview, var: service, pad_minutes: 15, datasources: {traces: apm-traces, logs: apm-logs}}
+  # 進行中事件群：用最新內容續命、升級時先關舊標籤再送新的、安靜滿 resolve_after_minutes 才結案（防抖動）。
+  # 要排在 payload 之後（升級的嚴重度由 payload 算）
+  - name: heartbeat
+    operator: alert.heartbeat
+    params: {resolve_after_minutes: 15}
+  # 依環境變數 AIOPS_NOTIFIER 選 log 或 alertmanager；要固定就改 notifier.alertmanager
+  - name: notify
+    operator: notifier.auto
+  # 自我健康心跳（Dead Man's Snitch）：寫入成功才送；排程停了或整輪失敗，ttl 到期就會收到 resolved
+  - name: watchdog
+    operator: notifier.watchdog
+    params: {ttl_minutes: 15}
+
+targets:
+  # 範例（mock 資料源）。正式使用請複製這個檔，改成自己的 targets。
+  # attrs.signal（latency／errors／traffic／saturation）：alert.golden_signals 加權與 RCA 建議處置的故障特徵都靠它判斷
+  # 這條序列是哪一類；ES 這種 metric 是整段查詢 JSON 的資料源判不出類別，不填就不會觸發
+  # overrides 示範分母底噪 min_scale（單位跟指標一樣）：MAD／標準差小於它就用它當分母，避免幾乎不動的序列一點雜訊就爆分。
+  # 沒填時的通用保底是 min_scale_ratio（中心值的 1%）與整數序列的 1 個單位；單位只有 target 自己知道，例如：
+  #   每分鐘失敗數 -> {detect_rshift: {min_scale: 0.5}, detect: {min_scale: 0.5}}
+  #   延遲 µs（ES 的 transaction.duration.summary.sum）-> {detect_rshift: {min_scale: 5000}}
+  #   這裡的 cpu 百分比：0.5 個百分點以內的抖動不算
+  # 致命硬上限寫在 overrides.fatal（沒寫的序列不受影響），例如：
+  #   錯誤率（0~1）    -> {fatal: {fatal_ceiling: 0.5, plausible_max: 1}}
+  #   每分鐘請求數瞬斷 -> {fatal: {max_drop: 500}}       跟前一分鐘比一步掉超過 500
+  #   單點尖峰         -> {fatal: {max_deviation_ratio: 20}}  偏離前 30 點中位數超過 20 倍
+  - {source_type: mock, query: 'cpu{service="cart"}', entity: cart, attrs: {dept: payments, signal: saturation},
+     overrides: {detect_rshift: {min_scale: 0.5}}}
+  - {source_type: mock, query: 'cpu{service="redis"}', entity: redis, attrs: {dept: platform, signal: saturation}}
