@@ -3,7 +3,10 @@
 軌道一 detector.hard_limit：致命硬上限，單點成立、不投票（detector.ensemble 的 bypass）、alert.fatal_floor 直接拉到 P0。
 軌道二：hourly_baseline＋MAD＋quantile_drift 多數決，組成與分母不變。
 
-整合測試用「出貨的 it_otel.yaml」：只把 fetch 換成固定資料、targets 換成測試序列，其餘節點與參數原封不動。
+整合測試用「出貨的 factory.yaml」（統計軌是上面那三票的布林多數決）：只把 fetch 換成固定資料、targets 換成測試序列，
+其餘節點與參數原封不動。以前用 it_otel.yaml；it_otel 的統計軌改成 R+SNR（殘差三票＋軟投票）之後，
+「單點被 3 過 2 吃掉」的前提不再成立（軟投票下一票夠強就單獨成立），所以布林多數決的雙軌測試改掛 factory，
+it_otel 的雙軌接線另外測（test_it_otel_*）。
 資料是重尾的：訓練段 N(1000, 20) 混 2% 的 ±400 離群點——標準差被拉到約 60、MAD 不受影響，
 所以 +150 的單點只有 MAD 一票（z≈2.5 < 3），正好是「被 3 過 2 多數決吃掉」的形狀。
 """
@@ -68,7 +71,7 @@ class _FetchProbe(_Frame):
         return ctx
 
 
-def _shipped(fatal: dict | None, *, seed=0, points=None, entity="ETCH-01", dual=True, name="it_otel",
+def _shipped(fatal: dict | None, *, seed=0, points=None, entity="ETCH-01", dual=True, name="factory",
              fetch="test.dual_frame") -> Workflow:
     """出貨的 workflow，fetch 換成固定資料。dual=False：把雙軌制的節點與參數拿掉（等於改動前的 workflow）。"""
     wf = load_workflow(workflow_path(name))
@@ -194,6 +197,20 @@ def test_fatal_node_does_not_make_the_statistical_detectors_retrain_every_round(
     assert probes == [f"probe:train=True:{nodes}"] + [f"probe:train=False:{nodes}"] * 3
     # 基準線停在事故前：事故期間 26 分鐘（第 50～75 分）每一分鐘都還是異常，沒有被重訓吃掉
     assert detected >= {T0 + timedelta(minutes=m) for m in range(50, 76)}
+
+
+@pytest.mark.parametrize("label,value,limits", SINGLE_POINTS, ids=[s[0] for s in SINGLE_POINTS])
+def test_it_otel_soft_vote_also_misses_the_single_point_and_the_fatal_track_catches_it(label, value, limits):
+    """it_otel 的統計軌是 R+SNR（殘差三票＋軟投票）：同樣的單點（偏離約 2.5 個尺度），軟投票加總也到不了 2 票等值；
+    致命軌照樣單點成立、直接 P0。5 組雜訊都一樣。"""
+    for seed in range(5):
+        before = _run(_shipped(None, seed=seed, points={"ETCH-01": {40: value}}, name="it_otel"))
+        assert not _at(before.anomalies, 40) and before.notifications == []
+        assert any(line.startswith("soft_vote:vote:voters=3:need=2:") for line in before.audit)
+        after = _run(_shipped(limits, seed=seed, points={"ETCH-01": {40: value}}, name="it_otel"))
+        assert not _at(after.anomalies, 40, "detector.soft_vote")
+        assert [(e.detector, e.detector_node) for e in _at(after.anomalies, 40)] == [("detector.hard_limit", "fatal")]
+        assert [n.labels["severity"] for n in after.notifications] == ["P0"]
 
 
 @pytest.mark.parametrize("name", ["it_otel", "factory"])

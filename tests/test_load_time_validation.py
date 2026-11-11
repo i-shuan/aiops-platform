@@ -233,7 +233,7 @@ def test_api_rejects_unknown_request_fields_instead_of_running_with_defaults(cli
 
 def test_api_rejects_a_bad_override_value_with_400_not_500(client):
     body = {"workflow": "it_otel", "targets": [
-        {"source_type": "mock", "query": "a", "entity": "a", "overrides": {"detect_mad": {"threshold": -3}}}]}
+        {"source_type": "mock", "query": "a", "entity": "a", "overrides": {"detect_rshift": {"threshold": -3}}}]}
     res = client.post("/api/v1/runs", json=body)
     assert res.status_code == 400
     assert "threshold=-3" in res.text

@@ -141,9 +141,9 @@ def test_it_otel_example_target_overrides_min_scale():
 
     wf = load_workflow(workflow_path("it_otel"))
     overrides = [t.overrides for t in wf.targets if t.overrides]
-    assert any("min_scale" in o.get("detect_mad", {}) for o in overrides)
+    assert any("min_scale" in o.get("detect_rshift", {}) for o in overrides)
     Pipeline(wf)  # 合法
     bad = wf.model_copy(update={"targets": [TargetSpec(source_type="mock", query="q", entity="x",
-                                                       overrides={"detect_mad": {"min_scale": -5}})]})
+                                                       overrides={"detect_rshift": {"min_scale": -5}})]})
     with pytest.raises(Exception, match="min_scale"):
         Pipeline(bad)

@@ -14,6 +14,7 @@ from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import ANOMALY, AnomalyEvent
+from scripts.backtest.variants import detection_nodes
 from aiops.stages.detectors.base import SNR_STATE_KEY, gaussian_threshold, series_snr, snr_threshold
 
 TZ = "Asia/Taipei"
@@ -217,12 +218,12 @@ def test_soft_vote_keeps_bypass_events_and_needs_snr_on_every_voter():
         OperatorRegistry.create("detector.soft_vote", {"votes": 0})
 
 
-@pytest.mark.parametrize("name", ["it_otel_snr", "it_otel_residual_snr"])
-def test_snr_example_pipelines_load(name):
-    from aiops.engine.pipeline import load_workflow
-    from aiops.interfaces.runner import workflow_path
-
-    pipe = Pipeline(load_workflow(workflow_path(name)))
+@pytest.mark.parametrize("variant", ["R+SNR", "A+SNR"])
+def test_snr_variants_load(variant):
+    """R+SNR 是 it_otel 原樣；A+SNR 是對照變體（67a29a1 的 it_otel_snr，YAML 已刪）。"""
+    wf = Workflow(name="sv", targets=[TargetSpec(source_type="mock", query="q", entity="svc")],
+                  nodes=detection_nodes("snr_test.frame", variant))
+    pipe = Pipeline(wf)
     vote = next(op for n, op in pipe.target_nodes if n.operator == "detector.soft_vote")
     voters = [op for n, op in pipe.target_nodes if getattr(op, "has_baseline", False) and n.name not in vote.bypass]
     assert len(voters) == 3 and all(op.snr["p_fa"] == 0.001 for op in voters)
@@ -260,23 +261,18 @@ def _low_traffic_mild():
     return train, test.iloc[s:s + 60].reset_index(drop=True)
 
 
-def _alerts(workflow: str, train, window) -> int:
-    """跑 workflow 的偵測段一輪：裁決（ensemble／soft_vote）∪ bypass 節點的告警分鐘數。"""
-    from aiops.engine.pipeline import load_workflow
-    from aiops.interfaces.runner import workflow_path
-
-    nodes = load_workflow(workflow_path(workflow)).nodes
-    stop = next(i for i, n in enumerate(nodes) if n.operator in ("detector.ensemble", "detector.soft_vote"))
+def _alerts(variant: str, train, window) -> int:
+    """跑變體的偵測段一輪：裁決（ensemble／soft_vote）∪ bypass 節點的告警分鐘數。"""
     _Frames.raw, _Frames.train = window, train
     wf = Workflow(name="snr_test", targets=[TargetSpec(source_type="mock", query="rpm", entity="svc")],
-                  nodes=[NodeSpec(name="fetch", operator="snr_test.frame"), *nodes[1:stop + 1]])
+                  nodes=detection_nodes("snr_test.frame", variant))
     batch = Pipeline(wf).run(now=window["ts"].iloc[-1].to_pydatetime() + timedelta(seconds=30), strict=True)
     return len({e.ts for e in batch.anomalies if e.level == ANOMALY})
 
 
 def test_residual_snr_catches_the_low_traffic_mild_drop():
     train, window = _low_traffic_mild()
-    assert _alerts("it_otel_residual_snr", train, window) >= 10
+    assert _alerts("R+SNR", train, window) >= 10
 
 
 @pytest.mark.xfail(strict=True, reason="漏報死區（ES 回放 A 與 A+SNR 的 report-svc mild 都是 0/60）：低流量序列持續低兩成約 1.3 個"
@@ -284,4 +280,4 @@ def test_residual_snr_catches_the_low_traffic_mild_drop():
                                         "hourly 也不到門檻，軟投票湊不到 2 票等值。要抓到得放寬到 votes 1.5（每週約 1618 分鐘誤報）。")
 def test_current_detectors_with_snr_catch_the_low_traffic_mild_drop():
     train, window = _low_traffic_mild()
-    assert _alerts("it_otel_snr", train, window) >= 1
+    assert _alerts("A+SNR", train, window) >= 1

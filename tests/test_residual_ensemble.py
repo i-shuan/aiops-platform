@@ -1,4 +1,5 @@
-"""殘差白化＋自適應門檻的三票（detector.residual_shift／residual_chronic，管線 it_otel_residual）。
+"""殘差白化＋自適應門檻的三票（detector.residual_shift／residual_chronic）。it_otel 的偵測段現在是 R+SNR；
+這裡的多數決（R）用 scripts/backtest/variants.py 由 it_otel 改出來（67a29a1 的 it_otel_residual，YAML 已刪）。
 
 合成序列照 ES 回測裡 mes-api 的形狀做：台北時間平日 09:00–18:59 約 291、其餘 135，週末 145／75，分鐘雜訊 std 9。
 ES 6 條序列的回放數字在 docs/RESIDUAL_SNR_ENSEMBLE.md（scripts/backtest/residual_ensemble.py）。
@@ -17,6 +18,7 @@ from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow, load
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import ANOMALY
 from aiops.interfaces.runner import workflow_path
+from scripts.backtest.variants import detection_nodes
 from aiops.stages.detectors.base import (calibrated_scale, fit_seasonal_profile, noise_stats, seasonal_baseline,
                                          seasonal_residual)
 
@@ -267,26 +269,26 @@ def test_target_override_is_range_checked_at_load_time():
 # ── 管線 ──
 
 
-def _detection_nodes(name: str) -> list[NodeSpec]:
-    nodes = load_workflow(workflow_path(name)).nodes
-    stop = [n.operator for n in nodes].index("detector.ensemble")
-    return [NodeSpec(name="fetch", operator="residual_test.frame"), *nodes[1:stop + 1]]
+def _detection_nodes(variant: str = "R") -> list[NodeSpec]:
+    return detection_nodes("residual_test.frame", variant)
 
 
-def test_it_otel_residual_loads_with_three_complementary_votes_and_fatal_bypass():
-    pipe = Pipeline(load_workflow(workflow_path("it_otel_residual")))
+def test_it_otel_detects_with_three_complementary_votes_and_two_bypass_tracks():
+    """it_otel 的偵測段 = R+SNR：三票互補（週期、殘差突變、殘差漂移）、軟投票，hard_limit 與旁路漂移票單獨成立。"""
+    pipe = Pipeline(load_workflow(workflow_path("it_otel")))
     ops = {n.name: n.operator for n, _ in pipe.target_nodes}
-    vote = next(op for n, op in pipe.target_nodes if n.operator == "detector.ensemble")
+    vote = next(op for n, op in pipe.target_nodes if n.operator == "detector.soft_vote")
     voters = [n.name for n, op in pipe.target_nodes if getattr(op, "has_baseline", False) and n.name not in vote.bypass]
     assert [ops[v] for v in voters] == ["detector.hourly_baseline", "detector.residual_shift",
                                         "detector.residual_chronic"]
-    assert vote.strategy == "majority" and vote.bypass == {"fatal", "detect_drift_solo"}
+    assert vote.votes == 2 and vote.bypass == {"fatal", "detect_drift_solo"}
     solo = next(op for n, op in pipe.target_nodes if n.name == "detect_drift_solo")
-    assert solo.operator_name == "detector.residual_chronic" and solo.min_run > 1
-    # 原本的 it_otel 不動：還是 hourly + mad + quantile_drift
-    original = [n.operator for n in load_workflow(workflow_path("it_otel")).nodes]
-    assert {"detector.mad", "detector.quantile_drift"} <= set(original)
-    assert "detector.residual_shift" not in original
+    assert solo.operator_name == "detector.residual_chronic" and solo.min_run > 1 and solo.snr is None
+    assert not {"detector.mad", "detector.quantile_drift"} & set(ops.values())
+    # 對照變體 R：同樣三票＋旁路，不開 snr、布林多數決
+    r = {n.name: n for n in _detection_nodes("R")}
+    assert r["vote"].operator == "detector.ensemble" and r["vote"].params["strategy"] == "majority"
+    assert all("snr" not in n.params for n in r.values())
 
 
 class _Frames:
@@ -304,9 +306,9 @@ class _Frame(BaseOperator):
 
 
 def _majority_minutes(train: pd.DataFrame, window: pd.DataFrame) -> tuple[int, set]:
-    """跑 it_otel_residual 的偵測段一輪（60 分鐘），回傳 (裁決通過的分鐘數, 投過票的節點)。"""
+    """跑 R（布林多數決）的偵測段一輪（60 分鐘），回傳 (裁決通過的分鐘數, 投過票的節點)。"""
     _Frames.raw, _Frames.train = window.reset_index(drop=True), train
-    wf = Workflow(name="residual_test", nodes=_detection_nodes("it_otel_residual"),
+    wf = Workflow(name="residual_test", nodes=_detection_nodes("R"),
                   targets=[TargetSpec(source_type="mock", query="rpm", entity="svc")])
     batch = Pipeline(wf).run(now=window["ts"].iloc[-1].to_pydatetime() + timedelta(seconds=30), strict=True)
     verdicts = [e for e in batch.anomalies if e.detector == "detector.ensemble" and e.level == ANOMALY]
@@ -316,7 +318,7 @@ def _majority_minutes(train: pd.DataFrame, window: pd.DataFrame) -> tuple[int, s
 def _alert_minutes(train: pd.DataFrame, window: pd.DataFrame) -> int:
     """這一輪會發告警的分鐘：裁決通過的 ∪ bypass 節點（旁路漂移票、致命硬上限）自己的事件。"""
     _Frames.raw, _Frames.train = window.reset_index(drop=True), train
-    wf = Workflow(name="residual_test", nodes=_detection_nodes("it_otel_residual"),
+    wf = Workflow(name="residual_test", nodes=_detection_nodes("R"),
                   targets=[TargetSpec(source_type="mock", query="rpm", entity="svc")])
     batch = Pipeline(wf).run(now=window["ts"].iloc[-1].to_pydatetime() + timedelta(seconds=30), strict=True)
     return len({e.ts for e in batch.anomalies if e.level == ANOMALY})

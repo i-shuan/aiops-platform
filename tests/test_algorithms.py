@@ -116,9 +116,10 @@ def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
     assert nodes["fetch"].params["train_lookback_minutes"] >= 10080
 
 
-@pytest.mark.parametrize("name", ["it_otel", "factory"])
+@pytest.mark.parametrize("name", ["factory"])
 def test_default_detection_is_a_majority_vote_of_three_detectors(name):
-    """真實資料回放：多數決比聯集少 88% 的警報分鐘數。it_otel 與 factory 預設都是這個組合。
+    """真實資料回放：多數決比聯集少 88% 的警報分鐘數。factory 預設是這個組合（it_otel 改成 R+SNR，
+    見 tests/test_residual_ensemble.py::test_it_otel_detects_with_three_complementary_votes_and_two_bypass_tracks）。
     雙軌制之後多了一個不投票的致命硬上限節點（fatal）：排在裁決前、列在 bypass，統計三票的組成不變。"""
     from aiops.interfaces.runner import workflow_path
 

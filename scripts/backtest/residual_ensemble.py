@@ -1,10 +1,6 @@
-"""四組偵測回測，用 ES 的每分鐘請求數序列：
-  A      it_otel               hourly_baseline＋mad＋quantile_drift，detector.ensemble 多數決
-  R      it_otel_residual      hourly_baseline＋residual_shift＋residual_chronic 多數決＋旁路漂移票
-  R+SNR  it_otel_residual_snr  R 的投票節點開 snr（p_fa 換算門檻）＋detector.soft_vote 軟投票
-  A+SNR  it_otel_snr           A 的投票節點開 snr＋detector.soft_vote 軟投票
+"""偵測回測，用 ES 的每分鐘請求數序列。組別（R+SNR 現行＝it_otel；R、A、A+SNR 是對照變體）見 scripts/backtest/variants.py。
 
-偵測走真的 Pipeline：從各 workflow YAML 取出偵測節點（fetch 之後到裁決節點為止，含 hard_limit 與 bypass），
+偵測走真的 Pipeline：從 it_otel.yaml 取出偵測節點（fetch 之後到裁決節點為止，含 hard_limit 與 bypass），
 fetch 換成回放用的 replay.window（每輪給最近 60 分鐘，同 it_otel 的 lookback_minutes），基準線由記憶體版 Hooks 保存——
 第一輪沒有基準線時給訓練段 train_df、引擎訓練並交出 new_detector_states，之後每輪載入同一份（等同正式環境基準線還沒到期）。
 每 5 分鐘一輪（同 CronJob 週期）；一分鐘只要在任何一輪被 detector.ensemble 判成異常、或被 bypass 節點
@@ -27,25 +23,24 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from aiops.engine.operator import BaseOperator  # noqa: E402
-from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow  # noqa: E402
+from aiops.engine.pipeline import Pipeline, TargetSpec, Workflow  # noqa: E402
 from aiops.engine.registry import OperatorRegistry  # noqa: E402
 from aiops.engine.types import ANOMALY  # noqa: E402
-from aiops.interfaces.runner import load_all, workflow_path  # noqa: E402
+from aiops.interfaces.runner import load_all  # noqa: E402
 from es_series import load_series  # noqa: E402
+from scripts.backtest.variants import VARIANTS as ALL_VARIANTS, VOTERS, detection_nodes  # noqa: E402
 
 warnings.filterwarnings("ignore")
 TZ = "Asia/Taipei"
 LOOKBACK, STEP = 60, 5
 SERVICES = ["mes-api", "wip-worker", "report-svc", "order-svc", "cart-api", "pay-api"]
-VARIANTS = {"A": "it_otel", "R": "it_otel_residual", "R+SNR": "it_otel_residual_snr", "A+SNR": "it_otel_snr"}
-VOTERS = ("detector.ensemble", "detector.soft_vote")
+VARIANTS = {v: "it_otel" for v in ALL_VARIANTS}  # 組別 -> 從哪條管線改出來（scripts/backtest/variants.py）
 INJECTIONS = {"step": np.full(20, 0.3), "ramp": np.r_[np.linspace(1.0, 0.3, 15), np.full(20, 0.3)],
               "mild": np.full(60, 0.8)}
 
@@ -86,22 +81,10 @@ class MemoryHooks:
     def finalize_batch(self, ctx): ...
 
 
-def detection_nodes(workflow: str) -> list[NodeSpec]:
-    """workflow YAML 的偵測段：fetch 之後到 detector.ensemble（含），fetch 換成回放。裁決保留成員事件，才算得出各票。"""
-    raw = yaml.safe_load(workflow_path(workflow).read_text(encoding="utf-8"))["nodes"]
-    stop = next(i for i, n in enumerate(raw) if n["operator"] in VOTERS)
-    nodes = [NodeSpec(name="fetch", operator="replay.window")]
-    for n in raw[1:stop + 1]:
-        params = dict(n.get("params") or {})
-        if n["operator"] in VOTERS:
-            params["keep_members"] = True
-        nodes.append(NodeSpec(name=n["name"], operator=n["operator"], params=params))
-    return nodes
-
-
 class Runner:
-    def __init__(self, workflow: str, service: str, train: pd.DataFrame):
-        self.pipe = Pipeline(Workflow(name=f"replay_{workflow}", nodes=detection_nodes(workflow),
+    def __init__(self, workflow: str, service: str, train: pd.DataFrame, variant: str = "R+SNR"):
+        self.pipe = Pipeline(Workflow(name=f"replay_{workflow}", nodes=detection_nodes(
+            "replay.window", variant, workflow=workflow, keep_members=True),
                                       targets=[TargetSpec(source_type="mock", query=f"rpm:{service}", entity=service)]),
                              MemoryHooks())
         self.train = train
@@ -176,7 +159,7 @@ def run_service(service: str, df: pd.DataFrame) -> dict:
            "訓練天": train_days, "測試天": round(days, 2)}
     all_rounds = range(LOOKBACK - 1, len(test), STEP)
     for key, workflow in VARIANTS.items():
-        runner = Runner(workflow, service, train)
+        runner = Runner(workflow, service, train, key)
         verdict, member = runner.flags(test, all_rounds)
         r = {"workflow": workflow,
              "各票_分/週": {k: round(int(v.sum()) * per_week) for k, v in member.items()},
