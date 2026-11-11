@@ -176,7 +176,7 @@ def test_legacy_llm_operators_still_default_to_noop():
 
 
 # 告警路徑（偵測 → 收斂 → 計分 → 抑制 → 通知）的算子；rca 也列進來：證據層與機率模型不准 import enrichment
-# （docs/COGNITIVE_RCA_DESIGN.md 第 4 節），LLM 只能透過 ctx.rca_evidence 進到 RCA 判斷
+# LLM 只能透過 ctx.rca_evidence 進到 RCA 判斷
 _NO_LLM_STAGES = ("ingestion", "detectors", "ensemble", "grouping", "scoring", "suppression", "notification", "rca")
 
 

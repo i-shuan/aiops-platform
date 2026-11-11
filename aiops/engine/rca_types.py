@@ -1,14 +1,14 @@
 """認知型 RCA 三段之間的接口型別（docs/COGNITIVE_RCA_DESIGN.md）。
 
 事實（Fact）由證據層從原始資料算出，確定性、不帶結論；證據項（EvidenceItem）由 LLM 從非結構化日誌抽出，
-必須通過驗證才進得了機率模型。兩者都是 frozen：建立後不准改。
+必須通過驗證才進得了判斷層。兩者都是 frozen：建立後不准改。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-# LLM 只能從這份封閉詞表挑，詞表外的一律拒絕。新增一種證據 = 在這裡加一項，並在機率模型補它的先驗。
+# LLM 只能從這份封閉詞表挑，詞表外的一律拒絕。新增一種證據 = 在這裡加一項。
 EVIDENCE_KINDS: frozenset[str] = frozenset({
     "circuit_breaker_open",       # 呼叫端熔斷：快速失敗，不是服務自己壞
     "gc_pause",                   # JVM 停頓
@@ -45,7 +45,7 @@ class EvidenceItem:
     kind: str                        # 必須在 EVIDENCE_KINDS
     entity: str                      # 必須是事件群或拓撲裡已知的實體
     state: Literal["present", "absent"] = "present"
-    confidence: float = 1.0          # 0～1，LLM 自評；機率模型把它當軟證據
+    confidence: float = 1.0          # 0～1，LLM 自評
     quote: str = ""
     log_ts: str = ""                 # 該筆日誌的時間（ISO），給報告引用
 

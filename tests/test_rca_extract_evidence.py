@@ -96,7 +96,7 @@ def _reset_calls(monkeypatch):
 
 
 def _ctx(logs=True) -> PipelineContext:
-    ctx = PipelineContext(pipeline="rca_report_cognitive", now=NOW)
+    ctx = PipelineContext(pipeline="rca_report_llm", now=NOW)
     ev = [AnomalyEvent(entity=e, metric="latency", ts=NOW - timedelta(minutes=5), score=5.0)
           for e in ("checkout", "order-svc", "inventory")]
     ctx.incidents = [Incident(events=ev)]

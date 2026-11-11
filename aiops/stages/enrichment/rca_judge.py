@@ -1,6 +1,6 @@
 """rca.root_cause.llm：把呼叫圖（DAG）＋證據層事實＋驗證過的日誌證據一起交給 LLM，由 LLM 判斷根因。
 
-跟 rca.root_cause.bayes（機率模型）、rca.root_cause.evidence（舊判斷層）並排的第三個根因算子，用 rca_report_llm.yaml 掛上。
+新引擎的根因算子（rca_report_llm.yaml 掛上），跟確定性的 rca.root_cause.evidence（舊判斷層、rca_report.yaml）並排。
 放在 enrichment/ 是因為它要呼叫 LLM（stages/ 其他地方不准 import enrichment、不准連外）；契約仍是 RootCauseOperator。
 
 LLM 的每個候選都要過驗證，不過就丟掉並記原因（ctx.log）：

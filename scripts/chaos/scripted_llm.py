@@ -6,7 +6,7 @@
 它**不代表真模型的抽取品質**。規則抓得到的句子真模型不一定抓得到，反過來也一樣；
 真模型的品質要另外用真實供應商與錄製回應驗，**不能拿混沌在這個假 LLM 下的通過當成「LLM 抽取有效」的證據**。
 
-放在 scripts/chaos/ 而不是 aiops/：CLAUDE.md §100.2（生產程式不准有測試特化分支），合約 docs/COGNITIVE_RCA_DESIGN.md §5
+放在 scripts/chaos/ 而不是 aiops/：CLAUDE.md §100.2（生產程式不准有測試特化分支），原本的合約文件已隨 cognitive 引擎移除
 也寫明假供應商由測試或混沌腳本自己用 registry.register 登記。
 
 模式（用 YAML／harness 傳進來的 model 字串選，factory 介面只有 (model, base_url, api_key)）：
@@ -16,6 +16,10 @@
 - slow[:秒數]   先睡（預設 35 秒，超過一般 30 秒逾時），再回 faithful 的結果；平台若沒有自己的逾時，就會「等到了」而判成 ok，這正是要抓的
 - garbage       回截斷的壞 JSON
 - hallucinate   回詞表內、實體已知、但 quote 根本不在日誌裡的項目（測 quote 逐字驗證）
+- judge_faithful     給根因判斷節點（rca.root_cause.llm）用：從 prompt 的「已驗證日誌證據」挑第一筆屬於已知實體的，
+                     指認那個實體、cites 引用它、reason 不帶任何數字。測的是「判斷節點接得上、驗證不會誤殺一個有根據的答案」，
+                     不是判斷品質（它只會照抄證據的實體，不懂呼叫圖）。
+- judge_hallucinate  給根因判斷節點用：指認一個不在已知實體裡的服務（測實體白名單；驗證要把它全部拒絕 -> undetermined）
 
 JSON 形狀（合約 §3 EvidenceItem）：
     {"evidence": [{"kind": "circuit_breaker_open", "entity": "ord-svc", "state": "present",
@@ -36,7 +40,7 @@ from aiops.stages.enrichment.base import BaseLLM, LLMError
 from aiops.stages.enrichment.registry import register
 
 NAME = "chaos_scripted"
-MODES = ("faithful", "down", "slow", "garbage", "hallucinate")
+MODES = ("faithful", "down", "slow", "garbage", "hallucinate", "judge_faithful", "judge_hallucinate")
 SLOW_DEFAULT_S = 35.0
 
 # (證據 kind, 規則, 自評信心)。kind 必須在 aiops.engine.rca_types.EVIDENCE_KINDS
@@ -143,6 +147,30 @@ def hallucinate(prompt: str) -> list[dict]:
              "quote": HALLUCINATED_QUOTE, "log_ts": ""}]
 
 
+_KNOWN = "已知實體（entity 只能從這裡挑）："
+_EVIDENCE = "日誌證據（已驗證 quote 逐字出現在原日誌）："
+HALLUCINATED_ENTITY = "fabricated-svc"  # 不在任何世界裡的服務名
+
+
+def _json_after(prompt: str, marker: str):
+    i = prompt.find(marker)
+    return next(_json_chunks(prompt[i + len(marker):]), None) if i >= 0 else None
+
+
+def judge(prompt: str, faithful: bool) -> dict:
+    """根因判斷節點的回覆（形狀照 aiops/stages/enrichment/rca_judge.build_prompt 的「請輸出」）。"""
+    if not faithful:
+        return {"candidates": [{"entity": HALLUCINATED_ENTITY, "confidence": 0.99, "subtype": "", "resource": "",
+                                "reason": "記憶體耗盡導致整條鏈路失敗", "cites": ["E1"]}], "note": ""}
+    entities = set(_json_after(prompt, _KNOWN) or [])
+    rows = [e for e in (_json_after(prompt, _EVIDENCE) or []) if isinstance(e, dict) and e.get("entity") in entities]
+    if not rows:
+        return {"candidates": [], "note": "沒有屬於已知實體的已驗證日誌證據"}
+    e = rows[0]
+    return {"candidates": [{"entity": e["entity"], "confidence": 0.6, "subtype": "", "resource": "",
+                            "reason": f"已驗證的日誌證據顯示 {e['kind']}", "cites": [e["id"]]}], "note": ""}
+
+
 class ScriptedLLM(BaseLLM):
     name = NAME
 
@@ -164,6 +192,10 @@ class ScriptedLLM(BaseLLM):
             return rec["reply"]
         if self.mode == "slow":
             time.sleep(self.sleep_s)
+        if self.mode.startswith("judge_"):
+            reply = json.dumps(judge(prompt or "", self.mode == "judge_faithful"), ensure_ascii=False)
+            rec["reply"] = reply[:300]
+            return reply
         items = hallucinate(prompt) if self.mode == "hallucinate" else extract(prompt or "")
         rec["reply"] = json.dumps({"evidence": items}, ensure_ascii=False)[:300]
         return json.dumps({"evidence": items}, ensure_ascii=False)
@@ -174,10 +206,10 @@ def _scripted(model: str, base_url: str, api_key: str | None) -> BaseLLM:
     return ScriptedLLM(model)
 
 
-# ── 接線：把 cognitive workflow 裡的 LLM 節點指到這個假供應商 ──
+# ── 接線：把 RCA workflow 裡的 LLM 節點指到這個假供應商 ──
 LLM_OPERATORS = ("enrichment.extract_evidence", "enrichment.rca_narrator", "rca.root_cause.llm")
 JUDGE = "rca.root_cause.llm"
-JUDGE_MODES = ("down", "slow", "garbage")   # 假 LLM 只會抽證據、不會判斷根因：判斷節點只能接失效模式
+JUDGE_MODES = ("down", "slow", "garbage")   # 判斷節點直接用的失效模式；faithful／hallucinate 換成 judge_* 版本
 _TIMEOUT_KEYS = ("timeout_seconds", "timeout_s", "timeout")
 
 
@@ -185,21 +217,25 @@ def node_timeout(params: dict, default: float = 30.0) -> float:
     return float(next((params[k] for k in _TIMEOUT_KEYS if k in params), default))
 
 
+def judge_mode(mode: str) -> str:
+    """判斷節點要接的模式：失效模式原樣；faithful -> judge_faithful、hallucinate -> judge_hallucinate。"""
+    return mode if mode in JUDGE_MODES else {"faithful": "judge_faithful", "hallucinate": "judge_hallucinate"}[mode]
+
+
 def wire(wf, mode: str) -> list[str]:
     """把 LLM 節點的 provider 換成 chaos_scripted（model 欄位帶模式）。回傳接上的節點名稱；一個都沒有就報錯，
-    不然「LLM 全掛」場景會在 LLM 根本沒接上的情況下假裝通過。slow 模式睡的秒數 = 節點逾時 + 5。"""
-    if mode not in JUDGE_MODES and any(n.operator == JUDGE for n in wf.nodes):
-        raise RuntimeError(f"{wf.name} 的根因由 LLM 判斷，腳本化假 LLM（{mode}）不會判斷："
-                           f"請用 --llm yaml（真的 LLM）或失效模式 {'／'.join(JUDGE_MODES)}")
+    不然「LLM 全掛」場景會在 LLM 根本沒接上的情況下假裝通過。slow 模式睡的秒數 = 節點逾時 + 5。
+    根因判斷節點（rca.root_cause.llm）接 judge_mode(mode)：抽證據與判斷的回覆形狀不同。"""
     hit = []
     for n in wf.nodes:
         if n.operator not in LLM_OPERATORS:
             continue
-        model = f"slow:{node_timeout(n.params) + 5}" if mode == "slow" else mode
+        node_mode = judge_mode(mode) if n.operator == JUDGE else mode
+        model = f"slow:{node_timeout(n.params) + 5}" if node_mode == "slow" else node_mode
         n.params = {**n.params, "provider": NAME, "model": model}
         hit.append(n.name)
     if not hit:
-        raise RuntimeError(f"cognitive workflow {wf.name} 裡沒有 LLM 節點（{'／'.join(LLM_OPERATORS)}），假 LLM 接不上")
+        raise RuntimeError(f"workflow {wf.name} 裡沒有 LLM 節點（{'／'.join(LLM_OPERATORS)}），假 LLM 接不上")
     return hit
 
 

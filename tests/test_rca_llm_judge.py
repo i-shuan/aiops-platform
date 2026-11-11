@@ -252,16 +252,6 @@ def test_narrator_labels_llm_candidates_as_self_rated_confidence_not_probability
     assert "payment（信心 0.8）" in by_key["root_candidates"]["body"] and "機率" not in by_key["root_candidates"]["title"]
 
 
-def test_llm_workflow_loads_and_differs_from_cognitive_only_in_the_judge_node():
-    load_all()
-    llm, cog = (load_workflow(workflow_path(n)) for n in ("rca_report_llm", "rca_report_cognitive"))
-    assert [n.name for n in llm.nodes] == [n.name for n in cog.nodes]
-    diff = [(a.operator, b.operator) for a, b in zip(llm.nodes, cog.nodes) if a.operator != b.operator]
-    assert diff == [("rca.root_cause.llm", "rca.root_cause.bayes")]
-    same = [(a.name, a.params, b.params) for a, b in zip(llm.nodes, cog.nodes) if a.operator == b.operator and a.params != b.params]
-    assert same == []  # 撈取、證據層、報告、摘要的參數完全相同：比的是判斷層
-
-
 # ── 資源（外部 API、資料庫）：不是實體，但要出現在圖上；LLM 指名後數字由事實抄進 attribution ──
 
 

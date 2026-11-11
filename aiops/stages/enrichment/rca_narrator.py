@@ -1,6 +1,6 @@
-"""認知型 RCA 的戰情摘要（docs/COGNITIVE_RCA_DESIGN.md 第 5 節「摘要作者」）。
+"""新引擎（rca_report_llm）的戰情摘要。
 
-放在根因排名（rca.root_cause.bayes）與 rca.report 之後，只吃已經算好的東西：判定狀態、機率候選、證據層事實、
+放在根因排名（rca.root_cause.llm）與 rca.report 之後，只吃已經算好的東西：判定狀態、根因候選、證據層事實、
 LLM 抽出且驗證過的證據、命中的 Runbook。LLM 只負責把它們寫成人看得懂的摘要，**不下新的結論**。
 
 驗證沿用 narrative.validate（每條 claim 要引用存在的段落、不准提事件群與這些段落以外的已知實體、數字要在段落原文裡）；
@@ -46,7 +46,7 @@ def build_sections(ctx: PipelineContext) -> list[dict[str, str]]:
     else:
         status = "判定狀態：ok"
     out.append({"key": "rca_status", "title": "判定狀態", "body": status})
-    # 候選是誰判的照實寫：機率模型的分數是後驗機率，LLM 判斷（rca.root_cause.llm）的分數是它自評的信心
+    # 候選是誰判的照實寫：LLM 判斷（rca.root_cause.llm）的分數是它自評的信心；其他（原本的機率模型，已移除）照舊寫機率
     by_llm = ctx.rca_root_algorithm == "rca.root_cause.llm"
     title, word = ("根因候選（LLM 判斷）", "信心") if by_llm else ("根因候選（機率模型）", "機率")
     if ctx.rca_root_candidates:

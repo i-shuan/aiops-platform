@@ -80,7 +80,7 @@ from scripts.chaos import scen_traffic_amp as A  # noqa: E402
 SCENARIOS = {1: scenario_1, 2: D.scenario_2, 3: D.scenario_3, 4: D.scenario_4, 5: D.scenario_5,
              6: L.scenario_6, 7: L.scenario_7, 8: L.scenario_8, 9: L.scenario_9, 10: L.scenario_10, 11: D.scenario_11,
              12: Q.scenario_12, 13: A.scenario_13}
-from scripts.chaos.scen_cognitive import scenario_24 as _s24; SCENARIOS[24] = _s24  # noqa: E402,E702  LLM 全掛（認知型 RCA）
+from scripts.chaos.scen_llm_outage import scenario_24 as _s24; SCENARIOS[24] = _s24  # noqa: E402,E702  LLM 全掛（rca_report_llm）
 
 
 def run(numbers: list[int] | None = None) -> list[H.Result]:

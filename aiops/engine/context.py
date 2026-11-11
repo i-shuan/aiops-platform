@@ -77,7 +77,7 @@ class AnomalyResult:
 
 @dataclass
 class DetectorEvidence:
-    """偵測節點開了 snr（節點參數）時交出的逐點證據：給 detector.soft_vote 軟投票、之後也能當連續證據餵給貝葉斯。
+    """偵測節點開了 snr（節點參數）時交出的逐點證據：給 detector.soft_vote 軟投票、之後也能當連續證據餵給機率模型。
 
     snr[i] = 這個節點的統計量在第 i 點的偏離 / 該統計量的雜訊尺度（也就是節點自己的分數，連續值、不是布林）。
     threshold 跟 snr 同單位：由目標虛警率 p_fa 換算（threshold_source 說是怎麼換的，見 stages/detectors/base.snr_threshold）。
@@ -339,7 +339,7 @@ class PipelineContext:
     incidents: list[Incident] = field(default_factory=list)
     incidents_built: bool = False  # ensure_incidents 建過了：之後清單變空也不再從 anomalies 重建
     incident_ids: dict[str, int] = field(default_factory=dict)  # 事件群 fingerprint -> 已存的 id（持久化後填）
-    # 認知型 RCA（docs/COGNITIVE_RCA_DESIGN.md）：事實 → LLM 抽出的證據 → 機率排名。status 為 undetermined 時報告照出但沒有根因結論
+    # 認知型 RCA（docs/COGNITIVE_RCA_DESIGN.md）：事實 → LLM 抽出的證據 → 根因判斷（rca.root_cause.llm）。status 為 undetermined 時報告照出但沒有根因結論
     rca_facts: list[Fact] = field(default_factory=list)
     rca_evidence: list[EvidenceItem] = field(default_factory=list)
     rca_status: RcaStatus = "ok"

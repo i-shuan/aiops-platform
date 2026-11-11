@@ -1,4 +1,6 @@
-"""認知型 RCA 的報告整合：facts 段落、to_result 的判定狀態與事實、rca_report_cognitive.yaml 載得進來。"""
+"""新引擎（rca_report_llm）的報告整合：facts 段落、to_result 的判定狀態與事實、管線節點順序。
+
+原本也測 rca_report_cognitive（rca.root_cause.bayes，已移除）；事實段落與 to_result 的測試不變，只把管線換成 rca_report_llm。"""
 from datetime import UTC, datetime
 
 from aiops.engine.context import PipelineContext, ReportSection
@@ -12,7 +14,7 @@ NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
 
 
 def _ctx(**kw) -> PipelineContext:
-    ctx = PipelineContext(pipeline="rca_report_cognitive", now=NOW)
+    ctx = PipelineContext(pipeline="rca_report_llm", now=NOW)
     ctx.incidents = [Incident(events=[AnomalyEvent(entity="ord-svc", ts=NOW, score=9.0, detector="detector.mad",
                                                    metric="m", value=1.0)])]
     for k, v in kw.items():
@@ -46,7 +48,7 @@ def test_section_skipped_when_nothing_to_show():
     assert ctx.rca_sections == [] and ctx.rca_skipped == ["facts"]
 
 
-def test_to_result_shape_unchanged_for_legacy_and_extended_for_cognitive():
+def test_to_result_shape_unchanged_for_legacy_and_extended_for_the_new_engine():
     legacy = _ctx(rca_sections=[ReportSection("summary", "摘要", "x")])
     assert "facts" not in legacy.to_result() and "status" not in legacy.to_result()["root_cause"]
     cog = _ctx(rca_sections=[ReportSection("summary", "摘要", "x")], rca_status="undetermined",
@@ -56,11 +58,11 @@ def test_to_result_shape_unchanged_for_legacy_and_extended_for_cognitive():
     assert out["facts"][0]["kind"] == "traffic_drop" and out["evidence"] == []
 
 
-def test_cognitive_workflow_loads_and_has_the_cognitive_nodes_in_order():
+def test_llm_workflow_loads_and_has_the_new_engine_nodes_in_order():
     load_all()
-    wf = load_workflow(workflow_path("rca_report_cognitive"))
+    wf = load_workflow(workflow_path("rca_report_llm"))
     ops = [n.operator for n in wf.nodes]
     order = ["ingestion.incident_traces", "ingestion.incident_logs", "rca.facts", "enrichment.extract_evidence",
-             "rca.root_cause.bayes", "rca.report", "enrichment.rca_narrator"]
+             "rca.root_cause.llm", "rca.report", "enrichment.rca_narrator"]
     assert [ops.index(o) for o in order] == sorted(ops.index(o) for o in order)
     assert "rca.root_cause.evidence" not in ops  # 新管線不掛舊判斷層

@@ -1,7 +1,7 @@
 name: rca_report_llm
-description: "LLM 判斷型 RCA：事實 → LLM 證據抽取 → 呼叫圖＋事實＋證據交給 LLM 判斷根因 → 報告 → LLM 戰情摘要（跟 rca_report、rca_report_cognitive 並排對照；LLM 失效時報告照出、根因寫無法判定）"
+description: "LLM 判斷型 RCA：事實 → LLM 證據抽取 → 呼叫圖＋事實＋證據交給 LLM 判斷根因 → 報告 → LLM 戰情摘要（RCA 主力；跟確定性的 rca_report 並排對照；LLM 失效時報告照出、根因寫無法判定）"
 nodes:
-  # 撈取三段與證據層跟 rca_report_cognitive.yaml 相同：三個引擎吃同一份原始資料，差別只在判斷層
+  # 撈取三段與證據層：跟 rca_report.yaml 吃同一份原始資料（trace、日誌）
   - name: fetch_traces
     operator: ingestion.incident_traces
     params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,

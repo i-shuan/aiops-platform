@@ -1,15 +1,20 @@
-"""場景 24：LLM 全掛（認知型 RCA，docs/COGNITIVE_RCA_DESIGN.md §1 第 3 條、§6）。
+"""場景 24：LLM 全掛（rca_report_llm 的降級；CLAUDE.md §1 第 3 條：RCA 路徑的 LLM 是必要元件，失效時報告照出、標 undetermined）。
 
 世界：ord-svc 呼叫外部金流 payment-gw:443；12:00 起金流全掛，ord-svc 的熔斷器打開，錯誤日誌是
 「CircuitBreaker 'payment-gw' is OPEN and does not permit further calls」（Resilience4j 的原句）。
-偵測只跑一次，同一個事件群用 rca_report_cognitive 跑五次，每次假 LLM（scripted_llm.py）換一種模式：
+偵測只跑一次，同一個事件群用 rca_report_llm 跑五次，每次假 LLM（scripted_llm.py）換一種模式
+（證據抽取與戰情摘要接這個模式；根因判斷節點 rca.root_cause.llm 接 scripted_llm.judge_mode：失效模式原樣，
+hallucinate -> judge_hallucinate、faithful -> judge_faithful）：
 
 - 24a down／24b slow／24c garbage／24d hallucinate：LLM 不可用或回的東西不能信。報告要照出、rca_status == "undetermined"、
   原因代碼存在、證據層的事實與原始 trace／日誌入口還在、**沒有編造的根因**（不准退回舊規則硬猜）。
-- 24e faithful（對照組）：假 LLM 照規則抽出熔斷證據，驗證要讓它過（quote 逐字在日誌裡），狀態是 ok。
-  這組只證明「平台接得上、驗證不會誤殺」，不證明真模型抽得到（見 scripted_llm.py 檔頭的誠實限制）。
+  24d：證據抽取全部被 quote 逐字驗證拒絕 -> 上游已經 undetermined，判斷節點不會被呼叫（rca_judge.py 的既有行為）。
+- 24e faithful（對照組）：假 LLM 照規則抽出熔斷證據，驗證要讓它過（quote 逐字在日誌裡）；判斷節點照抄那筆證據的實體，
+  驗證也要讓它過，狀態是 ok、有根因候選。這組只證明「平台接得上、驗證不會誤殺」，不證明真模型抽得到、判得對
+  （見 scripted_llm.py 檔頭的誠實限制）。
 
-cognitive workflow 還沒建立時，五列都標「未執行（尚無 cognitive 引擎）」，不假裝通過、不退回 legacy。
+改寫自原本對 rca_report_cognitive（rca.root_cause.bayes，已移除）的版本：斷言條件一條都沒改，只有 24e 一條斷言的
+說明文字「機率模型拿到證據有輸出」改成「判斷節點拿到證據有輸出」（條件仍是 >= 1 個候選）。
 """
 from __future__ import annotations
 
@@ -25,8 +30,8 @@ T0 = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
 INC = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
 CB_MESSAGE = "CircuitBreaker 'payment-gw' is OPEN and does not permit further calls"
 
-# 只有 cognitive 引擎才有意義的場景：run.py 不帶場景編號（全部）且 --rca legacy 時不跑，legacy 全量輸出跟以前逐列相同
-COGNITIVE_ONLY = {24}
+# 只對 LLM 引擎有意義的場景：run.py 不帶場景編號（全部）且 --rca legacy 時不跑，legacy 全量輸出跟以前逐列相同
+LLM_ONLY = {24}
 
 MODES = [("24a", "down", "LLM 連不上（丟 LLMError）"),
          ("24b", "slow", "LLM 逾時（睡過節點逾時 + 5 秒）"),
@@ -34,7 +39,7 @@ MODES = [("24a", "down", "LLM 連不上（丟 LLMError）"),
          ("24d", "hallucinate", "LLM 回 quote 不在日誌裡的證據（幻覺）"),
          ("24e", "faithful", "對照組：假 LLM 照規則抽出熔斷證據")]
 INJECTED = (f"ord-svc 呼叫 payment-gw:443（external/http）：12:00 起 100% 失敗、熔斷打開快速失敗，ord-svc 交易失敗、"
-            f"錯誤日誌「{CB_MESSAGE}」；同一事件群用 rca_report_cognitive 跑，假 LLM 模式：")
+            f"錯誤日誌「{CB_MESSAGE}」；同一事件群用 rca_report_llm 跑，假 LLM 模式：")
 
 
 def _mins(lo: datetime, hi: datetime) -> int:
@@ -85,19 +90,13 @@ def _check_faithful(r: H.Result, out: dict, calls: list[dict], log_texts: set[st
     verbatim = bool(cb) and all(any(e.quote in t for t in log_texts) for e in cb)
     r.check("進來的證據 quote 逐字出現在世界的日誌裡", "全部逐字", f"{[e.quote for e in cb]}", verbatim)
     c = out.get("root_cause", {}).get("candidates", [])
-    r.check("有根因候選（機率模型拿到證據有輸出）", "≥1 個", f"{[(x['entity'], x['score']) for x in c[:3]]}", bool(c))
+    r.check("有根因候選（判斷節點拿到證據有輸出）", "≥1 個", f"{[(x['entity'], x['score']) for x in c[:3]]}", bool(c))
     r.notes.append(f"假 LLM 呼叫：{[(x['mode'], x['system'][:40], x['prompt_chars']) for x in calls]}；errors={out['_errors']}")
 
 
 def scenario_24() -> list[H.Result]:
-    """LLM 全掛（認知型 RCA 的降級）"""
+    """LLM 全掛（rca_report_llm 的降級）"""
     results = _results()
-    why = H.cognitive_missing()
-    if why:
-        for r in results:
-            r.blocked = "尚無 cognitive 引擎"
-            r.notes.append(why)
-        return results
     end = INC + timedelta(minutes=45)
     w = World(T0, _mins(T0, end + timedelta(minutes=20)), [
         Svc("ord-svc", "POST /orders", 30.0, [Call("payment-gw:443", 1.0, "external", "http", 20.0, 0.0, name="POST payment-gw")],
@@ -121,13 +120,13 @@ def scenario_24() -> list[H.Result]:
             r.check("偵測到 ord-svc 事件群（失敗數飆升）", "有", bool(target), bool(target))
         if not target:
             return results
-        wf_rca = H.load_workflow(H.workflow_path(H.RCA_WORKFLOWS["cognitive"]))
+        wf_rca = H.load_workflow(H.workflow_path(H.RCA_WORKFLOWS["llm"]))
         sleep_s = max((LLM.node_timeout(n.params) + 5 for n in wf_rca.nodes if n.operator in LLM.LLM_OPERATORS), default=0.0)
         for r, (_, mode, _) in zip(results, MODES):
             before = len(LLM.CALLS)
             t = time.time()
             try:
-                out = H.rca(target["id"], mode="cognitive", llm=mode)
+                out = H.rca(target["id"], mode="llm", llm=mode)
             except Exception as e:  # noqa: BLE001  整份報告失敗本身就是要抓的結果：記成未通過，其他模式照跑
                 r.check("報告照出（整份沒失敗）", "產出報告", f"{type(e).__name__}: {str(e)[:200]}", False)
                 continue

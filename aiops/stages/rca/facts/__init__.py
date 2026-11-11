@@ -1,7 +1,7 @@
 """認知型 RCA 的證據層（rca.facts，docs/COGNITIVE_RCA_DESIGN.md §3、§5）：原始資料 -> list[Fact]。
 
 只陳述「資料裡發生了什麼」，不下結論：不寫誰是兇手、不判斷是時鐘偏移還是逾時、不判斷是不是「自己的錯」、
-不判斷佇列算不算積壓。結論交給機率模型（rca.root_cause.bayes）。
+不判斷佇列算不算積壓。結論交給判斷層（rca.root_cause.llm）。
 
 - spans.py   ：入口耗時／失敗率、自身耗時增量、資源等待增量、流入流量、呼叫邊的流量變化與扇出、子 span 超出父 span
 - logs.py    ：錯誤日誌樣板的頻率變化
