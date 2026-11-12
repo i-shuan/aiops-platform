@@ -20,6 +20,7 @@ from aiops.engine.params import positive
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.enrichment import narrative
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
+from aiops.stages.enrichment.masking import MASK_FAILED, Masker, MaskError, MaskPolicy, mask_or_fail, rca_keep_names
 from aiops.stages.enrichment.evidence_extractor import (CallFailure, check_provider, complete_with_policy, known_entities,
                                                         resolve_provider)
 
@@ -114,13 +115,17 @@ def validate(reply: dict[str, Any], ctx: PipelineContext, sections: list[dict[st
 @OperatorRegistry.register("enrichment.rca_narrator")
 class RcaNarrator(BaseOperator):
     """戰情摘要（見模組說明）。params：provider（不寫看環境變數 AIOPS_LLM_PROVIDER）、model、base_url、json_mode（預設 true）、
-    timeout_seconds（預設 30）。不重試：摘要是旁路，失敗就用模板。"""
+    timeout_seconds（預設 30）、mask_hostnames（預設 false，見 masking.py）。不重試：摘要是旁路，失敗就用模板。
+    送 LLM 的是遮過的段落（驗證也對遮過的那份比）；模板不送出，用原本的段落。"""
 
     scope = "batch"
 
     def __init__(self, provider: str | None = None, model: str | None = None, base_url: str | None = None,
-                 json_mode: bool = True, timeout_seconds: float = 30.0):
+                 json_mode: bool = True, timeout_seconds: float = 30.0, mask_hostnames: bool = False):
         check_provider(provider)
+        if not isinstance(mask_hostnames, bool):
+            raise ValueError(f"mask_hostnames 必須是 true／false，不是 {mask_hostnames!r}")
+        self.mask = MaskPolicy(mask_hostnames=mask_hostnames)
         self.provider, self.model, self.base_url, self.json_mode = provider, model, base_url, bool(json_mode)
         self.timeout = positive("timeout_seconds", timeout_seconds)
 
@@ -131,10 +136,14 @@ class RcaNarrator(BaseOperator):
         fallback = template(ctx, sections)
         ctx.llm_summary, ctx.llm_claims, ctx.llm_generated_by, ctx.llm_rejected = (
             fallback["summary"], fallback["claims"], "template", None)
+        masker = Masker(self.mask, keep=rca_keep_names(ctx) | known_entities(ctx))
         try:
+            sections = mask_or_fail(masker, sections)
             text = complete_with_policy(resolve_provider(self.provider), self.model, self.base_url, self.json_mode,
-                                        SYSTEM, build_prompt(sections), self.timeout, 0)
+                                        SYSTEM, build_prompt(sections), self.timeout, 0, masker=masker)
             reply = parse_json_reply(text)
+        except MaskError as e:
+            return self._fallback(ctx, f"{MASK_FAILED}：{e}")
         except CallFailure as f:
             return self._fallback(ctx, f.reason())
         except LLMError as e:
