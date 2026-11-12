@@ -70,7 +70,8 @@ class MockSpec(BaseDataSourceSpec):
         return members
 
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
-                    max_spans: int = 20000, field_map: dict[str, str] | None = None) -> tuple[list[dict], bool]:
+                    max_spans: int = 20000, field_map: dict[str, str] | None = None,
+                    environment: str | None = None) -> tuple[list[dict], bool]:
         """假的分散式 trace：每分鐘一條，services 依序串成一條呼叫鏈（第一個呼叫第二個、第二個呼叫第三個…），
         每個服務再各有一個呼叫資料庫的子 span（同服務內，不算跨服務呼叫）。沒給 services 就用 MOCK_TRACE_CHAIN。"""
         chain = list(services) if services else list(MOCK_TRACE_CHAIN)
@@ -89,7 +90,8 @@ class MockSpec(BaseDataSourceSpec):
         return spans, False
 
     def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
-                   max_logs: int = 5000, field_map: dict[str, str] | None = None) -> tuple[list[dict], bool]:
+                   max_logs: int = 5000, field_map: dict[str, str] | None = None,
+                   environment: str | None = None) -> tuple[list[dict], bool]:
         """假的錯誤日誌：每個服務每 5 分鐘一筆快取未命中（平常就有的雜訊，數字每次不同）。
         只提供管線打通用；要測「暴增」請用合成資料產生器的日誌，或測試裡自己塞 LogRecord。"""
         logs = []

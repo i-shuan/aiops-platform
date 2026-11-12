@@ -150,7 +150,7 @@ RCA 管線
 - 圖可以有環，不是 DAG。
 - **圖分環境**（`feat/environment-scope`）：workflow YAML 選填 `environment`（`[A-Za-z0-9_.-]`，最長 64；預設空字串 = 不分環境，跟以前一模一樣）。`service_edges`、`service_async_edges`、`lot_paths` 都有 `environment` 欄位，唯一鍵含它（`uq_service_edges_env_pair`、`uq_service_async_edges_env_pair`、`uq_lot_paths_env_lot`，`migrations/postgres/0009`）。偵測時 `storage/hooks` 只載入這條管線環境的邊；事件群快照記下 `environment`，RCA 照事件群的環境載圖（快照沒存拓撲時才從表載；舊快照沒有這個鍵就沿用 RCA 管線自己的，等於舊行為）。`admin.topology_refresh`、`admin.merge_traces`、`admin.merge_lot_paths` 的請求都接受 `environment`，寫入與 prune 只碰那個環境。`''` 是「不分環境」的那一份，**不是**「全部環境」。
 - **實體命名規則**：實體維持 `service.name`（工廠是機台編號），**不把環境或命名空間塞進名稱**。塞進去的話改環境名就斷基準線（基準線、調參、異常血緣都以實體名稱為鍵），跨環境比較也對不起來。環境只寫在管線的 `environment`；一個環境開一條管線（異常點、基準線、事件群、調參本來就以管線名稱分開）。載入期檢查：管線設了 `environment` 時，target 的 `entity` 以非英數字元切段後有一段等於環境名（`cart-prod`、`prod.cart`）就 `WorkflowError`；沒寫 `entity` 的 target 名稱是查詢字串（本來就可能含 `env="prod"`），不檢查。
-- **環境的缺口**：撈 span 還沒依 `deployment.environment` 過濾（`aiops/sources` 另案重寫中），所以 `admin.topology_refresh` 與 RCA 現場還原用的 trace 來源要只含那個環境，否則別環境的呼叫會被記進來（`tests/test_environment_scope.py` 的 `xfail(strict=True)` 標著）。`trace_series`（trace 合成時序）、通知去重的指紋與最近通知仍不分環境，見 `docs/CROSS_DOMAIN_CONSISTENCY_AUDIT.md` M4。
+- **撈 span／日誌依環境過濾**：管線設了 `environment` 時，`admin.topology_refresh` 與 RCA 現抓（`ingestion.incident_traces`／`incident_logs`，用事件群自己的環境）只撈那個環境的資料：ES 查詢帶 term 過濾（Elastic APM 是 `service.environment`，OTel 是 `resource.attributes.deployment.environment.name`，舊版 `deployment.environment` 也認），回來再用 `sources/base.in_environment` 濾一次。沒標環境的資料不算進任何有名字的環境；資料源完全不提供環境資訊（回傳沒有 `environment` 鍵）時不過濾。訊息佇列跨時窗補撈（`fetch_linked_spans`）依 trace ID 撈，不另外過濾。
 - **還沒做的（都是行為變更，要等混沌回歸）**：佇列邊進傳播圖、`SUPPLY`（物理供應）與 `HOSTED_ON`（服務部署在哪台主機）兩種邊、`lot_paths` 的清理。
 
 ### 1.2 各階段功能與新舊差異

@@ -313,3 +313,56 @@ def test_legacy_summary_and_briefing_mask_their_prompts():
     assert len(_Capture.prompts) == 2
     for p in _Capture.prompts:
         _assert_clean(p)
+
+
+# ── 第六條路徑：控制面的調參回饋（control_plane/learning/tuning.py）──
+
+def test_tuning_feedback_text_is_masked_before_it_reaches_the_llm(monkeypatch):
+    from aiops.control_plane.learning import tuning
+    from aiops.stages.enrichment import registry
+
+    prompts = []
+
+    class _Capture(BaseLLM):
+        name = "capture"
+
+        def complete(self, system, prompt):
+            prompts.append(prompt)
+            return '{"params": {"threshold": 4.0}, "reason": "太敏感"}'
+
+    monkeypatch.setattr(registry, "_ENTRIES", dict(registry._ENTRIES))
+    registry.register("capture_tuning", requires_model=False)(lambda model, base_url, api_key: _Capture())
+    op = OperatorRegistry.create("admin.feedback_propose", {"provider": "capture_tuning"})
+    fb = {"verdict": "false_positive", "text": "又誤報了，請聯絡 alice.wang@corp.example.com，主機 10.20.30.40 password=Hunter2!"}
+    tunable = {"threshold": (3.0, 1.0, 20.0)}
+    params, _reason, generated_by, fallback = op._extract(fb, "detector.zscore", tunable, {"threshold": 3.0},
+                                                         lambda: ({"threshold": 3.6}, "rule", "auto"))
+    assert generated_by == "llm" and fallback is None and params == {"threshold": 4.0}
+    sent = prompts[0]
+    assert "alice.wang@corp.example.com" not in sent and "10.20.30.40" not in sent and "Hunter2!" not in sent
+    assert "detector.zscore" in sent and "false_positive" in sent and "threshold" in sent  # 調參需要的東西還在
+
+
+def test_tuning_falls_back_to_the_rule_without_sending_when_masking_fails(monkeypatch):
+    from aiops.control_plane.learning import tuning  # noqa: F401
+    from aiops.stages.enrichment import registry
+
+    called = []
+
+    class _Never(BaseLLM):
+        name = "never"
+
+        def complete(self, system, prompt):
+            called.append(prompt)
+            return "{}"
+
+    def boom(self, text):
+        raise RuntimeError("regex engine exploded")
+
+    monkeypatch.setattr(registry, "_ENTRIES", dict(registry._ENTRIES))
+    registry.register("never_tuning", requires_model=False)(lambda model, base_url, api_key: _Never())
+    monkeypatch.setattr(Masker, "text", boom)
+    op = OperatorRegistry.create("admin.feedback_propose", {"provider": "never_tuning"})
+    out = op._extract({"verdict": "false_positive", "text": "x"}, "detector.zscore", {"threshold": (3.0, 1.0, 20.0)},
+                      {"threshold": 3.0}, lambda: ({"threshold": 3.6}, "rule", "auto"))
+    assert not called and out[:3] == ({"threshold": 3.6}, "rule", "auto") and out[3].startswith("mask_failed")

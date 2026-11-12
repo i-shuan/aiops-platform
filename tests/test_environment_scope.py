@@ -193,7 +193,8 @@ class _FakeTraces(BaseDataSourceSpec):
     def fetch_data(self, *a, **k):
         raise NotImplementedError
 
-    def fetch_spans(self, start, end, services=None, max_spans=20000):
+    def fetch_spans(self, start, end, services=None, max_spans=20000, **_ignored):
+        # 故意不理會 environment 參數（模擬沒有在查詢裡過濾的資料源）：呼叫端的 in_environment 仍然要擋得住
         def span(sid, parent, svc, env):
             return {"trace_id": sid[0], "span_id": sid, "parent_id": parent, "service": svc, "ts": NOW,
                     "duration_ms": 1.0, "error": False, "environment": env}
@@ -218,11 +219,15 @@ def test_topology_refresh_writes_and_prunes_only_its_environment(mixed_source):
     assert ServiceEdges.all() == []
 
 
-@pytest.mark.xfail(strict=True, reason="缺口：撈 span 還沒依 deployment.environment 過濾（aiops/sources 另案重寫 fetch_spans 中），"
-                                       "同一個 trace 來源混了多個環境時，別環境的呼叫也會記進這個環境。兩邊合流後接上就會轉綠。")
 def test_topology_refresh_only_counts_spans_of_its_own_deployment_environment(mixed_source):
     run("admin_topology_refresh", request=TopologyRefresh(source_type="faketrace", environment="prod"), now=NOW)
     assert {(e["caller"], e["callee"]) for e in ServiceEdges.all("prod")} == {("cart", "inventory")}
+
+
+def test_topology_refresh_without_an_environment_keeps_every_span(mixed_source):
+    """沒設環境 = 不分：兩個環境的呼叫都算（跟分環境之前一樣）。"""
+    run("admin_topology_refresh", request=TopologyRefresh(source_type="faketrace"), now=NOW)
+    assert {(e["caller"], e["callee"]) for e in ServiceEdges.all()} == {("cart", "inventory"), ("cart", "pricing")}
 
 
 def test_merge_traces_and_lot_paths_write_into_the_requested_environment():
@@ -254,3 +259,54 @@ def test_migration_creates_the_same_named_unique_keys_as_the_models():
         cols = ", ".join(c.name for c in uq.columns)
         assert re.search(rf"ADD CONSTRAINT {uq.name} UNIQUE \({cols}\)", sql), (uq.name, cols)
         assert f"ALTER TABLE {row.__tablename__} ADD COLUMN IF NOT EXISTS environment VARCHAR(64) NOT NULL DEFAULT ''" in sql
+
+
+# ── 撈 span／日誌依部署環境過濾（sources 那一側）──
+
+def test_in_environment_is_strict_only_when_the_source_reports_an_environment():
+    from aiops.sources.base import in_environment
+    rows = [{"id": 1, "environment": "prod"}, {"id": 2, "environment": "staging"}, {"id": 3, "environment": ""}, {"id": 4}]
+    assert [r["id"] for r in in_environment(rows, "prod")] == [1, 4]  # 沒有 environment 鍵 = 資料源不提供，留著
+    assert in_environment(rows, "") == rows and in_environment(rows, None) == rows
+
+
+@pytest.mark.parametrize("model, field", [("elastic_apm", "service.environment"),
+                                          ("otel", "resource.attributes.deployment.environment.name")])
+def test_es_pushes_the_environment_into_the_query_so_other_environments_do_not_use_up_the_span_budget(monkeypatch, model, field):
+    from aiops.sources.elasticsearch import ElasticsearchSpec
+    monkeypatch.setenv("AIOPS_ES_DATA_MODEL", model)
+    bodies = []
+    spec = ElasticsearchSpec.__new__(ElasticsearchSpec)
+    monkeypatch.setattr(spec, "_search", lambda index, body, what: bodies.append(body) or {"hits": {"hits": [], "total": {"value": 0}}},
+                        raising=False)
+    spec.fetch_spans(NOW - timedelta(minutes=5), NOW, None, 100, environment="prod")
+    spec.fetch_logs(NOW - timedelta(minutes=5), NOW, None, 100, environment="prod")
+    for body in bodies:
+        terms = [t["term"] for f in body["query"]["bool"]["filter"] if "bool" in f for t in f["bool"].get("should", []) if "term" in t]
+        assert {field: "prod"} in terms
+    bodies.clear()
+    spec.fetch_spans(NOW - timedelta(minutes=5), NOW, None, 100)
+    assert "environment" not in str(bodies[0]["query"])  # 沒設環境：查詢條件跟以前一樣
+
+
+def test_parsed_otel_spans_and_logs_carry_their_deployment_environment():
+    """真實 Collector 樣本（tests/fixtures/otel_es）的 resource.attributes.deployment.environment.name = sample。"""
+    import json
+    from pathlib import Path
+    from aiops.sources.es_models import OTEL
+    fixtures = Path(__file__).parent / "fixtures" / "otel_es"
+    r = OTEL.resolve(None)
+    spans = [r.span(d["_source"]) for d in json.loads((fixtures / "traces-generic.otel-default.json").read_text(encoding="utf-8"))]
+    logs = [r.log(d["_source"]) for d in json.loads((fixtures / "logs-generic.otel-default.json").read_text(encoding="utf-8"))]
+    assert {s["environment"] for s in spans if s} == {"sample"} and {x["environment"] for x in logs if x} == {"sample"}
+
+
+def test_rca_fetch_asks_for_the_incidents_environment():
+    from aiops.engine.context import PipelineContext
+    from aiops.stages.ingestion.fetch import _rca_environment, _scope_kw
+    ctx = PipelineContext("rca", NOW, environment="staging")
+    assert _scope_kw(ctx, "elasticsearch") == {"environment": "staging"}
+    ctx.incident_environment = "prod"  # 事件群是 prod 的：照事件群，不照 RCA 管線自己的設定
+    assert _rca_environment(ctx) == "prod"
+    assert _scope_kw(PipelineContext("rca", NOW), "elasticsearch") == {}  # 不分環境：不帶參數，舊簽名的資料源照樣能用
+

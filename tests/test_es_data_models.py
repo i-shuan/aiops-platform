@@ -66,10 +66,12 @@ def test_elastic_apm_queries_are_exactly_what_they_were_before_profiles():
                           "transaction.type", "transaction.message.queue.name", "transaction.message.age.ms", "span.links"]
     # 唯一刻意多撈的：取樣還原（階段 2）要的 representative_count；沒有這兩個欄位的索引權重一律 1
     added_for_sampling = ["transaction.representative_count", "span.representative_count"]
-    assert sorted(r.span_source) == sorted(before_span_fields + added_for_sampling)
+    # 環境區隔：每筆帶回 service.environment（Workflow.environment 的過濾與呼叫端的第二道檢查用）；沒設環境時查詢條件不變
+    added_for_environment = ["service.environment"]
+    assert sorted(r.span_source) == sorted(before_span_fields + added_for_sampling + added_for_environment)
     assert r.span_sort == [{"@timestamp": "asc"}, {"trace.id": "asc"}, {"span.id": {"order": "asc", "missing": "_first"}}]
     assert sorted(r.log_source) == sorted(["@timestamp", "service.name", "trace.id", "message", "error.exception",
-                                           "error.log", "error.culprit"])
+                                           "error.log", "error.culprit", *added_for_environment])
     assert ELASTIC_APM.log_sort == [{"@timestamp": "asc"}, {"error.id": {"order": "asc", "missing": "_last"}}]
     assert (ELASTIC_APM.trace_index, ELASTIC_APM.log_index) == ("traces-apm-*", "logs-apm.*")
     assert ELASTIC_APM.log_filters == ()

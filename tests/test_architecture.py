@@ -183,9 +183,8 @@ def test_llm_calls_in_enrichment_go_through_masking():
     assert "llm.complete(system, sealed)" in _src(ROOT / "stages" / "enrichment" / "masking.py")
 
 
-@pytest.mark.xfail(strict=True, reason="已知缺口：control_plane/learning/tuning.py 把調參回饋的自由文字直接送 LLM，"
-                                       "沒有經過 masking.send（不在 G3 遮罩這次的修改範圍，待控制面接上）")
 def test_llm_calls_outside_enrichment_go_through_masking():
+    """整個 aiops/（含控制面的調參回饋）送 LLM 都只能走 masking.send。"""
     bad = _llm_complete_refs(_py())
     assert not bad, bad
 

@@ -124,7 +124,7 @@ class TopologyRefresh(StrictModel):
     prune_days: int = Field(7, gt=0)  # last_seen 早於「現在 − prune_days」的邊移除
     end: datetime | None = None  # 回放歷史用；不給 = 現在
     # 邊寫進哪個環境、prune 只刪哪個環境（= 讀它的管線的 Workflow.environment；'' = 不分）。
-    # 注意：撈 span 還沒有依 deployment.environment 過濾（sources 那一側還沒接），trace 來源本身要只含這個環境
+    # 設了環境時，撈 span 也只撈這個環境的（deployment.environment／service.environment；查詢時濾一次、回來再濾一次）
     environment: EnvironmentName = ""
 
 

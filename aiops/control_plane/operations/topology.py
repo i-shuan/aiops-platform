@@ -21,6 +21,7 @@ from aiops.engine.requests import TopologyRefresh
 from aiops.engine.topology import service_edges
 from aiops.engine.types import as_utc
 from aiops.sources import get_datasource_spec, is_configured, source_types
+from aiops.sources.base import in_environment
 from aiops.storage.repository import AsyncEdges, ServiceEdges
 
 
@@ -37,8 +38,8 @@ class TopologyRefreshOp(BaseOperator):
     - 訊息消費者的 span 不算同步邊（engine/topology.service_edges 會跳過），改記成非同步邊 (producer, consumer, 延遲 P95, 訊息數)
       -> AsyncEdges.record／prune，規則同上。延遲是「這一次刷新窗裡」的 P95（覆蓋）：平常是毫秒級，積壓期間刷到才會變大。
       以前版本把消費者算成同步邊寫進 service_edges 的舊列不會再被刷新，prune_days 之後自己消失。
-    - environment：邊寫進哪個環境、prune 只刪那個環境（別的環境的邊不動）。缺口：撈 span 時還沒依 deployment.environment
-      過濾（aiops/sources 那一側另案重寫中），所以一個 trace 來源混了多個環境時，這裡會把別環境的呼叫也記進來
+    - environment：邊寫進哪個環境、prune 只刪那個環境（別的環境的邊不動）。設了環境時撈 span 也只撈這個環境的
+      （查詢帶 environment、回來用 sources/base.in_environment 再濾一次）；沒標環境的 span 不算進任何有名字的環境。
       （tests/test_environment_scope.py 的 xfail 標著）。
     """
 
@@ -59,14 +60,17 @@ class TopologyRefreshOp(BaseOperator):
                           "edges_pruned": 0, "edges": [], "async_edges_seen": 0, "async_edges_pruned": 0,
                           "async_edges": [], "window": window}
             return ctx
-        spans, truncated = get_datasource_spec(req.source_type).fetch_spans(start, end, None, req.max_spans)
+        env = req.environment
+        # 只算這個環境的呼叫：查詢時帶 environment（沒設環境就不帶，只實作舊簽名的自訂資料源照樣能用），回來再濾一次
+        spans, truncated = get_datasource_spec(req.source_type).fetch_spans(
+            start, end, None, req.max_spans, **({"environment": env} if env else {}))
+        spans = in_environment(spans, env)
         records = [SimpleNamespace(span_id=s.get("span_id"), parent_id=s.get("parent_id"), service=s["service"],
                                    ts=s.get("ts"), consumer=bool(s.get("consumer")),
                                    links=tuple(s.get("links") or ())) for s in spans]
         edges = service_edges(records)
         lags = async_lags(records)
         cutoff = ctx.now - timedelta(days=req.prune_days)
-        env = req.environment
         written = ServiceEdges.add_calls(dict(edges), seen_at=ctx.now, environment=env)
         pruned = ServiceEdges.prune(cutoff, environment=env)
         AsyncEdges.record(lags, seen_at=ctx.now, environment=env)

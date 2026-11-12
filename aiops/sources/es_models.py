@@ -38,10 +38,12 @@ STANDARD_FIELDS: dict[str, str] = {
     "span.server_port": "下游連接埠（server.port）",
     "span.messaging_system": "訊息系統（kafka、rabbitmq）",
     "span.messaging_destination": "佇列／topic 名稱",
+    "span.environment": "部署環境（Workflow.environment 用它過濾）",
     "log.service": "日誌的服務名稱",
     "log.message": "日誌訊息",
     "log.error_type": "例外型別",
     "log.trace_id": "日誌對應的 trace ID",
+    "log.environment": "日誌的部署環境",
 }
 
 
@@ -168,6 +170,14 @@ class Resolved:
         沒設對照時一字不差走原本的邏輯。"""
         return get_path(doc, self.paths[standard][0]) if standard in self.overridden else None
 
+    def environment_filters(self, standard: str, environment: str | None) -> list[dict[str, Any]]:
+        """只留這個部署環境的文件。來源欄有好幾個（新舊 semconv）時任何一個相符就算；沒有這個欄位的文件不會相符——
+        設了環境就只認標了那個環境的資料，不把沒標的當成自己的。environment 是空的 = 不過濾。"""
+        if not environment:
+            return []
+        terms = [{"term": {path: environment}} for path in self.paths.get(standard, ())]
+        return [{"bool": {"should": terms, "minimum_should_match": 1}}] if terms else []
+
     def query_field(self, standard: str) -> str:
         """查詢（term、terms、排序、_source）用的實際欄位：取第一個來源欄。"""
         return self.paths[standard][0]
@@ -233,7 +243,8 @@ def _apm_span(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
             "age_ms": float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None,
             "links": _links(span.get("links"), "trace.id", "span.id"),
             # 取樣權重：APM agent 依 transaction_sample_rate 取樣時，每筆帶 representative_count = 1 ÷ 取樣率
-            "weight": _positive_weight(own.get("representative_count"))}
+            "weight": _positive_weight(own.get("representative_count")),
+            "environment": str(r.get(src, "span.environment") or "")}
 
 
 def _apm_log(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
@@ -248,7 +259,7 @@ def _apm_log(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {"ts": as_utc_datetime(src["@timestamp"]), "service": canonical_service(service),
             "message": str(message), "error_type": str(first.get("type") or ""),
-            "trace_id": str(r.get(src, "log.trace_id") or "")}
+            "trace_id": str(r.get(src, "log.trace_id") or ""), "environment": str(r.get(src, "log.environment") or "")}
 
 
 ELASTIC_APM = EsDataModel(
@@ -260,6 +271,7 @@ ELASTIC_APM = EsDataModel(
         "span.service": ("service.name",), "span.duration": ("span.duration.us", "transaction.duration.us"),
         "span.status_code": ("http.response.status_code",), "span.name": ("transaction.name",),
         "log.service": ("service.name",), "log.trace_id": ("trace.id",), "log.message": ("message",),
+        "span.environment": ("service.environment",), "log.environment": ("service.environment",),
     },
     span_sort_tail=("span.trace_id", "span.span_id"),
     # 分頁要穩定的排序：時間＋每筆唯一的 error.id（不用 _doc，跨分片沒有 PIT 時不保證順序）
@@ -351,7 +363,8 @@ def _otel_span(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
             # 佇列延遲只能靠 parent／links 找到生產者 span 的發布時間（engine/mq.py 的 T_pub）
             "age_ms": None,
             "links": _links(src.get("links"), "trace_id", "span_id"),
-            "weight": otel_sampling_weight(src.get("trace_state"))}
+            "weight": otel_sampling_weight(src.get("trace_state")),
+            "environment": str(r.get(src, "span.environment") or "")}
 
 
 def _otel_message(r: Resolved, src: dict[str, Any]) -> str:
@@ -376,7 +389,8 @@ def _otel_log(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
     if not message:
         return None
     return {"ts": as_utc_datetime(src["@timestamp"]), "service": canonical_service(service), "message": message,
-            "error_type": str(r.get(src, "log.error_type") or ""), "trace_id": str(r.get(src, "log.trace_id") or "")}
+            "error_type": str(r.get(src, "log.error_type") or ""), "trace_id": str(r.get(src, "log.trace_id") or ""),
+            "environment": str(r.get(src, "log.environment") or "")}
 
 
 OTEL = EsDataModel(
@@ -399,6 +413,9 @@ OTEL = EsDataModel(
         "log.service": ("resource.attributes.service.name",), "log.trace_id": ("trace_id",),
         "log.message": ("body.text", "attributes.exception.message"),
         "log.error_type": ("attributes.exception.type", "attributes.error.type"),
+        # 新版 semconv 是 deployment.environment.name（實測樣本就是它），舊版是 deployment.environment
+        "span.environment": ("resource.attributes.deployment.environment.name", "resource.attributes.deployment.environment"),
+        "log.environment": ("resource.attributes.deployment.environment.name", "resource.attributes.deployment.environment"),
     },
     span_sort_tail=("span.trace_id", "span.span_id"),
     # OTel 日誌沒有每筆唯一的 ID 欄位：時間＋trace＋span 當排序鍵。同一毫秒、同一個 span（或都沒有 trace）的多筆

@@ -69,7 +69,8 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         })
 
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
-                    max_spans: int = 20000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
+                    max_spans: int = 20000, field_map: dict[str, str] | None = None,
+                    environment: str | None = None) -> tuple[list[dict[str, Any]], bool]:
         """[start, end] 內的 span。欄位與索引依資料模型（AIOPS_ES_DATA_MODEL，見 sources/es_models.py）：
         elastic_apm（預設）的 transaction／span 文件、或 OTel Collector（otel mapping）的 span 文件。
         field_map 是已核准的欄位對照，標準欄 span.* 的那幾條會蓋過模型的預設欄位。只呼叫 _search，不寫任何索引。
@@ -80,10 +81,11 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         以 trace 為單位抽樣，父子才接得起來（抽 span 會把跨服務的邊拆斷）。回傳的 truncated 為 True。"""
         r = current_model().resolve(field_map)
         index = _trace_index(r)
-        rows, over = self._paginate(index, _window_filters(start, end, services, r.query_field("span.service")),
+        env = r.environment_filters("span.environment", environment)  # 在查詢裡濾：別環境的 span 不佔 max_spans 的額度
+        rows, over = self._paginate(index, [*_window_filters(start, end, services, r.query_field("span.service")), *env],
                                     r.span_source, r.span_sort, r.span, max_spans, "撈 trace")
         if over:
-            return self._sampled_spans(r, index, start, end, services, max_spans), True
+            return self._sampled_spans(r, index, start, end, services, max_spans, env), True
         return rows[:max_spans], over is None
 
     def fetch_linked_spans(self, trace_ids: list[str], start: datetime, end: datetime,
@@ -151,7 +153,7 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         return payload
 
     def _sampled_spans(self, r: Resolved, index: str, start: datetime, end: datetime, services: list[str] | None,
-                       max_spans: int) -> list[dict[str, Any]]:
+                       max_spans: int, env: list[dict[str, Any]] | tuple = ()) -> list[dict[str, Any]]:
         """時間分桶 + 以 trace 為單位的均勻抽樣。
 
         1. 窗口切成 min(分鐘數, SAMPLE_MAX_BUCKETS) 個桶；每桶用固定 seed 的 random_score 挑一批候選文件，只拿 trace ID
@@ -168,8 +170,8 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         for b in range(buckets):
             lo, hi = start + step * b, (start + step * (b + 1) if b < buckets - 1 else end)
             body = {"size": candidates_per_bucket, "_source": [trace_field],
-                    "query": {"function_score": {"query": {"bool": {"filter": _window_filters(
-                                                     lo, hi, services, service_field, b == buckets - 1)}},
+                    "query": {"function_score": {"query": {"bool": {"filter": [*_window_filters(
+                                                     lo, hi, services, service_field, b == buckets - 1), *env]}},
                                                  "random_score": {"seed": SAMPLE_SEED, "field": "_seq_no"},
                                                  "boost_mode": "replace"}}}
             ids = []
@@ -181,7 +183,7 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             queues.append(ids)
 
         spans: list[dict[str, Any]] = []
-        window = _window_filters(start, end, services, service_field)
+        window = [*_window_filters(start, end, services, service_field), *env]
         while len(spans) < max_spans and any(queues):
             # 交錯排（桶0第1條、桶1第1條…桶0第2條…），最後一輪放不下時各桶少的一樣多，不會偏向前面的桶
             batch = [q[i] for i in range(SAMPLE_TRACES_PER_ROUND) for q in queues if i < len(q)]
@@ -207,7 +209,8 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         return sorted(spans, key=lambda s: s["ts"])
 
     def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
-                   max_logs: int = 5000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
+                   max_logs: int = 5000, field_map: dict[str, str] | None = None,
+                   environment: str | None = None) -> tuple[list[dict[str, Any]], bool]:
         """錯誤日誌。elastic_apm：APM 錯誤文件（processor.event = error），訊息依序取 error.exception（陣列或單一物件都可）
         的 message、error.log.message、頂層 message。otel：OTel 日誌資料流裡 ERROR 以上（severity_number >= 17）與
         span 的 exception 事件，訊息取 body.text › exception.message › 結構化 body。索引用 AIOPS_ES_LOG_INDEX 改。只呼叫 _search。
@@ -217,14 +220,15 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         回傳的 truncated 為 True。"""
         r = current_model().resolve(field_map)
         index = _log_index(r)
-        filters = [*_window_filters(start, end, services, r.query_field("log.service")), *r.model.log_filters]
+        env = r.environment_filters("log.environment", environment)
+        filters = [*_window_filters(start, end, services, r.query_field("log.service")), *r.model.log_filters, *env]
         rows, over = self._paginate(index, filters, r.log_source, r.model.log_sort, r.log, max_logs, "撈日誌")
         if over:
-            return self._sampled_logs(r, index, start, end, services, max_logs), True
+            return self._sampled_logs(r, index, start, end, services, max_logs, env), True
         return rows, over is None
 
     def _sampled_logs(self, r: Resolved, index: str, start: datetime, end: datetime, services: list[str] | None,
-                      max_logs: int) -> list[dict[str, Any]]:
+                      max_logs: int, env: list[dict[str, Any]] | tuple = ()) -> list[dict[str, Any]]:
         buckets = max(1, min(SAMPLE_MAX_BUCKETS, math.ceil((end - start).total_seconds() / 60)))
         step = (end - start) / buckets
         quota = max(1, min(5000, max_logs // buckets))
@@ -232,7 +236,7 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         for b in range(buckets):
             lo, hi = start + step * b, (start + step * (b + 1) if b < buckets - 1 else end)
             filters = [*_window_filters(lo, hi, services, r.query_field("log.service"), b == buckets - 1),
-                       *r.model.log_filters]
+                       *r.model.log_filters, *env]
             body = {"size": quota, "track_total_hits": True, "_source": r.log_source, "sort": r.model.log_sort,
                     "query": {"bool": {"filter": filters}}}
             payload = self._search(index, body, "抽樣日誌")

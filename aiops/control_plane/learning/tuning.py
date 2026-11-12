@@ -27,7 +27,7 @@ from aiops.engine.operator import BaseOperator
 from aiops.stages.detectors.base import ROUTING_PARAMS, DetectorOperator, layer_params
 from aiops.stages.ingestion.fetch import fetch_target_frame
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
-from aiops.stages.enrichment import registry
+from aiops.stages.enrichment import masking, registry
 from aiops.stages.enrichment.providers import build_llm
 from aiops.storage.repository import ActiveConfigs, Feedbacks, Incidents, Knowledge, Proposals
 
@@ -313,7 +313,10 @@ class FeedbackProposeOp(BaseOperator):
             llm = build_llm(self.provider, self.model, self.base_url)
             assert llm is not None
             prompt = tuning_rules.build_prompt(detector, fb["verdict"], fb["text"], tunable, current)
-            reply = parse_json_reply(llm.complete(tuning_rules.SYSTEM, prompt))
+            # 回饋是人寫的自由文字，可能帶帳號、信箱、IP、憑證：跟 RCA 一樣只從 masking.send 這個出口送
+            reply = parse_json_reply(masking.send(llm, tuning_rules.SYSTEM, prompt, masking.Masker(keep={detector})))
+        except masking.MaskError as e:
+            return (*fallback(), f"mask_failed：{e}")  # 遮罩失敗就不送，退回規則式提案
         except LLMError as e:
             return (*fallback(), str(e))
         reason = tuning_rules.validate(reply, fb["verdict"], tunable, current)

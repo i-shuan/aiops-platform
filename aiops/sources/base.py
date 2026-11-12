@@ -13,6 +13,17 @@ def canonical_service(name: Any) -> str:
     return str(name).strip().lower()
 
 
+def in_environment(rows: list[dict[str, Any]], environment: str | None) -> list[dict[str, Any]]:
+    """只留屬於這個部署環境的 span／日誌（每筆的 environment 鍵，來自 deployment.environment／service.environment）。
+    environment 是空的 = 不分環境，原樣回傳。資料源應該在查詢時就濾掉（fetch_spans／fetch_logs 的 environment 參數），
+    這裡是呼叫端的第二道：資料源忽略那個參數時，別環境的資料也進不來。
+    某一筆**沒有** environment 這個鍵 = 那個資料源不提供環境資訊，留著（濾掉的話這種資料源一設環境就整個撈不到）；
+    有這個鍵但值不同（含空字串）就丟掉。"""
+    if not environment:
+        return rows
+    return [r for r in rows if "environment" not in r or r["environment"] == environment]
+
+
 def as_utc_datetime(value: Any) -> datetime:
     """ES 的 @timestamp 轉成帶 UTC 時區的 datetime。有時區就換算成 UTC；沒帶時區（naive）一律當 UTC，不丟 TypeError。
 
@@ -65,7 +76,8 @@ class BaseDataSourceSpec(ABC):
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援動態同儕（peer_group），請改用 peers 寫死名單")
 
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
-                    max_spans: int = 20000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
+                    max_spans: int = 20000, field_map: dict[str, str] | None = None,
+                    environment: str | None = None) -> tuple[list[dict[str, Any]], bool]:
         """RCA 隨需撈 trace：[start, end] 內的 span／transaction，services 給了就只撈這些服務。
         回傳 (spans, 是否因為 max_spans 被截斷)。每個 span 是 dict：
         trace_id、span_id、parent_id（可能是 None）、service、ts（UTC datetime）、duration_ms、error。
@@ -75,6 +87,8 @@ class BaseDataSourceSpec(ABC):
         訊息佇列（非同步邊）用的選填鍵：consumer（transaction.type = messaging 的消費者入口）、queue（佇列名）、
         age_ms（訊息年齡，沒有就是 None）、links（批次消費的 span.links：[(trace_id, span_id), ...]）。
         field_map：已核准的欄位對照（標準欄 span.* 蓋過資料源預設的來源欄；只有真的有對照時呼叫端才會帶）。
+        environment：只撈這個部署環境的（管線設了 Workflow.environment 時呼叫端才會帶）；每筆回傳的 dict 帶
+        environment 鍵（該筆的環境，沒有就是空字串），呼叫端會用 in_environment 再濾一次。
         預設不支援；存 trace 的資料源（Elasticsearch：Elastic APM 或 OTel，見 sources/es_models.py）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
 
@@ -85,7 +99,8 @@ class BaseDataSourceSpec(ABC):
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援依 trace 撈 span（訊息佇列跨時窗）")
 
     def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
-                   max_logs: int = 5000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
+                   max_logs: int = 5000, field_map: dict[str, str] | None = None,
+                   environment: str | None = None) -> tuple[list[dict[str, Any]], bool]:
         """RCA 隨需撈錯誤日誌：[start, end] 內、services 給了就只撈這些服務。回傳 (logs, 是否因為 max_logs 被截斷)。
         每筆是 dict：ts（UTC datetime）、service、message、error_type、trace_id。預設不支援。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈日誌")
