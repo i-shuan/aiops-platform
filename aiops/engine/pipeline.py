@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Protocol
@@ -28,6 +29,19 @@ logger = logging.getLogger("aiops.engine")
 
 # 資料源一律明寫、沒有預設值：漏寫時以前會默默退回 mock（假資料），監控平台寧可直接報錯（API 回 400、YAML 載入失敗）
 SourceType = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+# 環境（正式／測試…）的名稱：管線層屬性，也是關係圖資料表的範圍鍵。空字串 = 不分環境（舊行為）。
+EnvironmentName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=64, pattern=r"^[A-Za-z0-9_.-]*$")]
+
+
+def environment_in_entity(entity: str, environment: str) -> bool:
+    """實體名稱裡有沒有夾帶環境名（cart-prod、prod.cart、cart@prod 這類）。規則：實體維持 service.name，環境只放在
+    管線的 environment，不塞進名稱——塞進去的話改環境名就斷基準線，跨環境比較也對不起來。
+    以非英數字元切開後逐段比對（不分大小寫），所以 product-api 不會被 prod 誤判。"""
+    if not environment:
+        return False
+    return environment.lower() in {t for t in re.split(r"[^0-9a-z]+", entity.lower()) if t}
 
 
 class StrictModel(BaseModel):
@@ -101,6 +115,10 @@ class Workflow(StrictModel):
     # 心跳不續命、備援通報會響。預設 1.0 = 全部序列都抓不到才算（PVC 滿、APM 寫不進去就是這個樣子；
     # 個別序列本來就稀疏的只記錯誤）。查詢寫錯（BadRequest）是設定問題，不算斷流
     max_failed_target_ratio: float = Field(1.0, gt=0, le=1)
+    # 這條管線屬於哪個環境（prod、staging…）。關係圖（service_edges／service_async_edges／lot_paths）只載入同一個
+    # 環境的邊，事件群快照記下它（RCA 照它載圖）。空字串 = 不分環境，跟加這個欄位之前完全一樣。
+    # 異常點、基準線、事件群、調參本來就以管線名稱分開，一個環境開一條管線即可；實體名稱不要再夾帶環境。
+    environment: EnvironmentName = ""
 
     @model_validator(mode="after")
     def _unique_names(self):
@@ -216,6 +234,10 @@ class Pipeline:
     def check_target(self, spec: TargetSpec) -> None:
         """載入期檢查 target 的 detectors／overrides。YAML 的 targets 在建立管線時檢查，API 傳進來的在 run() 一開始檢查。"""
         label = f"Workflow {self.workflow.name} 的 target {spec.label}"
+        entity = spec.entity or ""  # 沒寫 entity 時名稱是查詢字串（裡面本來就可能有 env="prod" 篩選），不檢查
+        if environment_in_entity(entity, self.workflow.environment):
+            raise WorkflowError(f"{label}：實體名稱 {entity!r} 夾帶了環境名 {self.workflow.environment!r}；實體請維持 "
+                                f"service.name，環境只寫在 workflow 的 environment（改環境名才不會斷基準線）")
         if spec.detectors is not None:
             known = set(self._detectors) | {operator for operator, _ in self._detectors.values()}
             unknown = [d for d in spec.detectors if d not in known]
@@ -268,7 +290,8 @@ class Pipeline:
         now = now or datetime.now(timezone.utc)
         for spec in targets or []:
             self.check_target(spec)  # API 傳進來的 targets 跟 YAML 的一樣要檢查，在做任何事之前擋下
-        batch = PipelineContext(pipeline=self.workflow.name, now=now, incident_id=incident_id, request=request)
+        batch = PipelineContext(pipeline=self.workflow.name, now=now, incident_id=incident_id, request=request,
+                                environment=self.workflow.environment)
         if self.workflow.topology is not None:
             batch.topology, batch.topology_explicit = list(self.workflow.topology), True
         if self.workflow.lot_edges is not None:
@@ -280,7 +303,8 @@ class Pipeline:
             specs = list(targets if targets is not None else self.workflow.targets)
             starved: list[str] = []  # 抓不到資料的序列：資料源說沒資料（NoDataError）、或抓回來是空的
             for spec in specs:
-                ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request)
+                ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request,
+                                      environment=self.workflow.environment)
                 skipped = {name: reason for name in self._detectors
                            if (reason := self._skip_reason(name, ctx.target)) is not None}
                 active = [d for d in self.detector_nodes if d[0] not in skipped]

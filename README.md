@@ -558,7 +558,13 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0007_service_async_edge
 psql -h <host> -U <user> -d aiops -f migrations/postgres/0008_anomalies_unique_key.sql
 ```
 
+```bash
+psql -h <host> -U <user> -d aiops -f migrations/postgres/0009_graph_environment_scope.sql
+```
+
 `0008` 替 `anomalies` 補上唯一鍵 `uq_anomalies_key`（pipeline, entity, metric, ts, detector_node）：同一輪被重跑（兩個 worker 重疊、寫入後行程被殺再重來）時，新版程式撞到鍵就跳過（`INSERT ... ON CONFLICT DO NOTHING`，留先寫的那筆），不會寫出兩份。**這個檔會刪資料**：建索引前先刪既有的重複列（同一個鍵留 `id` 最小的），刪幾筆印在 NOTICE；想先看會刪幾筆的查詢、回滾 SQL 都在檔案開頭。新版程式在還沒跑 `0008` 的資料庫上照常能寫（只是沒有去重效果）；舊版程式在跑過 `0008` 的資料庫上重跑同一輪會撞唯一鍵、那一輪失敗。
+
+`0009` 讓關係圖分環境：`service_edges`、`service_async_edges`、`lot_paths` 加 `environment`（`VARCHAR(64) NOT NULL DEFAULT ''`，舊列回填 `''`），唯一鍵換成含 `environment` 的 `uq_service_edges_env_pair`／`uq_service_async_edges_env_pair`／`uq_lot_paths_env_lot`（舊的唯一約束沒有固定名稱，依欄位組合找出來刪）。**新舊程式不能跨版跑**：先停排程與 API、跑完再換版（新版寫入要 `environment` 欄位；舊版的 `ON CONFLICT (caller, callee)` 在舊鍵刪掉後會失敗）。沒設 `environment` 的管線看到的圖跟升級前一樣。已在 PostgreSQL 16 實跑兩條路徑（舊版程式建表＋寫入舊列後升級、新版程式建表後套用），各連跑兩次 exit 0；回滾 SQL 在檔案開頭。
 
 > 實測（PostgreSQL 16.15 容器，`anomalies` 200 萬筆／295 MB，其中 1,050 組重複）：刪掉 1,050 筆重複列＋建索引共 7.7 秒（這段時間 `anomalies` 不能寫、可以讀），索引 129 MB；重複執行 81 ms、只出 NOTICE；另一個連線有未提交的寫入時等滿 5 秒報 `lock timeout` 放棄、什麼都沒改；回滾後再升級結果相同，索引定義跟程式自動建表的逐字一致。**限制**：鍵的四個字串欄位合計超過約 2,700 bytes 的列寫不進去（btree 上限；四欄全部塞滿中文才 3,072 bytes，全部塞滿 ASCII 是 1,024 bytes，實測 entity 60 字＋metric 200 字中文可以寫）。
 

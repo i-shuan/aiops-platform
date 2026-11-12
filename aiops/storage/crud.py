@@ -164,10 +164,10 @@ def increment(model: Any, match: dict[str, Any], column: str, amount: int, **fie
             setattr(row, k, v)
 
 
-def delete_before(model: Any, column: str, before: Any) -> int:
-    """刪掉 column < before 的列，回傳刪了幾筆。column 是 NULL 的列不會被刪（SQL 的 NULL < x 不成立）。"""
+def delete_before(model: Any, column: str, before: Any, **filters: Any) -> int:
+    """刪掉 column < before（且符合 filters 各欄相等）的列，回傳刪了幾筆。column 是 NULL 的列不會被刪（SQL 的 NULL < x 不成立）。"""
     with write_session() as s:
-        result = s.execute(sql_delete(model).where(getattr(model, column) < utc_naive(before)))
+        result = s.execute(sql_delete(model).where(getattr(model, column) < utc_naive(before), *_where(model, filters)))
         return int(result.rowcount or 0)
 
 

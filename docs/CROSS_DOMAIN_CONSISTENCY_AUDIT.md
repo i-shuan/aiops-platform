@@ -11,7 +11,8 @@
 | H2 工廠黑洞 | **已擋**：沒有 trace 的管線不會被分流到新引擎。新引擎沒有事實也沒有證據時改標 `undetermined`、原因代碼 `no_evidence`（以前是狀態 `ok`） |
 | H2 餘項 | 未做：新引擎掛 `incident_series`、把 Lot 流向送進 LLM 的圖。做完之前工廠不開放 llm |
 | H3 邊型別 | **部分完成**（2026-11-12，`refactor/service-graph-model`）：`ServiceGraph` 已建立，邊帶型別（CALL／ASYNC／FLOW）、方向由型別決定、算子統一用 `ctx.graph`，行為不變。尚未做：SUPPLY 型別、佇列邊進傳播圖（M3）、圖分管線（M4）。原規格：列為 `ServiceGraph` 重構（`refactor/service-graph-model`）的必備規格——每條邊帶語意型別（呼叫 CALL／佇列 ASYNC／Lot 流向 FLOW／物理供應 SUPPLY），傳播方向由型別決定，不靠人寫對順序 |
-| M1–M5 | 未做：待辦，等資料庫恢復後量測或併入重構 |
+| M4 依賴圖分範圍 | **部分完成**（`feat/environment-scope`）：改成「依環境」而不是「依管線」分——workflow 選填 `environment`，三張圖表加 `environment` 欄位並納入唯一鍵（0009），hooks 只載同環境的邊，RCA 照事件群快照記的環境載圖。同一個環境的 IT 與工廠管線仍共用一張圖（名稱不撞就沒事，見下方 M4 原文）。尚未做：通知去重的指紋與最近通知不分管線／環境；`trace_series` 不分環境；撈 span 不依 `deployment.environment` 過濾（等 `sources` 重寫合流） |
+| M1–M3、M5 | 未做：待辦，等資料庫恢復後量測或併入重構 |
 
 注意：分流後 IT 事故預設走 LLM。部署環境沒有設定 LLM 供應商時，IT 的 RCA 報告會照出但標「無法判定（llm_not_configured）」，不會自動改用舊引擎；要舊引擎的結果得在請求帶 `workflow: rca_report`。以下是定案前的原始盤點。
 

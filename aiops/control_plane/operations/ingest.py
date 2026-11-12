@@ -63,11 +63,12 @@ class MergeTraces(BaseOperator):
         edges = service_edges(req.spans)
         if req.persist:
             Traces.upsert_series(series)
-            ServiceEdges.add_calls(dict(edges))
+            ServiceEdges.add_calls(dict(edges), environment=req.environment)
         ctx.result = {
             "series": [{**s, "ts": s["ts"].isoformat()} for s in series],
             "edges": [{"caller": a, "callee": b, "calls": n} for (a, b), n in sorted(edges.items())],
             "persisted": req.persist,
+            "environment": req.environment,
         }
         return ctx
 
@@ -107,11 +108,12 @@ class MergeLotPaths(BaseOperator):
                           for s in steps],
             })
         if req.persist:
-            LotPaths.upsert_many(lots)
+            LotPaths.upsert_many(lots, environment=req.environment)
         ctx.result = {
             "lots": [{**lot, "start": lot["start"].isoformat(), "end": lot["end"].isoformat()} for lot in lots],
             "lot_edges": [{"from": e.upstream, "to": e.downstream, "lots": e.lots}
                           for e in lot_edges_from_paths([lot["path"] for lot in lots])],
             "persisted": req.persist,
+            "environment": req.environment,
         }
         return ctx

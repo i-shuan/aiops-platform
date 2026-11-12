@@ -69,12 +69,7 @@ class StorageHooks:
         cutoff = ctx.now - timedelta(days=RECENT_NOTIFICATION_DAYS)
         ctx.recent_notifications = [RecentNotification(r["fingerprint"], r["last_event_ts"], severity=r["severity"])
                                     for r in Notifications.since(cutoff.replace(tzinfo=None))]
-        if not ctx.topology_explicit:
-            ctx.topology = [(e["caller"], e["callee"]) for e in ServiceEdges.all()]
-            # 非同步邊跟著同一條規則：workflow 自己指定拓撲（含空清單 = 不要用）時不載
-            ctx.async_edges = {(e["producer"], e["consumer"]): float(e["lag_ms_p95"]) for e in AsyncEdges.all()}
-        if not ctx.lot_edges_explicit:
-            ctx.lot_edges = lot_edges_from_paths(LotPaths.paths())
+        self._load_graph(ctx, ctx.environment)
 
         for row in Incidents.list_open(ctx.pipeline):
             ctx.open_incidents.append(OpenIncident(row["id"], row["uid"], row["preset"], row["severity"],
@@ -98,7 +93,11 @@ class StorageHooks:
             ctx.incidents = [incident]
             ctx.incident_ids[incident.fingerprint] = row["id"]
             ctx.incident_pipeline = row["pipeline"] or ""
-            snapshot = row.get("context") or {}  # 建立當下用的拓撲優先（可重現）；沒有才用上面現推導的
+            snapshot = row.get("context") or {}  # 建立當下用的拓撲優先（可重現）；沒有才用那個事件群所屬環境現推導的
+            # RCA 管線自己的 environment 不算數：圖要照事件群的環境（舊快照沒記就沿用這條管線的，跟以前一樣）
+            ctx.incident_environment = str(snapshot.get("environment", ctx.environment))
+            if ctx.incident_environment != ctx.environment:
+                self._load_graph(ctx, ctx.incident_environment)
             if not ctx.topology_explicit and snapshot.get("topology"):
                 ctx.topology = [(a, b) for a, b in snapshot["topology"]]
             if not ctx.lot_edges_explicit and snapshot.get("lot_edges"):
@@ -118,6 +117,17 @@ class StorageHooks:
                 KnowledgeCase(k["incident_uid"], k["pipeline"], list(k["entities"]), list(k["metrics"]),
                               list(k["signals"]), k["resolution"], k["root_cause"], as_utc(k["created_at"]))
                 for k in Knowledge.recent(KNOWLEDGE_POOL_SIZE) if k["incident_uid"] != incident.uid]
+
+    @staticmethod
+    def _load_graph(ctx: PipelineContext, environment: str) -> None:
+        """關係圖只載入這個環境的邊（'' = 不分環境的那一份，跟加 environment 之前一樣）。workflow 明確給的拓撲／Lot 流向不覆蓋。"""
+        if not ctx.topology_explicit:
+            ctx.topology = [(e["caller"], e["callee"]) for e in ServiceEdges.all(environment)]
+            # 非同步邊跟著同一條規則：workflow 自己指定拓撲（含空清單 = 不要用）時不載
+            ctx.async_edges = {(e["producer"], e["consumer"]): float(e["lag_ms_p95"])
+                               for e in AsyncEdges.all(environment)}
+        if not ctx.lot_edges_explicit:
+            ctx.lot_edges = lot_edges_from_paths(LotPaths.paths(environment))
 
     def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None:
         target = ctx.target
@@ -223,6 +233,7 @@ class StorageHooks:
                     continue
                 entities = set(inc.entities)
                 snapshot = {
+                    "environment": ctx.environment,
                     "topology": [[a, b] for a, b in ctx.topology if a in entities or b in entities],
                     "lot_edges": [{"from": e.upstream, "to": e.downstream, "lots": e.lots} for e in ctx.lot_edges
                                   if e.upstream in entities or e.downstream in entities],
