@@ -333,7 +333,7 @@ nodes:
 
 4. **演算法死區誠實披露 (Algorithm Dead-zone Disclosure)**：
    - 當某個演算法（如門控遮罩、互相關、分位數）在特定波形（如階梯高原、單點毛刺、微弱斜率）下無法被激發時，嚴禁透過抽換測試波形（例如將階梯波形偷換成隨機漫步）來粉飾太平。必須將該波形死區以測試標註（`@pytest.mark.xfail(strict=True)` 或 docstring）明確留存。
-   - 現有範例：`tests/test_rca_hybrid_limits.py`（短毛刺、被遮罩切斷的高原、偵測延遲造成的假領先者）。
+   - 現有範例：`tests/test_rca_amplifiers.py`（透過訊息佇列放大時指不到生產者，`xfail(strict=True)`）。
 
 5. **嚴禁用客製化 rule-based 補丁修測試失敗 (No Overfit Patches)**：
    - 測試或混沌場景失敗時，修的必須是**通用機制**（物理量、統計量、資料結構、錯誤處理），不准加「只為了讓這個測試、這個場景、這批資料過關」的規則。以下都算客製化補丁：
