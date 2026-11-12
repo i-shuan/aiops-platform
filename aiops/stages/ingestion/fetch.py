@@ -284,7 +284,8 @@ class IncidentTracesFetch(BaseOperator):
                           kind=str(s.get("kind") or ""), subtype=str(s.get("subtype") or ""),
                           resource=str(s.get("resource") or ""), status_code=int(s.get("status_code") or 0),
                           name=str(s.get("name") or ""), consumer=bool(s.get("consumer")), queue=str(s.get("queue") or ""),
-                          age_ms=s.get("age_ms"), links=tuple((str(t), str(i)) for t, i in s.get("links") or ()))
+                          age_ms=s.get("age_ms"), links=tuple((str(t), str(i)) for t, i in s.get("links") or ()),
+                          weight=float(s.get("weight") or 1.0))
 
     @staticmethod
     def _entry_counts(spans: list[SpanRecord], entities: list[str], lo: datetime, hi: datetime) -> dict[str, int]:

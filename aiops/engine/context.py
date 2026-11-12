@@ -204,6 +204,9 @@ class SpanRecord:
     queue: str = ""         # transaction.message.queue.name
     age_ms: float | None = None  # transaction.message.age.ms：訊息在佇列裡等了多久；None = 資料源沒給
     links: tuple[tuple[str, str], ...] = ()  # span.links：批次消費時指回各個生產者 span 的 (trace_id, span_id)
+    # 取樣權重：這個 span 代表幾個實際的 span（APM representative_count、OTel tracestate 的 adjusted count）；
+    # 沒取樣資訊就是 1。比例、平均、流量用它加權；「樣本夠不夠」的門檻仍看實際撈到幾筆（見 stages/rca/spans.py）
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)

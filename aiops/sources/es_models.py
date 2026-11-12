@@ -92,6 +92,40 @@ def _links(raw: Any, trace_key: str, span_key: str) -> tuple[tuple[str, str], ..
     return tuple(out)
 
 
+def _positive_weight(v: Any) -> float:
+    """取樣權重（這個 span 代表幾個實際請求）：正數才算；沒有、0、負數、非數字一律 1（= 沒取樣，行為不變）。"""
+    if isinstance(v, str) and v.strip().replace(".", "", 1).isdigit():
+        v = float(v)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 1.0
+    return float(v) if 0 < v < float("inf") else 1.0  # NaN 的比較都是 False，也落到 1
+
+
+# OTel 機率取樣（tracestate 的 ot 欄位，https://opentelemetry.io/docs/specs/otel/trace/tracestate-probability-sampling/）：
+#   th:<1～14 位十六進位> = 56 位元的拒絕門檻 T（右邊補 0 到 14 位），取樣機率 = (2^56 − T) / 2^56，
+#   adjusted count（權重）= 2^56 / (2^56 − T)。th:0 = 全取（權重 1）；th:c -> 25%、權重 4；th:8 -> 50%、權重 2。
+#   舊版實驗規格的 p:<n>（0～62）：取樣機率 2^−n、權重 2^n；p:63 代表「不能拿來計數」，這裡當沒有資訊（權重 1）。
+_OTEL_THRESHOLD_BITS = 56
+_OTEL_MAX_P = 62
+
+
+def otel_sampling_weight(trace_state: Any) -> float:
+    """tracestate 字串 -> 權重。格式錯、沒有 ot 欄位、或沒有 th／p：1（當沒取樣）。th 優先於 p。"""
+    if not isinstance(trace_state, str) or "ot=" not in trace_state:
+        return 1.0
+    ot = next((m.strip()[3:] for m in trace_state.split(",") if m.strip().startswith("ot=")), "")
+    fields = dict(kv.split(":", 1) for kv in ot.split(";") if ":" in kv)
+    th = fields.get("th", "")
+    if th and len(th) <= 14 and all(c in "0123456789abcdef" for c in th):
+        reject = int(th.ljust(14, "0"), 16)
+        total = 1 << _OTEL_THRESHOLD_BITS
+        return total / (total - reject)
+    p = fields.get("p", "")
+    if p.isdigit() and int(p) <= _OTEL_MAX_P:
+        return float(1 << int(p))
+    return 1.0
+
+
 @dataclass(frozen=True)
 class EsDataModel:
     name: str
@@ -197,7 +231,9 @@ def _apm_span(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
             "consumer": own is txn and txn.get("type") == "messaging",
             "queue": str((message.get("queue") or {}).get("name") or ""),
             "age_ms": float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None,
-            "links": _links(span.get("links"), "trace.id", "span.id")}
+            "links": _links(span.get("links"), "trace.id", "span.id"),
+            # 取樣權重：APM agent 依 transaction_sample_rate 取樣時，每筆帶 representative_count = 1 ÷ 取樣率
+            "weight": _positive_weight(own.get("representative_count"))}
 
 
 def _apm_log(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
@@ -232,7 +268,9 @@ ELASTIC_APM = EsDataModel(
                        # 下游資源歸因與範例 trace 排序用；索引沒有就是空字串／0，行為退回只看服務
                        "span.type", "span.subtype", "span.destination.service.resource",
                        # 訊息佇列（非同步邊）：消費者 transaction 的型別、佇列名、訊息年齡，與批次消費的 span.links
-                       "transaction.type", "transaction.message.queue.name", "transaction.message.age.ms", "span.links"),
+                       "transaction.type", "transaction.message.queue.name", "transaction.message.age.ms", "span.links",
+                       # 取樣權重（APM 資料模型：這一筆代表幾筆；沒有就是 1）
+                       "transaction.representative_count", "span.representative_count"),
     extra_log_source=("error.exception", "error.log", "error.culprit"),
     parse_span=_apm_span,
     parse_log=_apm_log,
@@ -312,7 +350,8 @@ def _otel_span(r: Resolved, src: dict[str, Any]) -> dict[str, Any] | None:
             # OTel 沒有標準的「訊息在佇列等了多久」屬性（APM 的 transaction.message.age.ms）：一律 None，
             # 佇列延遲只能靠 parent／links 找到生產者 span 的發布時間（engine/mq.py 的 T_pub）
             "age_ms": None,
-            "links": _links(src.get("links"), "trace_id", "span_id")}
+            "links": _links(src.get("links"), "trace_id", "span_id"),
+            "weight": otel_sampling_weight(src.get("trace_state"))}
 
 
 def _otel_message(r: Resolved, src: dict[str, Any]) -> str:
@@ -366,8 +405,8 @@ OTEL = EsDataModel(
     # 剛好落在分頁邊界時，search_after 可能漏掉同鍵的其他筆（只有超過 5000 筆一頁時才會發生）
     log_sort=[{"@timestamp": "asc"}, {"trace_id": {"order": "asc", "missing": "_last"}},
               {"span_id": {"order": "asc", "missing": "_last"}}],
-    extra_span_source=("kind", "status", "links", "attributes.rpc.system", "attributes.http.request.method",
-                       "attributes.url.full"),
+    extra_span_source=("kind", "status", "links", "trace_state", "attributes.rpc.system",
+                       "attributes.http.request.method", "attributes.url.full"),
     extra_log_source=("body.structured", "severity_number", "event_name"),
     parse_span=_otel_span,
     parse_log=_otel_log,

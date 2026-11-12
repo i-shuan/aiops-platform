@@ -5,6 +5,7 @@ OTel 的期望值一律來自 tests/fixtures/otel_es/ 的真實文件（Collecto
 """
 import json
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from aiops.engine.requests import MappingSubmit
 from aiops.interfaces.runner import run
 from aiops.sources.base import InvalidQueryError, as_utc_datetime
 from aiops.sources.elasticsearch import ElasticsearchSpec, _span
-from aiops.sources.es_models import DATA_MODEL_ENV, ELASTIC_APM, OTEL, current_model, get_path
+from aiops.sources.es_models import DATA_MODEL_ENV, ELASTIC_APM, OTEL, current_model, get_path, otel_sampling_weight
 from aiops.stages.ingestion.fetch import IncidentTracesFetch
 from aiops.stages.rca import spans as rca_spans
 
@@ -63,7 +64,9 @@ def test_elastic_apm_queries_are_exactly_what_they_were_before_profiles():
                           "span.type", "span.subtype", "span.destination.service.resource",
                           "http.response.status_code", "transaction.name",
                           "transaction.type", "transaction.message.queue.name", "transaction.message.age.ms", "span.links"]
-    assert sorted(r.span_source) == sorted(before_span_fields)
+    # 唯一刻意多撈的：取樣還原（階段 2）要的 representative_count；沒有這兩個欄位的索引權重一律 1
+    added_for_sampling = ["transaction.representative_count", "span.representative_count"]
+    assert sorted(r.span_source) == sorted(before_span_fields + added_for_sampling)
     assert r.span_sort == [{"@timestamp": "asc"}, {"trace.id": "asc"}, {"span.id": {"order": "asc", "missing": "_first"}}]
     assert sorted(r.log_source) == sorted(["@timestamp", "service.name", "trace.id", "message", "error.exception",
                                            "error.log", "error.culprit"])
@@ -114,8 +117,9 @@ def test_otel_span_kinds_map_onto_the_apm_semantics_downstream_already_uses():
 
 
 def test_rca_statistics_read_otel_spans_with_the_same_meaning_as_apm():
+    """語意對照（不含取樣還原）：把權重拿掉，數字是逐 span 的原始統計。取樣還原另見 test_sampling_weights_*。"""
     r = OTEL.resolve(None)
-    recs = [IncidentTracesFetch._record(r.span(d), lambda x: x) for d in OTEL_SPANS]
+    recs = [replace(IncidentTracesFetch._record(r.span(d), lambda x: x), weight=1.0) for d in OTEL_SPANS]
     lo, hi = min(s.ts for s in recs) - timedelta(seconds=1), max(s.ts for s in recs) + timedelta(seconds=1)
     stats = rca_spans.window_stats(recs, lo, hi)
     assert {k: v.requests for k, v in stats.items()} == {"checkout": 8, "cart-api": 8, "ord-svc": 7}
@@ -230,6 +234,63 @@ def test_otel_span_query_uses_otel_ids_for_sort_and_trace_lookups(monkeypatch):
     seen.clear()
     spec.fetch_linked_spans(["abc"], t, t + timedelta(hours=1))
     assert {"terms": {"trace_id": ["abc"]}} in seen[0][1]["query"]["bool"]["filter"]
+
+
+# ── 取樣還原（階段 2）──
+
+
+def test_otel_tracestate_threshold_and_legacy_p_value_become_adjusted_counts():
+    # OTel tracestate probability sampling：權重 = 2^56 / (2^56 − T)；舊版 p:n -> 2^n
+    assert otel_sampling_weight("ot=th:c") == 4.0      # 拒絕 75%，取樣 25%
+    assert otel_sampling_weight("ot=th:8") == 2.0
+    assert otel_sampling_weight("ot=th:0") == 1.0
+    assert otel_sampling_weight("ot=th:c;rv:abcdef01234567") == 4.0
+    assert otel_sampling_weight("vendor=x,ot=th:8") == 2.0
+    assert otel_sampling_weight("ot=p:2") == 4.0
+    for no_info in (None, "", "vendor=x", "ot=p:63", "ot=th:zz", "ot=rv:abcdef01234567", 4):
+        assert otel_sampling_weight(no_info) == 1.0
+    # 真實樣本裡的 trace_state 原樣進來
+    assert Counter(OTEL.resolve(None).span(d)["weight"] for d in OTEL_SPANS) == {4.0: 28, 1.0: 21, 2.0: 8}
+
+
+def test_apm_representative_count_is_the_weight_and_bad_values_mean_unsampled():
+    base = {"@timestamp": "2026-11-03T14:00:00Z", "trace": {"id": "t"}, "service": {"name": "a"}}
+    txn = {**base, "transaction": {"id": "x", "duration": {"us": 1000}, "representative_count": 10}}
+    assert _span(txn)["weight"] == 10.0
+    span = {**base, "span": {"id": "s", "duration": {"us": 1000}, "representative_count": "2.5"},
+            "transaction": {"id": "x", "representative_count": 10}}
+    assert _span(span)["weight"] == 2.5  # span 文件看 span 自己的，不是所屬 transaction 的
+    for bad in (None, 0, -3, "abc", True, float("nan"), float("inf")):
+        assert _span({**base, "transaction": {"id": "x", "representative_count": bad}})["weight"] == 1.0
+
+
+def test_sampling_weights_restore_request_counts_and_rates_but_not_evidence_counts():
+    """真實樣本：checkout 撈到 8 個入口 span，權重 1,1,4,2,4,4（正常）＋ 1,4（錯誤）-> 估計 21 個請求。
+    錯誤率 5/21（不是 2/8）；平均耗時是加權平均；樣本數（requests、wait_failures）仍是實際筆數。"""
+    r = OTEL.resolve(None)
+    recs = [IncidentTracesFetch._record(r.span(d), lambda x: x) for d in OTEL_SPANS]
+    lo, hi = min(s.ts for s in recs) - timedelta(seconds=1), max(s.ts for s in recs) + timedelta(seconds=1)
+    stats = rca_spans.window_stats(recs, lo, hi)
+    checkout, cart = stats["checkout"], stats["cart-api"]
+    assert (checkout.requests, checkout.weighted_requests) == (8, 21)
+    assert checkout.error_rate == pytest.approx(5 / 21)
+    assert checkout.total_ms_mean == pytest.approx((120 * 16 + 300 * 5) / 21)
+    assert cart.total_ms_mean == pytest.approx((75 * 16 + 270 * 5) / 21)
+    assert cart.wait_ms_per_request["pg-main:5432"] == pytest.approx((40 * 16 + 250 * 5) / 21)
+    assert cart.wait_failures == {"pg-main:5432": 2, "redis-cache:6379": 0}  # 筆數，不加權
+    assert (stats["ord-svc"].requests, stats["ord-svc"].weighted_requests) == (7, 17)  # 批次消費者沒有 trace_state
+    assert rca_spans.inbound_callers(recs, lo, hi) == {"checkout": {"": 21}, "cart-api": {"checkout": 21},
+                                                       "ord-svc": {"mq:checkout": 17}}
+
+
+def test_unit_weights_leave_every_statistic_exactly_as_before():
+    r = OTEL.resolve(None)
+    recs = [replace(IncidentTracesFetch._record(r.span(d), lambda x: x), weight=1.0) for d in OTEL_SPANS]
+    lo, hi = min(s.ts for s in recs) - timedelta(seconds=1), max(s.ts for s in recs) + timedelta(seconds=1)
+    for st in rca_spans.window_stats(recs, lo, hi).values():
+        assert st.weighted_requests == st.requests and isinstance(st.weighted_requests, int)
+    callers = rca_spans.inbound_callers(recs, lo, hi)
+    assert all(isinstance(n, int) for v in callers.values() for n in v.values())
 
 
 # ── 欄位對照提交 ──
