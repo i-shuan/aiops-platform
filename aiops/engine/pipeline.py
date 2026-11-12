@@ -93,6 +93,10 @@ class Workflow(StrictModel):
     # 明確指定拓撲／Lot 流向時優先於從 trace、Lot 履歷自動推導的結果；給空清單代表「不要用」
     topology: list[tuple[str, str]] | None = None
     lot_edges: list[dict[str, Any]] | None = None
+    # 這條偵測管線產生的事件群，預設用哪一條 RCA 管線出報告（POST /api/v1/rca 沒帶 workflow 時用它）。
+    # 依場景有沒有 trace 決定：有 trace 的 IT 管線寫 rca_report_llm；沒有 trace 的（工廠、純指標）寫 rca_report
+    # （沒有 span 時退回拓撲／Lot 流向推測）。不寫 = rca_report。名稱在載入期檢查（interfaces/runner.build_pipeline）。
+    rca_workflow: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
     # 資料斷流：這一輪「抓不到資料」（資料源回沒資料、或抓回來是空的）的序列比例達到這個值，整輪視為基礎設施錯誤，
     # 心跳不續命、備援通報會響。預設 1.0 = 全部序列都抓不到才算（PVC 滿、APM 寫不進去就是這個樣子；
     # 個別序列本來就稀疏的只記錯誤）。查詢寫錯（BadRequest）是設定問題，不算斷流

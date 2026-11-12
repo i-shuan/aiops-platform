@@ -26,7 +26,7 @@
 ### 🚫 架構自動化防禦（違規將導致 `test_architecture.py` 報錯）
 1. **嚴禁內部跨節點偷渡**：任何算子內部嚴禁出現 `ReadDAO` 去翻其他模組的表。所有上游資訊必須由 `ctx` 取得。
 2. **算子獨立性**：`stages/detectors/` 各演算法之間嚴禁互相 import。
-3. **LLM 的位置（告警路徑零依賴、RCA 路徑必要）**：告警路徑（偵測 → 收斂 → 計分 → 抑制 → 通知，`pipelines/detection/`）**嚴禁依賴 LLM**——那些 YAML 不准掛 `enrichment.*` 節點，`stages/` 除了 `enrichment/` 本身都不准 import `aiops.stages.enrichment`。RCA 路徑的 LLM 是**必要元件**（`enrichment.extract_evidence` 抽證據、`enrichment.rca_narrator` 寫摘要，沒有 `noop`）：沒設定、連不上、逾時、格式不合、驗證全數被拒時報告照出，`ctx.rca_status = "undetermined"` 並在 `rca_undetermined_reason` 寫代碼與原因，不整份失敗、不退回舊規則硬猜、不無限重試。舊引擎的 `enrichment.llm_summary`／`llm_briefing` 保留 `provider: noop`（預設），完全不連外、直接用模板。
+3. **LLM 的位置（告警路徑零依賴、RCA 路徑必要）**：告警路徑（偵測 → 收斂 → 計分 → 抑制 → 通知，`pipelines/detection/`）**嚴禁依賴 LLM**——那些 YAML 不准掛 `enrichment.*` 節點，`stages/` 除了 `enrichment/` 本身都不准 import `aiops.stages.enrichment`。RCA 路徑的 LLM 是**必要元件**（`enrichment.extract_evidence` 抽證據、`enrichment.rca_narrator` 寫摘要，沒有 `noop`）：沒設定、連不上、逾時、格式不合、驗證全數被拒、或根本沒有事實與證據可判（`no_evidence`）時報告照出，`ctx.rca_status = "undetermined"` 並在 `rca_undetermined_reason` 寫代碼與原因，不整份失敗、不退回舊規則硬猜、不無限重試。舊引擎的 `enrichment.llm_summary`／`llm_briefing` 保留 `provider: noop`（預設），完全不連外、直接用模板。
 4. **模型序列化安全**：整個 `aiops/` 嚴禁 import `pickle`／`joblib`／`dill`／`cloudpickle`／`shelve`／`marshal`，也不准出現 `allow_pickle=True`。非 JSON 的模型本體只能用 npz（`pack_arrays`／`unpack_arrays`）。
 5. **RCA 不寫死**：報告段落是 `rca.section.*`、根因演算法是 `rca.root_cause.*`，都走 `OperatorRegistry`；`stages/rca/report.py` 不得 import 具體段落或演算法。
 
@@ -226,6 +226,8 @@ nodes:
 **節點失敗怎麼處理**：預設任何節點出錯都讓這一輪（或這條序列）失敗。旁路裝飾節點（LLM 摘要等）加上 `optional: true`，失敗時只記進 `errors`（實體名為 `node:<節點名>`）並跳過，後面的節點與最終寫入照常執行。`InfrastructureError`（DB、資料源連不上）不受 `optional` 影響，一律讓整輪失敗。**不要把 fetch、detector、group、suppress、payload、notify 標成 optional。** 例外只有 RCA 的旁路證據撈取（`ingestion.incident_series`／`incident_traces`／`incident_logs`）：它們自己接住資料源連不上，寫進 `errors` 後略過，報告照出；偵測流程的 `ingestion.fetch` 不准這樣做。資料源的短暫抖動（連線失敗、逾時、429／502／503／504）由 `sources/_http.request` 重試 2 次。
 
 **參數優先序**：演算法預設值 ← 後台核准的調參 ← YAML `params` ← target `overrides`，逐鍵合併（`engine/params.deep_merge`，收口在 `stages/detectors/base.layer_params`）；YAML 寫了的鍵鎖定、不被調參覆蓋。調參分層 (偵測器, 管線, 實體)，取最具體的一層（管線×實體 > 管線 > 實體 > 全域）。提案回測疊同樣的層，被 YAML 鎖住的鍵列在回測結果的 `workflow.locked`。
+
+**RCA 依偵測管線分流**：偵測管線 YAML 的 `rca_workflow` 決定它的事件群預設用哪條 RCA 管線（`POST /api/v1/rca` 沒帶 `workflow` 時；`interfaces/runner.rca_workflow_for`）。有 trace 的寫 `rca_report_llm`，沒有 trace 的（工廠、純指標）寫 `rca_report`；新增偵測管線必須寫（`tests/test_rca_routing.py`），名稱寫錯在載入期報錯。
 
 **workflow 只能用名稱**：API 的 `workflow` 欄位只接受 `[A-Za-z0-9_-]+` 的內建名稱（`interfaces/runner.workflow_path`，在 `pipelines/` 所有子資料夾依名稱找檔，名稱重複直接報錯），絕不接受路徑；只有排程 CLI 可以用 `allow_file=True` 載入自己的 YAML 檔。
 

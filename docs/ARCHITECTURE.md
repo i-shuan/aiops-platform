@@ -58,7 +58,16 @@ RCA 管線
 | 10. 根因：報告 | `rca.report`、`rca_narrator`、`llm_briefing` |
 | 11. 學習回饋 | `feedback_submit`、`feedback_propose`、`proposal_backtest`、`proposal_approve` |
 
-不在主線、只當備援的：`rca.root_cause.evidence`（LLM 不可用時改跑 `rca_report`，不連外）與 `rca.root_cause.topological`（連 trace 都沒有時，只看服務依賴圖與先後時間）。
+不在 IT 主線的：`rca.root_cause.evidence`（`rca_report`，不連外）與 `rca.root_cause.topological`（連 trace 都沒有時，只看服務依賴圖／Lot 流向與先後時間）。
+
+**RCA 走哪一條由偵測管線決定**：每條偵測管線 YAML 寫 `rca_workflow`，`POST /api/v1/rca` 沒帶 `workflow` 時照它走。
+
+| 偵測管線 | 有沒有 trace | 預設 RCA 管線 |
+| :--- | :--- | :--- |
+| `it_otel`、`it_apm` | 有 | `rca_report_llm` |
+| `factory`、`metrics_only` | 沒有 | `rca_report`（沒有 span 時退回 `topological`） |
+
+新引擎不會自動退回舊引擎：LLM 沒設定或不可用時，報告照出但標「無法判定」。要舊引擎的結果，請求帶 `workflow: rca_report`。
 
 **各算子簡介**
 

@@ -45,6 +45,7 @@ LLM_TIMEOUT = "llm_timeout"                 # 超過節點 timeout_seconds 沒�
 LLM_BAD_JSON = "llm_bad_json"               # 回應不是 JSON 物件
 LLM_BAD_SCHEMA = "llm_bad_schema"           # 是 JSON，但沒有 evidence 陣列
 LLM_ALL_REJECTED = "llm_all_rejected"       # 有回項目，但驗證後一項都不剩
+NO_EVIDENCE = "no_evidence"                 # 根因判斷沒有任何事實或日誌證據可用（沒有 trace／日誌／時序），沒有呼叫 LLM
 FAILURE_CODES = (LLM_NOT_CONFIGURED, LLM_ERROR, LLM_TIMEOUT, LLM_BAD_JSON, LLM_BAD_SCHEMA, LLM_ALL_REJECTED)
 
 MAX_RETRIES = 3

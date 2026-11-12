@@ -1,5 +1,7 @@
 name: it_otel
 description: "IT：OpenTelemetry trace + 指標，有服務拓撲與黃金訊號（偵測：R+SNR）"
+# 這條管線的事件群預設用哪條 RCA 管線（POST /api/v1/rca 沒帶 workflow 時）。有 trace：事實＋日誌證據交給 LLM 判斷（沒設定 LLM 時報告照出、標無法判定）
+rca_workflow: rca_report_llm
 
 nodes:
   # 注意 Prometheus 單次查詢上限約 11000 點：step 60 秒抓 7 天是 10081 點，剛好在上限內。

@@ -1,5 +1,7 @@
 name: factory
 description: "工廠：機台／Lot 指標，沒有 Pod、HTTP 與黃金訊號；流向來自 Lot 履歷"
+# 這條管線的事件群預設用哪條 RCA 管線（POST /api/v1/rca 沒帶 workflow 時）。沒有 trace：不走 LLM（沒有 span 事實可判），用舊引擎，退回拓撲／Lot 流向推測
+rca_workflow: rca_report
 
 nodes:
   # 168 時段基準線每個「週幾幾點」要看過至少 2 週才會啟用（min_weeks），訓練窗口不夠長時它整條退回全段統計（等同 zscore）。

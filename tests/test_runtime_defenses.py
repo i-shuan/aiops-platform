@@ -257,7 +257,7 @@ def test_ten_concurrent_rca_requests_for_one_incident_hit_the_data_source_and_th
     monkeypatch.setattr(runner, "load_workflow", with_llm)
     incident_id = _rca_incident(now)
 
-    solo = client.post("/api/v1/rca", json={"incident_id": incident_id})
+    solo = client.post("/api/v1/rca", json={"incident_id": incident_id, "workflow": "rca_report"})
     assert solo.status_code == 200 and solo.json()["result"]["narrative"]["generated_by"] == "llm"
     per_run = list(spec.calls)
     assert per_run.count("spans") >= 1 and per_run.count("logs") >= 1 and llm.calls == 1
@@ -270,7 +270,7 @@ def test_ten_concurrent_rca_requests_for_one_incident_hit_the_data_source_and_th
 
     def call():
         barrier.wait(5)
-        responses.append(client.post("/api/v1/rca", json={"incident_id": incident_id}))
+        responses.append(client.post("/api/v1/rca", json={"incident_id": incident_id, "workflow": "rca_report"}))
 
     threads = [threading.Thread(target=call) for _ in range(10)]
     for t in threads:

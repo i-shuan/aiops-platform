@@ -40,7 +40,7 @@ from aiops.engine.rca_types import EvidenceItem, Fact
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import Incident, as_utc
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
-from aiops.stages.enrichment.evidence_extractor import (LLM_ALL_REJECTED, LLM_BAD_JSON, LLM_BAD_SCHEMA, MAX_RETRIES,
+from aiops.stages.enrichment.evidence_extractor import (LLM_ALL_REJECTED, LLM_BAD_JSON, LLM_BAD_SCHEMA, MAX_RETRIES, NO_EVIDENCE,
                                                         CallFailure, check_provider, complete_with_policy,
                                                         known_entities, resolve_provider)
 from aiops.stages.rca.base import RootCauseOperator, first_seen
@@ -510,8 +510,8 @@ class LLMRootCause(RootCauseOperator):
             ctx.rca_root_note = f"無法判定：{ctx.rca_undetermined_reason or 'LLM 證據抽取未完成'}，不呼叫 LLM 判斷"
             return []
         if not ctx.rca_facts and not ctx.rca_evidence:
-            ctx.rca_root_note = "證據不足，不指認根因：沒有任何可用的事實或日誌證據（不呼叫 LLM）"
-            return []
+            # 以前只寫 rca_root_note、rca_status 維持 ok：查狀態的人會以為「判過了、沒有根因」。沒東西可判就是無法判定
+            return self._undetermined(ctx, NO_EVIDENCE, "沒有任何可用的事實或日誌證據（沒有 trace、日誌，或這條管線沒有撈時序），不呼叫 LLM")
         facts, evidence = fact_rows(ctx.rca_facts, self.max_facts), evidence_rows(ctx.rca_evidence)
         entities = known_entities(ctx) | {f.entity for f in ctx.rca_facts}
         graph = graph_rows(ctx, entities)

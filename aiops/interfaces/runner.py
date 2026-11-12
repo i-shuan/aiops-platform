@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import pkgutil
 import re
 from datetime import datetime
@@ -17,6 +18,9 @@ from aiops.engine.context import PipelineContext
 from aiops.engine.errors import BadRequest, NotFound, WorkflowError
 from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
 from aiops.storage.hooks import StorageHooks
+from aiops.storage.repository import Incidents
+
+logger = logging.getLogger(__name__)
 
 WORKFLOW_DIR = Path(__file__).parents[1] / "pipelines"
 # 算子所在的套件：管線算子（stages）與控制面手動動作（control_plane）
@@ -24,6 +28,8 @@ OPERATOR_PACKAGES = ("aiops.stages", "aiops.control_plane")
 # 白名單：只准英數、底線、連字號。fullmatch 一次擋掉 /、\、..、空字串、換行與 \x00
 WORKFLOW_NAME = r"[A-Za-z0-9_-]+"
 _NAME = re.compile(WORKFLOW_NAME)
+# 事件群查不到所屬管線、或那條管線沒寫 rca_workflow 時用的 RCA 管線：不需要 LLM、沒有 trace 也能退回拓撲推測
+DEFAULT_RCA_WORKFLOW = "rca_report"
 
 
 def load_all() -> None:
@@ -69,7 +75,32 @@ def workflow_path(name: str, *, allow_file: bool = False) -> Path:
 
 def build_pipeline(name: str, *, allow_file: bool = False) -> Pipeline:
     load_all()
-    return Pipeline(load_workflow(workflow_path(name, allow_file=allow_file)), StorageHooks())
+    workflow = load_workflow(workflow_path(name, allow_file=allow_file))
+    if workflow.rca_workflow:
+        try:
+            workflow_path(workflow.rca_workflow)  # 寫錯名稱在載入期就報錯，不要等到有人按 RCA 才發現
+        except NotFound as e:
+            raise WorkflowError(f"workflow {workflow.name} 的 rca_workflow 找不到：{workflow.rca_workflow}") from e
+    return Pipeline(workflow, StorageHooks())
+
+
+def rca_workflow_for(incident_id: int, requested: str | None = None) -> str:
+    """這個事件群要用哪一條 RCA 管線：呼叫端指定的優先；沒指定就看事件群所屬偵測管線 YAML 的 rca_workflow；
+    查不到（事件群不存在、舊資料沒記管線、管線是排程 CLI 用檔案載入的）就用 DEFAULT_RCA_WORKFLOW。
+    事件群不存在不在這裡報錯：照常交給管線載入時丟 NotFound（404）。"""
+    if requested:
+        return requested
+    row = Incidents.get(incident_id)
+    pipeline = (row or {}).get("pipeline")
+    if not pipeline:
+        return DEFAULT_RCA_WORKFLOW
+    try:
+        path = workflow_path(pipeline)
+    except (NotFound, BadRequest) as e:
+        logger.info("rca_workflow_for: 事件群 %s 的管線 %r 不是內建 workflow（%s），用 %s",
+                    incident_id, pipeline, e, DEFAULT_RCA_WORKFLOW)
+        return DEFAULT_RCA_WORKFLOW
+    return load_workflow(path).rca_workflow or DEFAULT_RCA_WORKFLOW
 
 
 def run_context(workflow: str, *, request: BaseModel | None = None, incident_id: int | None = None,

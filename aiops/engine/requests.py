@@ -45,7 +45,8 @@ class RunWorkflowRequest(StrictModel):
 
 class RcaRequest(StrictModel):
     incident_id: int
-    workflow: str = Field("rca_report", pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
+    # 不給 = 依事件群所屬偵測管線的 rca_workflow 決定（interfaces/runner.rca_workflow_for）
+    workflow: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
 
 
 class IdRef(StrictModel):

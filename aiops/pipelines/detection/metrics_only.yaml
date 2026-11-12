@@ -1,5 +1,7 @@
 name: metrics_only
 description: "只有時序指標，沒有 trace 與拓撲"
+# 這條管線的事件群預設用哪條 RCA 管線（POST /api/v1/rca 沒帶 workflow 時）。沒有 trace：不走 LLM（沒有 span 事實可判），用舊引擎，退回拓撲／Lot 流向推測
+rca_workflow: rca_report
 
 nodes:
   - name: fetch

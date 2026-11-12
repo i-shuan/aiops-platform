@@ -1,5 +1,7 @@
 name: it_apm
 description: "IT：APM 產品資料，有服務拓撲與黃金訊號"
+# 這條管線的事件群預設用哪條 RCA 管線（POST /api/v1/rca 沒帶 workflow 時）。有 trace：事實＋日誌證據交給 LLM 判斷（沒設定 LLM 時報告照出、標無法判定）
+rca_workflow: rca_report_llm
 
 nodes:
   - name: fetch

@@ -230,7 +230,9 @@ def test_upstream_undetermined_or_no_material_means_the_llm_is_not_called():
     assert ctx.rca_root_candidates == [] and "llm_timeout" in ctx.rca_root_note
     assert ctx.rca_undetermined_reason == "llm_timeout：30 秒沒有回應"  # 上游的原因不被蓋掉
     empty = _rank(_ctx(facts=False, evidence=False), model="ok")
-    assert empty.rca_status == "ok" and empty.rca_root_candidates == [] and "證據不足" in empty.rca_root_note
+    # 沒東西可判 = 無法判定（原因代碼 no_evidence），不是「判過了、狀態 ok」
+    assert empty.rca_status == "undetermined" and empty.rca_root_candidates == []
+    assert empty.rca_undetermined_reason.startswith("no_evidence") and "無法判定" in empty.rca_root_note
     assert _Judge.calls == []
 
 
