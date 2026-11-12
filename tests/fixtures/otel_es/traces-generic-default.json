@@ -1,0 +1,3192 @@
+[
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:27.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "177219d30e7a269f",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   },
+   "url": {
+    "path": "/checkout",
+    "scheme": "http"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:27.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "177219d30e7a269f"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "5c6e433715ba2bdd",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   },
+   "url": {
+    "full": "http://cart-api:8080/cart"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:27.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "5c6e433715ba2bdd"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "2b491044d5e34124",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:27.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "collection": {
+     "name": "items"
+    },
+    "operation": {
+     "name": "SELECT"
+    },
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "2b491044d5e34124"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "cf1822ffbc688778",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:27.690552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "operation": {
+     "name": "GET"
+    },
+    "system": {
+     "name": "redis"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "2b491044d5e34124"
+   },
+   "server": {
+    "address": "redis-cache",
+    "port": 6379
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "type": "redis"
+    },
+    "id": "da94e3e8ab73738f",
+    "kind": "CLIENT",
+    "name": "GET"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:27.720552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "177219d30e7a269f"
+   },
+   "server": {
+    "address": "tax-gw.example.net",
+    "port": 443
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "4067c3584ee207f8",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   },
+   "url": {
+    "full": "https://tax-gw.example.net/v1/quote"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:27.747552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "operation": {
+     "type": "publish",
+     "value": "publish"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "177219d30e7a269f"
+   },
+   "server": {
+    "address": "kafka-0",
+    "port": 9092
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "3653f8dd9b1f282e",
+    "kind": "PRODUCER",
+    "name": "orders publish"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.035552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "kafka": {
+     "consumer": {
+      "group": "ord-svc"
+     }
+    },
+    "operation": {
+     "type": "process",
+     "value": "process"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "3653f8dd9b1f282e"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "ord-svc",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "0925e4749b575bd1",
+    "kind": "CONSUMER",
+    "name": "orders process"
+   },
+   "trace": {
+    "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "a372db8f6e405d93",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   },
+   "url": {
+    "path": "/checkout",
+    "scheme": "http"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "a372db8f6e405d93"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "cdbd47d364be8049",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   },
+   "url": {
+    "full": "http://cart-api:8080/cart"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "cdbd47d364be8049"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "dc38f519b91751da",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "collection": {
+     "name": "items"
+    },
+    "operation": {
+     "name": "SELECT"
+    },
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "dc38f519b91751da"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "82523e86feac7eb7",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.690552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "operation": {
+     "name": "GET"
+    },
+    "system": {
+     "name": "redis"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "dc38f519b91751da"
+   },
+   "server": {
+    "address": "redis-cache",
+    "port": 6379
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "type": "redis"
+    },
+    "id": "5f3f57ebf30b94fa",
+    "kind": "CLIENT",
+    "name": "GET"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.720552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "a372db8f6e405d93"
+   },
+   "server": {
+    "address": "tax-gw.example.net",
+    "port": 443
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "ef8acd128b4f2fc1",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   },
+   "url": {
+    "full": "https://tax-gw.example.net/v1/quote"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:28.747552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "operation": {
+     "type": "publish",
+     "value": "publish"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "a372db8f6e405d93"
+   },
+   "server": {
+    "address": "kafka-0",
+    "port": 9092
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "80877b6f71e1f6d2",
+    "kind": "PRODUCER",
+    "name": "orders publish"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.035552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "kafka": {
+     "consumer": {
+      "group": "ord-svc"
+     }
+    },
+    "operation": {
+     "type": "process",
+     "value": "process"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "80877b6f71e1f6d2"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "ord-svc",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "e6b58de744ab6cce",
+    "kind": "CONSUMER",
+    "name": "orders process"
+   },
+   "trace": {
+    "id": "ffed9235288bc781ae66267594c9c950"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "ee8d7ee9770348a0",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   },
+   "url": {
+    "path": "/checkout",
+    "scheme": "http"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "ee8d7ee9770348a0"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "e8624fab5186ee32",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   },
+   "url": {
+    "full": "http://cart-api:8080/cart"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "e8624fab5186ee32"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "6c71c4a66148a86f",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "collection": {
+     "name": "items"
+    },
+    "operation": {
+     "name": "SELECT"
+    },
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "6c71c4a66148a86f"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "e2520e33e44c5055",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.690552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "operation": {
+     "name": "GET"
+    },
+    "system": {
+     "name": "redis"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "6c71c4a66148a86f"
+   },
+   "server": {
+    "address": "redis-cache",
+    "port": 6379
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "type": "redis"
+    },
+    "id": "2a1be9cd8697bbd0",
+    "kind": "CLIENT",
+    "name": "GET"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.720552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "ee8d7ee9770348a0"
+   },
+   "server": {
+    "address": "tax-gw.example.net",
+    "port": 443
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "2d6c797f8f7d9b78",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   },
+   "url": {
+    "full": "https://tax-gw.example.net/v1/quote"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:29.747552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "operation": {
+     "type": "publish",
+     "value": "publish"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "ee8d7ee9770348a0"
+   },
+   "server": {
+    "address": "kafka-0",
+    "port": 9092
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "3b08c6e33c729578",
+    "kind": "PRODUCER",
+    "name": "orders publish"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.035552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "kafka": {
+     "consumer": {
+      "group": "ord-svc"
+     }
+    },
+    "operation": {
+     "type": "process",
+     "value": "process"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "3b08c6e33c729578"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "ord-svc",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "2d3d854e061b9030",
+    "kind": "CONSUMER",
+    "name": "orders process"
+   },
+   "trace": {
+    "id": "5d300cb90706a045defc044a09325626"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "5c14bc4a829e07b0",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   },
+   "url": {
+    "path": "/checkout",
+    "scheme": "http"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "5c14bc4a829e07b0"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "83844b40ffa9b9f1",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   },
+   "url": {
+    "full": "http://cart-api:8080/cart"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "83844b40ffa9b9f1"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "8f54f8ceacaab39e",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "collection": {
+     "name": "items"
+    },
+    "operation": {
+     "name": "SELECT"
+    },
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "8f54f8ceacaab39e"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "fec3f6b32e8d4b8a",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.690552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "operation": {
+     "name": "GET"
+    },
+    "system": {
+     "name": "redis"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "8f54f8ceacaab39e"
+   },
+   "server": {
+    "address": "redis-cache",
+    "port": 6379
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "type": "redis"
+    },
+    "id": "72154e76e4c11ab2",
+    "kind": "CLIENT",
+    "name": "GET"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.720552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "5c14bc4a829e07b0"
+   },
+   "server": {
+    "address": "tax-gw.example.net",
+    "port": 443
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "6a27e0dfcbf87544",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   },
+   "url": {
+    "full": "https://tax-gw.example.net/v1/quote"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:30.747552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "operation": {
+     "type": "publish",
+     "value": "publish"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "5c14bc4a829e07b0"
+   },
+   "server": {
+    "address": "kafka-0",
+    "port": 9092
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "867e5e15bc01bfce",
+    "kind": "PRODUCER",
+    "name": "orders publish"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.035552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "kafka": {
+     "consumer": {
+      "group": "ord-svc"
+     }
+    },
+    "operation": {
+     "type": "process",
+     "value": "process"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "867e5e15bc01bfce"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "ord-svc",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "e89204e2e8168561",
+    "kind": "CONSUMER",
+    "name": "orders process"
+   },
+   "trace": {
+    "id": "829a48d422fe99a22c70501e533c9135"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "5ca495fa5a91c89b",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   },
+   "url": {
+    "path": "/checkout",
+    "scheme": "http"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "5ca495fa5a91c89b"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "dbe53fcafb2147df",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   },
+   "url": {
+    "full": "http://cart-api:8080/cart"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "dbe53fcafb2147df"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "721dea3bf63f23d0",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "collection": {
+     "name": "items"
+    },
+    "operation": {
+     "name": "SELECT"
+    },
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "721dea3bf63f23d0"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "f4767f26294365b2",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.690552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "operation": {
+     "name": "GET"
+    },
+    "system": {
+     "name": "redis"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "721dea3bf63f23d0"
+   },
+   "server": {
+    "address": "redis-cache",
+    "port": 6379
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "type": "redis"
+    },
+    "id": "665d7435c1066932",
+    "kind": "CLIENT",
+    "name": "GET"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.720552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "5ca495fa5a91c89b"
+   },
+   "server": {
+    "address": "tax-gw.example.net",
+    "port": 443
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "bd143fa9b714210c",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   },
+   "url": {
+    "full": "https://tax-gw.example.net/v1/quote"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:31.747552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "operation": {
+     "type": "publish",
+     "value": "publish"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "5ca495fa5a91c89b"
+   },
+   "server": {
+    "address": "kafka-0",
+    "port": 9092
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "a7a83ee0761ebfd2",
+    "kind": "PRODUCER",
+    "name": "orders publish"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.035552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "kafka": {
+     "consumer": {
+      "group": "ord-svc"
+     }
+    },
+    "operation": {
+     "type": "process",
+     "value": "process"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "a7a83ee0761ebfd2"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "ord-svc",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "3ff98ff387c56473",
+    "kind": "CONSUMER",
+    "name": "orders process"
+   },
+   "trace": {
+    "id": "97eeab64ca2ce6bc5d3fd983c34c769f"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "83f0be4e80371eb9",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   },
+   "url": {
+    "path": "/checkout",
+    "scheme": "http"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "83f0be4e80371eb9"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "cbd4d3e2d4dec9ef",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   },
+   "url": {
+    "full": "http://cart-api:8080/cart"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "cbd4d3e2d4dec9ef"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "a9643a295a9ac6de",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "collection": {
+     "name": "items"
+    },
+    "operation": {
+     "name": "SELECT"
+    },
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "a9643a295a9ac6de"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "74667bffe202849d",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.690552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "operation": {
+     "name": "GET"
+    },
+    "system": {
+     "name": "redis"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "a9643a295a9ac6de"
+   },
+   "server": {
+    "address": "redis-cache",
+    "port": 6379
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "type": "redis"
+    },
+    "id": "e73695c3e652c71a",
+    "kind": "CLIENT",
+    "name": "GET"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.720552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 200
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "83f0be4e80371eb9"
+   },
+   "server": {
+    "address": "tax-gw.example.net",
+    "port": 443
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "59cc60b17604e4b4",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   },
+   "url": {
+    "full": "https://tax-gw.example.net/v1/quote"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:32.747552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "operation": {
+     "type": "publish",
+     "value": "publish"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "83f0be4e80371eb9"
+   },
+   "server": {
+    "address": "kafka-0",
+    "port": 9092
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "b9d39cca91551e82",
+    "kind": "PRODUCER",
+    "name": "orders publish"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:33.035552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "destination": {
+     "name": "orders"
+    },
+    "kafka": {
+     "consumer": {
+      "group": "ord-svc"
+     }
+    },
+    "operation": {
+     "type": "process",
+     "value": "process"
+    },
+    "system": "kafka"
+   },
+   "parent": {
+    "id": "b9d39cca91551e82"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "ord-svc",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "8ebdbfe3eb9ac688",
+    "kind": "CONSUMER",
+    "name": "orders process"
+   },
+   "trace": {
+    "id": "7f81375eecc1cb6347733e847d718d73"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:37.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 502
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "f0caeef038c89b38",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:37.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "500"
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 500
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "f0caeef038c89b38"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "d08f1bb2531d6460",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:37.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "org.postgresql.util.PSQLException"
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 500
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "d08f1bb2531d6460"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "d5c44a4eb3172062",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:37.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "PSQLException"
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "d5c44a4eb3172062"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "e06f291b2a838af8",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:38.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 502
+    },
+    "route": "/checkout"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "7ad1f45ae9500ec9",
+    "kind": "SERVER",
+    "name": "POST /checkout"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:38.637552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "500"
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 500
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "7ad1f45ae9500ec9"
+   },
+   "peer": {
+    "service": "cart-api"
+   },
+   "server": {
+    "address": "cart-api",
+    "port": 8080
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "checkout",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "4da4daeb4f3f8777",
+    "kind": "CLIENT",
+    "name": "POST"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:38.639552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "org.postgresql.util.PSQLException"
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "http": {
+    "request": {
+     "method": "POST"
+    },
+    "response": {
+     "status_code": 500
+    },
+    "route": "/cart"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "4da4daeb4f3f8777"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "cc9c3adcf515a823",
+    "kind": "SERVER",
+    "name": "POST /cart"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:38.645552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "db": {
+    "system": {
+     "name": "postgresql"
+    }
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "PSQLException"
+   },
+   "event": {
+    "outcome": "failure"
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "parent": {
+    "id": "cc9c3adcf515a823"
+   },
+   "server": {
+    "address": "pg-main",
+    "port": 5432
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "cart-api",
+    "version": "1.4.2"
+   },
+   "span": {
+    "db": {
+     "instance": "shop",
+     "type": "postgresql"
+    },
+    "id": "d4c0dca8b4c9e755",
+    "kind": "CLIENT",
+    "name": "SELECT shop.items"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "2026-11-12T12:43:47.635552900Z",
+   "data_stream": {
+    "dataset": "generic",
+    "namespace": "default",
+    "type": "traces"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "kubernetes": {
+    "namespace": "shop",
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "messaging": {
+    "batch": {
+     "message_count": 3
+    },
+    "destination": {
+     "name": "orders"
+    },
+    "operation": {
+     "type": "process"
+    },
+    "system": "kafka"
+   },
+   "service": {
+    "environment": "sample",
+    "language": {
+     "name": "java"
+    },
+    "name": "ord-svc",
+    "version": "1.4.2"
+   },
+   "span": {
+    "id": "9da59b74a6c3181c",
+    "kind": "CONSUMER",
+    "links": [
+     {
+      "span": {
+       "id": "3653f8dd9b1f282e"
+      },
+      "trace": {
+       "id": "d95bafc8f2a4d27bdcf4bb99f4bea973"
+      }
+     },
+     {
+      "span": {
+       "id": "80877b6f71e1f6d2"
+      },
+      "trace": {
+       "id": "ffed9235288bc781ae66267594c9c950"
+      }
+     },
+     {
+      "span": {
+       "id": "3b08c6e33c729578"
+      },
+      "trace": {
+       "id": "5d300cb90706a045defc044a09325626"
+      }
+     }
+    ],
+    "name": "orders process"
+   },
+   "trace": {
+    "id": "81e220df848b1df78feb994a81167346"
+   }
+  }
+ }
+]

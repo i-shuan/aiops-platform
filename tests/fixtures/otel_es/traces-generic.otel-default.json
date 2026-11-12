@@ -1,0 +1,2349 @@
+[
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487341966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "1027c4d1c386bbc4",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 120000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "url.path": "/checkout",
+    "http.response.status_code": 200,
+    "url.scheme": "http"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487341968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "1e2feb89414c343c",
+   "parent_span_id": "1027c4d1c386bbc4",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 80000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "url.full": "http://cart-api:8080/cart",
+    "http.response.status_code": 200,
+    "peer.service": "cart-api"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487341970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "c2ce6f447ed4d57b",
+   "parent_span_id": "1e2feb89414c343c",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 75000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487341976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "78e510617311d8a3",
+   "parent_span_id": "c2ce6f447ed4d57b",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 40000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "db.operation.name": "SELECT",
+    "db.collection.name": "items",
+    "server.address": "pg-main",
+    "server.port": 5432
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342021.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "612e7696a6cecc1b",
+   "parent_span_id": "c2ce6f447ed4d57b",
+   "name": "GET",
+   "kind": "Client",
+   "duration": 2000000,
+   "attributes": {
+    "db.system": "redis",
+    "db.system.name": "redis",
+    "db.operation.name": "GET",
+    "server.address": "redis-cache",
+    "server.port": 6379
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342051.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "35bf992dc9e9c616",
+   "parent_span_id": "1027c4d1c386bbc4",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 25000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "tax-gw.example.net",
+    "server.port": 443,
+    "url.full": "https://tax-gw.example.net/v1/quote",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342078.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "7ce42c8218072e8c",
+   "parent_span_id": "1027c4d1c386bbc4",
+   "name": "orders publish",
+   "kind": "Producer",
+   "duration": 3000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "publish",
+    "messaging.operation": "publish",
+    "server.address": "kafka-0",
+    "server.port": 9092
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342366.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+   "span_id": "e4b06ce60741c7a8",
+   "parent_span_id": "7ce42c8218072e8c",
+   "name": "orders process",
+   "kind": "Consumer",
+   "duration": 30000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "process",
+    "messaging.operation": "process",
+    "messaging.kafka.consumer.group": "ord-svc"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "c4647159c324c985",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 120000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "url.path": "/checkout",
+    "http.response.status_code": 200,
+    "url.scheme": "http"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "b2221a58008a05a6",
+   "parent_span_id": "c4647159c324c985",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 80000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "url.full": "http://cart-api:8080/cart",
+    "http.response.status_code": 200,
+    "peer.service": "cart-api"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "442e3d437204e52d",
+   "parent_span_id": "b2221a58008a05a6",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 75000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487342976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "cd447e35b8b6d8fe",
+   "parent_span_id": "442e3d437204e52d",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 40000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "db.operation.name": "SELECT",
+    "db.collection.name": "items",
+    "server.address": "pg-main",
+    "server.port": 5432
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343021.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "9755d4c13a902931",
+   "parent_span_id": "442e3d437204e52d",
+   "name": "GET",
+   "kind": "Client",
+   "duration": 2000000,
+   "attributes": {
+    "db.system": "redis",
+    "db.system.name": "redis",
+    "db.operation.name": "GET",
+    "server.address": "redis-cache",
+    "server.port": 6379
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343051.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "1a2b8f1ff1fd42a2",
+   "parent_span_id": "c4647159c324c985",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 25000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "tax-gw.example.net",
+    "server.port": 443,
+    "url.full": "https://tax-gw.example.net/v1/quote",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343078.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "51431193e6c3f339",
+   "parent_span_id": "c4647159c324c985",
+   "name": "orders publish",
+   "kind": "Producer",
+   "duration": 3000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "publish",
+    "messaging.operation": "publish",
+    "server.address": "kafka-0",
+    "server.port": 9092
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343366.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+   "span_id": "05b6e6e307d4bedc",
+   "parent_span_id": "51431193e6c3f339",
+   "name": "orders process",
+   "kind": "Consumer",
+   "duration": 30000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "process",
+    "messaging.operation": "process",
+    "messaging.kafka.consumer.group": "ord-svc"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "e1988ad9f06c144a",
+   "trace_state": "ot=th:c",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 120000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "url.path": "/checkout",
+    "http.response.status_code": 200,
+    "url.scheme": "http"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "afbd67f9619699cf",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "e1988ad9f06c144a",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 80000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "url.full": "http://cart-api:8080/cart",
+    "http.response.status_code": 200,
+    "peer.service": "cart-api"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "f8130c4237730edf",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "afbd67f9619699cf",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 75000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487343976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "b9d179e06c0fd4f5",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "f8130c4237730edf",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 40000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "db.operation.name": "SELECT",
+    "db.collection.name": "items",
+    "server.address": "pg-main",
+    "server.port": 5432
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344021.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "8712b8bc076f3787",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "f8130c4237730edf",
+   "name": "GET",
+   "kind": "Client",
+   "duration": 2000000,
+   "attributes": {
+    "db.system": "redis",
+    "db.system.name": "redis",
+    "db.operation.name": "GET",
+    "server.address": "redis-cache",
+    "server.port": 6379
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344051.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "c381e88f38c0c8fd",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "e1988ad9f06c144a",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 25000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "tax-gw.example.net",
+    "server.port": 443,
+    "url.full": "https://tax-gw.example.net/v1/quote",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344078.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "f06d3fef701966a0",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "e1988ad9f06c144a",
+   "name": "orders publish",
+   "kind": "Producer",
+   "duration": 3000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "publish",
+    "messaging.operation": "publish",
+    "server.address": "kafka-0",
+    "server.port": 9092
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344366.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+   "span_id": "8d88348a7eed8d14",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "f06d3fef701966a0",
+   "name": "orders process",
+   "kind": "Consumer",
+   "duration": 30000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "process",
+    "messaging.operation": "process",
+    "messaging.kafka.consumer.group": "ord-svc"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "c2cd789a380208a9",
+   "trace_state": "ot=th:8",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 120000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "url.path": "/checkout",
+    "http.response.status_code": 200,
+    "url.scheme": "http"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "f3c64af775a89294",
+   "trace_state": "ot=th:8",
+   "parent_span_id": "c2cd789a380208a9",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 80000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "url.full": "http://cart-api:8080/cart",
+    "http.response.status_code": 200,
+    "peer.service": "cart-api"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "ed2f89d94a2f20aa",
+   "trace_state": "ot=th:8",
+   "parent_span_id": "f3c64af775a89294",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 75000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487344976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "6a8ac4ba05805975",
+   "trace_state": "ot=th:8",
+   "parent_span_id": "ed2f89d94a2f20aa",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 40000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "db.operation.name": "SELECT",
+    "db.collection.name": "items",
+    "server.address": "pg-main",
+    "server.port": 5432
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345021.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "ea90a8f0d66b829e",
+   "trace_state": "ot=th:8",
+   "parent_span_id": "ed2f89d94a2f20aa",
+   "name": "GET",
+   "kind": "Client",
+   "duration": 2000000,
+   "attributes": {
+    "db.system": "redis",
+    "db.system.name": "redis",
+    "db.operation.name": "GET",
+    "server.address": "redis-cache",
+    "server.port": 6379
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345051.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "ec148cb48e73ca47",
+   "trace_state": "ot=th:8",
+   "parent_span_id": "c2cd789a380208a9",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 25000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "tax-gw.example.net",
+    "server.port": 443,
+    "url.full": "https://tax-gw.example.net/v1/quote",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345078.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "19999e3fa46d6753",
+   "trace_state": "ot=th:8",
+   "parent_span_id": "c2cd789a380208a9",
+   "name": "orders publish",
+   "kind": "Producer",
+   "duration": 3000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "publish",
+    "messaging.operation": "publish",
+    "server.address": "kafka-0",
+    "server.port": 9092
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345366.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "ad45f23d3b1a11df587fd2803bab6c39",
+   "span_id": "a11d459a2f978d87",
+   "trace_state": "ot=th:8",
+   "parent_span_id": "19999e3fa46d6753",
+   "name": "orders process",
+   "kind": "Consumer",
+   "duration": 30000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "process",
+    "messaging.operation": "process",
+    "messaging.kafka.consumer.group": "ord-svc"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "be3edc0a1ef2a4f0",
+   "trace_state": "ot=p:2",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 120000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "url.path": "/checkout",
+    "http.response.status_code": 200,
+    "url.scheme": "http"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "e5446dd4552b82f6",
+   "trace_state": "ot=p:2",
+   "parent_span_id": "be3edc0a1ef2a4f0",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 80000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "url.full": "http://cart-api:8080/cart",
+    "http.response.status_code": 200,
+    "peer.service": "cart-api"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "f9270f4eb8b333a8",
+   "trace_state": "ot=p:2",
+   "parent_span_id": "e5446dd4552b82f6",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 75000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487345976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "803468b6b610a9f7",
+   "trace_state": "ot=p:2",
+   "parent_span_id": "f9270f4eb8b333a8",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 40000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "db.operation.name": "SELECT",
+    "db.collection.name": "items",
+    "server.address": "pg-main",
+    "server.port": 5432
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346021.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "f79b17aeefba91fc",
+   "trace_state": "ot=p:2",
+   "parent_span_id": "f9270f4eb8b333a8",
+   "name": "GET",
+   "kind": "Client",
+   "duration": 2000000,
+   "attributes": {
+    "db.system": "redis",
+    "db.system.name": "redis",
+    "db.operation.name": "GET",
+    "server.address": "redis-cache",
+    "server.port": 6379
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346051.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "81f9c1f66c0f3459",
+   "trace_state": "ot=p:2",
+   "parent_span_id": "be3edc0a1ef2a4f0",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 25000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "tax-gw.example.net",
+    "server.port": 443,
+    "url.full": "https://tax-gw.example.net/v1/quote",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346078.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "e901e35cd47d380d",
+   "trace_state": "ot=p:2",
+   "parent_span_id": "be3edc0a1ef2a4f0",
+   "name": "orders publish",
+   "kind": "Producer",
+   "duration": 3000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "publish",
+    "messaging.operation": "publish",
+    "server.address": "kafka-0",
+    "server.port": 9092
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346366.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "4be03db0dc2574bdb94067edfe175330",
+   "span_id": "3099fdf5ab99254a",
+   "trace_state": "ot=p:2",
+   "parent_span_id": "e901e35cd47d380d",
+   "name": "orders process",
+   "kind": "Consumer",
+   "duration": 30000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "process",
+    "messaging.operation": "process",
+    "messaging.kafka.consumer.group": "ord-svc"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "7fd63116e1ea24c4",
+   "trace_state": "ot=th:c",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 120000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "url.path": "/checkout",
+    "http.response.status_code": 200,
+    "url.scheme": "http"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "f0dfb4a5d8a064df",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "7fd63116e1ea24c4",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 80000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "url.full": "http://cart-api:8080/cart",
+    "http.response.status_code": 200,
+    "peer.service": "cart-api"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "64b2d2bc815a47c5",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "f0dfb4a5d8a064df",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 75000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487346976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "da71144896c8da19",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "64b2d2bc815a47c5",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 40000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "db.operation.name": "SELECT",
+    "db.collection.name": "items",
+    "server.address": "pg-main",
+    "server.port": 5432
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487347021.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "7af027bc08d6af57",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "64b2d2bc815a47c5",
+   "name": "GET",
+   "kind": "Client",
+   "duration": 2000000,
+   "attributes": {
+    "db.system": "redis",
+    "db.system.name": "redis",
+    "db.operation.name": "GET",
+    "server.address": "redis-cache",
+    "server.port": 6379
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487347051.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "be6521cc3e2434e3",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "7fd63116e1ea24c4",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 25000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "tax-gw.example.net",
+    "server.port": 443,
+    "url.full": "https://tax-gw.example.net/v1/quote",
+    "http.response.status_code": 200
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487347078.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "677f6cbdcc22af58",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "7fd63116e1ea24c4",
+   "name": "orders publish",
+   "kind": "Producer",
+   "duration": 3000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "publish",
+    "messaging.operation": "publish",
+    "server.address": "kafka-0",
+    "server.port": 9092
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487347366.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "f9341c68966baea148beab134da98f1d",
+   "span_id": "aa2ca1af6a107b75",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "677f6cbdcc22af58",
+   "name": "orders process",
+   "kind": "Consumer",
+   "duration": 30000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "process",
+    "messaging.operation": "process",
+    "messaging.kafka.consumer.group": "ord-svc"
+   },
+   "links": [],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487351966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "e1fab9d78c7e134f5dfbd3d12c4a3698",
+   "span_id": "c69d4bd8b3fa7aa7",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 300000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "http.response.status_code": 502
+   },
+   "links": [],
+   "status": {
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487351968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "e1fab9d78c7e134f5dfbd3d12c4a3698",
+   "span_id": "bcfbb050acab1a6b",
+   "parent_span_id": "c69d4bd8b3fa7aa7",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 280000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "http.response.status_code": 500,
+    "peer.service": "cart-api",
+    "error.type": "500"
+   },
+   "links": [],
+   "status": {
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487351970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "e1fab9d78c7e134f5dfbd3d12c4a3698",
+   "span_id": "1622bd795fec898f",
+   "parent_span_id": "bcfbb050acab1a6b",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 270000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 500,
+    "error.type": "org.postgresql.util.PSQLException"
+   },
+   "links": [],
+   "status": {
+    "message": "connection pool exhausted",
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487351976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "e1fab9d78c7e134f5dfbd3d12c4a3698",
+   "span_id": "a9ec0806705fca16",
+   "parent_span_id": "1622bd795fec898f",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 250000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "server.address": "pg-main",
+    "server.port": 5432,
+    "error.type": "PSQLException"
+   },
+   "links": [],
+   "status": {
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487352966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "29e821a4c74803e31ba1621582283d15",
+   "span_id": "d707107e855c3844",
+   "trace_state": "ot=th:c",
+   "name": "POST /checkout",
+   "kind": "Server",
+   "duration": 300000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/checkout",
+    "http.response.status_code": 502
+   },
+   "links": [],
+   "status": {
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487352968.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "29e821a4c74803e31ba1621582283d15",
+   "span_id": "5eda92d864ac5db9",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "d707107e855c3844",
+   "name": "POST",
+   "kind": "Client",
+   "duration": 280000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "server.address": "cart-api",
+    "server.port": 8080,
+    "http.response.status_code": 500,
+    "peer.service": "cart-api",
+    "error.type": "500"
+   },
+   "links": [],
+   "status": {
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "checkout-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487352970.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "29e821a4c74803e31ba1621582283d15",
+   "span_id": "bb968a437d5c8dfc",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "5eda92d864ac5db9",
+   "name": "POST /cart",
+   "kind": "Server",
+   "duration": 270000000,
+   "attributes": {
+    "http.request.method": "POST",
+    "http.route": "/cart",
+    "http.response.status_code": 500,
+    "error.type": "org.postgresql.util.PSQLException"
+   },
+   "links": [],
+   "status": {
+    "message": "connection pool exhausted",
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487352976.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "29e821a4c74803e31ba1621582283d15",
+   "span_id": "78255d6807923986",
+   "trace_state": "ot=th:c",
+   "parent_span_id": "bb968a437d5c8dfc",
+   "name": "SELECT shop.items",
+   "kind": "Client",
+   "duration": 250000000,
+   "attributes": {
+    "db.system": "postgresql",
+    "db.system.name": "postgresql",
+    "db.namespace": "shop",
+    "server.address": "pg-main",
+    "server.port": 5432,
+    "error.type": "PSQLException"
+   },
+   "links": [],
+   "status": {
+    "code": "Error"
+   },
+   "resource": {
+    "attributes": {
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "cart-api-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ },
+ {
+  "_index": ".ds-traces-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "@timestamp": "1794487361966.212300",
+   "data_stream": {
+    "type": "traces",
+    "dataset": "generic.otel",
+    "namespace": "default"
+   },
+   "trace_id": "d92a4aa2b410d93c4efbc8d60b21fbac",
+   "span_id": "9d643c25fbb230bb",
+   "name": "orders process",
+   "kind": "Consumer",
+   "duration": 45000000,
+   "attributes": {
+    "messaging.system": "kafka",
+    "messaging.destination.name": "orders",
+    "messaging.operation.type": "process",
+    "messaging.batch.message_count": 3
+   },
+   "links": [
+    {
+     "trace_id": "cd613e30d8f16adf91b7584a2265b1f5",
+     "span_id": "7ce42c8218072e8c"
+    },
+    {
+     "trace_id": "9b810e766ec9d28663ca828dd5f4b3b2",
+     "span_id": "51431193e6c3f339"
+    },
+    {
+     "trace_id": "025b413f8a9a021ea648a7dd06839eb9",
+     "span_id": "f06d3fef701966a0"
+    }
+   ],
+   "status": {},
+   "resource": {
+    "attributes": {
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde",
+     "telemetry.sdk.language": "java"
+    }
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   }
+  }
+ }
+]

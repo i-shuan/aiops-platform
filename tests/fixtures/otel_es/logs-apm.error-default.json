@@ -1,0 +1,196 @@
+[
+ {
+  "_index": ".ds-logs-apm.error-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "parent": {
+    "id": "d5c44a4eb3172062"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   },
+   "@timestamp": "2026-11-12T12:42:32.026212300Z",
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "apm.error"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "exception": {
+     "message": "FATAL: remaining connection slots are reserved",
+     "type": "org.postgresql.util.PSQLException"
+    },
+    "stack_trace": "org.postgresql.util.PSQLException: FATAL ...\n\tat Pool.get(Pool.java:42)"
+   },
+   "event": {
+    "ingested": "2026-11-12T12:44:32Z",
+    "dataset": "apm.error"
+   },
+   "tags": [
+    "_geoip_database_unavailable_GeoLite2-City.mmdb"
+   ]
+  }
+ },
+ {
+  "_index": ".ds-logs-apm.error-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "parent": {
+    "id": "cc9c3adcf515a823"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   },
+   "@timestamp": "2026-11-12T12:42:33.026212300Z",
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "apm.error"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "exception": {
+     "message": "FATAL: remaining connection slots are reserved",
+     "type": "org.postgresql.util.PSQLException"
+    },
+    "stack_trace": "org.postgresql.util.PSQLException: FATAL ...\n\tat Pool.get(Pool.java:42)"
+   },
+   "event": {
+    "ingested": "2026-11-12T12:44:32Z",
+    "dataset": "apm.error"
+   },
+   "tags": [
+    "_geoip_database_unavailable_GeoLite2-City.mmdb"
+   ]
+  }
+ },
+ {
+  "_index": ".ds-logs-apm.error-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "parent": {
+    "id": "d5c44a4eb3172062"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   },
+   "@timestamp": "2026-11-12T12:43:37.695552900Z",
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "apm.error"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "exception": {
+     "message": "FATAL: remaining connection slots are reserved",
+     "type": "org.postgresql.util.PSQLException"
+    },
+    "stack_trace": "org.postgresql.util.PSQLException: FATAL ...\n\tat Pool.get(Pool.java:42)"
+   },
+   "event": {
+    "ingested": "2026-11-12T12:45:37Z",
+    "dataset": "apm.error"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-apm.error-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "parent": {
+    "id": "cc9c3adcf515a823"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   },
+   "@timestamp": "2026-11-12T12:43:38.695552900Z",
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "apm.error"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "exception": {
+     "message": "FATAL: remaining connection slots are reserved",
+     "type": "org.postgresql.util.PSQLException"
+    },
+    "stack_trace": "org.postgresql.util.PSQLException: FATAL ...\n\tat Pool.get(Pool.java:42)"
+   },
+   "event": {
+    "ingested": "2026-11-12T12:45:37Z",
+    "dataset": "apm.error"
+   }
+  }
+ }
+]
