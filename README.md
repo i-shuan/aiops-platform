@@ -366,7 +366,7 @@ targets:
 
 > 混沌場景 4（`scripts/chaos/run.py 4`，gateway→order-api→inventory-svc→oracle）不再手動灌邊：偵測回放前對世界的 trace 跑一次 `admin.topology_refresh`（事故前 60 分鐘），9,228 個 span、未截斷，沉澱出 gateway→order-api 1,538 次、order-api→inventory-svc 1,538 次；三個服務收斂成同一個事件群、根因第 1 名 inventory-svc、下鑽 oracle／db。真實 ES 11/3 14:00–16:20Z：10,542 個 span、未截斷、`edges_seen = 0`（這批 trace 沒有跨服務呼叫），表裡 8 天前的邊被 prune、2 天前的保留。
 
-**拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才去 ES 撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`，用環境變數 `AIOPS_ES_TRACE_INDEX` 改；上限 `max_spans`（預設 20000）。區間內不超過上限就全部撈；超過時**不是取最早的 N 筆**（尖峰時那只是窗口開頭幾秒），而是把窗口切成最多 30 個時間桶、每桶用固定 seed 隨機挑 trace，輪流把**整條 trace** 撈回來直到湊滿上限（抽 span 會把父子拆斷），結果的 `trace_fetch.truncated` 為 true。記憶體：100 萬個 span 約 266 MB、聚合邊 0.7 秒，上限 2 萬時約 5 MB。
+**拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才去 ES 撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`（`AIOPS_ES_DATA_MODEL=otel` 時是 `traces-*.otel-*`），用環境變數 `AIOPS_ES_TRACE_INDEX` 改；欄位依資料模型（Elastic APM 的 `trace.id`／`parent.id`／`span.duration.us`，或 OTel 的 `trace_id`／`parent_span_id`／`duration` 奈秒），已核准欄位對照裡 `span.*` 標準欄可以蓋掉個別欄位；上限 `max_spans`（預設 20000）。區間內不超過上限就全部撈；超過時**不是取最早的 N 筆**（尖峰時那只是窗口開頭幾秒），而是把窗口切成最多 30 個時間桶、每桶用固定 seed 隨機挑 trace，輪流把**整條 trace** 撈回來直到湊滿上限（抽 span 會把父子拆斷），結果的 `trace_fetch.truncated` 為 true。記憶體：100 萬個 span 約 266 MB、聚合邊 0.7 秒，上限 2 萬時約 5 MB。
 
 > 真實 ES（11/3 13:50–16:20Z，共 11,283 span／3,761 條 trace）：上限 2000 時舊做法只涵蓋 13:50–14:16（10 分鐘格 3／15），新做法涵蓋整段（15／15，每 10 分鐘 129–138 個 span），抽到的 666 條 trace 全部完整；上限 5000 時舊做法 7／15、新做法 15／15。抽樣多花 0.7–1.1 秒（多了每桶一次候選查詢）。這批 trace 沒有跨服務呼叫，所以兩種做法的邊都是 0，邊的準確度要等有串 trace context 的資料才量得到。
 
@@ -474,7 +474,7 @@ targets:
 >
 > 提前量只有 bill-svc 一個服務：15:18 先預警、15:40 才越線（早 22 分鐘），升級路徑也實際走過（warning 通知 → 22 分鐘後 anomaly 不被冷卻擋、發 P3）。其他服務在窗內一開始就直接越線，沒有「接近門檻」的階段。**在這批資料上預警的雜訊是正式告警的 1～4 倍，所以預設不開**；要開的話建議 `notify_warnings: false` 或在 Alertmanager 把 `level="warning"` 分到低優先通道。
 
-**Log 樣式比對（RCA 段落 `log_patterns`）**：`ingestion.incident_logs` 隨需撈事件期間（前後各 5 分鐘）與事件前 60 分鐘、事件裡那些服務的錯誤日誌（索引預設 `logs-apm.*`，用 `AIOPS_ES_LOG_INDEX` 改；只呼叫 `_search`）。段落把訊息裡的 UUID／長 id → `<ID>`、IP → `<IP>`、數字 → `<NUM>`，依（服務、例外類型、樣板）分組，列出新出現或頻率 ≥ 2 倍的前 3 名，附一筆 trace id 可以點進去看。沒撈到日誌就略過段落，不出空殼。
+**Log 樣式比對（RCA 段落 `log_patterns`）**：`ingestion.incident_logs` 隨需撈事件期間（前後各 5 分鐘）與事件前 60 分鐘、事件裡那些服務的錯誤日誌（索引預設 `logs-apm.*`，用 `AIOPS_ES_LOG_INDEX` 改；`AIOPS_ES_DATA_MODEL=otel` 時是 `logs-*.otel-*`，這個資料流所有等級混在一起，只取 `severity_number >= 17` 與 span 的 exception 事件；只呼叫 `_search`）。段落把訊息裡的 UUID／長 id → `<ID>`、IP → `<IP>`、數字 → `<NUM>`，依（服務、例外類型、樣板）分組，列出新出現或頻率 ≥ 2 倍的前 3 名，附一筆 trace id 可以點進去看。沒撈到日誌就略過段落，不出空殼。
 
 > - **ES 真實資料，11/3 事故**：事件期間 68 筆、事件前 8 筆，列出 3 個樣板——cart-api `Unhandled exception in handler` 14.7 倍、ord-svc `ORA-<NUM>: TNS:Connect timeout occurred` 4.2 倍、bill-svc `Downstream tax-gw:<NUM> returned <NUM>` 2.5 倍。cart-api 排第一，跟資料本身最早起點（cart-api 14:46）一致。對照的 10/30、10/31、11/2 同時段與 11/3 事故前，這 3 個服務完全沒有錯誤日誌，段落正確略過。
 > - **產生器（有標準答案）**：`callee_slowdown` 根因 bill-svc 排第 1 ✓；`load_amplification` 根因 cart-api 排第 3 ✗（下游 bill-svc、ord-svc 的慢交易警告量更大）。安靜時段對照都回「沒有明顯暴增」。
@@ -671,7 +671,8 @@ pagerank、cross_correlation 已移除，這兩欄數字保留作歷史對照。
 | `AIOPS_PROMETHEUS_URL`／`AIOPS_PROMETHEUS_TOKEN` | （無） | Prometheus 位址與選填 token |
 | `AIOPS_VICTORIAMETRICS_URL`／`AIOPS_VICTORIAMETRICS_TOKEN` | （無） | VictoriaMetrics 位址與選填 token |
 | `AIOPS_ES_URL`／`AIOPS_ES_API_KEY` | （無） | Elasticsearch 位址與選填 API key |
-| `AIOPS_ES_TRACE_INDEX`／`AIOPS_ES_LOG_INDEX` | `traces-apm-*`／`logs-apm.*` | RCA 隨需撈 trace／錯誤日誌的索引 |
+| `AIOPS_ES_DATA_MODEL` | `elastic_apm` | trace／錯誤日誌的資料模型：`elastic_apm`（Elastic APM）或 `otel`（OTel Collector 的 elasticsearch exporter、otel mapping）。欄位、耗時單位、錯誤判定、預設索引都跟著換，見 `aiops/sources/es_models.py` 與 `tests/fixtures/otel_es/README.md` |
+| `AIOPS_ES_TRACE_INDEX`／`AIOPS_ES_LOG_INDEX` | 依資料模型：`traces-apm-*`／`logs-apm.*`（elastic_apm）、`traces-*.otel-*`／`logs-*.otel-*`（otel） | RCA 隨需撈 trace／錯誤日誌的索引 |
 | `AIOPS_FALLBACK_LOG` | （無，寫 stderr） | 備援日誌檔路徑 |
 | `AIOPS_FALLBACK_WEBHOOK` | （無） | 資料庫或推送失敗時直接打的 webhook |
 

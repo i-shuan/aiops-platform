@@ -14,7 +14,18 @@ def canonical_service(name: Any) -> str:
 
 
 def as_utc_datetime(value: Any) -> datetime:
-    """ES 的 @timestamp 轉成帶 UTC 時區的 datetime。有時區就換算成 UTC；沒帶時區（naive）一律當 UTC，不丟 TypeError。"""
+    """ES 的 @timestamp 轉成帶 UTC 時區的 datetime。有時區就換算成 UTC；沒帶時區（naive）一律當 UTC，不丟 TypeError。
+
+    數字或數字字串一律當 epoch 毫秒（ES 日期欄位的預設格式是 strict_date_optional_time||epoch_millis）：
+    OTel Collector 的 elasticsearchexporter（otel mapping）在 _source 裡存的就是 "1794487341966.212300"（毫秒＋次毫秒小數，
+    實測見 tests/fixtures/otel_es/）。直接丟給 pd.Timestamp 會被當成奈秒（整數解成 1970 年、這種字串直接溢位）。"""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return pd.Timestamp(float(value), unit="ms", tz="UTC").to_pydatetime()
+    if isinstance(value, str) and value.strip().replace(".", "", 1).isdigit():
+        whole, _, frac = value.strip().partition(".")
+        # 整數毫秒＋小數部分分開算到奈秒，不經過 float（13 位毫秒＋6 位小數超過 float 精度）
+        nanos = int(whole) * 1_000_000 + int((frac + "000000")[:6])
+        return pd.Timestamp(nanos // 1000, unit="us", tz="UTC").to_pydatetime()  # datetime 只到微秒
     ts = pd.Timestamp(value)
     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
     return ts.to_pydatetime()
@@ -54,7 +65,7 @@ class BaseDataSourceSpec(ABC):
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援動態同儕（peer_group），請改用 peers 寫死名單")
 
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
-                    max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
+                    max_spans: int = 20000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
         """RCA 隨需撈 trace：[start, end] 內的 span／transaction，services 給了就只撈這些服務。
         回傳 (spans, 是否因為 max_spans 被截斷)。每個 span 是 dict：
         trace_id、span_id、parent_id（可能是 None）、service、ts（UTC datetime）、duration_ms、error。
@@ -63,17 +74,18 @@ class BaseDataSourceSpec(ABC):
         status_code（http.response.status_code）、name（transaction.name）。
         訊息佇列（非同步邊）用的選填鍵：consumer（transaction.type = messaging 的消費者入口）、queue（佇列名）、
         age_ms（訊息年齡，沒有就是 None）、links（批次消費的 span.links：[(trace_id, span_id), ...]）。
-        預設不支援；存 trace 的資料源（Elasticsearch APM）覆寫它。"""
+        field_map：已核准的欄位對照（標準欄 span.* 蓋過資料源預設的來源欄；只有真的有對照時呼叫端才會帶）。
+        預設不支援；存 trace 的資料源（Elasticsearch：Elastic APM 或 OTel，見 sources/es_models.py）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
 
     def fetch_linked_spans(self, trace_ids: list[str], start: datetime, end: datetime,
-                           max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
+                           max_spans: int = 20000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
         """訊息佇列跨時窗：把指定 trace 在 [start, end] 內的 span 撈回來（格式同 fetch_spans，不帶服務過濾）。
         消費者的 parent／span.links 指向的生產者 span 常常落在事故窗之前，靠它補回來。預設不支援。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援依 trace 撈 span（訊息佇列跨時窗）")
 
     def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
-                   max_logs: int = 5000) -> tuple[list[dict[str, Any]], bool]:
+                   max_logs: int = 5000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
         """RCA 隨需撈錯誤日誌：[start, end] 內、services 給了就只撈這些服務。回傳 (logs, 是否因為 max_logs 被截斷)。
         每筆是 dict：ts（UTC datetime）、service、message、error_type、trace_id。預設不支援。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈日誌")

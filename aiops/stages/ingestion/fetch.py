@@ -54,6 +54,13 @@ def _trace_frame(ctx: PipelineContext, query: str, start: datetime, end: datetim
     return pd.DataFrame({"ts": pd.to_datetime([t for t, _ in points], utc=True), "value": [v for _, v in points]})
 
 
+def _field_map_kw(ctx: PipelineContext, source_type: str) -> dict:
+    """已核准的欄位對照（span.*／log.* 標準欄會蓋過資料模型的預設欄位，見 sources/es_models.py）。
+    沒有對照時不帶這個參數：自訂資料源（只實作舊簽名的 fetch_spans／fetch_logs）照樣能用。"""
+    fields = ctx.field_maps.get(source_type)
+    return {"field_map": fields} if fields else {}
+
+
 def fetch_series(ctx: PipelineContext, source_type: str, query: str, start: datetime, end: datetime,
                  step: int) -> pd.DataFrame:
     """抓一條序列 -> DataFrame(ts, value)。"""
@@ -331,7 +338,7 @@ class IncidentTracesFetch(BaseOperator):
         wanted = unresolved_trace_ids(spans, consumers)
         if wanted:
             picked = spread(wanted, self.max_linked_traces)
-            raw, cut = spec.fetch_linked_spans(picked, inc_start - self.max_lag, end, budget)
+            raw, cut = spec.fetch_linked_spans(picked, inc_start - self.max_lag, end, budget, **_field_map_kw(ctx, self.source_type))
             added = merge(raw)
             budget -= added
             info.update(linked_traces=len(picked), linked_candidates=len(wanted), extra_spans=added,
@@ -350,7 +357,7 @@ class IncidentTracesFetch(BaseOperator):
             need_lo = max(min(e.pub_start - (e.pub_end - e.pub_start) for e in known), floor)
             need_hi = min(max(e.pub_end for e in known), start)
             if need_lo < need_hi:
-                raw, cut = spec.fetch_spans(need_lo, need_hi, services, budget)
+                raw, cut = spec.fetch_spans(need_lo, need_hi, services, budget, **_field_map_kw(ctx, self.source_type))
                 added = merge(raw)
                 info.update(extra_spans=info["extra_spans"] + added, queries=info["queries"] + 1,
                             truncated=bool(info.get("truncated") or cut),
@@ -375,7 +382,7 @@ class IncidentTracesFetch(BaseOperator):
         used, extended_for = self.before, ""
         try:
             spec = get_datasource_spec(self.source_type)
-            raw, truncated = spec.fetch_spans(start, end, services, self.max_spans)
+            raw, truncated = spec.fetch_spans(start, end, services, self.max_spans, **_field_map_kw(ctx, self.source_type))
             spans = [self._record(s, spell) for s in raw]
             # 基準窗自適應回溯：入口請求不夠就往前加倍撈，只撈多出來的前段，窗口連續
             while self.max_before is not None and used < self.max_before and len(spans) < self.max_spans:
@@ -383,7 +390,8 @@ class IncidentTracesFetch(BaseOperator):
                 if not short:
                     break
                 new = min(used * 2, self.max_before)
-                extra, cut = spec.fetch_spans(inc_start - new, inc_start - used, services, self.max_spans - len(spans))
+                extra, cut = spec.fetch_spans(inc_start - new, inc_start - used, services, self.max_spans - len(spans),
+                                              **_field_map_kw(ctx, self.source_type))
                 seen = {s.span_id for s in spans}
                 spans = [self._record(s, spell) for s in extra if s["span_id"] not in seen] + spans
                 truncated = truncated or cut
@@ -470,8 +478,9 @@ class IncidentLogsFetch(BaseOperator):
 
         try:
             spec = get_datasource_spec(self.source_type)
-            during, cut1 = spec.fetch_logs(start, end, services, self.max_logs)
-            before, cut2 = spec.fetch_logs(base_start, start, services, self.max_logs)
+            fm = _field_map_kw(ctx, self.source_type)
+            during, cut1 = spec.fetch_logs(start, end, services, self.max_logs, **fm)
+            before, cut2 = spec.fetch_logs(base_start, start, services, self.max_logs, **fm)
             logs = [record(r) for r in during]
             # 正常期間的查詢區間跟事件期間在 start 那一刻相接，剛好落在 start 的那筆歸事件期間
             baseline = [record(r) for r in before if as_utc(r["ts"]) < start]
