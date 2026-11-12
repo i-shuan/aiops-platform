@@ -44,6 +44,7 @@ from aiops.stages.enrichment.base import LLMError, parse_json_reply
 from aiops.stages.enrichment.evidence_extractor import (LLM_ALL_REJECTED, LLM_BAD_JSON, LLM_BAD_SCHEMA, MAX_RETRIES, NO_EVIDENCE,
                                                         CallFailure, check_provider, complete_with_policy,
                                                         known_entities, resolve_provider)
+from aiops.stages.enrichment.masking import MASK_FAILED, Masker, MaskError, MaskPolicy, mask_or_fail, rca_keep_names
 from aiops.stages.rca.base import RootCauseOperator, first_seen
 from aiops.stages.rca.mq import async_attribution
 
@@ -490,13 +491,20 @@ class LLMRootCause(RootCauseOperator):
     params：provider（不寫看環境變數 AIOPS_LLM_PROVIDER；沒有 noop）、model、base_url、json_mode（預設 true）、
     timeout_seconds（預設 60：prompt 比證據抽取長）、retries（預設 0）、max_facts（最多送幾筆事實，預設 150；
     依證據層的固定排序取前面幾筆，超過的只告訴 LLM 筆數）、top_k（最多幾個候選，預設 5）、
-    min_lag_seconds（訊息延遲 P95 到這個秒數、而且比事件前多一倍才在 attribution.async 標成積壓，預設 60，跟舊判斷層一樣）。
+    min_lag_seconds（訊息延遲 P95 到這個秒數、而且比事件前多一倍才在 attribution.async 標成積壓，預設 60，跟舊判斷層一樣）、
+    mask_hostnames（預設 false，見 masking.py）。
+
+    敏感資訊遮罩：事實（detail 裡的日誌樣板）、日誌證據的 quote、呼叫圖在組 prompt 之前遮過，驗證也對遮過的那份比
+    （數字、資源名都不遮，所以 attribution 從事實抄的數字不變；已知名稱就算長得像 IP 也保留）。遮罩失敗 = mask_failed，不送。
     """
 
     def __init__(self, provider: str | None = None, model: str | None = None, base_url: str | None = None,
                  json_mode: bool = True, timeout_seconds: float = 60.0, retries: int = 0, max_facts: int = 150,
-                 top_k: int = 5, min_lag_seconds: float = 60.0):
+                 top_k: int = 5, min_lag_seconds: float = 60.0, mask_hostnames: bool = False):
         check_provider(provider)
+        if not isinstance(mask_hostnames, bool):
+            raise ValueError(f"mask_hostnames 必須是 true／false，不是 {mask_hostnames!r}")
+        self.mask = MaskPolicy(mask_hostnames=mask_hostnames)
         self.provider, self.model, self.base_url, self.json_mode = provider, model, base_url, bool(json_mode)
         self.timeout = positive("timeout_seconds", timeout_seconds)
         self.retries = whole("retries", retries, minimum=0)
@@ -513,16 +521,23 @@ class LLMRootCause(RootCauseOperator):
         if not ctx.rca_facts and not ctx.rca_evidence:
             # 以前只寫 rca_root_note、rca_status 維持 ok：查狀態的人會以為「判過了、沒有根因」。沒東西可判就是無法判定
             return self._undetermined(ctx, NO_EVIDENCE, "沒有任何可用的事實或日誌證據（沒有 trace、日誌，或這條管線沒有撈時序），不呼叫 LLM")
-        facts, evidence = fact_rows(ctx.rca_facts, self.max_facts), evidence_rows(ctx.rca_evidence)
         entities = known_entities(ctx) | {f.entity for f in ctx.rca_facts}
-        graph = graph_rows(ctx, entities)
+        masker = Masker(self.mask, keep=rca_keep_names(ctx) | entities)
+        try:
+            facts = mask_or_fail(masker, fact_rows(ctx.rca_facts, self.max_facts))
+            evidence = mask_or_fail(masker, evidence_rows(ctx.rca_evidence))
+            graph = mask_or_fail(masker, graph_rows(ctx, entities))
+        except MaskError as e:
+            logger.warning("root_cause.llm 遮罩失敗：%s", e)
+            return self._undetermined(ctx, MASK_FAILED, f"{e}（敏感資訊遮罩失敗，沒有送出）")
+        ctx.log(f"root_cause.llm：送出前遮罩（{masker.summary()}）")
         prompt = build_prompt(incident, graph, facts, evidence, sorted(entities),
                               max(0, len(ctx.rca_facts) - len(facts)), self.top_k)
         ctx.log(f"root_cause.llm：送入呼叫圖 {sum(len(v) for v in graph.values())} 條邊、事實 {len(facts)}／{len(ctx.rca_facts)} 筆、"
                 f"日誌證據 {len(evidence)} 筆，prompt {len(prompt)} 字")
         try:
             text = complete_with_policy(resolve_provider(self.provider), self.model, self.base_url, self.json_mode,
-                                        SYSTEM, prompt, self.timeout, self.retries)
+                                        SYSTEM, prompt, self.timeout, self.retries, masker=masker)
         except CallFailure as f:
             return self._undetermined(ctx, f.code, f.detail)
         try:

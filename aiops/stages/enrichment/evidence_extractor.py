@@ -21,7 +21,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from aiops.engine.context import LogRecord, PipelineContext
@@ -33,6 +33,7 @@ from aiops.engine.graph import EdgeKind
 from aiops.engine.types import as_utc
 from aiops.stages.enrichment import registry
 from aiops.stages.enrichment.base import BaseLLM, LLMError, parse_json_reply
+from aiops.stages.enrichment.masking import MASK_FAILED, Masker, MaskError, MaskPolicy, rca_keep_names, send
 from aiops.stages.enrichment.providers import build_llm
 from aiops.stages.rca.logs import rank_patterns, template_of
 
@@ -46,7 +47,8 @@ LLM_BAD_JSON = "llm_bad_json"               # 回應不是 JSON 物件
 LLM_BAD_SCHEMA = "llm_bad_schema"           # 是 JSON，但沒有 evidence 陣列
 LLM_ALL_REJECTED = "llm_all_rejected"       # 有回項目，但驗證後一項都不剩
 NO_EVIDENCE = "no_evidence"                 # 根因判斷沒有任何事實或日誌證據可用（沒有 trace／日誌／時序），沒有呼叫 LLM
-FAILURE_CODES = (LLM_NOT_CONFIGURED, LLM_ERROR, LLM_TIMEOUT, LLM_BAD_JSON, LLM_BAD_SCHEMA, LLM_ALL_REJECTED)
+# MASK_FAILED（masking.py）：送出前遮罩敏感資訊出錯，寧可不送也不放行原文
+FAILURE_CODES = (LLM_NOT_CONFIGURED, LLM_ERROR, LLM_TIMEOUT, LLM_BAD_JSON, LLM_BAD_SCHEMA, LLM_ALL_REJECTED, MASK_FAILED)
 
 MAX_RETRIES = 3
 PROVIDER_ENV = "AIOPS_LLM_PROVIDER"  # 節點沒寫 provider 時的預設；兩邊都沒有 = llm_not_configured
@@ -83,16 +85,17 @@ def check_provider(provider: str | None) -> None:
         raise ValueError("RCA 路徑的 LLM 是必要元件，沒有 noop 模式；不設定 provider 會讓報告標成 undetermined")
 
 
-def call_llm(llm: BaseLLM, system: str, prompt: str, timeout: float) -> str:
-    """在背景執行緒呼叫 complete，最多等 timeout 秒；逾時丟 _Timeout，complete 自己丟的例外原樣往上丟。
+def call_llm(llm: BaseLLM, system: str, prompt: str, timeout: float, masker: Masker) -> str:
+    """在背景執行緒經 masking.send（先遮罩再 complete）呼叫，最多等 timeout 秒；逾時丟 _Timeout，
+    遮罩失敗丟 MaskError（沒有送出），complete 自己丟的例外原樣往上丟。
     逾時後不等那個執行緒（shutdown(wait=False)）：真實供應商的 HTTP client 自己有逾時，會把連線收掉。
     每次呼叫新建 executor，不留模組層級狀態（CLAUDE.md §100.3）。"""
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aiops-llm-call")
     try:
-        return pool.submit(llm.complete, system, prompt).result(timeout=timeout)
+        return pool.submit(send, llm, system, prompt, masker).result(timeout=timeout)
     except FutureTimeout as e:
         raise _Timeout() from e
-    except LLMError:
+    except (LLMError, MaskError):
         raise
     except Exception as e:  # noqa: BLE001  供應商實作自己的 bug（回應形狀跟預期不同）也算「呼叫失敗」，不准讓整份報告失敗
         raise LLMError(f"供應商回應無法處理（{type(e).__name__}：{e}）") from e
@@ -110,9 +113,10 @@ class CallFailure(Exception):
 
 
 def complete_with_policy(provider: str, model: str | None, base_url: str | None, json_mode: bool,
-                         system: str, prompt: str, timeout: float, retries: int) -> str:
-    """建 client → 呼叫（逾時、重試依節點設定）。失敗一律丟 CallFailure(代碼, 說明)。
-    重試只針對 LLMError 與逾時（連線問題）；設定錯不重試。最多呼叫 1 + retries 次，不無限重試。"""
+                         system: str, prompt: str, timeout: float, retries: int, *, masker: Masker) -> str:
+    """建 client → 遮罩後呼叫（逾時、重試依節點設定）。失敗一律丟 CallFailure(代碼, 說明)。
+    重試只針對 LLMError 與逾時（連線問題）；設定錯、遮罩失敗不重試。最多呼叫 1 + retries 次，不無限重試。
+    masker 是必填：呼叫端應該已經用同一個 masker 遮過結構化輸入，這裡（masking.send）對整份 prompt 再遮一次防漏。"""
     if not provider:
         raise CallFailure(LLM_NOT_CONFIGURED, f"沒有設定 LLM 供應商（節點 provider 或環境變數 {PROVIDER_ENV}）")
     try:
@@ -124,7 +128,9 @@ def complete_with_policy(provider: str, model: str | None, base_url: str | None,
     last: CallFailure | None = None
     for _ in range(1 + retries):
         try:
-            return call_llm(llm, system, prompt, timeout)
+            return call_llm(llm, system, prompt, timeout, masker)
+        except MaskError as e:
+            raise CallFailure(MASK_FAILED, f"{e}（敏感資訊遮罩失敗，沒有送出）") from e
         except _Timeout:
             last = CallFailure(LLM_TIMEOUT, f"LLM 超過 {timeout:g} 秒沒有回應（共試 {1 + retries} 次）")
         except LLMError as e:
@@ -272,15 +278,22 @@ class EvidenceExtractor(BaseOperator):
     """日誌 → LLM → 驗證後的 EvidenceItem，放 ctx.rca_evidence。失敗把 rca_status 標成 undetermined（見模組說明），不丟例外。
     params：provider（不寫就看環境變數 AIOPS_LLM_PROVIDER；沒有 noop）、model、base_url、json_mode（預設 true）、
     timeout_seconds（預設 30）、retries（預設 0 = 逾時或連線失敗後不重試）、max_patterns（預設 20）、
-    examples_per_pattern（預設 2）、max_line_chars（每筆原文最多送幾個字，預設 400）。
+    examples_per_pattern（預設 2）、max_line_chars（每筆原文最多送幾個字，預設 400）、
+    mask_hostnames（預設 false：主機名是 RCA 線索，理由見 masking.py）。
+
+    敏感資訊遮罩：日誌原文在整理成樣板與代表性原文**之前**就先遮（masking.Masker），所以 LLM 看到的、quote 逐字比對的、
+    存進 ctx.rca_evidence（報告與資料庫）的都是遮過的版本；未遮的原文只留在 ctx.rca_logs（本來就在，沒有多流到新地方）。
     """
 
     scope = "batch"
 
     def __init__(self, provider: str | None = None, model: str | None = None, base_url: str | None = None,
                  json_mode: bool = True, timeout_seconds: float = 30.0, retries: int = 0, max_patterns: int = 20,
-                 examples_per_pattern: int = 2, max_line_chars: int = 400):
+                 examples_per_pattern: int = 2, max_line_chars: int = 400, mask_hostnames: bool = False):
         check_provider(provider)
+        if not isinstance(mask_hostnames, bool):
+            raise ValueError(f"mask_hostnames 必須是 true／false，不是 {mask_hostnames!r}")
+        self.mask = MaskPolicy(mask_hostnames=mask_hostnames)
         self.provider, self.model, self.base_url, self.json_mode = provider, model, base_url, bool(json_mode)
         self.timeout = positive("timeout_seconds", timeout_seconds)
         self.retries = whole("retries", retries, minimum=0)
@@ -295,13 +308,21 @@ class EvidenceExtractor(BaseOperator):
         if not ctx.rca_logs:
             ctx.log("extract_evidence：沒有事件期間的錯誤日誌，不呼叫 LLM（rca_evidence = []，不算失敗）")
             return ctx
-        patterns, lines = build_input(ctx.rca_logs, ctx.rca_logs_baseline, ctx.rca_log_window_minutes,
-                                      self.max_patterns, self.examples_per_pattern, self.max_line_chars)
         entities = known_entities(ctx)
+        masker = Masker(self.mask, keep=rca_keep_names(ctx) | entities)
+        try:
+            during = [replace(r, message=masker.text(r.message)) for r in ctx.rca_logs]
+            baseline = [replace(r, message=masker.text(r.message)) for r in ctx.rca_logs_baseline]
+        except Exception as e:  # noqa: BLE001  遮罩失敗：寧可不送，不放行原文
+            logger.exception("extract_evidence 遮罩失敗")
+            return self._undetermined(ctx, MASK_FAILED, f"日誌敏感資訊遮罩失敗（{type(e).__name__}），沒有送出")
+        patterns, lines = build_input(during, baseline, ctx.rca_log_window_minutes,
+                                      self.max_patterns, self.examples_per_pattern, self.max_line_chars)
         prompt = build_prompt(patterns, lines, sorted(entities))
+        ctx.log(f"extract_evidence：送出前遮罩（{masker.summary()}）")
         try:
             text = complete_with_policy(resolve_provider(self.provider), self.model, self.base_url, self.json_mode,
-                                        SYSTEM, prompt, self.timeout, self.retries)
+                                        SYSTEM, prompt, self.timeout, self.retries, masker=masker)
         except CallFailure as f:
             return self._undetermined(ctx, f.code, f.detail)
         try:

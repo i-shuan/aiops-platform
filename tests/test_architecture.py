@@ -163,6 +163,33 @@ def test_llm_noop_never_builds_a_client():
     assert build_llm("noop") is None
 
 
+def _llm_complete_refs(files) -> list[str]:
+    """`.complete` 的引用（直接呼叫，或當成函式傳給執行緒池），masking.py 的出口本身除外。"""
+    out = []
+    for f in files:
+        rel = f.relative_to(ROOT).as_posix()
+        if rel == "stages/enrichment/masking.py":
+            continue
+        out += [f"{rel}:{n.lineno}: {ast.unparse(n)}" for n in ast.walk(ast.parse(_src(f)))
+                if isinstance(n, ast.Attribute) and n.attr == "complete"]
+    return out
+
+
+def test_llm_calls_in_enrichment_go_through_masking():
+    """送 LLM 之前一定要遮敏感資訊：stages/enrichment/ 裡碰 BaseLLM.complete 的只准是 masking.send（它先遮再送，
+    遮罩失敗就不送）。其他地方直接呼叫 llm.complete 就是繞過遮罩。"""
+    bad = _llm_complete_refs(_py("stages", "enrichment"))
+    assert not bad, f"繞過 masking.send 直接呼叫 LLM：{bad}"
+    assert "llm.complete(system, sealed)" in _src(ROOT / "stages" / "enrichment" / "masking.py")
+
+
+@pytest.mark.xfail(strict=True, reason="已知缺口：control_plane/learning/tuning.py 把調參回饋的自由文字直接送 LLM，"
+                                       "沒有經過 masking.send（不在 G3 遮罩這次的修改範圍，待控制面接上）")
+def test_llm_calls_outside_enrichment_go_through_masking():
+    bad = _llm_complete_refs(_py())
+    assert not bad, bad
+
+
 def test_legacy_llm_operators_still_default_to_noop():
     """CLAUDE.md §1 第 3 條：舊引擎的 llm_summary／llm_briefing 預設 provider=noop（完全不連外、直接用模板）。
     RCA 新算子（extract_evidence、rca_narrator）沒有 noop，不在這裡檢查；它們的降級是 rca_status=undetermined（各自的測試檔）。"""
