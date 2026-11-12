@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from aiops.engine.pipeline import PeerGroupSpec, PeerSpec, SourceType, StrictModel, TargetSpec
+from aiops.engine.pipeline import EnvironmentName, PeerGroupSpec, PeerSpec, SourceType, StrictModel, TargetSpec
 
 
 class TimeRangeIn(StrictModel):
@@ -112,6 +112,7 @@ class TraceMerge(StrictModel):
     spans: list[SpanIn] = Field(min_length=1)
     step_seconds: int = Field(60, gt=0)
     persist: bool = True
+    environment: EnvironmentName = ""  # 推導出的呼叫邊寫進哪個環境（= 讀它的管線的 Workflow.environment）；trace 時序不分環境
 
 
 class TopologyRefresh(StrictModel):
@@ -122,6 +123,9 @@ class TopologyRefresh(StrictModel):
     max_spans: int = Field(20000, gt=0, le=200000)
     prune_days: int = Field(7, gt=0)  # last_seen 早於「現在 − prune_days」的邊移除
     end: datetime | None = None  # 回放歷史用；不給 = 現在
+    # 邊寫進哪個環境、prune 只刪哪個環境（= 讀它的管線的 Workflow.environment；'' = 不分）。
+    # 注意：撈 span 還沒有依 deployment.environment 過濾（sources 那一側還沒接），trace 來源本身要只含這個環境
+    environment: EnvironmentName = ""
 
 
 class LotStepIn(StrictModel):
@@ -142,6 +146,7 @@ class LotStepIn(StrictModel):
 class LotPathsMerge(StrictModel):
     steps: list[LotStepIn] = Field(min_length=1, max_length=50000)
     persist: bool = True
+    environment: EnvironmentName = ""  # 路徑寫進哪個環境（= 讀它的工廠管線的 Workflow.environment）
 
 
 class ExternalAnomalyIn(StrictModel):

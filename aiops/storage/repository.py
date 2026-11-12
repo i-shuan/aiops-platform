@@ -240,66 +240,73 @@ class Traces:
 
 
 class ServiceEdges:
+    """同步呼叫邊。每個方法都帶 environment（Workflow.environment；'' = 不分環境，跟加這個欄位之前一樣）：
+    讀只讀那個環境、寫只寫那個環境、prune 只刪那個環境，正式與測試的同名服務不會互相污染。"""
+
     @staticmethod
-    def add_calls(edges: dict[tuple[str, str], int], seen_at: datetime | None = None) -> dict[str, int]:
+    def add_calls(edges: dict[tuple[str, str], int], seen_at: datetime | None = None,
+                  environment: str = "") -> dict[str, int]:
         """累加呼叫次數（原子，資料庫算 calls + n）並把 last_seen 設成 seen_at（預設現在）。
         回傳 {"added": 原本沒有的邊數, "updated": 原本就有的邊數}（新舊判斷是寫入前讀一次，併發時只影響這兩個數字的分配，不影響累加）。"""
         if not edges:
             return {"added": 0, "updated": 0}
         seen_at = seen_at or utc_now()
-        known = {(e["caller"], e["callee"]) for e in crud.find(ServiceEdgeRow)}
+        known = {(e["caller"], e["callee"]) for e in crud.find(ServiceEdgeRow, environment=environment)}
         for (caller, callee), calls in edges.items():
-            crud.increment(ServiceEdgeRow, {"caller": caller, "callee": callee}, "calls", int(calls), last_seen=seen_at)
+            crud.increment(ServiceEdgeRow, {"environment": environment, "caller": caller, "callee": callee}, "calls",
+                           int(calls), last_seen=seen_at)
         updated = sum(1 for k in edges if k in known)
         return {"added": len(edges) - updated, "updated": updated}
 
     @staticmethod
-    def prune(before: datetime) -> int:
-        """移除 last_seen 早於 before 的邊，回傳移除幾條。last_seen 是 NULL（0006 之前的舊列）不刪：不知道多久沒出現。"""
-        return crud.delete_before(ServiceEdgeRow, "last_seen", before)
+    def prune(before: datetime, environment: str = "") -> int:
+        """移除這個環境 last_seen 早於 before 的邊，回傳移除幾條。last_seen 是 NULL（0006 之前的舊列）不刪：不知道多久沒出現。"""
+        return crud.delete_before(ServiceEdgeRow, "last_seen", before, environment=environment)
 
     @staticmethod
-    def all() -> list[Row]:
-        return crud.find(ServiceEdgeRow)
+    def all(environment: str = "") -> list[Row]:
+        return crud.find(ServiceEdgeRow, environment=environment)
 
 
 class AsyncEdges:
-    """非同步邊（訊息佇列的 生產者 -> 消費者）。跟 ServiceEdges 分開：方向相反，不能混進同步拓撲。"""
+    """非同步邊（訊息佇列的 生產者 -> 消費者）。跟 ServiceEdges 分開：方向相反，不能混進同步拓撲。environment 規則同 ServiceEdges。"""
 
     @staticmethod
-    def record(edges: dict[tuple[str, str], tuple[float, int]], seen_at: datetime | None = None) -> dict[str, int]:
+    def record(edges: dict[tuple[str, str], tuple[float, int]], seen_at: datetime | None = None,
+               environment: str = "") -> dict[str, int]:
         """edges: (producer, consumer) -> (延遲 P95 毫秒, 訊息數)。訊息數原子累加；延遲覆蓋成這一次的值、last_seen 設成 seen_at。
         回傳 {"added", "updated"}（算法同 ServiceEdges.add_calls）。"""
         if not edges:
             return {"added": 0, "updated": 0}
         seen_at = seen_at or utc_now()
-        known = {(e["producer"], e["consumer"]) for e in crud.find(ServiceAsyncEdgeRow)}
+        known = {(e["producer"], e["consumer"]) for e in crud.find(ServiceAsyncEdgeRow, environment=environment)}
         for (producer, consumer), (lag_ms, count) in edges.items():
-            crud.increment(ServiceAsyncEdgeRow, {"producer": producer, "consumer": consumer}, "messages", int(count),
-                           lag_ms_p95=float(lag_ms), last_seen=seen_at)
+            crud.increment(ServiceAsyncEdgeRow, {"environment": environment, "producer": producer, "consumer": consumer},
+                           "messages", int(count), lag_ms_p95=float(lag_ms), last_seen=seen_at)
         updated = sum(1 for k in edges if k in known)
         return {"added": len(edges) - updated, "updated": updated}
 
     @staticmethod
-    def prune(before: datetime) -> int:
-        return crud.delete_before(ServiceAsyncEdgeRow, "last_seen", before)
+    def prune(before: datetime, environment: str = "") -> int:
+        return crud.delete_before(ServiceAsyncEdgeRow, "last_seen", before, environment=environment)
 
     @staticmethod
-    def all() -> list[Row]:
-        return crud.find(ServiceAsyncEdgeRow)
+    def all(environment: str = "") -> list[Row]:
+        return crud.find(ServiceAsyncEdgeRow, environment=environment)
 
 
 class LotPaths:
     @staticmethod
-    def upsert_many(lots: list[Row]) -> int:
-        """以 lot_id 為準：同一個 Lot 再合成一次就換成最新的路徑（不會重複計算流向）。"""
+    def upsert_many(lots: list[Row], environment: str = "") -> int:
+        """以 (environment, lot_id) 為準：同一個 Lot 再合成一次就換成最新的路徑（不會重複計算流向）。"""
         for lot in lots:
-            crud.upsert(LotPathRow, {"lot_id": lot["lot_id"]}, path=lot["path"], start=lot["start"], end=lot["end"])
+            crud.upsert(LotPathRow, {"environment": environment, "lot_id": lot["lot_id"]},
+                        path=lot["path"], start=lot["start"], end=lot["end"])
         return len(lots)
 
     @staticmethod
-    def paths() -> list[list[str]]:
-        return [r["path"] for r in crud.find(LotPathRow)]
+    def paths(environment: str = "") -> list[list[str]]:
+        return [r["path"] for r in crud.find(LotPathRow, environment=environment)]
 
 
 class Proposals:

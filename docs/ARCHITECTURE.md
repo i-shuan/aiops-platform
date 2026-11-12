@@ -132,7 +132,7 @@ RCA 管線
 
 | 邊的型別 | 宣告方向 | 異常傳播方向 | 來源 | 進傳播圖 |
 | :--- | :--- | :--- | :--- | :--- |
-| `CALL` 同步呼叫 | 呼叫者 → 被呼叫者 | 被呼叫者 → 呼叫者（反向） | `service_edges` 表、YAML `topology:`、RCA 現場從 trace 還原 | 是 |
+| `CALL` 同步呼叫 | 呼叫者 → 被呼叫者 | 被呼叫者 → 呼叫者（反向） | `service_edges` 表（依管線的 `environment`）、YAML `topology:`、RCA 現場從 trace 還原 | 是 |
 | `ASYNC` 訊息佇列 | 生產者 → 消費者 | 生產者 → 消費者 | `service_async_edges` 表 | **否**（現況照舊，只有 `alert.messaging_link` 用） |
 | `FLOW` Lot 流向 | 上游機台 → 下游機台 | 上游 → 下游 | `lot_paths` 表、YAML `lot_edges:` | 是 |
 
@@ -148,7 +148,10 @@ RCA 管線
 - 這是**不改行為**的重構：每個查詢都跟重構前各算子的寫法在 200 張隨機圖上逐一比對（`tests/test_service_graph.py`）。
 - `ctx.topology`、`ctx.lot_edges`、`ctx.async_edges` 留著當載入與存檔的格式；`ctx.graph` 每次現算、不快取。
 - 圖可以有環，不是 DAG。
-- **還沒做的（都是行為變更，要等混沌回歸）**：佇列邊進傳播圖、圖按管線分開、`SUPPLY`（物理供應）與 `HOSTED_ON`（服務部署在哪台主機）兩種邊、`lot_paths` 的清理。
+- **圖分環境**（`feat/environment-scope`）：workflow YAML 選填 `environment`（`[A-Za-z0-9_.-]`，最長 64；預設空字串 = 不分環境，跟以前一模一樣）。`service_edges`、`service_async_edges`、`lot_paths` 都有 `environment` 欄位，唯一鍵含它（`uq_service_edges_env_pair`、`uq_service_async_edges_env_pair`、`uq_lot_paths_env_lot`，`migrations/postgres/0009`）。偵測時 `storage/hooks` 只載入這條管線環境的邊；事件群快照記下 `environment`，RCA 照事件群的環境載圖（快照沒存拓撲時才從表載；舊快照沒有這個鍵就沿用 RCA 管線自己的，等於舊行為）。`admin.topology_refresh`、`admin.merge_traces`、`admin.merge_lot_paths` 的請求都接受 `environment`，寫入與 prune 只碰那個環境。`''` 是「不分環境」的那一份，**不是**「全部環境」。
+- **實體命名規則**：實體維持 `service.name`（工廠是機台編號），**不把環境或命名空間塞進名稱**。塞進去的話改環境名就斷基準線（基準線、調參、異常血緣都以實體名稱為鍵），跨環境比較也對不起來。環境只寫在管線的 `environment`；一個環境開一條管線（異常點、基準線、事件群、調參本來就以管線名稱分開）。載入期檢查：管線設了 `environment` 時，target 的 `entity` 以非英數字元切段後有一段等於環境名（`cart-prod`、`prod.cart`）就 `WorkflowError`；沒寫 `entity` 的 target 名稱是查詢字串（本來就可能含 `env="prod"`），不檢查。
+- **環境的缺口**：撈 span 還沒依 `deployment.environment` 過濾（`aiops/sources` 另案重寫中），所以 `admin.topology_refresh` 與 RCA 現場還原用的 trace 來源要只含那個環境，否則別環境的呼叫會被記進來（`tests/test_environment_scope.py` 的 `xfail(strict=True)` 標著）。`trace_series`（trace 合成時序）、通知去重的指紋與最近通知仍不分環境，見 `docs/CROSS_DOMAIN_CONSISTENCY_AUDIT.md` M4。
+- **還沒做的（都是行為變更，要等混沌回歸）**：佇列邊進傳播圖、`SUPPLY`（物理供應）與 `HOSTED_ON`（服務部署在哪台主機）兩種邊、`lot_paths` 的清理。
 
 ### 1.2 各階段功能與新舊差異
 

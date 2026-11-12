@@ -298,6 +298,8 @@ class PipelineContext:
     pipeline: str
     now: datetime
     target: Target | None = None  # None = 批次層（所有 target 的結果合併後）
+    # 管線所屬環境（Workflow.environment；空字串 = 不分）。storage 只載入這個環境的關係圖；RCA 改用事件群快照記的環境
+    environment: str = ""
 
     # ── 載入的輸入（引擎在跑之前載入；算子只讀）──
     field_maps: dict[str, dict[str, str]] = field(default_factory=dict)  # source_type -> 已核准對照（來源欄 -> 標準欄）
@@ -397,6 +399,8 @@ class PipelineContext:
     # ── 手動動作（API）：請求與結果 ──
     incident_id: int | None = None  # RCA 等針對單一事件群的流程
     incident_pipeline: str = ""  # 那個事件群是哪條管線產生的（RCA 的 ctx.pipeline 是報告流程自己的名字）
+    # 那個事件群的環境（建立時寫進快照；舊快照沒有就沿用 ctx.environment）。RCA 的關係圖照它載入
+    incident_environment: str = ""
     request: BaseModel | None = None
     result: dict[str, Any] = field(default_factory=dict)
 

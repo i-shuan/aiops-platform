@@ -187,8 +187,10 @@ class ServiceEdgeRow(Base):
     不知道多久沒出現，prune 不刪它（migrations/postgres/0006）。"""
 
     __tablename__ = "service_edges"
-    __table_args__ = (UniqueConstraint("caller", "callee"),)
+    __table_args__ = (UniqueConstraint("environment", "caller", "callee", name="uq_service_edges_env_pair"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 環境範圍（Workflow.environment；'' = 不分環境）。唯一鍵含它：正式與測試的同名服務各有自己的邊（migrations/postgres/0009）
+    environment: Mapped[str] = mapped_column(String(64), default="", server_default="")
     caller: Mapped[str] = mapped_column(String(256))
     callee: Mapped[str] = mapped_column(String(256))
     calls: Mapped[int] = mapped_column(Integer, default=0)
@@ -205,8 +207,10 @@ class ServiceAsyncEdgeRow(Base):
     migrations/postgres/0007。"""
 
     __tablename__ = "service_async_edges"
-    __table_args__ = (UniqueConstraint("producer", "consumer"),)
+    __table_args__ = (UniqueConstraint("environment", "producer", "consumer", name="uq_service_async_edges_env_pair"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 環境範圍（Workflow.environment；'' = 不分環境）。唯一鍵含它：正式與測試的同名服務各有自己的邊（migrations/postgres/0009）
+    environment: Mapped[str] = mapped_column(String(64), default="", server_default="")
     producer: Mapped[str] = mapped_column(String(256))
     consumer: Mapped[str] = mapped_column(String(256))
     messages: Mapped[int] = mapped_column(Integer, default=0)
@@ -218,8 +222,11 @@ class LotPathRow(Base):
     """每個 Lot 依時間排好的機台路徑（MergeLotPathsCommand 寫入）。alerts、rca 從這裡推導機台間流向（lot_edges）。"""
 
     __tablename__ = "lot_paths"
+    __table_args__ = (UniqueConstraint("environment", "lot_id", name="uq_lot_paths_env_lot"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    lot_id: Mapped[str] = mapped_column(String(128), unique=True)
+    # 環境範圍（Workflow.environment；'' = 不分環境）。唯一鍵含它：正式與測試的同名服務各有自己的邊（migrations/postgres/0009）
+    environment: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    lot_id: Mapped[str] = mapped_column(String(128))
     path: Mapped[list] = mapped_column(JSON)
     start: Mapped[datetime] = mapped_column(DateTime)
     end: Mapped[datetime] = mapped_column(DateTime)

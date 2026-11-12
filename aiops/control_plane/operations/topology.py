@@ -37,6 +37,9 @@ class TopologyRefreshOp(BaseOperator):
     - 訊息消費者的 span 不算同步邊（engine/topology.service_edges 會跳過），改記成非同步邊 (producer, consumer, 延遲 P95, 訊息數)
       -> AsyncEdges.record／prune，規則同上。延遲是「這一次刷新窗裡」的 P95（覆蓋）：平常是毫秒級，積壓期間刷到才會變大。
       以前版本把消費者算成同步邊寫進 service_edges 的舊列不會再被刷新，prune_days 之後自己消失。
+    - environment：邊寫進哪個環境、prune 只刪那個環境（別的環境的邊不動）。缺口：撈 span 時還沒依 deployment.environment
+      過濾（aiops/sources 那一側另案重寫中），所以一個 trace 來源混了多個環境時，這裡會把別環境的呼叫也記進來
+      （tests/test_environment_scope.py 的 xfail 標著）。
     """
 
     scope = "batch"
@@ -51,7 +54,7 @@ class TopologyRefreshOp(BaseOperator):
         start = end - timedelta(minutes=req.lookback_minutes)
         window = {"start": start.isoformat(), "end": end.isoformat()}
         if not is_configured(req.source_type):
-            ctx.result = {"source_type": req.source_type, "skipped": f"資料源 {req.source_type} 沒有設定，略過（不更新、不移除邊）",
+            ctx.result = {"source_type": req.source_type, "environment": req.environment, "skipped": f"資料源 {req.source_type} 沒有設定，略過（不更新、不移除邊）",
                           "spans": 0, "truncated": False, "edges_seen": 0, "edges_added": 0, "edges_updated": 0,
                           "edges_pruned": 0, "edges": [], "async_edges_seen": 0, "async_edges_pruned": 0,
                           "async_edges": [], "window": window}
@@ -63,12 +66,13 @@ class TopologyRefreshOp(BaseOperator):
         edges = service_edges(records)
         lags = async_lags(records)
         cutoff = ctx.now - timedelta(days=req.prune_days)
-        written = ServiceEdges.add_calls(dict(edges), seen_at=ctx.now)
-        pruned = ServiceEdges.prune(cutoff)
-        AsyncEdges.record(lags, seen_at=ctx.now)
-        async_pruned = AsyncEdges.prune(cutoff)
+        env = req.environment
+        written = ServiceEdges.add_calls(dict(edges), seen_at=ctx.now, environment=env)
+        pruned = ServiceEdges.prune(cutoff, environment=env)
+        AsyncEdges.record(lags, seen_at=ctx.now, environment=env)
+        async_pruned = AsyncEdges.prune(cutoff, environment=env)
         ctx.result = {
-            "source_type": req.source_type, "spans": len(spans), "truncated": truncated,
+            "source_type": req.source_type, "environment": env, "spans": len(spans), "truncated": truncated,
             "edges_seen": len(edges), "edges_added": written["added"], "edges_updated": written["updated"],
             "edges_pruned": pruned,
             "edges": [{"caller": a, "callee": b, "calls": n} for (a, b), n in sorted(edges.items())],
