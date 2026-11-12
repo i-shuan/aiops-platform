@@ -40,6 +40,83 @@ RCA 管線
 圖上偵測畫成一個方塊，**YAML 裡仍是分開的節點**：每一票各自存基準線（以節點名稱）、各自能被回饋閉環調參
 （`threshold_scale`，分 偵測器×管線×實體），不包成複合算子。`topological` 也仍是獨立算子（`evidence` 的 fallback 參數），沒有併進 `evidence`。
 
+### 1.1.1 主線每一層實際使用的算子
+
+實際在跑的主線是 `it_otel`（偵測告警）加 `rca_report_llm`（根因）。第 1–7 層每分鐘跑一輪，第 8–10 層只在有事故時跑，第 11 層是人送出回饋才跑。
+
+| 階層 | 實際使用的算子 |
+| :--- | :--- |
+| 1. 抓資料 | `ingestion.fetch` |
+| 2. 偵測 | `hourly_baseline`、`residual_shift`、`residual_chronic`、`hard_limit` |
+| 3. 裁決 | `soft_vote`（SNR 門檻）、`new_only` |
+| 4. 收斂 | `same_entity`、`topology_chain`、`messaging_link` |
+| 5. 計分 | `golden_signals`、`p0_boost`、`fatal_floor` |
+| 6. 吸收與抑制 | `absorb_open`、`suppress_window`、`suppress_same_root_cause`、`suppress_dedup` |
+| 7. 通知 | `notify_payload`、`heartbeat`、`notifier.auto`、`notifier.watchdog` |
+| 8. 根因：撈證據 | `incident_traces`、`incident_logs`、`build_dynamic_topology`、`rca.facts`、`extract_evidence` |
+| 9. 根因：判斷 | `rca.root_cause.llm` |
+| 10. 根因：報告 | `rca.report`、`rca_narrator`、`llm_briefing` |
+| 11. 學習回饋 | `feedback_submit`、`feedback_propose`、`proposal_backtest`、`proposal_approve` |
+
+不在主線、只當備援的：`rca.root_cause.evidence`（LLM 不可用時改跑 `rca_report`，不連外）與 `rca.root_cause.topological`（連 trace 都沒有時，只看服務依賴圖與先後時間）。
+
+**各算子簡介**
+
+第 1 層　抓資料
+- `ingestion.fetch`：從 Elasticsearch／Prometheus 抓每條序列這一輪的時序；基準線還沒有或到期時才多抓訓練窗。
+
+第 2 層　偵測（每個算子各自給分數，不互相依賴）
+- `detector.hourly_baseline`：週期票。拿「週幾 × 幾點」的歷史平均與標準差當基準，看現在偏離多少。
+- `detector.residual_shift`：突變票。先扣掉週期基準得到殘差，再看殘差有沒有突然跳一階。
+- `detector.residual_chronic`：慢性票。看殘差是不是連續偏向同一邊。管線裡掛兩次：一次投票，一次（連續 10 點）單獨成立、不經表決。
+- `detector.hard_limit`：致命界線。物理或業務上踩到就是出事的上下限，單點成立、不投票、不接受後台調參。
+
+第 3 層　裁決
+- `detector.soft_vote`：把三張統計票合成一個判定。門檻由誤報機率 `p_fa` 換算（預設 3.29 個雜訊標準差）；列在 `bypass` 的節點原樣放行。
+- `detector.new_only`：只留比資料庫裡最後一筆更新的異常，重跑同一段時間不會重複告警。
+
+第 4 層　收斂（多筆異常併成一件事故）
+- `alert.same_entity`：同一個實體、時間相近的異常併成一群。
+- `alert.topology_chain`：服務依賴圖上相鄰（呼叫關係）且時間相近的群併在一起。
+- `alert.messaging_link`：訊息佇列的生產者先出事、消費者稍後出事，併成同一件。
+
+第 5 層　計分（決定嚴重度 P0–P3）
+- `alert.golden_signals`：事故含黃金訊號（延遲、錯誤、流量、飽和度）時加權。
+- `alert.p0_boost`：事故牽涉到列為 P0 的實體時加分。
+- `alert.fatal_floor`：事故裡有致命界線事件時，分數至少拉到 P0 門檻並打上 `fatal:<節點>` 標籤。
+
+第 6 層　吸收與抑制
+- `alert.absorb_open`：新異常併入還在進行中的事故，一場事故從頭到尾只有一個編號。
+- `alert.suppress_window`：落在靜音或維護窗口內的不通知。
+- `alert.suppress_same_root_cause`：只是被下游拖累的上游症狀，下游已在同批告警就不另發。
+- `alert.suppress_dedup`：同一組實體在冷卻時間（30 分鐘）內通知過就不重發；嚴重度升級時例外。
+
+第 7 層　通知
+- `alert.notify_payload`：替事故定嚴重度，產生通知內容（含回饋頁連結）。
+- `alert.heartbeat`：進行中的事故每輪續送；安靜超過 15 分鐘送結案。
+- `notifier.auto`：依環境變數決定出口（只寫日誌，或送 Alertmanager）。資料庫寫入成功後才送。
+- `notifier.watchdog`：整輪每一步都成功才送「我還活著」的心跳；排程或資料源掛了，心跳過期就會告警。
+
+第 8 層　根因：撈證據
+- `ingestion.incident_traces`／`ingestion.incident_logs`：撈事故時段相關服務的 trace 與日誌。資料源連不上只記錯誤，報告照出。
+- `rca.build_dynamic_topology`：用這次事故的 trace 重建當下的服務依賴圖。
+- `rca.facts`：把 trace、日誌算成一條條有數字的事實（自身耗時變化、錯誤率、等待資源、流量來源、佇列延遲等）。純計算，不用 LLM。
+- `enrichment.extract_evidence`：LLM 從日誌抽出證據；引文必須逐字出現在該服務自己的日誌裡，否則拒收。
+
+第 9 層　根因：判斷
+- `rca.root_cause.llm`：把呼叫圖、事實、日誌證據交給 LLM 排出根因候選。每個候選都要引用事實編號，數字要對得上，驗證不過就拒收；LLM 不可用或全數被拒時標「無法判定」，不硬猜。
+
+第 10 層　根因：報告
+- `rca.report`：依段落清單組出報告（摘要、時間軸、受影響實體、黃金訊號、根因候選、傳播路徑、trace 與日誌證據、建議處置等）。
+- `enrichment.rca_narrator`：LLM 把報告寫成一段人看得懂的敘述，每句話要對應到報告段落。
+- `enrichment.llm_briefing`：產生給值班人員的簡短戰情摘要。
+
+第 11 層　學習回饋（手動動作）
+- `admin.feedback_submit`：收下值班人員的回饋（誤報、漏報、正確）。
+- `admin.feedback_propose`：把累積的誤報回饋轉成調參提案。
+- `admin.proposal_backtest`：拿歷史資料回測提案；會讓已確認的真實事故漏掉的提案直接擋下。
+- `admin.proposal_approve`：人工核准後才生效；YAML 寫死的參數不會被覆蓋。
+
 ### 1.2 各階段功能與新舊差異
 
 | 階段 | 舊做什麼 | 新做什麼 |
