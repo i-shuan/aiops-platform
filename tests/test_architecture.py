@@ -431,3 +431,22 @@ def test_every_test_asserts_something_and_dead_zones_are_strict():
             if mark.attr == "skip":
                 bad.append(f"{f.name}:{n.lineno}: 無條件 skip")
     assert not bad, "\n".join(bad)
+
+
+GRAPH_FIELDS = {"topology", "lot_edges", "async_edges"}
+
+
+def test_operators_ask_the_service_graph_instead_of_reading_raw_edge_lists():
+    """關係圖只有一個查詢入口：ctx.graph（engine/graph.py 的 ServiceGraph）。stages／control_plane 的算子不准再讀
+    ctx.topology／ctx.lot_edges／ctx.async_edges 自己拼圖，也不准繞過 ctx 直接用 propagation_edges——方向的規則
+    （呼叫邊要翻、Lot 流向不翻）只有 ServiceGraph 知道，各自拼就會有人弄反。
+    寫入不擋（rca.build_dynamic_topology 把現場還原的邊寫回 ctx.topology）；載入與存檔在 engine、storage，不在這裡的範圍。"""
+    bad = []
+    for f in [*_py("stages"), *_py("control_plane")]:
+        rel = f.relative_to(ROOT).as_posix()
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Attribute) and node.attr in GRAPH_FIELDS and isinstance(node.ctx, ast.Load):
+                bad.append(f"{rel}:{node.lineno} 讀了 .{node.attr}")
+        if "aiops.engine.topology.propagation_edges" in _imports(f):
+            bad.append(f"{rel} import 了 propagation_edges")
+    assert not bad, "\n".join(bad)

@@ -126,6 +126,30 @@ RCA 管線
 - `admin.proposal_backtest`：拿歷史資料回測提案；會讓已確認的真實事故漏掉的提案直接擋下。
 - `admin.proposal_approve`：人工核准後才生效；YAML 寫死的參數不會被覆蓋。
 
+### 1.1.2 關係圖（`ServiceGraph`，`aiops/engine/graph.py`）
+
+實體之間的關係收在一個物件裡，算子用 `ctx.graph` 查詢，不再各自從清單拼圖。
+
+| 邊的型別 | 宣告方向 | 異常傳播方向 | 來源 | 進傳播圖 |
+| :--- | :--- | :--- | :--- | :--- |
+| `CALL` 同步呼叫 | 呼叫者 → 被呼叫者 | 被呼叫者 → 呼叫者（反向） | `service_edges` 表、YAML `topology:`、RCA 現場從 trace 還原 | 是 |
+| `ASYNC` 訊息佇列 | 生產者 → 消費者 | 生產者 → 消費者 | `service_async_edges` 表 | **否**（現況照舊，只有 `alert.messaging_link` 用） |
+| `FLOW` Lot 流向 | 上游機台 → 下游機台 | 上游 → 下游 | `lot_paths` 表、YAML `lot_edges:` | 是 |
+
+| 查詢 | 回傳 | 誰在用 |
+| :--- | :--- | :--- |
+| `adjacent(kind, min_weight)` | 無向相鄰的實體對 | `alert.topology_chain`、`alert.lot_path_chain` |
+| `pairs(kind)` | 有向（宣告方向）的實體對 | `alert.suppress_same_root_cause`、LLM 判斷的呼叫圖 |
+| `weights(kind)` | 有向邊 → 權重（佇列延遲 P95） | `alert.messaging_link` |
+| `propagation(min_lots)` | 傳播方向的有向邊 | `rca.root_cause.topological`、依賴圖段落、LLM 輸出的實體檢查 |
+| `nodes(kind)` | 邊上出現過的實體 | 證據抽取的已知實體清單 |
+| `declared(kind)` | 照原順序的清單 | `rca.build_dynamic_topology`（合併現場還原的邊） |
+
+- 這是**不改行為**的重構：每個查詢都跟重構前各算子的寫法在 200 張隨機圖上逐一比對（`tests/test_service_graph.py`）。
+- `ctx.topology`、`ctx.lot_edges`、`ctx.async_edges` 留著當載入與存檔的格式；`ctx.graph` 每次現算、不快取。
+- 圖可以有環，不是 DAG。
+- **還沒做的（都是行為變更，要等混沌回歸）**：佇列邊進傳播圖、圖按管線分開、`SUPPLY`（物理供應）與 `HOSTED_ON`（服務部署在哪台主機）兩種邊、`lot_paths` 的清理。
+
 ### 1.2 各階段功能與新舊差異
 
 | 階段 | 舊做什麼 | 新做什麼 |

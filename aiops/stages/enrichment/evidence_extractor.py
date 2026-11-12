@@ -29,7 +29,7 @@ from aiops.engine.operator import BaseOperator
 from aiops.engine.params import positive, whole
 from aiops.engine.rca_types import EVIDENCE_KINDS, EvidenceItem
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.topology import propagation_edges
+from aiops.engine.graph import EdgeKind
 from aiops.engine.types import as_utc
 from aiops.stages.enrichment import registry
 from aiops.stages.enrichment.base import BaseLLM, LLMError, parse_json_reply
@@ -192,8 +192,9 @@ def known_entities(ctx: PipelineContext) -> set[str]:
     names: set[str] = set()
     for inc in ctx.incidents:
         names.update(inc.entities)
-    names.update(n for edge in ctx.topology for n in edge)
-    names.update(n for edge in propagation_edges(ctx.topology, ctx.lot_edges) for n in edge)
+    graph = ctx.graph
+    names.update(graph.nodes(EdgeKind.CALL))
+    names.update(n for edge in graph.propagation() for n in edge)
     names.update(s.service for s in ctx.rca_spans if getattr(s, "service", ""))
     names.discard("")
     return names

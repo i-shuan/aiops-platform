@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from aiops.engine.context import PipelineContext, Silence
+from aiops.engine.graph import EdgeKind
 from aiops.engine.params import positive
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, Incident, as_utc, gap_seconds
@@ -78,7 +79,7 @@ class SameRootCauseSuppressor(BaseOperator):
         return None
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
-        edges = {(caller, callee) for caller, callee in ctx.topology if caller != callee}
+        edges = ctx.graph.pairs(EdgeKind.CALL)  # (呼叫者, 被呼叫者)
         if not edges:
             return ctx
         batch = ensure_incidents(ctx)

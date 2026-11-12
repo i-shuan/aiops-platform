@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel
 
+from aiops.engine.graph import ServiceGraph
 from aiops.engine.rca_types import EvidenceItem, Fact, RcaStatus
 from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
 
@@ -309,6 +310,7 @@ class PipelineContext:
     training_exclusions: list[TrainingExclusion] = field(default_factory=list)
     silences: list[Silence] = field(default_factory=list)
     recent_notifications: list[RecentNotification] = field(default_factory=list)
+    # 關係圖的載入格式（YAML、資料表、事件群快照都是這個形狀）。算子不直接讀這三個欄位，一律問 ctx.graph
     topology: list[tuple[str, str]] = field(default_factory=list)  # (caller, callee)
     lot_edges: list[LotEdge] = field(default_factory=list)
     # 非同步邊（訊息佇列）：(生產者, 消費者) -> 延遲 P95（毫秒）。由 admin.topology_refresh 沉澱、引擎載入；
@@ -394,6 +396,12 @@ class PipelineContext:
     incident_pipeline: str = ""  # 那個事件群是哪條管線產生的（RCA 的 ctx.pipeline 是報告流程自己的名字）
     request: BaseModel | None = None
     result: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def graph(self) -> ServiceGraph:
+        """實體關係圖（engine/graph.py）。每次從當下的 topology／lot_edges／async_edges 現算、不快取：
+        rca.build_dynamic_topology 會在一輪中途改 topology，快取會讓後面的節點讀到舊圖。"""
+        return ServiceGraph.from_parts(self.topology, self.lot_edges, self.async_edges)
 
     @property
     def is_suppressed(self) -> bool:

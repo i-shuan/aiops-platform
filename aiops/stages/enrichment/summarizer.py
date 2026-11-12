@@ -4,7 +4,6 @@ import logging
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.topology import propagation_edges
 from aiops.engine.operator import BaseOperator
 from aiops.stages.enrichment import narrative
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
@@ -44,7 +43,7 @@ class LLMSummarizer(BaseOperator):
             return ctx
 
         incident = ctx.incidents[0]
-        known = set(incident.entities) | {n for edge in propagation_edges(ctx.topology, ctx.lot_edges) for n in edge}
+        known = set(incident.entities) | {n for edge in ctx.graph.propagation() for n in edge}
         reason = narrative.validate(reply, sections, set(incident.entities), known)
         if reason:
             ctx.llm_rejected = reason
@@ -84,7 +83,7 @@ class LLMBriefing(BaseOperator):
         except LLMError as e:
             ctx.llm_briefing_rejected = str(e)
             return ctx
-        known = set(incident.entities) | {n for edge in propagation_edges(ctx.topology, ctx.lot_edges) for n in edge}
+        known = set(incident.entities) | {n for edge in ctx.graph.propagation() for n in edge}
         reason = narrative.validate_briefing(reply, context, known)
         if reason:
             logger.warning("HallucinationBlocked incident=%s provider=%s：%s", incident.uid, self.provider, reason)

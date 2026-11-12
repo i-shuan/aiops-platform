@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from aiops.engine.context import PipelineContext
+from aiops.engine.graph import EdgeKind
 from aiops.engine.params import number, positive, whole
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import gap_seconds, merge_incidents
@@ -29,7 +30,7 @@ class SameEntityGrouper(BaseOperator):
 
 @OperatorRegistry.register("alert.topology_chain")
 class TopologyChainGrouper(BaseOperator):
-    """IT：服務呼叫關係上相鄰、時間相近的異常併成一條鏈。拓撲來自 ctx.topology。params: window_minutes。"""
+    """IT：服務呼叫關係上相鄰、時間相近的異常併成一條鏈。拓撲來自 ctx.graph 的同步呼叫邊。params: window_minutes。"""
 
     scope = "batch"
 
@@ -38,7 +39,7 @@ class TopologyChainGrouper(BaseOperator):
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incidents = ensure_incidents(ctx)
-        edges = {frozenset(e) for e in ctx.topology if e[0] != e[1]}
+        edges = ctx.graph.adjacent(EdgeKind.CALL)
         if not edges:
             return ctx
 
@@ -52,7 +53,7 @@ class TopologyChainGrouper(BaseOperator):
 
 @OperatorRegistry.register("alert.messaging_link")
 class MessagingLinkGrouper(BaseOperator):
-    """IT：訊息佇列的生產者先出事、消費者晚一點才出事，併成一件事。非同步邊來自 ctx.async_edges
+    """IT：訊息佇列的生產者先出事、消費者晚一點才出事，併成一件事。非同步邊來自 ctx.graph 的 ASYNC 邊
     （(生產者, 消費者) -> 延遲 P95 毫秒；admin.topology_refresh 從 trace 沉澱）。
     params: min_window_minutes（預設 10）、max_window_minutes（預設 120）、lag_factor（預設 1.5）。
 
@@ -66,7 +67,7 @@ class MessagingLinkGrouper(BaseOperator):
       有共同實體，後面的 alert.absorb_open 會照既有規則吸收進同一個 incident_uid；生產者這一輪已經安靜了，
       消費者這一輪才出事，這裡併不到（absorb_open 只認共同實體，不認非同步邊）——兩張卡，靠 RCA 的訊息佇列段落指回生產者。
     - 延遲是最近一次拓撲刷新看到的值：積壓才剛開始、還沒被刷新到的時候，窗口只有 min_window。
-    - 沒有 ctx.async_edges（沒接 trace、或 workflow 自己指定了拓撲）就什麼都不做。
+    - 沒有非同步邊（沒接 trace、或 workflow 自己指定了拓撲）就什麼都不做。
     一定要放在計分之前（併群取最高分，計分後再併會讓加權失真），跟其他收斂算子一樣。
     """
 
@@ -86,7 +87,7 @@ class MessagingLinkGrouper(BaseOperator):
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incidents = ensure_incidents(ctx)
-        edges = {(p, c): lag for (p, c), lag in ctx.async_edges.items() if p != c}
+        edges = ctx.graph.weights(EdgeKind.ASYNC)
         if not edges:
             return ctx
 
@@ -103,7 +104,7 @@ class MessagingLinkGrouper(BaseOperator):
 
 @OperatorRegistry.register("alert.lot_path_chain")
 class LotPathChainGrouper(BaseOperator):
-    """工廠：Lot 流經的上下游機台在相近時間都出事，併成一條鏈。流向來自 ctx.lot_edges。
+    """工廠：Lot 流經的上下游機台在相近時間都出事，併成一條鏈。流向來自 ctx.graph 的 FLOW 邊。
     params: window_minutes（工廠的傳遞比 IT 慢，預設 60）、min_lots（經過的 Lot 太少的流向不算）。
     """
 
@@ -115,8 +116,7 @@ class LotPathChainGrouper(BaseOperator):
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incidents = ensure_incidents(ctx)
-        edges = {frozenset((e.upstream, e.downstream)) for e in ctx.lot_edges
-                 if e.upstream != e.downstream and e.lots >= self.min_lots}
+        edges = ctx.graph.adjacent(EdgeKind.FLOW, min_weight=self.min_lots)
         if not edges:
             return ctx
 

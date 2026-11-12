@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from aiops.engine.context import LotEdge
+from aiops.engine.graph import ServiceGraph
 
 
 def service_edges(spans: Iterable[Any]) -> Counter:
@@ -37,8 +38,7 @@ def lot_edges_from_paths(paths: list[list[str]]) -> list[LotEdge]:
 def propagation_edges(topology: list[tuple[str, str]], lot_edges: list[LotEdge], min_lots: int = 1) -> set[tuple[str, str]]:
     """IT 的 topology 是 (caller, callee)：callee（被呼叫的依賴）出事會拖垮 caller，所以傳播方向是 callee -> caller。
     工廠的 lot_edges 是 上游 -> 下游：上游機台出事會流到下游，傳播方向是 上游 -> 下游。
-    兩者方向相反，所以 Lot 流向絕不能塞進 topology。
+    兩者方向相反，所以 Lot 流向絕不能塞進 topology。方向的規則只有一份，在 engine/graph.py 的 KINDS；
+    這個函式留給手上只有清單、沒有 ctx 的呼叫端（算子用 ctx.graph.propagation()）。
     """
-    edges = {(callee, caller) for caller, callee in topology if caller != callee}
-    edges |= {(e.upstream, e.downstream) for e in lot_edges if e.upstream != e.downstream and e.lots >= min_lots}
-    return edges
+    return ServiceGraph.from_parts(topology, lot_edges).propagation(min_lots)

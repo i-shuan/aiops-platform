@@ -15,7 +15,6 @@ from typing import ClassVar
 
 from aiops.engine.context import PipelineContext, ReportSection, RootCandidate
 from aiops.engine.errors import NotFound
-from aiops.engine.topology import propagation_edges
 from aiops.engine.types import Incident
 from aiops.engine.operator import BaseOperator
 
@@ -31,7 +30,7 @@ def need_incident(ctx: PipelineContext) -> Incident:
 
 def graph_edges(ctx: PipelineContext) -> set[tuple[str, str]]:
     """異常傳播方向的有向邊（IT：被呼叫端 -> 呼叫端；工廠：上游 -> 下游）。"""
-    return propagation_edges(ctx.topology, ctx.lot_edges)
+    return ctx.graph.propagation()
 
 
 def first_seen(incident: Incident) -> dict[str, tuple[datetime, float]]:

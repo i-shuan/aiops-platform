@@ -12,6 +12,7 @@ params:
 from __future__ import annotations
 
 from aiops.engine.context import PipelineContext
+from aiops.engine.graph import EdgeKind
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.topology import service_edges
 from aiops.engine.operator import BaseOperator
@@ -35,7 +36,7 @@ class BuildDynamicTopology(BaseOperator):
         need_incident(ctx)
         counts = service_edges(ctx.rca_spans)
         edges = sorted((pair, n) for pair, n in counts.items() if n >= self.min_calls)
-        before = list(ctx.topology)
+        before = ctx.graph.declared(EdgeKind.CALL)
         found = [pair for pair, _ in edges]
         if self.mode == "replace" and found:
             ctx.topology = found
@@ -45,7 +46,7 @@ class BuildDynamicTopology(BaseOperator):
         ctx.result["dynamic_topology"] = {
             "mode": self.mode, "spans": len(ctx.rca_spans), "traces": len({s.trace_id for s in ctx.rca_spans}),
             "edges": [{"caller": a, "callee": b, "calls": n} for (a, b), n in edges],
-            "added_to_topology": [list(p) for p in added], "topology_size": len(ctx.topology),
+            "added_to_topology": [list(p) for p in added], "topology_size": len(ctx.graph.declared(EdgeKind.CALL)),
         }
         if ctx.rca_spans and not found:
             ctx.log("dynamic_topology:no-cross-service-calls")  # 有撈到 span，但每條 trace 都只在一個服務裡

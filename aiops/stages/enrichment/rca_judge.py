@@ -35,6 +35,7 @@ import re
 from typing import Any
 
 from aiops.engine.context import PipelineContext, RootCandidate
+from aiops.engine.graph import EdgeKind
 from aiops.engine.params import number, positive, whole
 from aiops.engine.rca_types import EvidenceItem, Fact
 from aiops.engine.registry import OperatorRegistry
@@ -152,9 +153,9 @@ def evidence_rows(evidence: list[EvidenceItem]) -> list[dict]:
 
 def graph_rows(ctx: PipelineContext, entities: set[str]) -> dict[str, list]:
     """呼叫圖：同步呼叫邊（caller → callee，callee 出事會拖垮 caller）、訊息佇列邊（producer → consumer）、
-    資源邊（服務 → 它依賴的資料庫／快取／外部 API）。ctx.topology 只有服務對服務的邊；資源不是實體，
+    資源邊（服務 → 它依賴的資料庫／快取／外部 API）。ctx.graph 只有服務對服務的邊；資源不是實體，
     只出現在 wait_delta 事實的 detail.target，不補進來的話 LLM 看到的圖在「外部依賴變慢」這類事故裡是空的。"""
-    calls = sorted({(a, b) for a, b in ctx.topology if a != b})
+    calls = sorted(ctx.graph.pairs(EdgeKind.CALL))
     mq = sorted({(e.producer, e.consumer, e.queue or "") for e in ctx.rca_mq if e.producer and e.consumer})
     res = sorted({(f.entity, str(f.detail["target"]), str(f.detail.get("target_kind") or ""))
                   for f in ctx.rca_facts if f.kind == "wait_delta" and f.detail.get("target")
