@@ -35,6 +35,13 @@
   消費者一律是入口（即使生產者跟它同一個服務）。它的呼叫者記成 MQ_CALLER_PREFIX + 生產者服務（mq:order-api）：
   跟同步呼叫者分開，流量放大的回溯不會沿著它往上走（訊息量變多不等於此刻被上游打爆，要看的是發布時窗，見 engine/mq.py）。
   還原不出生產者（parent 與 links 都不在樣本裡）記成 UNKNOWN_CALLER。
+- 取樣還原：每個 span 帶 weight（SpanRecord.weight：APM representative_count、OTel tracestate 的 adjusted count，
+  沒有取樣資訊就是 1）。取樣後的 span 數不是實際請求數，而且常常不是均勻取樣（尾端取樣會把錯誤 trace 全留、正常的只留一成），
+  所以「多少比例、每請求多少、流量多少」一律加權：每請求自身耗時、平均總耗時、錯誤率、資源等待用加權平均，
+  inbound_callers（流入流量、呼叫邊、扇出）數加權後的請求數，ServiceWindowStats.weighted_requests 是估計的實際請求數。
+  「樣本夠不夠」仍看實際撈到幾筆：requests（入口 span 數）、wait_failures（失敗的資源 span 筆數）不加權——
+  看到 5 筆、每筆代表 4 個請求，統計上仍然只有 5 筆證據，不能因為權重而通過 min_requests 之類的門檻。
+  全部權重是 1 時，每個數字跟加權之前一字不差。
 """
 from __future__ import annotations
 
@@ -64,6 +71,7 @@ class ServiceWindowStats:
     wait_ms_per_request: dict[str, float] = field(default_factory=dict)  # 資源 -> 每請求等待 ms
     wait_failures: dict[str, int] = field(default_factory=dict)  # 資源 -> 失敗的資源 span 筆數
     clock_skew_spans: int = 0  # 子 span 超出父 span 區間（時鐘偏移）、超出部分沒扣的 span 筆數
+    weighted_requests: float = 0.0  # 取樣還原後估計的入口請求數（Σ weight）；沒取樣時 = requests
 
 
 def resource_label(span: SpanRecord) -> str:
@@ -196,31 +204,38 @@ def window_stats(spans: list[SpanRecord], start: datetime, end: datetime) -> dic
         if not (lo <= as_utc(s.ts) < hi):
             continue
         a = acc[s.service]
+        w = s.weight
         own = selfs.get(s.span_id, 0.0)
-        a["self_ms"] += own
+        a["self_ms"] += own * w
         a["clock_skew"] += s.span_id in skewed
         if is_resource_leaf(s, children):
             label = resource_label(s)
-            waits[s.service][label] += own
-            wait_fail[s.service][label] += int(bool(s.error))
+            waits[s.service][label] += own * w
+            wait_fail[s.service][label] += int(bool(s.error))  # 筆數（證據量），不加權
         else:
-            a["app_ms"] += own
+            a["app_ms"] += own * w
         # 入口 span：沒有父、父在別的服務，或是訊息消費者（生產者跟它同一個服務也算一次獨立的處理）
         if s.parent_id is None or service_of.get(s.parent_id) != s.service or s.consumer:
             a["requests"] += 1
-            a["total_ms"] += s.duration_ms
-            a["errors"] += bool(s.error)
-            a["own_errors"] += bool(s.error) and not below.get(s.span_id, False)
+            a["weighted"] += w
+            a["total_ms"] += s.duration_ms * w
+            a["errors"] += bool(s.error) * w
+            a["own_errors"] += (bool(s.error) and not below.get(s.span_id, False)) * w
     out = {}
     for service, a in acc.items():
-        n = a["requests"]
+        n, wn = a["requests"], a["weighted"]
         if not n:
             continue
-        out[service] = ServiceWindowStats(service, int(n), a["self_ms"] / n, a["total_ms"] / n,
-                                          a["own_errors"] / n, a["errors"] / n, a["app_ms"] / n,
-                                          {k: v / n for k, v in waits[service].items()}, dict(wait_fail[service]),
-                                          int(a["clock_skew"]))
+        out[service] = ServiceWindowStats(service, int(n), a["self_ms"] / wn, a["total_ms"] / wn,
+                                          a["own_errors"] / wn, a["errors"] / wn, a["app_ms"] / wn,
+                                          {k: v / wn for k, v in waits[service].items()}, dict(wait_fail[service]),
+                                          int(a["clock_skew"]), _count(wn))
     return out
+
+
+def _count(v: float) -> int | float:
+    """加權後的計數：整數就回 int（沒取樣、或權重都是整數時跟以前的型別一樣），不是整數才留小數。"""
+    return int(v) if float(v).is_integer() else round(v, 3)
 
 
 def sample_trace(spans: list[SpanRecord], start: datetime, end: datetime) -> SpanRecord | None:
@@ -252,25 +267,26 @@ def sample_trace_reason(span: SpanRecord, spans: list[SpanRecord]) -> str:
 
 
 def inbound_callers(spans: list[SpanRecord], start: datetime, end: datetime) -> dict[str, dict[str, int]]:
-    """[start, end) 內每個服務的入口 span 是誰呼叫的：callee -> {caller: 次數}。
+    """[start, end) 內每個服務的入口 span 是誰呼叫的：callee -> {caller: 次數}。次數是取樣還原後的請求數（Σ weight），
+    沒取樣時就是 span 數（int，跟以前一樣）。
     沒有父 span 記成 EXTERNAL_CALLER；有父但父不在樣本裡記成 UNKNOWN_CALLER（孤兒，不是外部入口）。
     訊息消費者記成 MQ_CALLER_PREFIX + 生產者服務；還原不出生產者記成 UNKNOWN_CALLER（它絕對不是外部打進來的同步請求）。"""
     service_of = {s.span_id: s.service for s in spans}
     lo, hi = as_utc(start), as_utc(end)
-    out: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    out: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for s in spans:
         if not (lo <= as_utc(s.ts) < hi):
             continue
         if s.consumer:
             producer = producer_service(s, service_of)
-            out[s.service][MQ_CALLER_PREFIX + producer if producer else UNKNOWN_CALLER] += 1
+            out[s.service][MQ_CALLER_PREFIX + producer if producer else UNKNOWN_CALLER] += s.weight
         elif s.parent_id is None:
-            out[s.service][EXTERNAL_CALLER] += 1
+            out[s.service][EXTERNAL_CALLER] += s.weight
         elif s.parent_id not in service_of:
-            out[s.service][UNKNOWN_CALLER] += 1
+            out[s.service][UNKNOWN_CALLER] += s.weight
         elif service_of[s.parent_id] != s.service:
-            out[s.service][service_of[s.parent_id]] += 1
-    return {k: dict(v) for k, v in out.items()}
+            out[s.service][service_of[s.parent_id]] += s.weight
+    return {k: {c: _count(n) for c, n in v.items()} for k, v in out.items()}
 
 
 def call_chain(spans: list[SpanRecord], trace_id: str) -> list[tuple[int, SpanRecord, float]]:

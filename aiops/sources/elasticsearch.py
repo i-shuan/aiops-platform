@@ -1,14 +1,15 @@
 import math
 import os
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import pandas as pd
 
 from aiops.sources import _http
-from aiops.sources.base import (BaseDataSourceSpec, InvalidQueryError, NoDataError, as_utc_datetime,
-                                canonical_service)
+from aiops.sources.base import BaseDataSourceSpec, InvalidQueryError, NoDataError, canonical_service
+from aiops.sources.es_models import ELASTIC_APM, Resolved, current_model, get_path
+from aiops.sources.es_models import _links as _apm_links
 from aiops.sources.query.elasticsearch import bucket_value, build_search_body, parse_es_query
 from aiops.sources.query.window import align_window
 
@@ -16,7 +17,8 @@ from aiops.sources.query.window import align_window
 class ElasticsearchSpec(BaseDataSourceSpec):
     """Elasticsearch：date_histogram 降採樣成時序。query 是 JSON（格式見 sources/query/elasticsearch.py）。
 
-    環境變數：AIOPS_ES_URL（必填）、AIOPS_ES_API_KEY（選填，送 Authorization: ApiKey <key>）。
+    環境變數：AIOPS_ES_URL（必填）、AIOPS_ES_API_KEY（選填，送 Authorization: ApiKey <key>）、
+    AIOPS_ES_DATA_MODEL（trace／日誌的資料模型：elastic_apm〔預設〕／otel，見 sources/es_models.py）。
     只讀：只呼叫 _search 與根路徑，不寫任何索引。
     """
 
@@ -67,46 +69,29 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         })
 
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
-                    max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
-        """APM 資料模型（processor.event = transaction／span）：transaction 的 id 在 transaction.id，span 的在 span.id；
-        兩者都用 parent.id 指向父節點，跨服務呼叫時下游 transaction 的 parent.id 就是上游 span 的 id。
-        只呼叫 _search，不寫任何索引。索引用 AIOPS_ES_TRACE_INDEX 改。
+                    max_spans: int = 20000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
+        """[start, end] 內的 span。欄位與索引依資料模型（AIOPS_ES_DATA_MODEL，見 sources/es_models.py）：
+        elastic_apm（預設）的 transaction／span 文件、或 OTel Collector（otel mapping）的 span 文件。
+        field_map 是已核准的欄位對照，標準欄 span.* 的那幾條會蓋過模型的預設欄位。只呼叫 _search，不寫任何索引。
 
         區間內 span 總數 <= max_spans：用 search_after 全部撈完（完整，不抽樣）。
         超過：不能只拿時間最早的 max_spans 筆（尖峰時那只是窗口開頭幾秒，拓撲會偏），改成 _sampled_spans：
         把窗口切成時間桶，每桶隨機挑 trace，輪流把「整條 trace」的 span 撈回來直到湊滿 max_spans。
         以 trace 為單位抽樣，父子才接得起來（抽 span 會把跨服務的邊拆斷）。回傳的 truncated 為 True。"""
-        index = os.environ.get("AIOPS_ES_TRACE_INDEX", "").strip() or DEFAULT_TRACE_INDEX
-        filters = _window_filters(start, end, services)
-        spans: list[dict[str, Any]] = []
-        after = None
-        first = True
-        while len(spans) < max_spans:
-            body: dict[str, Any] = {
-                "size": min(5000, max_spans - len(spans)), "query": {"bool": {"filter": filters}},
-                "_source": SPAN_FIELDS, "sort": SPAN_SORT,
-            }
-            if first:
-                body["track_total_hits"] = max_spans + 1  # 只要知道「有沒有超過上限」，不必數完全部
-            if after is not None:
-                body["search_after"] = after
-            payload = self._search(index, body, "撈 trace")
-            total = ((payload.get("hits") or {}).get("total") or {}).get("value")
-            if first and total is not None and total > max_spans:
-                return self._sampled_spans(index, start, end, services, max_spans), True
-            first = False
-            hits = payload.get("hits", {}).get("hits", [])
-            if not hits:
-                return spans, False
-            spans += [s for s in (_span(h["_source"]) for h in hits) if s is not None]
-            after = hits[-1]["sort"]
-        return spans[:max_spans], True
+        r = current_model().resolve(field_map)
+        index = _trace_index(r)
+        rows, over = self._paginate(index, _window_filters(start, end, services, r.query_field("span.service")),
+                                    r.span_source, r.span_sort, r.span, max_spans, "撈 trace")
+        if over:
+            return self._sampled_spans(r, index, start, end, services, max_spans), True
+        return rows[:max_spans], over is None
 
     def fetch_linked_spans(self, trace_ids: list[str], start: datetime, end: datetime,
-                           max_spans: int = 20000) -> tuple[list[dict[str, Any]], bool]:
+                           max_spans: int = 20000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
         """訊息佇列跨時窗：把指定 trace 在 [start, end] 內的 span 全撈回來（消費者 parent／span.links 指到的生產者那一段）。
-        不帶服務過濾：生產者是誰要撈回來才知道。trace.id 每 500 個一批、每批 search_after 分頁，湊滿 max_spans 就停。"""
-        index = os.environ.get("AIOPS_ES_TRACE_INDEX", "").strip() or DEFAULT_TRACE_INDEX
+        不帶服務過濾：生產者是誰要撈回來才知道。trace ID 每 500 個一批、每批 search_after 分頁，湊滿 max_spans 就停。"""
+        r = current_model().resolve(field_map)
+        index = _trace_index(r)
         ids = sorted({t for t in trace_ids if t})
         window = _window_filters(start, end, None)
         spans: list[dict[str, Any]] = []
@@ -116,16 +101,45 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             while True:
                 if len(spans) >= max_spans:
                     return spans[:max_spans], True
-                body: dict[str, Any] = {"size": min(5000, max_spans - len(spans)), "_source": SPAN_FIELDS, "sort": SPAN_SORT,
-                                        "query": {"bool": {"filter": [*window, {"terms": {"trace.id": batch}}]}}}
+                body: dict[str, Any] = {"size": min(5000, max_spans - len(spans)), "_source": r.span_source,
+                                        "sort": r.span_sort,
+                                        "query": {"bool": {"filter": [*window, {"terms": {r.query_field("span.trace_id"): batch}}]}}}
                 if after is not None:
                     body["search_after"] = after
                 hits = self._search(index, body, "撈訊息生產者 trace").get("hits", {}).get("hits", [])
                 if not hits:
                     break
-                spans += [s for s in (_span(h["_source"]) for h in hits) if s is not None]
+                spans += [s for s in (r.span(h["_source"]) for h in hits) if s is not None]
                 after = hits[-1]["sort"]
         return spans, False
+
+    def _paginate(self, index: str, filters: list[dict[str, Any]], source: list[str], sort: list[dict[str, Any]],
+                  parse: Callable[[dict[str, Any]], dict[str, Any] | None], limit: int,
+                  what: str) -> tuple[list[dict[str, Any]], bool | None]:
+        """search_after 分頁撈到 limit 筆（fetch_spans 與 fetch_logs 共用）。回傳 (rows, over)：
+        over=True：第一頁就知道總數超過 limit（呼叫端改走分桶抽樣，rows 是空的）；
+        over=False：撈完了（沒有下一頁）；over=None：撈滿 limit 筆就停了（當成被截斷）。"""
+        rows: list[dict[str, Any]] = []
+        after = None
+        first = True
+        while len(rows) < limit:
+            body: dict[str, Any] = {"size": min(5000, limit - len(rows)), "query": {"bool": {"filter": filters}},
+                                    "_source": source, "sort": sort}
+            if first:
+                body["track_total_hits"] = limit + 1  # 只要知道「有沒有超過上限」，不必數完全部
+            if after is not None:
+                body["search_after"] = after
+            payload = self._search(index, body, what)
+            total = ((payload.get("hits") or {}).get("total") or {}).get("value")
+            if first and total is not None and total > limit:
+                return [], True
+            first = False
+            hits = payload.get("hits", {}).get("hits", [])
+            if not hits:
+                return rows, False
+            rows += [x for x in (parse(h["_source"]) for h in hits) if x is not None]
+            after = hits[-1]["sort"]
+        return rows[:limit], None
 
     def _search(self, index: str, body: dict[str, Any], what: str) -> dict[str, Any]:
         resp = _http.request(self.client, self.source_type, "POST", f"{self.base_url}/{index}/_search",
@@ -136,15 +150,16 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             raise InvalidQueryError(f"elasticsearch {what}失敗（HTTP {resp.status_code}）：{reason or resp.text[:200]}")
         return payload
 
-    def _sampled_spans(self, index: str, start: datetime, end: datetime, services: list[str] | None,
+    def _sampled_spans(self, r: Resolved, index: str, start: datetime, end: datetime, services: list[str] | None,
                        max_spans: int) -> list[dict[str, Any]]:
         """時間分桶 + 以 trace 為單位的均勻抽樣。
 
-        1. 窗口切成 min(分鐘數, SAMPLE_MAX_BUCKETS) 個桶；每桶用固定 seed 的 random_score 挑一批候選文件，只拿 trace.id
+        1. 窗口切成 min(分鐘數, SAMPLE_MAX_BUCKETS) 個桶；每桶用固定 seed 的 random_score 挑一批候選文件，只拿 trace ID
            （固定 seed：同一個事件重跑報告，抽到的 trace 一樣）。
-        2. 一輪從每個桶各拿 SAMPLE_TRACES_PER_ROUND 條還沒撈過的 trace，用 terms trace.id 把它們的 span 全撈回來；
+        2. 一輪從每個桶各拿 SAMPLE_TRACES_PER_ROUND 條還沒撈過的 trace，用 terms trace ID 把它們的 span 全撈回來；
            整條放得下才收（不收半條），湊滿 max_spans 或候選用完就停。各桶輪流拿，所以每個時段的 trace 數差不多。
         """
+        trace_field, service_field = r.query_field("span.trace_id"), r.query_field("span.service")
         buckets = max(1, min(SAMPLE_MAX_BUCKETS, math.ceil((end - start).total_seconds() / 60)))
         step = (end - start) / buckets
         candidates_per_bucket = min(5000, max(SAMPLE_TRACES_PER_ROUND * 4, max_spans // buckets))
@@ -152,20 +167,21 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         seen: set[str] = set()
         for b in range(buckets):
             lo, hi = start + step * b, (start + step * (b + 1) if b < buckets - 1 else end)
-            body = {"size": candidates_per_bucket, "_source": ["trace.id"],
-                    "query": {"function_score": {"query": {"bool": {"filter": _window_filters(lo, hi, services, b == buckets - 1)}},
+            body = {"size": candidates_per_bucket, "_source": [trace_field],
+                    "query": {"function_score": {"query": {"bool": {"filter": _window_filters(
+                                                     lo, hi, services, service_field, b == buckets - 1)}},
                                                  "random_score": {"seed": SAMPLE_SEED, "field": "_seq_no"},
                                                  "boost_mode": "replace"}}}
             ids = []
             for h in self._search(index, body, "抽樣 trace").get("hits", {}).get("hits", []):
-                tid = ((h.get("_source") or {}).get("trace") or {}).get("id")
+                tid = get_path(h.get("_source") or {}, trace_field)
                 if tid and tid not in seen:
                     seen.add(tid)
                     ids.append(tid)
             queues.append(ids)
 
         spans: list[dict[str, Any]] = []
-        window = _window_filters(start, end, services)
+        window = _window_filters(start, end, services, service_field)
         while len(spans) < max_spans and any(queues):
             # 交錯排（桶0第1條、桶1第1條…桶0第2條…），最後一輪放不下時各桶少的一樣多，不會偏向前面的桶
             batch = [q[i] for i in range(SAMPLE_TRACES_PER_ROUND) for q in queues if i < len(q)]
@@ -173,14 +189,14 @@ class ElasticsearchSpec(BaseDataSourceSpec):
             by_trace: dict[str, list[dict[str, Any]]] = {}
             after = None
             while True:
-                body = {"size": 5000, "_source": SPAN_FIELDS, "sort": SPAN_SORT,
-                        "query": {"bool": {"filter": [*window, {"terms": {"trace.id": batch}}]}}}
+                body = {"size": 5000, "_source": r.span_source, "sort": r.span_sort,
+                        "query": {"bool": {"filter": [*window, {"terms": {trace_field: batch}}]}}}
                 if after is not None:
                     body["search_after"] = after
                 hits = self._search(index, body, "撈抽樣 trace").get("hits", {}).get("hits", [])
                 if not hits:
                     break
-                for s in (_span(h["_source"]) for h in hits):
+                for s in (r.span(h["_source"]) for h in hits):
                     if s is not None:
                         by_trace.setdefault(s["trace_id"], []).append(s)
                 after = hits[-1]["sort"]
@@ -191,40 +207,23 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         return sorted(spans, key=lambda s: s["ts"])
 
     def fetch_logs(self, start: datetime, end: datetime, services: list[str] | None = None,
-                   max_logs: int = 5000) -> tuple[list[dict[str, Any]], bool]:
-        """APM 錯誤日誌（processor.event = error）。訊息依序取：error.exception（陣列或單一物件都可）的 message、
-        error.log.message、頂層 message。索引用 AIOPS_ES_LOG_INDEX 改。只呼叫 _search。
+                   max_logs: int = 5000, field_map: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], bool]:
+        """錯誤日誌。elastic_apm：APM 錯誤文件（processor.event = error），訊息依序取 error.exception（陣列或單一物件都可）
+        的 message、error.log.message、頂層 message。otel：OTel 日誌資料流裡 ERROR 以上（severity_number >= 17）與
+        span 的 exception 事件，訊息取 body.text › exception.message › 結構化 body。索引用 AIOPS_ES_LOG_INDEX 改。只呼叫 _search。
 
         區間內筆數 <= max_logs：全部撈（每筆 weight=1）。超過：不再只拿時間最早的 max_logs 筆（事故後段的暴增會整段被丟掉），
         改成把區間切成時間桶，每桶撈固定筆數，每筆帶 weight = 該桶總筆數 ÷ 撈到的筆數，暴增倍率用加權後的筆數算。
         回傳的 truncated 為 True。"""
-        index = os.environ.get("AIOPS_ES_LOG_INDEX", "").strip() or DEFAULT_LOG_INDEX
-        filters = _window_filters(start, end, services)
-        logs: list[dict[str, Any]] = []
-        after = None
-        first = True
-        while len(logs) < max_logs:
-            body: dict[str, Any] = {
-                "size": min(5000, max_logs - len(logs)), "query": {"bool": {"filter": filters}},
-                "_source": LOG_FIELDS, "sort": LOG_SORT,
-            }
-            if first:
-                body["track_total_hits"] = max_logs + 1
-            if after is not None:
-                body["search_after"] = after
-            payload = self._search(index, body, "撈日誌")
-            total = ((payload.get("hits") or {}).get("total") or {}).get("value")
-            if first and total is not None and total > max_logs:
-                return self._sampled_logs(index, start, end, services, max_logs), True
-            first = False
-            hits = payload.get("hits", {}).get("hits", [])
-            if not hits:
-                return logs, False
-            logs += [r for r in (_log(h["_source"]) for h in hits) if r is not None]
-            after = hits[-1]["sort"]
-        return logs[:max_logs], True
+        r = current_model().resolve(field_map)
+        index = _log_index(r)
+        filters = [*_window_filters(start, end, services, r.query_field("log.service")), *r.model.log_filters]
+        rows, over = self._paginate(index, filters, r.log_source, r.model.log_sort, r.log, max_logs, "撈日誌")
+        if over:
+            return self._sampled_logs(r, index, start, end, services, max_logs), True
+        return rows, over is None
 
-    def _sampled_logs(self, index: str, start: datetime, end: datetime, services: list[str] | None,
+    def _sampled_logs(self, r: Resolved, index: str, start: datetime, end: datetime, services: list[str] | None,
                       max_logs: int) -> list[dict[str, Any]]:
         buckets = max(1, min(SAMPLE_MAX_BUCKETS, math.ceil((end - start).total_seconds() / 60)))
         step = (end - start) / buckets
@@ -232,40 +231,37 @@ class ElasticsearchSpec(BaseDataSourceSpec):
         out: list[dict[str, Any]] = []
         for b in range(buckets):
             lo, hi = start + step * b, (start + step * (b + 1) if b < buckets - 1 else end)
-            body = {"size": quota, "track_total_hits": True, "_source": LOG_FIELDS, "sort": LOG_SORT,
-                    "query": {"bool": {"filter": _window_filters(lo, hi, services, b == buckets - 1)}}}
+            filters = [*_window_filters(lo, hi, services, r.query_field("log.service"), b == buckets - 1),
+                       *r.model.log_filters]
+            body = {"size": quota, "track_total_hits": True, "_source": r.log_source, "sort": r.model.log_sort,
+                    "query": {"bool": {"filter": filters}}}
             payload = self._search(index, body, "抽樣日誌")
             hits = payload.get("hits", {}).get("hits", [])
-            rows = [r for r in (_log(h["_source"]) for h in hits) if r is not None]
+            rows = [x for x in (r.log(h["_source"]) for h in hits) if x is not None]
             total = ((payload.get("hits") or {}).get("total") or {}).get("value") or len(rows)
             weight = total / len(rows) if rows else 1.0
-            out += [{**r, "weight": weight} for r in rows]
+            out += [{**x, "weight": weight} for x in rows]
         return out
 
     def check(self) -> dict[str, Any]:
         return _http.check(self.client, self.source_type, f"{self.base_url}/", headers=self.headers)
 
 
-DEFAULT_TRACE_INDEX = "traces-apm-*"
-DEFAULT_LOG_INDEX = "logs-apm.*"
-SPAN_FIELDS = ["@timestamp", "trace.id", "span.id", "transaction.id", "parent.id", "service.name",
-               "span.duration.us", "transaction.duration.us", "event.outcome",
-               # 下游資源歸因與範例 trace 排序用（Elastic APM／OTel 標準欄位）；索引沒有就是空字串／0，行為退回只看服務
-               "span.type", "span.subtype", "span.destination.service.resource",
-               "http.response.status_code", "transaction.name",
-               # 訊息佇列（非同步邊）：消費者 transaction 的型別、佇列名、訊息年齡，與批次消費的 span.links
-               "transaction.type", "transaction.message.queue.name", "transaction.message.age.ms", "span.links"]
-SPAN_SORT = [{"@timestamp": "asc"}, {"trace.id": "asc"}, {"span.id": {"order": "asc", "missing": "_first"}}]
 SAMPLE_MAX_BUCKETS = 30
 LINKED_TRACES_PER_QUERY = 500
-LOG_FIELDS = ["@timestamp", "service.name", "trace.id", "message", "error.exception", "error.log", "error.culprit"]
-# 分頁要穩定的排序：時間＋每筆唯一的 error.id（不用 _doc，跨分片沒有 PIT 時不保證順序）
-LOG_SORT = [{"@timestamp": "asc"}, {"error.id": {"order": "asc", "missing": "_last"}}]
 SAMPLE_TRACES_PER_ROUND = 20
 SAMPLE_SEED = 20261103
 
 
-def _window_filters(start: datetime, end: datetime, services: list[str] | None,
+def _trace_index(r: Resolved) -> str:
+    return os.environ.get("AIOPS_ES_TRACE_INDEX", "").strip() or r.model.trace_index
+
+
+def _log_index(r: Resolved) -> str:
+    return os.environ.get("AIOPS_ES_LOG_INDEX", "").strip() or r.model.log_index
+
+
+def _window_filters(start: datetime, end: datetime, services: list[str] | None, service_field: str = "service.name",
                     end_inclusive: bool = True) -> list[dict[str, Any]]:
     """時間區間＋服務過濾。分桶抽樣時，除了最後一桶都要 end_inclusive=False（含頭不含尾），
     不然剛好落在桶邊界的文件會被相鄰兩桶各算一次，日誌權重就會偏高。"""
@@ -274,71 +270,22 @@ def _window_filters(start: datetime, end: datetime, services: list[str] | None,
     if services:
         # 大小寫不分（case_insensitive，ES 7.10+）：事件實體叫 cart-api、索引裡寫 Cart-API 一樣要撈得到
         names = sorted({canonical_service(s) for s in services})
-        filters.append({"bool": {"should": [{"term": {"service.name": {"value": n, "case_insensitive": True}}}
+        filters.append({"bool": {"should": [{"term": {service_field: {"value": n, "case_insensitive": True}}}
                                             for n in names], "minimum_should_match": 1}})
     return filters
 
 
-def _first_exception(exc: Any) -> dict[str, Any]:
-    """error.exception 可能是陣列（APM 標準）、單一物件、字串、或陣列裡放字串；一律整理成 {message, type}。"""
-    first = exc[0] if isinstance(exc, list) and exc else exc
-    if isinstance(first, dict):
-        return first
-    return {"message": first} if isinstance(first, str) and first.strip() else {}
-
-
-def _log(src: dict[str, Any]) -> dict[str, Any] | None:
-    service = (src.get("service") or {}).get("name")
-    if not service or "@timestamp" not in src:
-        return None
-    error = src.get("error") or {}
-    first = _first_exception(error.get("exception"))
-    message = first.get("message") or (error.get("log") or {}).get("message") or src.get("message") or ""
-    if not message:
-        return None
-    return {"ts": as_utc_datetime(src["@timestamp"]), "service": canonical_service(service),
-            "message": str(message), "error_type": str(first.get("type") or ""),
-            "trace_id": str((src.get("trace") or {}).get("id") or "")}
-
-
-def _links(raw: Any) -> tuple[tuple[str, str], ...]:
-    """span.links 整理成 ((trace_id, span_id), ...)。索引裡可能是陣列或單一物件；缺 trace.id 或 span.id 的丟掉。"""
-    items = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
-    out = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        trace_id, span_id = (item.get("trace") or {}).get("id"), (item.get("span") or {}).get("id")
-        if trace_id and span_id:
-            out.append((str(trace_id), str(span_id)))
-    return tuple(out)
+# 相容舊介面（測試與合成資料驗證直接拿來解析單筆 APM 文件）：一律走 Elastic APM 模型、不套欄位對照
+_APM = ELASTIC_APM.resolve(None)
 
 
 def _span(src: dict[str, Any]) -> dict[str, Any] | None:
-    span, txn = src.get("span") or {}, src.get("transaction") or {}
-    # 是 span 文件還是 transaction 文件，看有沒有 span.id：批次消費的 transaction 文件帶 span.links，
-    # 所以會有 span 物件但沒有 span.id，不能用「有沒有 span 物件」判斷（會把 transaction 的耗時讀成 0）
-    own = span if span.get("id") else txn
-    span_id = own.get("id")
-    service = (src.get("service") or {}).get("name")
-    trace_id = (src.get("trace") or {}).get("id")
-    if not (span_id and service and trace_id):
-        return None
-    status = ((src.get("http") or {}).get("response") or {}).get("status_code")
-    # 索引裡可能是數字或字串（"502"）；其他型別一律當沒有（0），不吞例外
-    status_code = int(status) if isinstance(status, (int, float)) or (isinstance(status, str) and status.isdigit()) else 0
-    message = txn.get("message") or {}
-    age = (message.get("age") or {}).get("ms")
-    return {"trace_id": trace_id, "span_id": span_id, "parent_id": (src.get("parent") or {}).get("id"),
-            "service": canonical_service(service), "ts": as_utc_datetime(src["@timestamp"]),
-            "duration_ms": float((own.get("duration") or {}).get("us") or 0) / 1000.0,
-            "error": (src.get("event") or {}).get("outcome") == "failure",
-            # transaction 文件沒有 span.type（kind 留空 = 入口）；span 文件的 type 是 app／db／external／messaging…
-            "kind": str(span.get("type") or ""), "subtype": str(span.get("subtype") or ""),
-            "resource": str(((span.get("destination") or {}).get("service") or {}).get("resource") or ""),
-            "status_code": status_code, "name": str(txn.get("name") or ""),
-            # 訊息消費者：transaction.type = messaging 的 transaction 文件。它的 parent／links 指向生產者的 send span（非同步邊）
-            "consumer": own is txn and txn.get("type") == "messaging",
-            "queue": str((message.get("queue") or {}).get("name") or ""),
-            "age_ms": float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None,
-            "links": _links(span.get("links"))}
+    return _APM.span(src)
+
+
+def _log(src: dict[str, Any]) -> dict[str, Any] | None:
+    return _APM.log(src)
+
+
+def _links(raw: Any) -> tuple[tuple[str, str], ...]:
+    return _apm_links(raw, "trace.id", "span.id")

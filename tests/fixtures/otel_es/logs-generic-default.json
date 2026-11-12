@@ -1,0 +1,436 @@
+[
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "@timestamp": "2026-11-12T12:42:26.966212300Z",
+   "log": {
+    "level": "INFO"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "checkout",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "event": {
+    "severity": 9
+   },
+   "message": "checkout started"
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   },
+   "@timestamp": "2026-11-12T12:42:32.026212300Z",
+   "code": {
+    "function": {
+     "name": "Pool.get"
+    }
+   },
+   "log": {
+    "level": "ERROR"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "message": "FATAL: remaining connection slots are reserved",
+    "type": "org.postgresql.util.PSQLException"
+   },
+   "event": {
+    "severity": 17
+   },
+   "message": "checkout failed: FATAL: remaining connection slots are reserved",
+   "span": {
+    "id": "d5c44a4eb3172062"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   },
+   "@timestamp": "2026-11-12T12:42:33.026212300Z",
+   "code": {
+    "function": {
+     "name": "Pool.get"
+    }
+   },
+   "log": {
+    "level": "ERROR"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "message": "FATAL: remaining connection slots are reserved",
+    "type": "org.postgresql.util.PSQLException"
+   },
+   "event": {
+    "severity": 17
+   },
+   "message": "checkout failed: FATAL: remaining connection slots are reserved",
+   "span": {
+    "id": "cc9c3adcf515a823"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "@timestamp": "2026-11-12T12:42:42.966212300Z",
+   "log": {
+    "level": "WARN"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "ord-svc",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "event": {
+    "severity": 13
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "@timestamp": "2026-11-12T12:42:43.966212300Z",
+   "log": {
+    "level": "ERROR"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "ord-svc",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "org.apache.kafka.common.errors.CoordinatorNotAvailableException"
+   },
+   "event": {
+    "severity": 17
+   },
+   "message": "rebalance failed: coordinator not available"
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "checkout-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "@timestamp": "2026-11-12T12:43:32.635552900Z",
+   "log": {
+    "level": "INFO"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "checkout",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "event": {
+    "severity": 9
+   },
+   "message": "checkout started"
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "trace": {
+    "id": "a8acb5137c9260dc74e088a9b9492f25"
+   },
+   "@timestamp": "2026-11-12T12:43:37.695552900Z",
+   "code": {
+    "function": {
+     "name": "Pool.get"
+    }
+   },
+   "log": {
+    "level": "ERROR"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "message": "FATAL: remaining connection slots are reserved",
+    "type": "org.postgresql.util.PSQLException"
+   },
+   "event": {
+    "severity": 17
+   },
+   "message": "checkout failed: FATAL: remaining connection slots are reserved",
+   "span": {
+    "id": "d5c44a4eb3172062"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "cart-api-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "trace": {
+    "id": "c5e2486c44a4a8f69dc8db48e86ec9c6"
+   },
+   "@timestamp": "2026-11-12T12:43:38.695552900Z",
+   "code": {
+    "function": {
+     "name": "Pool.get"
+    }
+   },
+   "log": {
+    "level": "ERROR"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "cart-api",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "message": "FATAL: remaining connection slots are reserved",
+    "type": "org.postgresql.util.PSQLException"
+   },
+   "event": {
+    "severity": 17
+   },
+   "message": "checkout failed: FATAL: remaining connection slots are reserved",
+   "span": {
+    "id": "cc9c3adcf515a823"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "@timestamp": "2026-11-12T12:43:48.635552900Z",
+   "log": {
+    "level": "WARN"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "ord-svc",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "event": {
+    "severity": 13
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic-default-2026.11.12-000001",
+  "_source": {
+   "kubernetes": {
+    "pod": {
+     "name": "ord-svc-7d9f8-abcde"
+    },
+    "namespace": "shop"
+   },
+   "@timestamp": "2026-11-12T12:43:49.635552900Z",
+   "log": {
+    "level": "ERROR"
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic"
+   },
+   "service": {
+    "environment": "sample",
+    "name": "ord-svc",
+    "language": {
+     "name": "java"
+    },
+    "version": "1.4.2"
+   },
+   "elastic": {
+    "mapping": {
+     "mode": "ecs"
+    }
+   },
+   "error": {
+    "type": "org.apache.kafka.common.errors.CoordinatorNotAvailableException"
+   },
+   "event": {
+    "severity": 17
+   },
+   "message": "rebalance failed: coordinator not available"
+  }
+ }
+]

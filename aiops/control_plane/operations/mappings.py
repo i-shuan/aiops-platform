@@ -1,6 +1,8 @@
 """欄位對照的審核工作流：提交 -> 核准（同來源舊版自動作廢）-> 查詢現行版。
 
 資料源層只吃「已核准」的對照（引擎載入 ctx.field_maps），不管審核狀態。
+同一份對照兩種用途：標準欄 ts／value／entity 給指標查詢；span.*／log.* 給 Elasticsearch 的 trace 與日誌
+（蓋過資料模型 profile 的預設來源欄，見 sources/es_models.py）。
 """
 from __future__ import annotations
 
@@ -9,7 +11,11 @@ from aiops.engine.errors import BadRequest, Conflict, NotFound
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.requests import MappingApprove, MappingSubmit, SourceRef
 from aiops.engine.operator import BaseOperator
+from aiops.sources.es_models import STANDARD_FIELDS
 from aiops.storage.repository import Mappings
+
+# 指標查詢用的標準欄（sources/query/elasticsearch._apply_field_map）＋ trace／日誌的標準欄（sources/es_models.STANDARD_FIELDS）
+KNOWN_STANDARD_FIELDS = frozenset({"ts", "value", "entity", *STANDARD_FIELDS})
 
 
 @OperatorRegistry.register("admin.mapping_submit")
@@ -19,6 +25,11 @@ class MappingSubmitOp(BaseOperator):
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         if not isinstance(ctx.request, MappingSubmit):
             raise BadRequest("admin.mapping_submit 需要 MappingSubmit 請求")
+        unknown = sorted(set(ctx.request.fields.values()) - KNOWN_STANDARD_FIELDS)
+        if unknown:
+            # 標準欄打錯字以前會被資料源默默忽略（對照核准了卻沒有任何效果），在提交時就擋下來
+            raise BadRequest(f"不認得的標準欄位：{'、'.join(unknown)}；可用：指標 ts／value／entity，"
+                             f"trace／日誌 {'、'.join(sorted(STANDARD_FIELDS))}")
         ctx.result = {"mapping": Mappings.create({**ctx.request.model_dump(), "status": "pending", "approved_by": None})}
         return ctx
 

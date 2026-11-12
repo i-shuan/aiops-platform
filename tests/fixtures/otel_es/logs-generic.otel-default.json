@@ -1,0 +1,245 @@
+[
+ {
+  "_index": ".ds-logs-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "observed_timestamp": "0.0",
+   "@timestamp": "1794487346966.212300",
+   "resource": {
+    "attributes": {
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "telemetry.sdk.language": "java",
+     "service.name": "checkout",
+     "service.version": "1.4.2",
+     "k8s.pod.name": "checkout-7d9f8-abcde"
+    }
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic.otel"
+   },
+   "severity_text": "INFO",
+   "severity_number": 9,
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   },
+   "body": {
+    "text": "checkout started"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "trace_id": "e1fab9d78c7e134f5dfbd3d12c4a3698",
+   "@timestamp": "1794487352026.212300",
+   "span_id": "1622bd795fec898f",
+   "resource": {
+    "attributes": {
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "telemetry.sdk.language": "java",
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "k8s.pod.name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic.otel"
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   },
+   "event_name": "exception",
+   "attributes": {
+    "exception.type": "org.postgresql.util.PSQLException",
+    "exception.message": "FATAL: remaining connection slots are reserved",
+    "event.name": "exception",
+    "exception.stacktrace": "org.postgresql.util.PSQLException: FATAL ...\n\tat Pool.get(Pool.java:42)"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "observed_timestamp": "1794487352027.212300",
+   "trace_id": "e1fab9d78c7e134f5dfbd3d12c4a3698",
+   "@timestamp": "1794487352026.212300",
+   "span_id": "1622bd795fec898f",
+   "resource": {
+    "attributes": {
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "telemetry.sdk.language": "java",
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "k8s.pod.name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic.otel"
+   },
+   "severity_text": "ERROR",
+   "severity_number": 17,
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   },
+   "attributes": {
+    "exception.type": "org.postgresql.util.PSQLException",
+    "exception.message": "FATAL: remaining connection slots are reserved",
+    "code.function.name": "Pool.get"
+   },
+   "body": {
+    "text": "checkout failed: FATAL: remaining connection slots are reserved"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "trace_id": "29e821a4c74803e31ba1621582283d15",
+   "@timestamp": "1794487353026.212300",
+   "span_id": "bb968a437d5c8dfc",
+   "resource": {
+    "attributes": {
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "telemetry.sdk.language": "java",
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "k8s.pod.name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic.otel"
+   },
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   },
+   "event_name": "exception",
+   "attributes": {
+    "exception.type": "org.postgresql.util.PSQLException",
+    "exception.message": "FATAL: remaining connection slots are reserved",
+    "event.name": "exception",
+    "exception.stacktrace": "org.postgresql.util.PSQLException: FATAL ...\n\tat Pool.get(Pool.java:42)"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "observed_timestamp": "1794487353027.212300",
+   "trace_id": "29e821a4c74803e31ba1621582283d15",
+   "@timestamp": "1794487353026.212300",
+   "span_id": "bb968a437d5c8dfc",
+   "resource": {
+    "attributes": {
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "telemetry.sdk.language": "java",
+     "service.name": "cart-api",
+     "service.version": "1.4.2",
+     "k8s.pod.name": "cart-api-7d9f8-abcde"
+    }
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic.otel"
+   },
+   "severity_text": "ERROR",
+   "severity_number": 17,
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   },
+   "attributes": {
+    "exception.type": "org.postgresql.util.PSQLException",
+    "exception.message": "FATAL: remaining connection slots are reserved",
+    "code.function.name": "Pool.get"
+   },
+   "body": {
+    "text": "checkout failed: FATAL: remaining connection slots are reserved"
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "observed_timestamp": "0.0",
+   "@timestamp": "1794487362966.212300",
+   "resource": {
+    "attributes": {
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "telemetry.sdk.language": "java",
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic.otel"
+   },
+   "severity_text": "WARN",
+   "severity_number": 13,
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   },
+   "body": {
+    "structured": {
+     "msg": "consumer lag high",
+     "lag": 1200
+    }
+   }
+  }
+ },
+ {
+  "_index": ".ds-logs-generic.otel-default-2026.11.12-000001",
+  "_source": {
+   "observed_timestamp": "0.0",
+   "@timestamp": "1794487363966.212300",
+   "resource": {
+    "attributes": {
+     "deployment.environment.name": "sample",
+     "k8s.namespace.name": "shop",
+     "telemetry.sdk.language": "java",
+     "service.name": "ord-svc",
+     "service.version": "1.4.2",
+     "k8s.pod.name": "ord-svc-7d9f8-abcde"
+    }
+   },
+   "data_stream": {
+    "namespace": "default",
+    "type": "logs",
+    "dataset": "generic.otel"
+   },
+   "severity_text": "ERROR",
+   "severity_number": 17,
+   "scope": {
+    "name": "sample-generator",
+    "version": "1.0"
+   },
+   "attributes": {
+    "exception.type": "org.apache.kafka.common.errors.CoordinatorNotAvailableException"
+   },
+   "body": {
+    "text": "rebalance failed: coordinator not available"
+   }
+  }
+ }
+]

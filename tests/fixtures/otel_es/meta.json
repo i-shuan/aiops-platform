@@ -1,0 +1,19 @@
+{
+ "elasticsearch": "8.19.23",
+ "collector": "otel/opentelemetry-collector-contrib:0.165.0",
+ "data_streams": [
+  "logs-apm.error-default",
+  "logs-generic-default",
+  "logs-generic.otel-default",
+  "traces-generic-default",
+  "traces-generic.otel-default"
+ ],
+ "docs": {
+  "logs-apm.error-default": 4,
+  "logs-generic-default": 10,
+  "logs-generic.otel-default": 7,
+  "traces-generic-default": 57,
+  "traces-generic.otel-default": 57
+ },
+ "note": "traces-generic-default（ECS 模式的 span）是在拋棄式 ES 手動補了最小樣板 sample-traces-generic 才寫得進去；_source 由 exporter 產生，跟樣板無關。ECS 送了兩次（第一次 trace 因沒有樣板寫入失敗，補樣板後重送），trace_id 相同、時間戳不同，所以 logs-generic-default／logs-apm.error-default 是其他模式的兩倍"
+}
