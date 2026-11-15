@@ -165,6 +165,23 @@ class IngestAnomalies(StrictModel):
     anomalies: list[ExternalAnomalyIn] = Field(min_length=1, max_length=5000)
 
 
+# Grafana 告警 webhook 的網址參數：要進哪條管線（跟 workflow 名稱同一套白名單）、來源代號（哪個團隊；外部異常以 來源 + external_id 去重）
+PIPELINE_NAME = r"^[A-Za-z0-9_-]+$"
+SOURCE_NAME = r"^[A-Za-z0-9_.-]+$"
+
+
+class GrafanaAlertIngest(StrictModel):
+    """admin.ingest_grafana_alerts：各團隊自己的 Grafana 告警，經 webhook 通知管道推進來。
+
+    payload 是 Grafana 送來的原樣（第三方格式）：不用嚴格模型解析，因為 Grafana 每個版本都可能多欄位，嚴格模型會讓
+    對方升級 Grafana 之後告警全部進不來。算子只讀它需要的欄位（alerts 裡的 status、labels、fingerprint、startsAt、
+    generatorURL、valueString、values），每一筆都檢查型別，格式不對的列在結果的 rejected 裡。"""
+
+    pipeline: str = Field(pattern=PIPELINE_NAME, max_length=128)
+    source: str = Field(pattern=SOURCE_NAME, max_length=64)
+    payload: dict[str, Any]
+
+
 # ── 調參 ──
 
 

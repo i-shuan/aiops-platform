@@ -1,0 +1,57 @@
+{
+  "receiver": "to-aiops",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "CheckoutCpuHigh",
+        "grafana_folder": "team-a",
+        "service": "checkout",
+        "severity": "critical",
+        "team": "a"
+      },
+      "annotations": {
+        "description": "自由文字，平台不收",
+        "summary": "CheckoutCpuHigh 觸發了"
+      },
+      "startsAt": "2026-11-15T13:45:20Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/cpu-high/view?orgId=1",
+      "fingerprint": "da8e608b969fe98c",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dcpu-high&matcher=service%3Dcheckout&matcher=severity%3Dcritical&matcher=team%3Da&orgId=1",
+      "dashboardURL": "",
+      "panelURL": "",
+      "ruleUID": "cpu-high",
+      "values": {
+        "A": 95,
+        "B": 1
+      },
+      "valueString": "[ var='A' labels={} type='math' value=95 ], [ var='B' labels={} type='threshold' value=1 ]",
+      "orgId": 1
+    }
+  ],
+  "groupLabels": {
+    "alertname": "CheckoutCpuHigh"
+  },
+  "commonLabels": {
+    "alertname": "CheckoutCpuHigh",
+    "grafana_folder": "team-a",
+    "service": "checkout",
+    "severity": "critical",
+    "team": "a"
+  },
+  "commonAnnotations": {
+    "description": "自由文字，平台不收",
+    "summary": "CheckoutCpuHigh 觸發了"
+  },
+  "externalURL": "http://localhost:3000/",
+  "appVersion": "13.0.7",
+  "version": "1",
+  "groupKey": "{}:{alertname=\"CheckoutCpuHigh\"}",
+  "truncatedAlerts": 0,
+  "orgId": 1,
+  "title": "[FIRING:1] CheckoutCpuHigh (team-a checkout critical a)",
+  "state": "alerting",
+  "message": "**Firing**\n\nValue: A=95, B=1\nLabels:\n - alertname = CheckoutCpuHigh\n - grafana_folder = team-a\n - service = checkout\n - severity = critical\n - team = a\nAnnotations:\n - description = 自由文字，平台不收\n - summary = CheckoutCpuHigh 觸發了\nSource: http://localhost:3000/alerting/grafana/cpu-high/view?orgId=1\nSilence: http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dcpu-high&matcher=service%3Dcheckout&matcher=severity%3Dcritical&matcher=team%3Da&orgId=1\n"
+}

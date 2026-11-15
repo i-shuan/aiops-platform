@@ -1,7 +1,20 @@
-from fastapi import APIRouter
+from typing import Any
 
-from aiops.engine.requests import IngestAnomalies, LotPathsMerge, MappingApprove, MappingSubmit, SourceRef, TopologyRefresh, TraceMerge
-from aiops.interfaces.runner import run
+from fastapi import APIRouter, Body, Query
+
+from aiops.engine.requests import (
+    PIPELINE_NAME,
+    SOURCE_NAME,
+    GrafanaAlertIngest,
+    IngestAnomalies,
+    LotPathsMerge,
+    MappingApprove,
+    MappingSubmit,
+    SourceRef,
+    TopologyRefresh,
+    TraceMerge,
+)
+from aiops.interfaces.runner import ingest_grafana_alerts as ingest_grafana, run
 
 router = APIRouter(prefix="/api/v1/ingestion", tags=["ingestion"])
 
@@ -39,6 +52,16 @@ def merge_lot_paths(req: LotPathsMerge):
 @router.post("/anomalies")
 def ingest_anomalies(req: IngestAnomalies):
     return {"result": run("admin_ingest_anomalies", request=req)}
+
+
+@router.post("/grafana-alerts")
+def ingest_grafana_alerts(payload: dict[str, Any] = Body(...),
+                          pipeline: str = Query(..., pattern=PIPELINE_NAME, max_length=128),
+                          source: str = Query("grafana", pattern=SOURCE_NAME, max_length=64)):
+    """各團隊自己的 Grafana 告警（Webhook 通知管道）推到這裡：網址帶 ?pipeline=<要進哪條管線>&source=<團隊代號>，
+    Authorization 用平台的 Bearer token。pipeline 不是存在的偵測管線回 404／400（對方 Grafana 會顯示送達失敗）；
+    部分告警格式不對時仍回 200，拒收的列在 rejected（Grafana 收到非 2xx 會重送整批）。"""
+    return {"result": ingest_grafana(GrafanaAlertIngest(pipeline=pipeline, source=source, payload=payload))}
 
 
 @router.get("/sources/check")

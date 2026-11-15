@@ -18,6 +18,7 @@ from aiops.engine.context import PipelineContext
 from aiops.engine.errors import BadRequest, NotFound, WorkflowError
 from aiops.engine.health import run_status
 from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
+from aiops.engine.requests import GrafanaAlertIngest
 from aiops.storage.hooks import StorageHooks
 from aiops.storage.repository import Incidents
 
@@ -133,6 +134,15 @@ def record_load_failure(workflow: str, error: WorkflowError, now: datetime | Non
         StorageHooks().record_health(ctx)
     except Exception as e:  # noqa: BLE001
         logger.warning("管線 %s 載入失敗的健康度紀錄寫不進去：%s", ctx.pipeline, e)
+
+
+def ingest_grafana_alerts(request: GrafanaAlertIngest) -> dict[str, Any]:
+    """各團隊 Grafana 的 webhook：先確認網址上的 pipeline 是存在的偵測管線，再交給 admin_ingest_grafana_alerts。
+    寫錯的話回 404／400：對方在自己的 Grafana 通知管道上看得到「送達失敗」；不檢查的話告警會一直等在 pending，沒有人知道。"""
+    path = workflow_path(request.pipeline)
+    if path.parent.name != "detection":
+        raise BadRequest(f"{request.pipeline} 不是偵測管線（pipelines/detection/ 底下的），告警不能送進去")
+    return run("admin_ingest_grafana_alerts", request=request)
 
 
 def run(workflow: str, **kwargs: Any) -> dict[str, Any]:
