@@ -64,3 +64,13 @@ def test_dev_postgres_wires_database_url_automatically():
         url = next(e["value"] for e in c["env"] if e["name"] == "AIOPS_DATABASE_URL")
         assert url.startswith("postgresql+psycopg://") and "p-dev-postgres:5432" in url
     assert any(d["metadata"]["name"] == "p-dev-postgres" for d in docs["Deployment"])
+
+
+def test_the_platform_watchdog_has_its_own_cronjob():
+    """看門狗（偵測演算法監控平台自己）有自己的排程；使用者告警管線那個 CronJob 不變。"""
+    crons = {c["metadata"]["name"]: c for c in _render("existingSecret=s")["CronJob"]}
+    assert set(crons) == {"p-tasks", "p-watchdog"}
+    args = crons["p-watchdog"]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert args == ["python", "-m", "aiops.interfaces.cli", "run-once", "-w", "platform_watchdog"]
+    assert crons["p-watchdog"]["spec"]["concurrencyPolicy"] == "Forbid"
+    assert [c["metadata"]["name"] for c in _render("existingSecret=s", "watchdog.enabled=false")["CronJob"]] == ["p-tasks"]

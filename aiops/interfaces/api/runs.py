@@ -2,14 +2,15 @@ from fastapi import APIRouter, Request
 
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.requests import RcaRequest, RunWorkflowRequest
-from aiops.interfaces.runner import rca_workflow_for, run
+from aiops.interfaces.runner import rca_workflow_for, run, run_workflow_request
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 
 
 @router.post("/runs")
 def run_workflow(req: RunWorkflowRequest):
-    return {"result": run(req.workflow, targets=req.targets, now=req.now, strict=False)}
+    """帶 targets 只准平台看門狗管線、平台自己的紀錄（其他 403，見 runner.check_detection_entry）。"""
+    return {"result": run_workflow_request(req)}
 
 
 @router.post("/rca")

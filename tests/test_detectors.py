@@ -17,7 +17,8 @@ DETECTORS = [n for n in OperatorRegistry.names("detector.")
              if issubclass(OperatorRegistry.get(n), DetectorOperator)]
 SAMPLE = {"detector.rules": {"upper": 80}, "detector.hard_limit": {"fatal_ceiling": 80}}
 # 滾動平均／滾動分位數會稀釋單點尖峰，刻意的（它們抓的是持續偏移與尾端漂移）
-IGNORES_SINGLE_SPIKE = {"detector.quantile_drift", "detector.residual_chronic"}
+# sparse_count 只判稀疏計數序列（非負整數、訓練期一半以上是 0），契約測試的序列水位在 50 附近、不是計數，它刻意不做事
+IGNORES_SINGLE_SPIKE = {"detector.quantile_drift", "detector.residual_chronic", "detector.sparse_count"}
 
 
 def _df(values, **cols):

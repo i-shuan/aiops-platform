@@ -65,7 +65,7 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 | 目錄 | 是什麼 |
 |---|---|
 | `aiops/engine/` | 底座：`PipelineContext`（強型別）、Pipeline 引擎、算子註冊中心、`BaseOperator`、錯誤型別、請求模型 |
-| `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`：只吃各團隊推進來的外部告警、不跑偵測器，見 `docs/EXTERNAL_ALERTS.md`）、`rca/`（`rca_report` 等）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
+| `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`：只吃各團隊推進來的外部告警、不跑偵測器，見 `docs/EXTERNAL_ALERTS.md`）、`watchdog/`（`platform_watchdog`：偵測演算法只用來監控平台自己，見 `docs/WATCHDOG.md`）、`rca/`（`rca_report` 等）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
 | `aiops/stages/` | 管線算子，依執行順序分段：`ingestion` → `detectors` → `ensemble` → `grouping` → `scoring` → `suppression` → `rca` → `enrichment`（LLM，含 `noop`）→ `notification` |
 | `aiops/control_plane/` | 控制面手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） |
 | `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch`；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
@@ -105,6 +105,8 @@ aiops/
 │   │   ├── it_apm.yaml              IT：APM 產品資料，同上
 │   │   ├── factory.yaml             工廠：外部告警（含 FDC）→ Lot 履歷收斂，沒有黃金訊號與同根因抑制
 │   │   └── metrics_only.yaml        只有時序指標，沒有 trace 與拓撲
+│   ├── watchdog/                    平台看門狗：唯一准許掛偵測器的地方，只讀平台自己的紀錄（docs/WATCHDOG.md）
+│   │   └── platform_watchdog.yaml   排程停擺（rules）、整輪失敗暴增（sparse_count）、團隊心跳告警斷掉（rules）
 │   ├── rca/                         RCA 診斷管線
 │   │   └── rca_report.yaml          針對一個事件群產生 RCA 報告（根因用拓撲）
 │   └── control/                     控制面手動動作

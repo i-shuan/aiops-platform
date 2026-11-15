@@ -68,8 +68,9 @@ def test_targets_on_a_user_pipeline_are_rejected_at_load_and_from_the_api(path, 
         Pipeline(wf.model_copy(update={"targets": [target]}))
     with pytest.raises(WorkflowError, match="targets 不會被用到"):
         Pipeline(wf).run(targets=[target])
+    # API 在進引擎之前先過偵測入口政策（runner.check_detection_entry）：使用者管線不准拿來跑呼叫端的序列，403
     r = client.post("/api/v1/runs", json={"workflow": path.stem, "targets": [target.model_dump()]})
-    assert r.status_code == 400 and "grafana-alerts" in r.json()["message"]
+    assert r.status_code == 403 and "grafana-alerts" in r.json()["message"]
     assert client.post("/api/v1/runs", json={"workflow": path.stem}).status_code == 200  # 不帶 targets：照常跑一輪
 
 

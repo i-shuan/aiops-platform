@@ -306,6 +306,9 @@ class PipelineContext:
     # ── 載入的輸入（引擎在跑之前載入；算子只讀）──
     field_maps: dict[str, dict[str, str]] = field(default_factory=dict)  # source_type -> 已核准對照（來源欄 -> 標準欄）
     trace_rows: dict[str, list[TraceRow]] = field(default_factory=dict)  # 服務 -> trace 合成時序
+    # source_type = platform 的原始紀錄（engine/platform_series.py）：查詢字串 -> [(時間, 狀態)]。StorageHooks.load_target 載入，
+    # ingestion.fetch 換成每格筆數。只有看門狗管線（pipelines/watchdog/）用得到
+    platform_rows: dict[str, list[tuple[datetime, str]]] = field(default_factory=dict)
     # 節點名稱 -> tuning 核准的現行參數（已依 管線×實體 > 管線 > 實體 > 全域 挑出最具體的一筆）
     detector_params: dict[str, dict[str, Any]] = field(default_factory=dict)
     detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 基準線

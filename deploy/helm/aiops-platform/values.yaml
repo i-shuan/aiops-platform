@@ -37,6 +37,17 @@ tasks:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
 
+# 平台看門狗：用平台自己的偵測演算法監控平台自己（排程有沒有在跑、整輪失敗、各團隊的心跳告警），
+# 讀的只有平台資料庫裡的紀錄（aiops/pipelines/watchdog/platform_watchdog.yaml、docs/WATCHDOG.md）。
+# YAML 裡被監控的管線要跟上面 tasks.workflow 一致；換了 tasks.workflow 就要改 YAML 的 targets
+watchdog:
+  enabled: true
+  schedule: "*/5 * * * *"
+  workflow: platform_watchdog
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
 # 只限開發：一起裝一台沒有持久儲存的 PostgreSQL（pod 重建資料就沒了）。
 # 開啟時若沒有另外給 AIOPS_DATABASE_URL，平台會自動連這台。
 devPostgres:

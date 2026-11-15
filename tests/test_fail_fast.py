@@ -69,7 +69,9 @@ def workflows(tmp_path, monkeypatch):
     """內建 pipelines/ 的暫存複本，加上幾條寫壞的 workflow；不動真的 pipelines/。"""
     shutil.copytree(runner.WORKFLOW_DIR, tmp_path / "pipelines")
     for name, text in BROKEN.items():
-        (tmp_path / "pipelines" / "detection" / f"{name}.yaml").write_text(text, encoding="utf-8")
+        # 放在 samples/（測試裡准許拿偵測器跑呼叫端序列的資料夾，tests/conftest.py）：這些檔會跑偵測器、API 會帶 targets，
+        # 放 detection/ 會先被偵測入口政策擋成 403（使用者管線不准跑偵測），就測不到「設定錯誤在碰資料庫之前就 400」
+        (tmp_path / "pipelines" / "samples" / f"{name}.yaml").write_text(text, encoding="utf-8")
     monkeypatch.setattr(runner, "WORKFLOW_DIR", tmp_path / "pipelines")
     return tmp_path / "pipelines"
 
@@ -127,5 +129,5 @@ def test_api_target_errors_stop_the_whole_run_not_just_that_target(client, workf
 def test_cli_with_its_own_yaml_file_also_fails_before_touching_the_database(workflows, side_effects, name):
     _reset(side_effects)
     with pytest.raises(WorkflowError):
-        runner.run_context(str(workflows / "detection" / f"{name}.yaml"), allow_file=True, strict=False, now=T0)
+        runner.run_context(str(workflows / "samples" / f"{name}.yaml"), allow_file=True, strict=False, now=T0)
     assert side_effects == {"sql": 0, "http_out": 0, "load_batch": 0}

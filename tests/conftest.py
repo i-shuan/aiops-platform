@@ -52,12 +52,32 @@ def _workflow_dir_with_samples(tmp_path_factory):
     return merged_workflow_dir(tmp_path_factory.mktemp("workflows"))
 
 
+PRODUCTION_DETECTION_SCOPES = None  # 出貨的偵測入口政策（載入時記下來，給政策測試對照與還原）
+
+
 @pytest.fixture(autouse=True)
 def sample_pipelines(monkeypatch, _workflow_dir_with_samples):
+    """樣本放在 pipelines/samples/，偵測機制的測試要能拿它跑任意資料源（mock、elasticsearch…）：偵測入口政策多放一個
+    samples 資料夾、不限資料源。出貨的政策（只有 watchdog、只准 platform）由 production_detection_scopes 還原後測。"""
+    from types import MappingProxyType
+
     from aiops.interfaces import runner
 
+    global PRODUCTION_DETECTION_SCOPES
+    if PRODUCTION_DETECTION_SCOPES is None:
+        PRODUCTION_DETECTION_SCOPES = runner.DETECTION_SCOPES
     monkeypatch.setattr(runner, "WORKFLOW_DIR", _workflow_dir_with_samples)
+    monkeypatch.setattr(runner, "DETECTION_SCOPES", MappingProxyType({**PRODUCTION_DETECTION_SCOPES, "samples": None}))
     return _workflow_dir_with_samples
+
+
+@pytest.fixture
+def production_detection_scopes(monkeypatch):
+    """偵測入口政策恢復成出貨的樣子（樣本不能當入口）。"""
+    from aiops.interfaces import runner
+
+    monkeypatch.setattr(runner, "DETECTION_SCOPES", PRODUCTION_DETECTION_SCOPES)
+    return PRODUCTION_DETECTION_SCOPES
 
 
 @pytest.fixture(autouse=True)

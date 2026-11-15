@@ -21,3 +21,6 @@ nodes:
         p3: 1
       # 沒有 severity 標籤、或值不在上面：用這個分數（P2），attrs 記 score_source=default。設成 null 就改成拒收
       default_score: 3
+      # 心跳告警的標籤：團隊 Grafana 設一條一直觸發的告警、帶 aiops_heartbeat=true，平台只數它、不開事故卡。
+      # 看門狗（pipelines/watchdog/）靠它分辨「對方沒事」跟「對方的告警管道斷了」
+      heartbeat_label: aiops_heartbeat

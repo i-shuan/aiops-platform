@@ -39,6 +39,21 @@
 為什麼 `service` 要跟 trace 一致：收斂靠關係圖把「同一條呼叫鏈上的告警」併成一件事，RCA 也靠它找上下游。名字對不上，
 告警還是會進來、會變成事故卡，但就只能各自一張、RCA 沒有上下游可看。
 
+## 心跳告警（建議每個團隊都設）
+
+告警推送天生是稀疏的：沒有東西壞的時候，本來就一筆都不會推。所以只看「有沒有告警進來」，**分不出「對方沒事」跟「對方的告警管道斷了」**。
+
+做法：在你的 Grafana 設一條**一直觸發**的告警規則（例如條件寫成 `1 > 0`），標籤加 `aiops_heartbeat=true`，路由到同一個 webhook 通知管道，
+repeat interval 5～15 分鐘。平台收到後：
+
+- 存成心跳（`status = heartbeat`），**不進任何管線、不開事故卡**，不需要 `service` 標籤。
+- 平台看門狗（`aiops/pipelines/watchdog/platform_watchdog.yaml`）數每個來源的心跳；連續 30 分鐘一筆都沒有，平台自己會發一張卡
+  （「team-a 的告警管道斷了」），而不是默默以為你那邊沒事。要讓看門狗看你的來源，平台那邊要在看門狗 YAML 的 targets 加一行
+  （`alerts/<你的 source>/heartbeats`，寫法在 YAML 註解裡）。
+- 心跳間隔比 15 分鐘長的團隊，看門狗那一行要把 `consecutive` 加大，不然會誤報。
+
+沒有設心跳的來源，看門狗不會替它判斷任何事（見 `docs/WATCHDOG.md`）。
+
 ## 平台怎麼處理一筆告警
 
 | Grafana 送來的 | 平台做什麼 |
@@ -47,6 +62,7 @@
 | 同一筆告警在同一分鐘內重送 | 只收一次 |
 | 同一筆告警之後重送（repeat interval） | 記成新的一點，事故卡繼續開著 |
 | `status: resolved` | 不轉。事故卡照平台的規則結案：安靜滿 `resolve_after_minutes` |
+| 標籤 `aiops_heartbeat=true` | 存成心跳，只給平台看門狗數，不開事故卡（見上一節） |
 | `annotations`（summary、description 這類自由文字） | 不收。平台只存結構化欄位 |
 | 不認得的欄位（新版 Grafana 多的） | 忽略，不影響 |
 

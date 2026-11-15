@@ -17,6 +17,10 @@ aiops-grafana chart。平台只把推進來的告警轉成外部異常，下一�
   - 指紋：Grafana 的 fingerprint；沒有就用排好序的 labels 算一個（同一組標籤 = 同一筆告警，跟 Alertmanager 的認法一樣）。
   - attrs：alertname、labels、starts_at、generator_url、value_string、values、score_source、grafana_receiver。
     annotations（summary／description 這類自由文字）不收：平台只存結構化欄位。
+  - 心跳告警（labels[heartbeat_label] = "true"，預設標籤 aiops_heartbeat）：團隊 Grafana 一條一直觸發的告警，證明他們的告警管道活著。
+    存成 status = heartbeat：不進任何管線、不開事故卡、不需要實體標籤，只給看門狗（pipelines/watchdog/）數推入量；
+    原本有心跳、突然沒了 = 對方的 Grafana 或 webhook 斷了。沒有心跳的來源，「沒事」跟「斷了」看起來一樣（docs/EXTERNAL_ALERTS.md）。
+  - 收到的時間（received_at）記成這一輪的時間（ctx.now），看門狗照它數。
 
 不做的事：不驗證管線名稱存不存在（控制面不認識 workflow 檔；寫錯的話告警會一直等在 pending，見文件的已知限制）、
 不改對方的告警內容、不替沒有實體標籤的告警猜實體。
@@ -33,6 +37,7 @@ from aiops.engine.context import PipelineContext
 from aiops.engine.errors import BadRequest
 from aiops.engine.operator import BaseOperator
 from aiops.engine.params import number
+from aiops.engine.platform_series import HEARTBEAT_STATUS
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.requests import GrafanaAlertIngest
 from aiops.engine.types import as_utc
@@ -70,7 +75,10 @@ class IngestGrafanaAlerts(BaseOperator):
 
     def __init__(self, entity_labels: list[str] | None = None, metric_label: str = "alertname",
                  severity_label: str = "severity", severity_scores: dict[str, float] | None = None,
-                 default_score: float | None = 3.0):
+                 default_score: float | None = 3.0, heartbeat_label: str = "aiops_heartbeat"):
+        if not isinstance(heartbeat_label, str) or not heartbeat_label:
+            raise ValueError("heartbeat_label 不能是空的")
+        self.heartbeat_label = heartbeat_label
         # 只有沒寫才用預設；寫了空清單是設定錯誤（不然每一筆都會被拒收，又看不出為什麼）
         self.entity_labels = ["service", "service_name"] if entity_labels is None else list(entity_labels)
         if not self.entity_labels or not all(isinstance(k, str) and k for k in self.entity_labels):
@@ -118,6 +126,12 @@ class IngestGrafanaAlerts(BaseOperator):
                                  "reason": f"status 必須是 firing 或 resolved，收到 {alert.get('status')!r}"})
                 continue
             entity = next((labels[k] for k in self.entity_labels if labels.get(k)), "")
+            if labels.get(self.heartbeat_label, "").lower() == "true":
+                rows.append({"external_id": f"{fingerprint}@{minute:%Y-%m-%dT%H:%M}", "entity": (entity or alertname or "heartbeat")[:256],
+                             "metric": (alertname or "heartbeat")[:512], "ts": minute, "score": 0.0, "value": None,
+                             "status": HEARTBEAT_STATUS, "attrs": {"alertname": alertname, "labels": labels, "heartbeat": True,
+                                                                   "grafana_receiver": receiver[:128]}})
+                continue
             if not entity:
                 rejected.append({"alertname": alertname, "fingerprint": fingerprint,
                                  "reason": f"沒有實體標籤（要有 {'、'.join(self.entity_labels)} 其中一個）；"
@@ -135,7 +149,7 @@ class IngestGrafanaAlerts(BaseOperator):
             values =alert.get("values") if isinstance(alert.get("values"), dict) else {}
             rows.append({
                 "external_id": f"{fingerprint}@{minute:%Y-%m-%dT%H:%M}", "entity": entity[:256], "metric": alertname[:512],
-                "ts": minute, "score": float(score), "value": None,
+                "ts": minute, "score": float(score), "value": None, "status": "pending",
                 "attrs": {"alertname": alertname, "labels": labels, "score_source": score_source,
                           "starts_at": _starts_at(alert.get("startsAt")),
                           "generator_url": str(alert.get("generatorURL") or "")[:1000],
@@ -145,11 +159,14 @@ class IngestGrafanaAlerts(BaseOperator):
             })
         unique = {r["external_id"]: r for r in rows}  # 同一次推送裡同一筆告警重複出現：只收一次
         seen = ExternalAnomalies.existing_ids(req.source, list(unique))
-        fresh = [{"pipeline": req.pipeline, "source": req.source, **r} for k, r in unique.items() if k not in seen]
+        fresh = [{"pipeline": req.pipeline, "source": req.source, "received_at": ctx.now, **r}
+                 for k, r in unique.items() if k not in seen]
         accepted = ExternalAnomalies.create_many(fresh)
         if rejected:
             logger.warning("Grafana 告警拒收 %d 筆（pipeline=%s source=%s）：%s", len(rejected), req.pipeline, req.source,
                            rejected[0]["reason"])
-        ctx.result = {"pipeline": req.pipeline, "source": req.source, "received": len(alerts), "accepted": accepted,
-                      "duplicates": len(rows) - accepted, "resolved_ignored": resolved, "rejected": rejected}
+        heartbeats = sum(1 for r in fresh if r.get("status") == HEARTBEAT_STATUS)
+        ctx.result = {"pipeline": req.pipeline, "source": req.source, "received": len(alerts), "accepted": accepted - heartbeats,
+                      "heartbeats": heartbeats, "duplicates": len(rows) - accepted, "resolved_ignored": resolved,
+                      "rejected": rejected}
         return ctx

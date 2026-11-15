@@ -163,7 +163,8 @@ class ExternalAnomalyRow(Base):
     score: Mapped[float] = mapped_column(Float)
     attrs: Mapped[dict] = mapped_column(JSON, default=dict)
     received_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
-    # pending：還沒進過告警流程；processed：已被某一輪 Pipeline 處理
+    # pending：還沒進過告警流程；processed：已被某一輪 Pipeline 處理；
+    # heartbeat：團隊 Grafana 的心跳告警（一直觸發、證明他們的告警管道活著），不進任何管線，只給看門狗數（engine/platform_series.py）
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
 
 

@@ -250,8 +250,9 @@ def test_every_workflow_loads_and_its_operators_are_registered():
 
     load_all()
     files = sorted((ROOT / "pipelines").rglob("*.yaml"))
-    # 路徑寫錯時 rglob 是空的、迴圈一次都不跑也會「通過」：先確認三個子資料夾都真的掃到檔案
-    assert {f.parent.name for f in files} == {"detection", "rca", "control"} and len(files) >= 20
+    # 路徑寫錯時 rglob 是空的、迴圈一次都不跑也會「通過」：先確認四個子資料夾都真的掃到檔案
+    # （watchdog = 平台看門狗，唯一准許掛偵測器的資料夾，CLAUDE.md §1.1 第 9 點）
+    assert {f.parent.name for f in files} == {"detection", "rca", "control", "watchdog"} and len(files) >= 20
     for f in files:
         assert Pipeline(load_workflow(f)).workflow.nodes, f"{f.name} 沒有任何節點"
 

@@ -11,7 +11,7 @@ from aiops.engine.requests import (
     SeriesProfile,
     TuningMetricsQuery,
 )
-from aiops.interfaces.runner import run
+from aiops.interfaces.runner import backtest_proposal as run_backtest, profile_series as run_profile, run
 
 router = APIRouter(prefix="/api/v1/tuning", tags=["tuning"])
 
@@ -28,7 +28,8 @@ def get_proposal(proposal_id: int):
 
 @router.post("/proposals/backtest")
 def backtest_proposal(req: ProposalBacktest):
-    return {"result": run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=req.time_range.end)}
+    """只准平台看門狗管線的提案、平台自己的紀錄（其他 403，見 runner.check_detection_entry）。"""
+    return {"result": run_backtest(req)}
 
 
 @router.post("/proposals/approve")
@@ -58,4 +59,5 @@ def promote_rules(req: RulePromote):
 
 @router.post("/profile")
 def profile_series(req: SeriesProfile):
-    return {"result": run("admin_series_profile", request=req, targets=req.to_targets(), now=req.end)}
+    """只准平台看門狗管線、平台自己的紀錄（其他 403，見 runner.check_detection_entry）。"""
+    return {"result": run_profile(req)}

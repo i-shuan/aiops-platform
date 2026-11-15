@@ -22,6 +22,7 @@ from aiops.engine.context import LogRecord, PipelineContext, SpanRecord, TargetE
 from aiops.engine.errors import BadRequest, InfrastructureError, NoDataError, NotFound
 from aiops.engine.mq import age_p95_ms, build_edges, consumer_entries, spread, unresolved_trace_ids
 from aiops.engine.params import positive
+from aiops.engine.platform_series import PLATFORM_SOURCE, bucket_counts, parse_platform_query, selects
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.sources import get_datasource_spec, is_configured
@@ -72,11 +73,29 @@ def _scope_kw(ctx: PipelineContext, source_type: str) -> dict:
     return {**_field_map_kw(ctx, source_type), **({"environment": env} if env else {})}
 
 
+def _platform_frame(ctx: PipelineContext, query: str, start: datetime, end: datetime, step: int) -> pd.DataFrame:
+    """source_type = platform：平台自己的紀錄（StorageHooks 載進 ctx.platform_rows）換成每格筆數（engine/platform_series.py）。
+    0 也是資料：查得到的範圍內一筆都沒有，就是一排 0。"""
+    try:
+        q = parse_platform_query(query)
+    except ValueError as e:
+        raise BadRequest(str(e)) from e
+    if query not in ctx.platform_rows:
+        raise NoDataError(f"{PLATFORM_SOURCE} 的紀錄沒有載入（{query}）：只有用 StorageHooks 跑的管線讀得到平台自己的紀錄")
+    times = [ts for ts, status in ctx.platform_rows[query] if selects(q, status)]
+    frame = bucket_counts(times, to_utc(start), to_utc(end), step, as_utc(ctx.now))
+    if frame.empty:
+        raise NoDataError(f"{query}：這段時間還沒有任何一格完整過完")
+    return frame
+
+
 def fetch_series(ctx: PipelineContext, source_type: str, query: str, start: datetime, end: datetime,
                  step: int) -> pd.DataFrame:
     """抓一條序列 -> DataFrame(ts, value)。"""
     if source_type == TRACE_SOURCE:
         return _trace_frame(ctx, query, start, end, step)
+    if source_type == PLATFORM_SOURCE:
+        return _platform_frame(ctx, query, start, end, step)
     return get_datasource_spec(source_type).fetch_data(query, start, end, step, ctx.field_maps.get(source_type))
 
 
@@ -86,8 +105,8 @@ def _group(ctx: PipelineContext, start: datetime, end: datetime, step: int) -> t
     assert t is not None and t.peer_group is not None
     g = t.peer_group
     source_type = g.source_type or t.source_type
-    if source_type == TRACE_SOURCE:
-        raise BadRequest("trace 資料源不支援 peer_group，請改用 peers")
+    if source_type in (TRACE_SOURCE, PLATFORM_SOURCE):
+        raise BadRequest(f"{source_type} 資料源不支援 peer_group，請改用 peers")
     try:
         query = Template(g.query).substitute({k: str(v) for k, v in t.attrs.items()})
     except (KeyError, ValueError) as e:

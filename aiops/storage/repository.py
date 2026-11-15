@@ -145,6 +145,13 @@ class ExternalAnomalies:
         return crud.find(ExternalAnomalyRow, pipeline=pipeline, status="pending")
 
     @staticmethod
+    def received(source: str | None, start: datetime, end: datetime) -> list[tuple[datetime, str]]:
+        """[start, end] 收到的外部告警（含心跳）：(收到的時間, 狀態)。source = None = 所有來源。給看門狗數推入量。"""
+        rows = crud.find_between(ExternalAnomalyRow, "received_at", start, end,
+                                 **({"in_column": "source", "in_values": [source]} if source is not None else {}))
+        return [(r["received_at"], r["status"]) for r in rows]
+
+    @staticmethod
     def mark_processed(ids: list[int]) -> None:
         for row_id in ids:
             crud.update(ExternalAnomalyRow, row_id, status="processed")
@@ -465,6 +472,12 @@ class PipelineRuns:
         """run_at 落在 [since, until] 的輪次，由新到舊。"""
         return crud.find_recent(PipelineRunRow, "run_at", since=since, until=until, limit=limit, pipeline=pipeline,
                                 status=status, failure_type=failure_type)
+
+    @staticmethod
+    def events(pipeline: str, start: datetime, end: datetime) -> list[tuple[datetime, str]]:
+        """[start, end] 這條管線的每一輪：(輪次時間, 結果)。給看門狗數輪數與失敗數。"""
+        rows = crud.find_between(PipelineRunRow, "run_at", start, end, in_column="pipeline", in_values=[pipeline])
+        return [(r["run_at"], r["status"]) for r in rows]
 
     @staticmethod
     def prune(pipeline: str, before: datetime) -> int:

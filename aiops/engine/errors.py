@@ -22,6 +22,12 @@ class NoDataError(NotFound):
     """
 
 
+class Forbidden(PlatformError):
+    """請求格式沒錯，但平台的政策不允許（例如拿偵測演算法跑使用者的序列：偵測只給平台自己的看門狗用）。"""
+
+    status_code = 403
+
+
 class Conflict(PlatformError):
     """狀態不允許此動作（例如未回測就核准、設定已被別人改過）。"""
 

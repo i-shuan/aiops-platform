@@ -30,7 +30,7 @@ class IngestAnomaliesOp(BaseOperator):
         if len(ids) != len(set(ids)):
             raise BadRequest("同一批裡 external_id 重複")
         seen = ExternalAnomalies.existing_ids(req.source, ids)
-        rows = [{"pipeline": req.pipeline, "source": req.source, **a.model_dump()}
+        rows = [{"pipeline": req.pipeline, "source": req.source, "received_at": ctx.now, **a.model_dump()}
                 for a in req.anomalies if a.external_id not in seen]
         ctx.result = {"pipeline": req.pipeline, "source": req.source,
                       "accepted": ExternalAnomalies.create_many(rows), "duplicates": len(seen)}

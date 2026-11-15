@@ -1,0 +1,60 @@
+name: platform_watchdog
+description: "平台看門狗：用平台自己的偵測演算法監控 AIOps 平台自己——排程有沒有在跑、整輪失敗有沒有變多、各團隊的告警管道有沒有斷"
+# 這是唯一准許掛偵測器的地方（CLAUDE.md §1.1 第 9 點）：偵測演算法只看平台自己的紀錄（source_type: platform，
+# engine/platform_series.py），不看任何使用者的序列。對外的告警由各團隊在自己的 Grafana 設（docs/EXTERNAL_ALERTS.md）。
+# 驗證狀態與已知限制見 docs/WATCHDOG.md：門檻沒有在真實紀錄上驗證過（平台還沒上線），只在模擬的紀錄上回放過。
+# 這條管線自己有沒有在跑，靠最後的 notifier.watchdog 心跳（排程停了，Alertmanager 那邊 ttl 到期會收到 resolved）。
+rca_workflow: rca_report
+
+nodes:
+  # 5 分鐘一格（跟排程間隔一樣）；稀疏計數要訓練期的發生率，抓 14 天。
+  # lookback 至少要湊滿稀疏計數的一個窗口（window 30 格 × 5 分鐘 = 150 分鐘），不然它每一輪都棄權（tests/test_watchdog.py 擋著）
+  - name: fetch
+    operator: ingestion.fetch
+    params: {lookback_minutes: 180, step_seconds: 300, train_lookback_minutes: 20160, retrain_minutes: 1440}
+
+  # 排程停了：連續 3 格（15 分鐘）一輪都沒跑。人訂的下限，不用歷史資料（被監控的管線要每 5 分鐘跑一輪）
+  - name: stopped_rounds
+    operator: detector.rules
+    params: {lower: 1, consecutive: 3}
+  # 團隊的告警管道斷了：連續 6 格（30 分鐘）一筆心跳都沒有。團隊 Grafana 的 repeat interval 要 ≤ 15 分鐘（docs/EXTERNAL_ALERTS.md），
+  # 留兩倍的餘裕；心跳間隔更長的團隊在 target 的 overrides 把 consecutive 加大
+  - name: stopped_heartbeats
+    operator: detector.rules
+    params: {lower: 1, consecutive: 6}
+  # 整輪失敗變多：稀疏計數票（平常幾乎都是 0 的計數，看最近 window 格一共幾筆是不是比訓練期多太多）。
+  # 參數是偵測器的預設值，沒有為看門狗調過（docs/SPARSE_COUNT.md、docs/WATCHDOG.md）
+  - name: failures
+    operator: detector.sparse_count
+  - name: new_only
+    operator: detector.new_only
+
+  # ── 以下是批次層 ──
+  - name: group_entity
+    operator: alert.same_entity
+  - name: absorb_open
+    operator: alert.absorb_open
+  - name: suppress_window
+    operator: alert.suppress_window
+  - name: suppress_dedup
+    operator: alert.suppress_dedup
+    params: {cooldown_minutes: 30}
+  - name: payload
+    operator: alert.notify_payload
+    params: {severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}}
+  - name: heartbeat
+    operator: alert.heartbeat
+    params: {resolve_after_minutes: 15}
+  - name: notify
+    operator: notifier.auto
+  - name: watchdog
+    operator: notifier.watchdog
+    params: {ttl_minutes: 30}
+
+# 只准 source_type: platform（tests/test_detection_policy.py 會擋）。實體 = 被監控的東西（管線名稱、告警來源代號）。
+# 監控的管線要是真的有排程在跑的（aiops-platform chart 的 tasks.workflow，預設 metrics_only）；沒排程的管線會一直被判「停了」。
+# 每接一個送告警進來的團隊（webhook 網址的 source），就加一條心跳的 target，例如：
+#   - {source_type: platform, query: alerts/team-a/heartbeats, entity: team-a, detectors: [stopped_heartbeats]}
+targets:
+  - {source_type: platform, query: runs/metrics_only/rounds, entity: metrics_only, detectors: [stopped_rounds]}
+  - {source_type: platform, query: runs/metrics_only/failed, entity: metrics_only, detectors: [failures]}

@@ -22,6 +22,7 @@ from aiops.engine.context import (
 )
 from aiops.engine.errors import NotFound
 from aiops.engine.params import pick_most_specific
+from aiops.engine.platform_series import ALL_SOURCES, FIELDS, PLATFORM_SOURCE, split_platform_query
 from aiops.engine.topology import lot_edges_from_paths
 from aiops.engine.types import AnomalyEvent, Incident, as_utc
 from aiops.storage.db import run_in_transaction
@@ -50,6 +51,8 @@ RECENT_NOTIFICATION_DAYS = 7
 # 載入 trace 時序的範圍（算子再依自己的偵測窗取用）
 TRACE_LOOKBACK_DAYS = 7
 _RCA_TRACE_MARGIN = timedelta(minutes=10)
+# 看門狗（source_type = platform）載入平台自己紀錄的範圍：要涵蓋看門狗管線最長的訓練窗
+PLATFORM_LOOKBACK_DAYS = 35
 # RCA 找相似事故時，最多拿最近幾筆經驗出來比（避免經驗庫很大時整包載入）
 KNOWLEDGE_POOL_SIZE = 500
 # 訓練基準線時往回看多久的事故（要涵蓋最長的訓練窗；168 時段基準線建議 3～4 週）與前後多排除幾分鐘
@@ -141,6 +144,7 @@ class StorageHooks:
                 ctx.field_maps[source_type] = fields
 
         refs = [(target.source_type, target.query), *((p.source_type, p.query) for p in target.peers)]
+        self._load_platform_rows(ctx, [q for s, q in refs if s == PLATFORM_SOURCE])
         services = sorted({_trace_service(q) for s, q in refs if s == "trace"})
         if services:
             since = ctx.now - timedelta(days=TRACE_LOOKBACK_DAYS)
@@ -167,6 +171,23 @@ class StorageHooks:
         ctx.stream_seen_before = StreamFirstSeen.known(ctx.pipeline, target.entity, target.query)
         if detector_nodes:
             ctx.training_exclusions = self._exclusions_for(ctx, target.entity, (target.attrs or {}).get("dept"))
+
+    @staticmethod
+    def _load_platform_rows(ctx: PipelineContext, queries: list[str]) -> None:
+        """看門狗的平台自身紀錄（engine/platform_series.py）：原始的 (時間, 狀態) 載進 ctx.platform_rows，換成每格筆數是 fetch 的事。
+        格式不對的查詢不載（fetch 會把它報成查詢錯誤）。"""
+        since = (ctx.now - timedelta(days=PLATFORM_LOOKBACK_DAYS)).replace(tzinfo=None)
+        until = ctx.now.replace(tzinfo=None)
+        for query in queries:
+            parts = split_platform_query(query)
+            if parts is None or parts[0] not in FIELDS:
+                continue
+            table, key = parts[0], parts[1]
+            if table == "runs":
+                rows = PipelineRuns.events(key, since, until)
+            else:
+                rows = ExternalAnomalies.received(None if key == ALL_SOURCES else key, since, until)
+            ctx.platform_rows[query] = [(as_utc(ts), status) for ts, status in rows]
 
     def _exclusion_pool(self, ctx: PipelineContext):
         """這一輪所有序列共用：這條管線近期的事故（扣掉被標成誤報的）與維護窗。一輪只查一次。"""

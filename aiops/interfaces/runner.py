@@ -9,18 +9,21 @@ import logging
 import pkgutil
 import re
 from datetime import datetime, timezone
+from types import MappingProxyType
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
 from aiops.engine.context import PipelineContext
-from aiops.engine.errors import BadRequest, NotFound, WorkflowError
+from aiops.engine.errors import BadRequest, Forbidden, NotFound, WorkflowError
 from aiops.engine.health import run_status
 from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
-from aiops.engine.requests import GrafanaAlertIngest
+from aiops.engine.params import ANY
+from aiops.engine.platform_series import PLATFORM_SOURCE
+from aiops.engine.requests import GrafanaAlertIngest, ProposalBacktest, RunWorkflowRequest, SeriesProfile
 from aiops.storage.hooks import StorageHooks
-from aiops.storage.repository import Incidents
+from aiops.storage.repository import Incidents, Proposals
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,10 @@ WORKFLOW_NAME = r"[A-Za-z0-9_-]+"
 _NAME = re.compile(WORKFLOW_NAME)
 # 事件群查不到所屬管線、或那條管線沒寫 rca_workflow 時用的 RCA 管線：不需要 LLM、沒有 trace 也能退回拓撲推測
 DEFAULT_RCA_WORKFLOW = "rca_report"
+# 偵測入口政策（CLAUDE.md §1.1 第 9 點：偵測演算法只當平台自己的看門狗，不給使用者用）：
+# 哪個管線資料夾可以拿偵測演算法跑「呼叫端給的序列」（/runs 帶 targets、調參回測、序列畫像），以及那些序列只准來自哪些資料源。
+# None = 不限資料源。出貨只有 watchdog 資料夾、只准平台自己的紀錄（source_type = platform）；其他一律 403。
+DETECTION_SCOPES = MappingProxyType({"watchdog": frozenset({PLATFORM_SOURCE})})
 
 
 def load_all() -> None:
@@ -134,6 +141,60 @@ def record_load_failure(workflow: str, error: WorkflowError, now: datetime | Non
         StorageHooks().record_health(ctx)
     except Exception as e:  # noqa: BLE001
         logger.warning("管線 %s 載入失敗的健康度紀錄寫不進去：%s", ctx.pipeline, e)
+
+
+def _folder(workflow: str) -> str:
+    """內建 workflow 在 pipelines/ 底下的第一層資料夾（detection、watchdog、rca、control…）。"""
+    rel = workflow_path(workflow).relative_to(WORKFLOW_DIR)
+    return rel.parts[0] if len(rel.parts) > 1 else ""
+
+
+def _series_sources(specs: list[TargetSpec]) -> set[str]:
+    out = {s.source_type for s in specs} | {p.source_type for s in specs for p in s.peers}
+    return out | {s.peer_group.source_type or s.source_type for s in specs if s.peer_group is not None}
+
+
+def check_detection_entry(pipeline: str, specs: list[TargetSpec]) -> None:
+    """呼叫端要拿偵測演算法跑它給的序列之前先過這一關（DETECTION_SCOPES）：
+    - 指定了管線：那條管線要在允許的資料夾（出貨 = pipelines/watchdog/），序列的資料源也要在那個資料夾允許的範圍內
+    - 管線是 *（調參提案不限管線）：序列的資料源要是某個允許的資料夾看得到的
+    不符合一律 Forbidden（403）：請求格式沒錯，是政策不允許。管線名稱不存在照常 404。"""
+    sources = _series_sources(specs)
+    if pipeline == ANY:
+        scopes = list(DETECTION_SCOPES.values())
+        allowed = None if any(s is None for s in scopes) else frozenset().union(*scopes)
+    else:
+        folder = _folder(pipeline)
+        if folder not in DETECTION_SCOPES:
+            raise Forbidden(f"{pipeline} 不是平台看門狗管線（pipelines/{'、'.join(sorted(DETECTION_SCOPES))}/）："
+                            "偵測演算法只用來監控 AIOps 平台自己，不跑使用者的序列；使用者的告警請從自己的 Grafana 推進來"
+                            "（/api/v1/ingestion/grafana-alerts）")
+        allowed = DETECTION_SCOPES[folder]
+    if allowed is not None and not sources <= allowed:
+        raise Forbidden(f"偵測演算法只跑平台自己的紀錄（source_type：{'、'.join(sorted(allowed))}），"
+                        f"不跑這些資料源的序列：{'、'.join(sorted(sources - allowed))}")
+
+
+def run_workflow_request(req: RunWorkflowRequest) -> dict[str, Any]:
+    """POST /api/v1/runs：帶 targets = 拿這條管線的偵測器跑呼叫端給的序列，要先過偵測入口政策；不帶就照 YAML 跑一輪。"""
+    if req.targets:
+        check_detection_entry(req.workflow, req.targets)
+    return run(req.workflow, targets=req.targets, now=req.now, strict=False)
+
+
+def backtest_proposal(req: ProposalBacktest) -> dict[str, Any]:
+    """POST /api/v1/tuning/proposals/backtest：回測會用偵測器跑呼叫端給的序列，先過偵測入口政策（看提案屬於哪條管線）。"""
+    proposal = Proposals.get(req.proposal_id)
+    if proposal is None:
+        raise NotFound(f"找不到提案 {req.proposal_id}")
+    check_detection_entry(proposal["pipeline"], req.to_targets())
+    return run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=req.time_range.end)
+
+
+def profile_series(req: SeriesProfile) -> dict[str, Any]:
+    """POST /api/v1/tuning/profile：畫像會用偵測器跑呼叫端給的序列，先過偵測入口政策。"""
+    check_detection_entry(req.pipeline, req.to_targets())
+    return run("admin_series_profile", request=req, targets=req.to_targets(), now=req.end)
 
 
 def ingest_grafana_alerts(request: GrafanaAlertIngest) -> dict[str, Any]:
