@@ -120,6 +120,9 @@ class Workflow(StrictModel):
     # 環境的邊，事件群快照記下它（RCA 照它載圖）。空字串 = 不分環境，跟加這個欄位之前完全一樣。
     # 異常點、基準線、事件群、調參本來就以管線名稱分開，一個環境開一條管線即可；實體名稱不要再夾帶環境。
     environment: EnvironmentName = ""
+    # 資料健康度紀錄（資料流的狀態區間、每一輪的執行結果）留幾天：每輪寫入時順手清掉這條管線更舊的紀錄。
+    # 每條資料流目前的狀態與「第一次收到資料」的紀錄不受影響
+    health_retention_days: int = Field(180, gt=0, le=3650)
 
     @model_validator(mode="after")
     def _unique_names(self):
@@ -172,14 +175,15 @@ class NullHooks:
 
 
 def _stream_check(ctx: PipelineContext, error: BaseException | None) -> StreamCheck | None:
-    """這條序列這一輪的資料流狀態（engine/health.stream_status）。以前有沒有過資料：有過 ok 的健康度紀錄、
+    """這條序列這一輪的資料流狀態（engine/health.stream_status）。以前有沒有過資料：有「第一次收到資料」的紀錄、
     或已經有基準線、或存過異常點（後兩者讓加這個功能之前就在跑的資料流第一次斷流時不會被記成「從未有過資料」）。"""
     target = ctx.target
     assert target is not None
     seen = ctx.stream_seen_before or bool(ctx.detector_states) or ctx.last_anomaly_ts is not None
     verdict = stream_status(fetched=ctx.raw_df is not None, empty=ctx.raw_df is not None and ctx.raw_df.empty,
                             error=error, seen_before=seen)
-    return None if verdict is None else StreamCheck(target.entity, target.query, target.source_type, *verdict)
+    return None if verdict is None else StreamCheck(target.entity, target.query, target.source_type, *verdict,
+                                                    known=ctx.stream_seen_before)
 
 
 def _run_node(node: NodeSpec, op: Any, ctx: PipelineContext) -> PipelineContext:
@@ -332,6 +336,7 @@ class Pipeline:
         if not record:
             return
         batch.run_check = run_status(error, targets=targets, failed_entities=[e.entity for e in batch.errors])
+        batch.health_retention_days = self.workflow.health_retention_days
         try:
             self.hooks.record_health(batch)
         except Exception as e:  # noqa: BLE001

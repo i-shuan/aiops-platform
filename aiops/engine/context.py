@@ -401,9 +401,11 @@ class PipelineContext:
     resolved_incident_ids: list[int] = field(default_factory=list)
     errors: list[TargetError] = field(default_factory=list)
     audit: list[str] = field(default_factory=list)
-    # 資料健康度（engine/health.py）。每輪新建的 ctx 上，跑完由 hooks.record_health 寫成狀態區間：
-    # stream_seen_before：（序列層，引擎載入）這條資料流以前有過「有資料」的紀錄，用來分「斷流」與「從未有過資料」
+    # 資料健康度（engine/health.py）。每輪新建的 ctx 上，跑完由 hooks.record_health 寫進資料庫：
+    # stream_seen_before：（序列層，引擎載入）這條資料流已經有「第一次收到資料」的紀錄，用來分「斷流」與「從未有過資料」
     # stream_checks：（批次層）這一輪每條資料流的檢查結果；run_check：這一輪整條管線的執行結果（None = 這一輪不記）
+    # health_retention_days：健康度紀錄留幾天（Workflow.health_retention_days）；None = 這一輪不清舊紀錄
+    health_retention_days: int | None = None
     stream_seen_before: bool = False
     stream_checks: list[StreamCheck] = field(default_factory=list)
     run_check: RunCheck | None = None

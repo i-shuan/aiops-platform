@@ -16,7 +16,7 @@
 |---|---|---|
 | `apm-metrics`、`apm-traces`、`apm-logs` | Elasticsearch | APM 資料（只讀） |
 | `aiops-alertmanager` | Alertmanager | 顯示平台推送的告警 |
-| `aiops-platform-db` | PostgreSQL（Grafana 內建，不用裝外掛） | 平台資料庫的**唯讀帳號**，只讀 `data_stream_health`、`pipeline_run_health` |
+| `aiops-platform-db` | PostgreSQL（Grafana 內建，不用裝外掛） | 平台資料庫的**唯讀帳號**，只讀 `data_stream_health`、`pipeline_runs` |
 
 儀表板（都在 `files/dashboards/`）：
 
@@ -26,7 +26,8 @@
 - **資料健康度**（`data-health`）：資料有沒有進來、是誰的問題。說明見 `docs/DATA_HEALTH.md`。
   - 一打開就看得到「目前有問題的資料流」（狀態、訊息、從什麼時候開始）與「管線目前的執行結果」，不用先選服務。
   - 上方下拉選單：`管線`、`服務`（都是 SQL 查出來的、可多選、可打字篩選、預設 All），用來往下看單一服務的歷史；`時間軸範圍`預設只畫時間範圍內出過問題的資料流。
-  - 下面依序是：每條資料流的狀態時間軸、管線每輪的執行結果（時間軸與表格）、設定錯誤清單、資料流出問題的紀錄（要證明「某個時間點沒有資料」看這張表的開始與最後確認）。
+  - 下面依序是：每條資料流的狀態時間軸、管線每輪的執行結果（時間軸）、沒有成功的輪次、設定錯誤清單、資料流出問題的紀錄（要證明「某個時間點沒有資料」看這張表的開始與最後確認）。
+  - 每個查詢（含兩個下拉選單）都只查畫面右上角的時間範圍，不掃全表；哪個面板讀哪張表列在 `docs/DATA_HEALTH.md`。紀錄預設保留 180 天（管線 YAML 的 `health_retention_days`）。
   - 時間軸上最後一次檢查之後是空白 = 平台沒有再檢查到，不是正常。
 
 回饋表單不在 Grafana：告警卡片的 `feedback_url` 註解連到平台自己的回饋頁（平台設了 `AIOPS_PUBLIC_URL` 才有）。
@@ -42,7 +43,7 @@ Secret `grafana-env`（可用 `envSecret` 改名）要先建好，鍵見 `values
 **資料健康度儀表板要多做三件事**（都不改映像檔、不裝外掛）：
 
 1. 平台資料庫先跑 `migrations/postgres/0011_data_health.sql`（全新資料庫由平台啟動時自動建表，不用跑）。
-2. 在平台資料庫建一個**唯讀帳號**，只給那兩張表的 `SELECT`（SQL 在同一個 migration 檔的註解裡）。不要用平台自己那組可寫的帳號。
+2. 在平台資料庫建一個**唯讀帳號**，只給 `data_stream_health`、`pipeline_runs` 的 `SELECT`（SQL 在同一個 migration 檔的註解裡；建帳號是資料庫端的設定，密碼只放進 Secret）。不要用平台自己那組可寫的帳號。
 3. 在 `grafana-env` Secret 補四個鍵：`AIOPS_DB_HOST`（主機:埠）、`AIOPS_DB_NAME`、`AIOPS_DB_RO_USER`、`AIOPS_DB_RO_PASSWORD`。
    資料庫沒有 TLS（叢集內的開發資料庫）時加 `--set platformDb.sslmode=disable`，預設是 `require`。
 

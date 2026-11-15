@@ -53,7 +53,7 @@ datasources:
       handleGrafanaManagedAlerts: false
 
   # 平台資料庫（PostgreSQL，Grafana 內建的資料源，不用裝外掛）：只給「資料健康度」儀表板讀
-  # data_stream_health、pipeline_run_health。帳號必須是唯讀帳號（建法與授權見 migrations/postgres/0011_data_health.sql），
+  # data_stream_health、pipeline_runs。帳號必須是唯讀帳號（建法與授權見 migrations/postgres/0011_data_health.sql），
   # 不要拿平台自己那組可寫的帳號（AIOPS_DATABASE_URL）來用。位址、資料庫名稱、帳密都來自 envSecret。
   - name: aiops-platform-db
     uid: aiops-platform-db

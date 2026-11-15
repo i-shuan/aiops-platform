@@ -1,23 +1,25 @@
 """資料健康度：這一輪每條資料流（管線 × 實體 × 查詢）與整輪管線的狀態怎麼判（純函式，不碰資料庫）。
 
 引擎（engine/pipeline.py）在每條序列跑完、以及整輪結束或失敗時呼叫這裡，把結果放在這一輪的 PipelineContext
-（ctx.stream_checks、ctx.run_check）；寫進資料庫是 storage 的事（StorageHooks.record_health，存成「狀態區間」）。
+（ctx.stream_checks、ctx.run_check）；寫進資料庫是 storage 的事（StorageHooks.record_health）。
 目的是事後查得到「那個時間點資料有沒有進來、是誰的問題」，不是在引擎裡替資料源補洞（CLAUDE.md §1.1 第 4 點）。
 
 資料流狀態（STREAM_STATUSES）——只看「資料有沒有抓回來」，跟後面的偵測節點有沒有出錯無關：
   ok            這一輪抓回了資料（之後偵測器自己出錯也算 ok：資料是有進來的）
   no_data       查詢合法但沒有資料（資料源丟 NoDataError、或回 200 但零筆），而且這條資料流以前有過資料 = 斷流
-  never_seen    同上，但這條資料流從來沒有過資料（沒有過 ok 的紀錄、沒有基準線、沒有存過異常點）= 多半是還沒埋點或查詢對不到東西
+  never_seen    同上，但這條資料流從來沒有過資料（沒有「第一次收到資料」的紀錄、沒有基準線、沒有存過異常點）
+                = 多半是還沒埋點或查詢對不到東西
   config_error  設定或查詢錯誤：資料源說查詢不合法、欄位不存在、回應格式不對（BadRequest／InvalidQueryError）
   unreachable   抓這條資料流時資料源連不上（InfrastructureError；整輪也會失敗）
   error         抓到資料之前出了其他錯（查不到東西的 NotFound、資料源或抓取程式的非預期例外）
 
-管線狀態（RUN_STATUSES）：
-  ok                    整輪成功、沒有任何序列出錯
-  degraded              整輪完成，但有序列（或旁路節點）記了錯誤
-  infrastructure_error  整輪失敗：資料庫、資料源、Alertmanager 連不上，或資料斷流比例過高（心跳不續命）
-  workflow_error        管線定義載入失敗（YAML 寫錯、算子參數不合法）：這一輪根本沒跑
-  error                 整輪因為其他例外失敗
+管線每一輪的結果（RUN_STATUSES）與失敗類型（FAILURE_TYPES，只有 failed 才有）：
+  ok        整輪成功、沒有任何序列出錯
+  degraded  整輪完成，但有序列（或旁路節點）記了錯誤
+  failed    整輪失敗。失敗類型：
+              infrastructure_error  資料庫、資料源、Alertmanager 連不上，或資料斷流比例過高（InfrastructureError，心跳不續命）
+              workflow_error        管線定義載入失敗（WorkflowError：YAML 寫錯、算子參數不合法）：這一輪根本沒跑
+              error                 其他例外（訊息開頭是例外的型別）
 """
 from __future__ import annotations
 
@@ -26,26 +28,29 @@ from dataclasses import dataclass
 from aiops.engine.errors import BadRequest, InfrastructureError, NoDataError, WorkflowError
 
 STREAM_STATUSES: tuple[str, ...] = ("ok", "no_data", "never_seen", "config_error", "unreachable", "error")
-RUN_STATUSES: tuple[str, ...] = ("ok", "degraded", "infrastructure_error", "workflow_error", "error")
+RUN_STATUSES: tuple[str, ...] = ("ok", "degraded", "failed")
+FAILURE_TYPES: tuple[str, ...] = ("infrastructure_error", "workflow_error", "error")
 MESSAGE_CHARS = 1000  # 訊息欄位長度（storage 的欄位同寬）；資料源的錯誤訊息可能帶一大段回應內容
 
 
 @dataclass(frozen=True)
 class StreamCheck:
-    """一條資料流這一輪的檢查結果。"""
+    """一條資料流這一輪的檢查結果。known：這條資料流已經有「第一次收到資料」的紀錄（storage 據此決定要不要補記）。"""
 
     entity: str
     query: str
     source_type: str
     status: str
     message: str = ""
+    known: bool = False
 
 
 @dataclass(frozen=True)
 class RunCheck:
-    """一條管線這一輪的執行結果。targets／failed 是這一輪的序列數與出錯的序列數（載入失敗時都是 0）。"""
+    """一條管線這一輪的執行結果。failure_type 只有 status = failed 才有；targets／failed 是這一輪的序列數與出錯的實體數。"""
 
     status: str
+    failure_type: str = ""
     message: str = ""
     targets: int = 0
     failed: int = 0
@@ -81,12 +86,12 @@ def run_status(error: BaseException | None, *, targets: int, failed_entities: li
     failed = len(set(failed_entities))
     if error is None:
         if not failed_entities:
-            return RunCheck("ok", "", targets, 0)
+            return RunCheck("ok", "", "", targets, 0)
         shown = "、".join(sorted(set(failed_entities))[:10]) + ("…" if failed > 10 else "")
-        return RunCheck("degraded", _clip(f"{failed} 個實體或節點有錯誤：{shown}"), targets, failed)
+        return RunCheck("degraded", "", _clip(f"{failed} 個實體或節點有錯誤：{shown}"), targets, failed)
     message = _clip(str(error) or type(error).__name__)
     if isinstance(error, InfrastructureError):
-        return RunCheck("infrastructure_error", message, targets, failed)
+        return RunCheck("failed", "infrastructure_error", message, targets, failed)
     if isinstance(error, WorkflowError):
-        return RunCheck("workflow_error", message, targets, failed)
-    return RunCheck("error", _clip(f"{type(error).__name__}: {error}"), targets, failed)
+        return RunCheck("failed", "workflow_error", message, targets, failed)
+    return RunCheck("failed", "error", _clip(f"{type(error).__name__}: {error}"), targets, failed)

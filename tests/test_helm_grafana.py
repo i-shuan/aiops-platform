@@ -18,7 +18,7 @@ ALERTING_FILES = ("alert-rules", "contact-points", "policies", "notification-pol
 # 它讀的只能是下面 PLATFORM_DB_TABLES 這兩張表，由 test_platform_db_datasource_* 與 tests/test_data_health.py 把關
 DEAD_REFERENCES = re.compile(r"aiops-db|aiops_alerts|aiops_anomalies|aiops_tuning|aiops_feedback|localhost:18080|aiops-api")
 PLATFORM_DB = "aiops-platform-db"
-PLATFORM_DB_TABLES = {"data_stream_health", "pipeline_run_health"}
+PLATFORM_DB_TABLES = {"data_stream_health", "pipeline_runs"}
 
 
 def _render(*sets: str) -> list[dict]:
@@ -75,7 +75,7 @@ def test_platform_db_datasource_uses_a_read_only_account_from_the_secret():
     values = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
     assert values["platformDb"] == {"sslmode": "require"}  # 預設要 TLS；values 裡沒有位址與帳密
     migration = (CHART.parents[2] / "migrations" / "postgres" / "0011_data_health.sql").read_text(encoding="utf-8")
-    assert "GRANT SELECT ON data_stream_health, pipeline_run_health TO aiops_grafana_ro" in migration
+    assert "GRANT SELECT ON data_stream_health, pipeline_runs TO aiops_grafana_ro" in migration
 
 
 def test_platform_db_sslmode_is_rendered_from_values():

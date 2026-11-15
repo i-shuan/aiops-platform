@@ -15,6 +15,7 @@ from aiops.storage import crud
 from aiops.storage.models import (
     ActiveDetectorConfigRow,
     AnomalyRow,
+    DataStreamFirstSeenRow,
     DataStreamHealthRow,
     DetectorModelRow,
     ExternalAnomalyRow,
@@ -24,7 +25,7 @@ from aiops.storage.models import (
     IncidentRow,
     LotPathRow,
     NotificationRow,
-    PipelineRunHealthRow,
+    PipelineRunRow,
     ServiceAsyncEdgeRow,
     ServiceEdgeRow,
     SilenceRow,
@@ -416,11 +417,6 @@ class StreamHealth:
                                     status, at, "checks", message=message, source_type=source_type)
 
     @staticmethod
-    def ever_ok(pipeline: str, entity: str, query: str) -> bool:
-        """這條資料流有沒有過任何一段「有資料」的紀錄。"""
-        return crud.find_one(DataStreamHealthRow, pipeline=pipeline, entity=entity, query=query, status="ok") is not None
-
-    @staticmethod
     def list(pipeline: str | None = None, entity: str | None = None, status: str | None = None,
              current: bool | None = None, since: datetime | None = None, until: datetime | None = None,
              limit: int = 500) -> list[Row]:
@@ -428,17 +424,49 @@ class StreamHealth:
         return crud.find_intervals(DataStreamHealthRow, since=since, until=until, limit=limit, pipeline=pipeline,
                                    entity=entity, status=status, is_current=current)
 
+    @staticmethod
+    def prune(pipeline: str, before: datetime) -> int:
+        """保留期限：這條管線已經結束（不是目前狀態）而且最後確認時間早於 before 的區間移除，回傳移除幾列。
+        每條資料流目前的那一列不刪：它是「現在是什麼狀態、從什麼時候開始」的唯一依據。"""
+        return crud.delete_before(DataStreamHealthRow, "last_checked_at", before, pipeline=pipeline, is_current=False)
 
-class RunHealth:
-    """每條管線執行結果的狀態區間（PipelineRunHealthRow）。"""
+
+class StreamFirstSeen:
+    """每條資料流第一次收到資料的時間（DataStreamFirstSeenRow）。不受保留期限影響。"""
 
     @staticmethod
-    def record(pipeline: str, status: str, message: str, at: datetime, targets: int = 0, failed: int = 0) -> Row | None:
-        return crud.record_interval(PipelineRunHealthRow, {"pipeline": pipeline}, status, at, "runs",
-                                    message=message, targets=targets, failed_targets=failed)
+    def known(pipeline: str, entity: str, query: str) -> bool:
+        return crud.find_one(DataStreamFirstSeenRow, pipeline=pipeline, entity=entity, query=query) is not None
 
     @staticmethod
-    def list(pipeline: str | None = None, status: str | None = None, current: bool | None = None,
+    def record_many(pipeline: str, streams: list[tuple[str, str]], at: datetime) -> int:
+        """(實體, 查詢) 第一次收到資料：已經有紀錄的不動（留最早的那一次）。"""
+        return crud.create_many_ignoring_duplicates(DataStreamFirstSeenRow, [
+            {"pipeline": pipeline, "entity": entity, "query": query, "first_data_at": at} for entity, query in streams])
+
+    @staticmethod
+    def list(pipeline: str | None = None, entity: str | None = None, limit: int = 500) -> list[Row]:
+        return crud.find_recent(DataStreamFirstSeenRow, "first_data_at", limit=limit, pipeline=pipeline, entity=entity)
+
+
+class PipelineRuns:
+    """管線每一輪的執行結果（PipelineRunRow），一輪一列。"""
+
+    @staticmethod
+    def record(pipeline: str, run_at: datetime, status: str, failure_type: str, message: str, targets: int = 0,
+               failed: int = 0) -> Row:
+        """同一條管線同一個時間重跑就覆蓋那一列。"""
+        return crud.upsert(PipelineRunRow, {"pipeline": pipeline, "run_at": run_at}, status=status,
+                           failure_type=failure_type, message=message, targets=targets, failed_targets=failed)
+
+    @staticmethod
+    def list(pipeline: str | None = None, status: str | None = None, failure_type: str | None = None,
              since: datetime | None = None, until: datetime | None = None, limit: int = 500) -> list[Row]:
-        return crud.find_intervals(PipelineRunHealthRow, since=since, until=until, limit=limit, pipeline=pipeline,
-                                   status=status, is_current=current)
+        """run_at 落在 [since, until] 的輪次，由新到舊。"""
+        return crud.find_recent(PipelineRunRow, "run_at", since=since, until=until, limit=limit, pipeline=pipeline,
+                                status=status, failure_type=failure_type)
+
+    @staticmethod
+    def prune(pipeline: str, before: datetime) -> int:
+        """保留期限：這條管線 run_at 早於 before 的輪次移除，回傳移除幾列。"""
+        return crud.delete_before(PipelineRunRow, "run_at", before, pipeline=pipeline)

@@ -307,3 +307,16 @@ def find_intervals(model: Any, *, since: Any = None, until: Any = None, limit: i
         stmt = stmt.where(model.started_at <= utc_naive(until))
     with read_session() as s:
         return [row_to_dict(r) for r in s.scalars(stmt.order_by(model.started_at.desc(), model.id.desc()).limit(limit))]
+
+
+def find_recent(model: Any, column: str, *, since: Any = None, until: Any = None, limit: int = 500,
+                **filters: Any) -> list[dict[str, Any]]:
+    """column 落在 [since, until] 的列，由新到舊最多 limit 筆。filters 裡值是 None 的欄位不篩。"""
+    col = getattr(model, column)
+    stmt = select(model).where(*_where(model, {k: v for k, v in filters.items() if v is not None}))
+    if since is not None:
+        stmt = stmt.where(col >= utc_naive(since))
+    if until is not None:
+        stmt = stmt.where(col <= utc_naive(until))
+    with read_session() as s:
+        return [row_to_dict(r) for r in s.scalars(stmt.order_by(col.desc(), model.id.desc()).limit(limit))]

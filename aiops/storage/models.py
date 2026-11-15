@@ -335,7 +335,7 @@ class IncidentKnowledgeRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
-# ── 資料健康度 ──
+# ── 資料健康度（三張表，都在平台自己的資料庫；migrations/postgres/0011）──
 
 
 class DataStreamHealthRow(Base):
@@ -345,12 +345,15 @@ class DataStreamHealthRow(Base):
 
     status 見 engine/health.STREAM_STATUSES。is_current = 這條資料流最新的一列（Grafana「目前有問題的資料流」直接篩它）。
     時間是那一輪的邏輯時間（ctx.now）；比現有紀錄更早的時間（回放）不寫。寫入者只有 StorageHooks.record_health。
-    migrations/postgres/0011。"""
+    保留期限：不是 is_current、而且 last_checked_at 早於「現在 − 管線的 health_retention_days」的列，每輪寫入時順手刪掉。
+    索引：查某條資料流的歷史（pipeline, entity, query, started_at）、目前狀態（is_current, status）、
+    時間範圍與清除（last_checked_at）。"""
 
     __tablename__ = "data_stream_health"
     __table_args__ = (
         Index("ix_data_stream_health_stream", "pipeline", "entity", "query", "started_at"),
         Index("ix_data_stream_health_current", "is_current", "status"),
+        Index("ix_data_stream_health_last_checked", "last_checked_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pipeline: Mapped[str] = mapped_column(String(128))
@@ -365,26 +368,40 @@ class DataStreamHealthRow(Base):
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
 
-class PipelineRunHealthRow(Base):
-    """每條管線執行結果的狀態區間（同 DataStreamHealthRow 的做法：結果沒變只推 last_checked_at 與 runs）。
-    status 見 engine/health.RUN_STATUSES：整輪失敗（infrastructure_error）、定義載入失敗（workflow_error，那一輪根本沒跑）都在這裡。
-    targets／failed_targets 是區間內最近一輪的數字。migrations/postgres/0011。"""
+class PipelineRunRow(Base):
+    """管線每一輪的執行結果：一輪一列（排程模式才記）。少跑了哪幾輪直接看得出來——那個時間沒有列。
+    status：ok／degraded／failed；failure_type 只有 failed 才有（infrastructure_error／workflow_error／error，
+    見 engine/health.py）。定義載入失敗（workflow_error）那一輪根本沒跑，也會有一列。
+    run_at 是那一輪的邏輯時間（ctx.now）；同一條管線同一個時間重跑就覆蓋那一列。
+    保留期限：run_at 早於「現在 − 管線的 health_retention_days」的列，每輪寫入時順手刪掉。
+    索引：唯一鍵（pipeline, run_at）同時給「某條管線的時間範圍」用；（run_at）給不分管線的時間範圍與清除。"""
 
-    __tablename__ = "pipeline_run_health"
+    __tablename__ = "pipeline_runs"
     __table_args__ = (
-        Index("ix_pipeline_run_health_pipeline", "pipeline", "started_at"),
-        Index("ix_pipeline_run_health_current", "is_current", "status"),
+        UniqueConstraint("pipeline", "run_at", name="uq_pipeline_runs_pipeline_run_at"),
+        Index("ix_pipeline_runs_run_at", "run_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pipeline: Mapped[str] = mapped_column(String(128))
-    status: Mapped[str] = mapped_column(String(32))
+    run_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(16))
+    failure_type: Mapped[str] = mapped_column(String(32), default="", server_default="")
     message: Mapped[str] = mapped_column(String(1000), default="", server_default="")
-    started_at: Mapped[datetime] = mapped_column(DateTime)
-    last_checked_at: Mapped[datetime] = mapped_column(DateTime)
-    runs: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     targets: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     failed_targets: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class DataStreamFirstSeenRow(Base):
+    """每條資料流第一次收到資料的時間（一條資料流一列，只增不改、不受保留期限影響）。
+    用來分「從未有過資料」與「有過之後斷流」：狀態區間會被保留期限清掉，不能拿它當「以前有沒有過資料」的依據。"""
+
+    __tablename__ = "data_stream_first_seen"
+    __table_args__ = (UniqueConstraint("pipeline", "entity", "query", name="uq_data_stream_first_seen_stream"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pipeline: Mapped[str] = mapped_column(String(128))
+    entity: Mapped[str] = mapped_column(String(256))
+    query: Mapped[str] = mapped_column(String(512))
+    first_data_at: Mapped[datetime] = mapped_column(DateTime)
 
 
 def reset_all() -> None:

@@ -13,7 +13,7 @@ service:
 #   AIOPS_ALERTMANAGER_URL    aiops-alertmanager 的位址（只用來顯示告警）
 #   AIOPS_DB_HOST             平台資料庫（PostgreSQL）的 主機:埠（例：aiops-postgres.aiops.svc:5432）
 #   AIOPS_DB_NAME             資料庫名稱（例：aiops）
-#   AIOPS_DB_RO_USER          **唯讀**帳號，只有 data_stream_health、pipeline_run_health 的 SELECT
+#   AIOPS_DB_RO_USER          **唯讀**帳號，只有 data_stream_health、pipeline_runs 的 SELECT
 #   AIOPS_DB_RO_PASSWORD      （建帳號與授權的 SQL 在 migrations/postgres/0011_data_health.sql；不要用平台那組可寫的帳號）
 #   GF_SECURITY_ADMIN_PASSWORD
 envSecret: grafana-env
