@@ -459,7 +459,7 @@ def test_every_test_asserts_something_and_dead_zones_are_strict():
     assert not bad, "\n".join(bad)
 
 
-GRAPH_FIELDS = {"topology", "lot_edges", "async_edges"}
+GRAPH_FIELDS = {"topology", "lot_edges", "async_edges", "declared_edges", "imported_edges"}
 
 
 def test_operators_ask_the_service_graph_instead_of_reading_raw_edge_lists():

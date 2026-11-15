@@ -14,12 +14,13 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
+from aiops.engine.graph import Edge, EdgeKind, contradictions
 from aiops.engine.errors import InfrastructureError, NoDataError, PlatformError, WorkflowError
 from aiops.engine.operator import NodeInfo
 from aiops.engine.registry import OperatorRegistry
@@ -62,6 +63,39 @@ class PeerGroupSpec(StrictModel):
     query: str
     by: str = Field(min_length=1)
     source_type: str = ""  # 空 = 跟 target 同一個資料源
+
+
+EntityName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+
+
+class GraphEdgeSpec(StrictModel):
+    """一條宣告的關係邊。kind 必填、沒有預設值：方向由型別決定（engine/graph.KINDS），寫的人只照資料來源的說法選型別。
+      call    from 呼叫 to（from 依賴 to）                 -> to 出事拖垮 from
+      supply  from 供應 to（電力、氣體、冷卻水、共用主機）  -> from 出事拖垮 to
+      flow    from 是 to 的上游（物料、Lot 流向）          -> from 出事流到 to；weight = 走過的量（算子的 min_lots 會篩）
+      async   from 發訊息給 to（訊息佇列）                 -> 只給訊息收斂用，不進傳播圖；weight = 延遲 P95 毫秒"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    source: EntityName = Field(alias="from")
+    target: EntityName = Field(alias="to")
+    kind: Literal["call", "supply", "flow", "async"]
+    weight: float = Field(1.0, gt=0, allow_inf_nan=False)
+
+    def to_edge(self) -> Edge:
+        return Edge(self.source, self.target, EdgeKind(self.kind), float(self.weight))
+
+
+def check_declared(edges: list[Edge]) -> None:
+    """宣告的邊在載入期檢查：自己指自己、不同型別把同一對實體宣告成相反的傳播方向，都直接報錯（ValueError）。"""
+    loops = sorted({e.source for e in edges if e.is_loop})
+    if loops:
+        raise ValueError(f"宣告的邊不能自己指自己：{loops}")
+    bad = contradictions(edges)
+    if bad:
+        a, b = bad[0]
+        raise ValueError(f"宣告的邊方向互相矛盾：{a.kind.value} {a.source} -> {a.target} 的意思是「{a.propagation[0]} 出事拖垮 "
+                         f"{a.propagation[1]}」，{b.kind.value} {b.source} -> {b.target} 卻是「{b.propagation[0]} 出事拖垮 "
+                         f"{b.propagation[1]}」（共 {len(bad)} 組）。同一個依賴關係只要宣告一次")
 
 
 class TargetSpec(StrictModel):
@@ -107,6 +141,9 @@ class Workflow(StrictModel):
     # 明確指定拓撲／Lot 流向時優先於從 trace、Lot 履歷自動推導的結果；給空清單代表「不要用」
     topology: list[tuple[str, str]] | None = None
     lot_edges: list[dict[str, Any]] | None = None
+    # 宣告的關係邊（每條必寫 kind）：沒有 trace 的環境靠它提供依賴圖。跟資料庫裡觀測到的邊（trace 沉澱、Lot 履歷）
+    # 與 admin.graph_import 匯入的邊取聯集——是「補上」，不是「取代」（要整張取代用上面的 topology／lot_edges）。
+    graph: list[GraphEdgeSpec] = Field(default_factory=list)
     # 這條偵測管線產生的事件群，預設用哪一條 RCA 管線出報告（POST /api/v1/rca 沒帶 workflow 時用它）。
     # 依場景有沒有 trace 決定：有 trace 的 IT 管線寫 rca_report_llm；沒有 trace 的（工廠、純指標）寫 rca_report
     # （沒有 span 時退回拓撲／Lot 流向推測）。不寫 = rca_report。名稱在載入期檢查（interfaces/runner.build_pipeline）。
@@ -125,6 +162,7 @@ class Workflow(StrictModel):
         names = [n.name for n in self.nodes]
         if len(names) != len(set(names)):
             raise ValueError(f"節點名稱不可重複：{names}")
+        check_declared([e.to_edge() for e in self.graph])
         return self
 
 
@@ -297,6 +335,7 @@ class Pipeline:
         if self.workflow.lot_edges is not None:
             batch.lot_edges = [LotEdge(e["from"], e["to"], int(e.get("lots", 1))) for e in self.workflow.lot_edges]
             batch.lot_edges_explicit = True
+        batch.declared_edges = [e.to_edge() for e in self.workflow.graph]
         self.hooks.load_batch(batch)
 
         if self.target_nodes:

@@ -12,6 +12,7 @@ from typing import Any
 
 from aiops.engine.params import ANY
 from aiops.storage import crud
+from aiops.storage.db import run_in_transaction
 from aiops.storage.models import (
     ActiveDetectorConfigRow,
     AnomalyRow,
@@ -21,6 +22,7 @@ from aiops.storage.models import (
     FieldMappingRow,
     IncidentKnowledgeRow,
     IncidentRow,
+    DeclaredEdgeRow,
     LotPathRow,
     NotificationRow,
     ServiceAsyncEdgeRow,
@@ -307,6 +309,32 @@ class LotPaths:
     @staticmethod
     def paths(environment: str = "") -> list[list[str]]:
         return [r["path"] for r in crud.find(LotPathRow, environment=environment)]
+
+
+class DeclaredEdges:
+    """人宣告的關係邊（每條自帶型別）。environment 規則同 ServiceEdges。只搬資料：型別合不合法、方向有沒有矛盾由呼叫端
+    （engine/pipeline.check_declared）在寫入前檢查。"""
+
+    @staticmethod
+    def all(environment: str = "") -> list[Row]:
+        return crud.find(DeclaredEdgeRow, environment=environment)
+
+    @staticmethod
+    def merge(edges: list[Row], environment: str = "", origin: str = "") -> int:
+        """加進去；同一條邊（環境、source、target、kind）已經有就更新 weight 與來源。edges 每筆：source、target、kind、weight。"""
+        now = utc_now()
+        for e in edges:
+            crud.upsert(DeclaredEdgeRow, {"environment": environment, "source": e["source"], "target": e["target"],
+                                          "kind": e["kind"]}, weight=float(e["weight"]), origin=origin, updated_at=now)
+        return len(edges)
+
+    @staticmethod
+    def replace(edges: list[Row], environment: str = "", origin: str = "") -> dict[str, int]:
+        """這個環境的宣告邊整份換成這一批，單一交易（中途失敗整筆回復，不會留下刪了一半的圖）。回傳 {"removed", "written"}。"""
+        def write() -> dict[str, int]:
+            removed = crud.delete_where(DeclaredEdgeRow, environment=environment)
+            return {"removed": removed, "written": DeclaredEdges.merge(edges, environment, origin)}
+        return run_in_transaction(write)
 
 
 class Proposals:

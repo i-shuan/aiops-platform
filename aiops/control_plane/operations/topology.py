@@ -17,12 +17,13 @@ from aiops.engine.errors import BadRequest
 from aiops.engine.mq import async_lags
 from aiops.engine.operator import BaseOperator
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.requests import TopologyRefresh
+from aiops.engine.pipeline import GraphEdgeSpec, check_declared
+from aiops.engine.requests import GraphImport, TopologyRefresh
 from aiops.engine.topology import service_edges
 from aiops.engine.types import as_utc
 from aiops.sources import get_datasource_spec, is_configured, source_types
 from aiops.sources.base import in_environment
-from aiops.storage.repository import AsyncEdges, ServiceEdges
+from aiops.storage.repository import AsyncEdges, DeclaredEdges, ServiceEdges
 
 
 @OperatorRegistry.register("admin.topology_refresh")
@@ -85,4 +86,52 @@ class TopologyRefreshOp(BaseOperator):
                             for (p, c), (lag, n) in sorted(lags.items())],
             "window": window,
         }
+        return ctx
+
+
+@OperatorRegistry.register("admin.graph_import")
+class GraphImportOp(BaseOperator):
+    """匯入宣告的關係邊（CMDB、設備清冊、供電／管線圖）-> declared_edges。沒有 trace 的環境靠它提供依賴圖。
+
+    - 每條邊必寫 kind（call／supply／flow／async），傳播方向由型別決定（engine/graph.KINDS）；這裡不翻任何方向。
+    - 寫入前檢查「寫完之後這個環境的整份宣告」：自己指自己、不同型別把同一對實體宣告成相反的傳播方向，整批拒絕（400），
+      什麼都不寫。merge 時連同資料庫裡既有的宣告一起檢查。只檢查宣告的邊彼此之間：跟 trace 觀測到的邊不比對
+      （觀測到的是事實，宣告跟它衝突時由人決定改哪一邊，結果的 conflicts_with_observed 會列出來）。
+    - replace：這個環境的宣告邊整份換掉（單一交易）；merge：加進去、同一條邊更新 weight。
+    - 只動 declared_edges：trace 沉澱的 service_edges、Lot 履歷、非同步邊都不碰。"""
+
+    scope = "batch"
+
+    def execute(self, ctx: PipelineContext) -> PipelineContext:
+        req = ctx.request
+        if not isinstance(req, GraphImport):
+            raise BadRequest("admin.graph_import 需要 GraphImport 請求")
+        incoming = {(e.source, e.target, e.kind): e for e in req.edges}  # 同一批裡重複的邊：後面的蓋掉前面的
+        final = dict(incoming)
+        if req.mode == "merge":
+            for r in DeclaredEdges.all(req.environment):
+                final.setdefault((r["source"], r["target"], r["kind"]),
+                                 GraphEdgeSpec(source=r["source"], target=r["target"], kind=r["kind"], weight=r["weight"]))
+        try:
+            check_declared([e.to_edge() for e in final.values()])
+        except ValueError as e:
+            raise BadRequest(str(e)) from e
+        rows = [{"source": e.source, "target": e.target, "kind": e.kind, "weight": e.weight} for e in incoming.values()]
+        if req.mode == "replace":
+            written = DeclaredEdges.replace(rows, req.environment, req.source)
+        else:
+            written = {"removed": 0, "written": DeclaredEdges.merge(rows, req.environment, req.source)}
+        stored = DeclaredEdges.all(req.environment)
+        # 宣告的同步依賴跟 trace 觀測到的呼叫方向相反（宣告 A 依賴 B、trace 看到 B 呼叫 A）：只回報，不擋也不改
+        observed = {(e["caller"], e["callee"]) for e in ServiceEdges.all(req.environment)}
+        conflicts = sorted({(r["source"], r["target"], r["kind"]) for r in stored
+                            if r["kind"] == "call" and (r["target"], r["source"]) in observed
+                            and (r["source"], r["target"]) not in observed})
+        by_kind: dict[str, int] = {}
+        for r in stored:
+            by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+        ctx.result = {"environment": req.environment, "mode": req.mode, "received": len(req.edges),
+                      "written": written["written"], "removed": written["removed"], "declared_total": len(stored),
+                      "by_kind": dict(sorted(by_kind.items())),
+                      "conflicts_with_observed": [{"from": a, "to": b, "kind": k} for a, b, k in conflicts]}
         return ctx

@@ -171,6 +171,14 @@ def delete_before(model: Any, column: str, before: Any, **filters: Any) -> int:
         return int(result.rowcount or 0)
 
 
+def delete_where(model: Any, **filters: Any) -> int:
+    """刪掉符合 filters（各欄相等）的列，回傳刪了幾筆。至少要給一個條件：不提供「整張表清空」。"""
+    if not filters:
+        raise ValueError("delete_where 至少要一個條件")
+    with write_session() as s:
+        return int(s.execute(sql_delete(model).where(*_where(model, filters))).rowcount or 0)
+
+
 def insert_if_absent(model: Any, **fields: Any) -> dict[str, Any] | None:
     """新增一筆；撞到唯一鍵（別人已經先寫了）回傳 None，不拋錯也不覆蓋。"""
     try:

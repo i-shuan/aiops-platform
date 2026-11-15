@@ -218,6 +218,23 @@ class ServiceAsyncEdgeRow(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
+class DeclaredEdgeRow(Base):
+    """人宣告的關係邊（admin.graph_import 寫入）：沒有 trace 的環境靠它提供依賴圖。每條邊自帶型別
+    （engine/graph.EdgeKind 的值：call／supply／flow／async），方向照宣告、傳播方向由型別決定。
+    跟 service_edges（trace 沉澱、會依 last_seen 汰除）分開存：宣告的邊不會因為「很久沒被 trace 看到」而消失。"""
+
+    __tablename__ = "declared_edges"
+    __table_args__ = (UniqueConstraint("environment", "source", "target", "kind", name="uq_declared_edges_env_edge"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    environment: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    source: Mapped[str] = mapped_column(String(256))
+    target: Mapped[str] = mapped_column(String(256))
+    kind: Mapped[str] = mapped_column(String(16))
+    weight: Mapped[float] = mapped_column(Float, default=1.0, server_default="1")
+    origin: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class LotPathRow(Base):
     """每個 Lot 依時間排好的機台路徑（MergeLotPathsCommand 寫入）。alerts、rca 從這裡推導機台間流向（lot_edges）。"""
 

@@ -79,7 +79,7 @@ class SameRootCauseSuppressor(BaseOperator):
         return None
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
-        edges = ctx.graph.pairs(EdgeKind.CALL)  # (呼叫者, 被呼叫者)
+        edges = ctx.graph.dependencies()  # (依賴別人的, 被依賴的)：(呼叫者, 被呼叫者)＋宣告的 (使用端, 供應端)
         if not edges:
             return ctx
         batch = ensure_incidents(ctx)

@@ -30,7 +30,7 @@ class SameEntityGrouper(BaseOperator):
 
 @OperatorRegistry.register("alert.topology_chain")
 class TopologyChainGrouper(BaseOperator):
-    """IT：服務呼叫關係上相鄰、時間相近的異常併成一條鏈。拓撲來自 ctx.graph 的同步呼叫邊。params: window_minutes。"""
+    """依賴關係上相鄰、時間相近的異常併成一條鏈。拓撲來自 ctx.graph 的依賴邊（同步呼叫、宣告的 call／supply）。params: window_minutes。"""
 
     scope = "batch"
 
@@ -39,7 +39,7 @@ class TopologyChainGrouper(BaseOperator):
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incidents = ensure_incidents(ctx)
-        edges = ctx.graph.adjacent(EdgeKind.CALL)
+        edges = ctx.graph.dependency_adjacent()  # 同步呼叫＋宣告的供應關係（只有呼叫邊時跟以前一樣）
         if not edges:
             return ctx
 
