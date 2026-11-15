@@ -185,8 +185,9 @@ def build_context(ctx, incident) -> dict[str, Any]:
     return {
         "incident_meta": {"entities": sorted(set(incident.entities)), "duration_minutes": minutes,
                           "severity": incident.severity or None},
+        # conclusion_type：這個候選是哪一級的結論（engine/rca_types.ConclusionType）；模板與 LLM 都不准把推測或症狀位置寫成確定的根因
         "root_cause": ({"candidate": top.entity, "score": round(top.score, 3), "dependency": top.dependency or None,
-                        "attribution": top.attribution or None} if top else None),
+                        "attribution": top.attribution or None, "conclusion_type": ctx.rca_conclusion_type} if top else None),
         "root_note": ctx.rca_root_note or None,
         "sample_trace": sample,
         "top_error_logs": logs,
@@ -333,7 +334,14 @@ def briefing_template(context: dict[str, Any]) -> dict[str, str]:
     rb = context.get("matched_runbook") or {}
     st = context.get("sample_trace") or {}
     entities = "、".join(context["incident_meta"]["entities"]) or "事件群"
-    if rc.get("candidate") and rc.get("dependency"):
+    if rc.get("candidate") and rc.get("conclusion_type") == "topology_inference":
+        summary = f"{_PREFIX['summary_line']}沒有 trace 證據，依拓撲推測源頭可能是 {rc['candidate']}（推測，未確認）"
+        verify = f"{_PREFIX['verification_line']}先查 {rc['candidate']} 的指標與日誌、補上 trace，確認之後才能當成根因"
+    elif rc.get("candidate") and rc.get("conclusion_type") == "symptom_location":
+        summary = (f"{_PREFIX['summary_line']}根因未確認：症狀出現在 {rc['candidate']}，"
+                   "trace 分不出是它自己的問題還是它收到的回應或訊息內容有問題")
+        verify = f"{_PREFIX['verification_line']}同時檢查 {rc['candidate']} 的錯誤日誌，以及它呼叫的依賴當時回了什麼"
+    elif rc.get("candidate") and rc.get("dependency"):
         kind = "/".join(p for p in (a.get("kind", ""), a.get("subtype", "")) if p)
         summary = (f"{_PREFIX['summary_line']}{rc['candidate']} 等待 {a['resource']}（{kind}）"
                    f"{a['wait_ms']['before']}→{a['wait_ms']['during']} ms，程式自身 {a['self_ms']['before']}→{a['self_ms']['during']} ms，"

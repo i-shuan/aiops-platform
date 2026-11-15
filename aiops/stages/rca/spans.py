@@ -190,6 +190,39 @@ def _subtree_failed(spans: list[SpanRecord]) -> dict[str, bool]:
     return {s.span_id: failed_below(s.span_id) for s in spans}
 
 
+def own_failures_after_dependency(spans: list[SpanRecord], start: datetime, end: datetime) -> dict[str, tuple[float, float]]:
+    """[start, end) 內每個服務：(自己失敗的入口請求數, 其中「失敗之前已經同步呼叫過依賴、而且那些呼叫都成功」的請求數)。
+    自己失敗 = 入口 span 失敗、子孫沒有任何失敗（跟 window_stats 的 own_error_rate 同一個定義，所以子孫裡的呼叫必然全部成功）。
+    依賴 = 同步子孫裡屬於別的服務的 span，或資源葉節點（db、external、cache…）。兩個數字都是取樣加權後的請求數。
+    給結論等級判準用（stages/rca/conclusion.py）：拿到成功回應之後才失敗的請求，trace 分不出是自己的錯還是回應內容不對。"""
+    below = _subtree_failed(spans)
+    children = _children_index(spans)
+    service_of = {s.span_id: s.service for s in spans}
+    lo, hi = as_utc(start), as_utc(end)
+
+    def called_dependency(root: SpanRecord) -> bool:
+        stack, seen = list(children.get(root.span_id, [])), {root.span_id}
+        while stack:
+            c = stack.pop()
+            if c.span_id in seen:
+                continue
+            seen.add(c.span_id)
+            if c.service != root.service or is_resource_leaf(c, children):
+                return True
+            stack.extend(children.get(c.span_id, []))
+        return False
+
+    out: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for s in spans:
+        if not (lo <= as_utc(s.ts) < hi) or not s.error or below.get(s.span_id, False):
+            continue
+        if not (s.parent_id is None or service_of.get(s.parent_id) != s.service or s.consumer):
+            continue  # 不是入口
+        out[s.service][0] += s.weight
+        out[s.service][1] += s.weight * called_dependency(s)
+    return {k: (v[0], v[1]) for k, v in out.items()}
+
+
 def window_stats(spans: list[SpanRecord], start: datetime, end: datetime) -> dict[str, ServiceWindowStats]:
     """[start, end) 內的 span，依服務彙總。自身耗時用全部 span 算（含視窗邊界外的子 span 也算進扣除）。"""
     selfs, skewed = self_times_detail(spans)

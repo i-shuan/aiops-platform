@@ -51,3 +51,20 @@ class EvidenceItem:
 
 
 RcaStatus = Literal["ok", "undetermined"]
+
+# 根因結論的等級（互斥）。由根因演算法自己宣告（stages/rca/base.RootCauseOperator.conclusion，或在 rank() 裡寫
+# ctx.rca_conclusion_type 逐次覆寫），報告、API、事件群存檔都帶著；看報告的人不用讀理由文字就知道這個結論能不能直接拿去究責。
+#   confirmed           有直接證據（span 的自身耗時／自身錯誤、或 LLM 候選引用且通過驗證的事實與日誌證據）支持的根因
+#   symptom_location    只知道症狀出現在哪裡：第一名只有「自己失敗」這個症狀，而且失敗發生在它已經拿到依賴的成功回應之後。
+#                       trace 不記回應內容，分不出是它自己的程式錯、還是依賴回了成功但內容不對——根因未確認，不是「下游有問題」
+#   topology_inference  沒有 trace，純依拓撲／Lot 流向的推測
+#   undetermined        沒有候選（證據不足、LLM 失效、沒有根因節點）
+ConclusionType = Literal["confirmed", "symptom_location", "topology_inference", "undetermined"]
+CONCLUSION_TYPES: tuple[str, ...] = ("confirmed", "symptom_location", "topology_inference", "undetermined")
+# 報告「可能的源頭」段落第一行的標示。文字固定在這裡，段落與演算法都不自己拼
+CONCLUSION_LABELS: dict[str, str] = {
+    "confirmed": "【結論等級：有直接證據（confirmed）】第一名候選有 trace 或已驗證的證據直接支持",
+    "symptom_location": "【結論等級：僅症狀位置（symptom_location）】根因未確認：以下是症狀出現的位置，不是已確認的根因",
+    "topology_inference": "【結論等級：拓撲推測（topology_inference）】沒有 trace 證據，以下只是依拓撲／Lot 流向的推測，可能排錯",
+    "undetermined": "【結論等級：無法判定（undetermined）】沒有可指認的根因候選",
+}

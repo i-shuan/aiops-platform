@@ -14,7 +14,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from aiops.engine.graph import ServiceGraph
-from aiops.engine.rca_types import EvidenceItem, Fact, RcaStatus
+from aiops.engine.rca_types import ConclusionType, EvidenceItem, Fact, RcaStatus
 from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
 
 
@@ -356,6 +356,10 @@ class PipelineContext:
     rca_root_algorithm: str = ""
     # 根因演算法的結論說明，例如「證據不足」：沒給候選時報告要講清楚為什麼，不是讓段落默默消失
     rca_root_note: str = ""
+    # 根因結論的等級（engine/rca_types.ConclusionType）：根因節點執行時由 RootCauseOperator 依演算法的宣告填；
+    # 沒有根因節點、或沒有候選就是 undetermined。reason 是「為什麼是這一級」的說明（只有需要解釋的等級才有）
+    rca_conclusion_type: ConclusionType = "undetermined"
+    rca_conclusion_reason: str = ""
     # incident_traces 有設定 trace 來源、但這一輪連不上或讀失敗（例如 ES 重啟）。跟「這個場景本來就沒有 trace」（工廠）要分開：
     # 前者證據被吃掉，根因算子不該拿拓撲硬猜；後者退回拓撲推測是正常做法
     rca_traces_failed: bool = False
@@ -432,6 +436,8 @@ class PipelineContext:
                        resolved_incidents=len(self.resolved_incident_ids))
         if self.rca_sections or self.rca_skipped:
             root_cause: dict[str, Any] = {"algorithm": self.rca_root_algorithm, "note": self.rca_root_note,
+                                          "conclusion_type": self.rca_conclusion_type,
+                                          "conclusion_reason": self.rca_conclusion_reason,
                                           "candidates": [{"entity": c.entity, "score": round(c.score, 4), "reason": c.reason,
                                                           "dependency": c.dependency, "attribution": c.attribution}
                                                          for c in self.rca_root_candidates]}

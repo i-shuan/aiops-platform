@@ -131,7 +131,9 @@ def test_switching_the_root_cause_algorithm_is_only_a_yaml_change(now):
         out = _rca(inc["id"], algo, now=now)
         sections = {s["key"]: s["body"] for s in out["sections"]}
         assert out["root_cause"]["algorithm"] == algo and out["root_cause"]["candidates"][0]["entity"] == "svc-c"
-        assert sections["root_cause_candidates"].startswith("1. svc-c") and algo.split(".")[-1] in sections["root_cause_candidates"]
+        level, candidates = sections["root_cause_candidates"].split("\n", 1)  # 第一行是結論等級
+        assert level.startswith("【結論等級：拓撲推測（topology_inference）】")
+        assert candidates.startswith("1. svc-c") and algo.split(".")[-1] in candidates
         assert sections["propagation_path"].startswith("svc-c（")
 
 

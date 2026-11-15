@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from aiops.engine.rca_types import CONCLUSION_LABELS
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.rca.base import RcaSection, first_seen, graph_edges
 
@@ -20,7 +21,11 @@ class RootCauseCandidates(RcaSection):
         return bool(ctx.rca_root_candidates or ctx.rca_root_note or ctx.rca_mq_note)
 
     def build(self, incident, ctx):
-        lines = [f"{i}. {c.entity}：{c.reason}" for i, c in enumerate(ctx.rca_root_candidates, 1)]
+        # 第一行固定是結論等級（演算法宣告的，engine/rca_types）：不用讀完理由就知道這個結論能不能直接當成根因
+        lines = [CONCLUSION_LABELS[ctx.rca_conclusion_type]]
+        if ctx.rca_conclusion_reason:
+            lines.append(f"（{ctx.rca_conclusion_reason}）")
+        lines += [f"{i}. {c.entity}：{c.reason}" for i, c in enumerate(ctx.rca_root_candidates, 1)]
         if ctx.rca_root_note:
             lines.append(ctx.rca_root_note)
         if ctx.rca_mq_note:  # 看到訊息消費者但跨不了時窗：要講，不然值班的人以為生產者看過了

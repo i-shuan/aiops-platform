@@ -54,12 +54,16 @@ def test_without_topology_the_graph_sections_are_skipped(now):
     assert "propagation_path" in rca["skipped"]
     # 「可能的源頭」不再整段消失：寫明證據不足（沒有 trace、也沒有拓撲），讓值班的人知道是算了但不能指認
     candidates = {s["key"]: s["body"] for s in rca["sections"]}["root_cause_candidates"]
+    level, candidates = candidates.split("\n", 1)  # 第一行是結論等級：沒有候選 = 無法判定
+    assert level.startswith("【結論等級：無法判定（undetermined）】") and rca["root_cause"]["conclusion_type"] == "undetermined"
     assert candidates.startswith("證據不足") and rca["root_cause"]["candidates"] == []
 
 
 def test_root_cause_is_the_dependency_not_the_caller(now):
     sections = {s["key"]: s["body"] for s in _rca(_incident(now), now=now)["sections"]}
-    assert sections["root_cause_candidates"].startswith("1. svc-b")  # topology 是 (caller, callee)，被呼叫的依賴是源頭
+    level, candidates = sections["root_cause_candidates"].split("\n", 1)  # 第一行是結論等級：沒有 span，是拓撲推測
+    assert level.startswith("【結論等級：拓撲推測（topology_inference）】")
+    assert candidates.startswith("1. svc-b")  # topology 是 (caller, callee)，被呼叫的依賴是源頭
     assert sections["propagation_path"].startswith("svc-b（")
 
 

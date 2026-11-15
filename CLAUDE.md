@@ -44,8 +44,9 @@
 4. **資料源缺口不在引擎裡補**：外部系統負責照標準格式（OTel、Prometheus、標準日誌欄位、宣告的圖）把資料送進來。沒埋點、沒送日誌、時間戳錯、CMDB 填錯，是資料源端的缺口——平台的做法是**照實說看不到**（序列錯誤、`rca_skipped`、`undetermined`、文件裡的「已知限制」），不准在引擎裡寫業務特判去猜或補洞（§100.5）。格式差異只能在 `sources/` 與欄位對照（`admin` 的欄位對照）吸收，不准漏進 `stages/`。
 5. **遮罩的責任分界**：送往 LLM 的內容只有一個出口 `stages/enrichment/masking.send`，先遮罩再送，遮罩出錯就不送（`MaskError`）。它擋的是格式可辨識的敏感資訊（帳號、信箱、IP、憑證這類）；自由文字裡的業務機密沒有格式可認，由資料產生端在寫日誌之前負責去識別化（死區見 `masking.py` 與 `tests/test_llm_masking.py`）。**送往 Alertmanager 的通知內容不經過這個遮罩**，通知裡只放結構化欄位，不放日誌原文。
 6. **輸出即終點**：平台的產出是收斂後的事故卡、標準通知 payload（交給 Alertmanager 派發）、RCA 證據報告（證據不足就是 `undetermined`）。派工、聯絡、重啟、退版、改設定是外部維運系統與業務團隊的事。`aiops/` 不准起子行程、不准帶叢集或遠端執行的函式庫、不准呼叫任何修復腳本；RCA 報告的「建議動作」只是文字。
+7. **RCA 結論帶等級，推測不准看起來像定論**：每份 RCA 的根因結論有一個互斥的等級 `conclusion_type`（`engine/rca_types.ConclusionType`）——`confirmed`（span 或已驗證的證據直接支持）、`symptom_location`（只知道症狀出現在哪裡，根因未確認）、`topology_inference`（沒有 trace，純依拓撲／Lot 流向推測）、`undetermined`（沒有候選）。等級由根因演算法自己宣告（`RootCauseOperator.conclusion`，必填；同一個演算法不同情況屬於不同等級時在 `rank()` 裡寫 `ctx.rca_conclusion_type`），報告、段落、引擎不准用算子名稱判斷。它出現在三個地方：API 的 `root_cause.conclusion_type`／`conclusion_reason`、「可能的源頭」段落第一行（`CONCLUSION_LABELS`）、事件群的 `rca_conclusion_type`／`rca_concluded_at` 欄位（`migrations/postgres/0010`）；摘要模板（`llm_briefing`、`rca_narrator`）在非 `confirmed` 時不寫「根因是 X」。`symptom_location` 的判準在 `stages/rca/conclusion.py`（只有自身錯誤、而且是在依賴成功回應之後才失敗：trace 不記回應內容，分不出是自己的錯還是回應內容不對），**意思是「根因未確認」，不是「下游有問題」，不准因此把候選換成下游**；判準的門檻只在合成 span 上驗過（未驗證泛化），死區記在同一個檔案與 `tests/test_rca_conclusion_type.py`。
 
-自動檢查（`tests/test_architecture.py`）：`test_pipeline_layers_never_import_the_control_plane`、`test_platform_imports_nothing_from_outside_its_own_package`、`test_platform_never_executes_commands_or_remediation`，加上既有的 `test_algorithms_do_not_special_case_entities_or_lengths`、LLM 出口與 `hard_limit` 調參的測試。第 4 點「有沒有替外部補洞」與第 5 點「通知裡有沒有原文」機器只能擋一部分，靠 code review。
+自動檢查（`tests/test_architecture.py`）：`test_pipeline_layers_never_import_the_control_plane`、`test_platform_imports_nothing_from_outside_its_own_package`、`test_platform_never_executes_commands_or_remediation`，加上既有的 `test_algorithms_do_not_special_case_entities_or_lengths`、LLM 出口與 `hard_limit` 調參的測試。第 7 點在 `tests/test_rca_conclusion_type.py`（三個等級各一個端到端測試、演算法沒宣告等級不能定義、報告與引擎不准出現根因算子名稱）。第 4 點「有沒有替外部補洞」與第 5 點「通知裡有沒有原文」機器只能擋一部分，靠 code review。
 
 ---
 
@@ -90,6 +91,7 @@ class BaseOperator(ABC):
    * 序列隔離：`strict=False`（排程）時一條序列的**任何**例外（含演算法 bug 的 `ValueError`／`KeyError`）只記進 `errors`（訊息帶型別），其他序列照跑；`InfrastructureError` 例外，一律整輪失敗。`strict=True`（手動動作）照丟；抓回來是空的序列在 strict 下也丟 `NoDataError`（404），跟資料源說沒資料同一種錯，不走斷流（503）。
  * **RCA 根因演算法（`rca.root_cause.*`）**：
    * 繼承 `stages/rca/base.RootCauseOperator`，只寫 `rank(incident, ctx) -> list[RootCandidate]`（由可能到不可能排好；資料不足回空清單，段落會略過）。
+   * 必須宣告類別屬性 `conclusion`（給出候選時的結論等級：`confirmed`／`symptom_location`／`topology_inference`，見 §1.1 第 7 點），沒寫在定義類別時就丟 `TypeError`。沒有 trace、只看圖或先後的演算法宣告 `topology_inference`；沒有候選一律是 `undetermined`，不用自己寫。
    * 需要原始時序時，在它前面放 `ingestion.incident_series`（讀 `ctx.rca_series`），不准自己連資料源。
    * 證據不夠就回空清單，並把原因寫進 `ctx.rca_root_note`（「可能的源頭」段落會照出），不准為了有答案而硬湊候選。`rca_report` 預設的 `rca.root_cause.evidence` 讀 `ctx.rca_spans`；`ctx.rca_traces_failed`（trace 來源連不上）時不准退回拓撲硬猜。
    * span 統計（自身耗時、入口請求、流量來源）與日誌樣板／暴增排序是共用純函式，放 `stages/rca/spans.py`、`stages/rca/logs.py`，算子與段落都用同一份。

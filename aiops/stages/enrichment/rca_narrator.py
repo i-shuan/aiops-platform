@@ -17,6 +17,7 @@ from typing import Any
 from aiops.engine.context import PipelineContext
 from aiops.engine.operator import BaseOperator
 from aiops.engine.params import positive
+from aiops.engine.rca_types import CONCLUSION_LABELS
 from aiops.engine.registry import OperatorRegistry
 from aiops.stages.enrichment import narrative
 from aiops.stages.enrichment.base import LLMError, parse_json_reply
@@ -39,6 +40,10 @@ def _num(v: float) -> str:
     return f"{v:.3f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
 
 
+# 模板摘要第一句的開頭，依結論等級（engine/rca_types.ConclusionType）；confirmed 維持原本的「最可能的根因」
+_LEAD = {"symptom_location": "根因未確認，症狀出現的位置", "topology_inference": "沒有 trace 證據，依拓撲推測的源頭（未確認）"}
+
+
 def build_sections(ctx: PipelineContext) -> list[dict[str, str]]:
     """把已算好的結果攤成 {key, title, body}（narrative.validate 吃的形狀）。沒有內容的段落不列。"""
     out: list[dict[str, str]] = []
@@ -46,6 +51,8 @@ def build_sections(ctx: PipelineContext) -> list[dict[str, str]]:
         status = f"判定狀態：{UNDETERMINED_WORD}（{ctx.rca_undetermined_reason or '原因未記錄'}）"
     else:
         status = "判定狀態：ok"
+    if ctx.rca_root_candidates:  # 結論等級（演算法宣告的）：推測與症狀位置不准被寫成確定的根因
+        status += f"；{CONCLUSION_LABELS[ctx.rca_conclusion_type]}"
     out.append({"key": "rca_status", "title": "判定狀態", "body": status})
     # 候選是誰判的照實寫：LLM 判斷（rca.root_cause.llm）的分數是它自評的信心；其他（原本的機率模型，已移除）照舊寫機率
     by_llm = ctx.rca_root_algorithm == "rca.root_cause.llm"
@@ -81,7 +88,8 @@ def template(ctx: PipelineContext, sections: list[dict[str, str]]) -> dict[str, 
         summary = f"{UNDETERMINED_WORD}根因：{reason}。以下只列證據層算好的事實與原始日誌證據，請人工判讀。"
         claims.append({"text": f"{UNDETERMINED_WORD}：{reason}", "evidence": ["rca_status"]})
     elif ctx.rca_root_candidates:
-        summary = f"最可能的根因：{by_key['root_candidates']['body'].splitlines()[0].split('. ', 1)[-1]}"
+        lead = _LEAD.get(ctx.rca_conclusion_type, "最可能的根因")
+        summary = f"{lead}：{by_key['root_candidates']['body'].splitlines()[0].split('. ', 1)[-1]}"
         claims.append({"text": summary, "evidence": ["root_candidates"]})
     else:
         summary = f"證據不足，不指認單一服務：{ctx.rca_root_note or '機率模型沒有給出候選'}"

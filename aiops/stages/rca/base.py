@@ -15,6 +15,7 @@ from typing import ClassVar
 
 from aiops.engine.context import PipelineContext, ReportSection, RootCandidate
 from aiops.engine.errors import NotFound
+from aiops.engine.rca_types import CONCLUSION_TYPES, ConclusionType
 from aiops.engine.types import Incident
 from aiops.engine.operator import BaseOperator
 
@@ -47,9 +48,24 @@ def in_graph(entity: str, edges: set[tuple[str, str]]) -> bool:
 
 
 class RootCauseOperator(BaseOperator):
-    """根因演算法的契約。rank() 回傳由最可能到最不可能排好的候選；回空清單代表資料不足（段落會略過）。"""
+    """根因演算法的契約。rank() 回傳由最可能到最不可能排好的候選；回空清單代表資料不足（段落會略過）。
+
+    結論等級（engine/rca_types.ConclusionType）由演算法自己宣告，報告與引擎不看算子名稱：
+    - 類別屬性 conclusion：這個演算法「給出候選時」屬於哪一級（必填，沒寫在定義類別時就報錯）
+    - 同一個演算法不同情況屬於不同等級時（退回別的演算法、只看得到症狀），在 rank() 裡寫 ctx.rca_conclusion_type
+      與 ctx.rca_conclusion_reason 覆寫這一次的等級
+    - 沒有候選一律是 undetermined，演算法寫什麼都不算
+    """
 
     scope: ClassVar[str] = "batch"
+    conclusion: ClassVar[ConclusionType]
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        declared = getattr(cls, "conclusion", None)
+        if declared not in CONCLUSION_TYPES or declared == "undetermined":
+            raise TypeError(f"{cls.__name__} 必須宣告 conclusion（給出候選時的結論等級）："
+                            f"{[c for c in CONCLUSION_TYPES if c != 'undetermined']}，不是 {declared!r}")
 
     @abstractmethod
     def rank(self, incident: Incident, ctx: PipelineContext) -> list[RootCandidate]: ...
@@ -57,9 +73,15 @@ class RootCauseOperator(BaseOperator):
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         incident = need_incident(ctx)
         ctx.rca_root_note = ""
+        ctx.rca_conclusion_reason = ""
+        ctx.rca_conclusion_type = declared = self.conclusion  # rank() 可以覆寫這一次的等級
         ctx.rca_root_candidates = self.rank(incident, ctx)
+        if not ctx.rca_root_candidates:
+            ctx.rca_conclusion_type = "undetermined"
+        elif ctx.rca_conclusion_type not in CONCLUSION_TYPES or ctx.rca_conclusion_type == "undetermined":
+            ctx.rca_conclusion_type = declared  # 有候選卻寫了不認得的等級：退回演算法宣告的那一級
         ctx.rca_root_algorithm = self.operator_name
-        ctx.log(f"root_cause:{self.operator_name}:{len(ctx.rca_root_candidates)}")
+        ctx.log(f"root_cause:{self.operator_name}:{len(ctx.rca_root_candidates)}:{ctx.rca_conclusion_type}")
         return ctx
 
 

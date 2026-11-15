@@ -173,4 +173,6 @@ def test_insufficient_evidence_shows_up_in_the_report_section():
     ctx.rca_root_algorithm = "rca.root_cause.evidence"
     section = OperatorRegistry.create("rca.section.root_cause_candidates", {})
     incident = ctx.incidents[0]
-    assert section.applies(incident, ctx) and section.build(incident, ctx).startswith("證據不足")
+    level, body = section.build(incident, ctx).split("\n", 1)  # 第一行是結論等級：沒有候選 = 無法判定
+    assert level.startswith("【結論等級：無法判定（undetermined）】")
+    assert section.applies(incident, ctx) and body.startswith("證據不足")

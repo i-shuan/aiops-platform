@@ -52,6 +52,10 @@ class IncidentRow(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 建立事件群當下用的拓撲／Lot 流向（只留跟這件事有關的邊）：RCA 優先用它，報告才跟當時的收斂結果一致、可重現
     context: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 最近一次 RCA 的結論等級（engine/rca_types.ConclusionType）與產生時間；'' / NULL = 還沒跑過 RCA（含加欄位之前的舊列）。
+    # 每次重跑 RCA 覆蓋。migrations/postgres/0010
+    rca_conclusion_type: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    rca_concluded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SilenceRow(Base):

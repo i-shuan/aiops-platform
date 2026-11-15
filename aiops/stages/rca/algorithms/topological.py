@@ -19,6 +19,9 @@ def onset_text(ts, earliest) -> str:
 
 @OperatorRegistry.register("rca.root_cause.topological")
 class TopologicalRootCause(RootCauseOperator):
+    # 只看圖的結構與告警先後、不看任何 trace：給出的候選一律是推測（engine/rca_types.ConclusionType）
+    conclusion = "topology_inference"
+
     def rank(self, incident, ctx):
         edges = graph_edges(ctx)
         if not any(in_graph(e, edges) for e in incident.entities):

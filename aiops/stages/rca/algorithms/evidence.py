@@ -65,6 +65,7 @@ from aiops.engine.context import RootCandidate
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.stages.rca.base import RootCauseOperator, first_seen
+from aiops.stages.rca.conclusion import symptom_only
 from aiops.stages.rca.logs import service_burst
 from aiops.stages.rca.mq import async_attribution, lag_text, producer_windows, window_text
 from aiops.stages.rca.spans import EXTERNAL_CALLER, UNKNOWN_CALLER, inbound_callers, resource_kinds, window_stats
@@ -88,7 +89,13 @@ class EvidenceRootCause(RootCauseOperator):
     min_lag_seconds（60；訊息延遲 P95 到這個秒數、而且比事件前多一倍才標成積壓，見 stages/rca/mq.is_backlog）、
     min_fanout_ratio（2.0；呼叫者對下游的扇出，事件期間 ÷ 事件前達到這個倍數才指名為流量放大者，見模組說明）。
 
-    dependency 不改分數、不改排名：候選仍是服務（拓撲、傳播路徑、標準答案都不變），只多告訴人「該查的是它等的東西」。"""
+    dependency 不改分數、不改排名：候選仍是服務（拓撲、傳播路徑、標準答案都不變），只多告訴人「該查的是它等的東西」。
+
+    結論等級（engine/rca_types.ConclusionType）：有候選時預設 confirmed（span 的自身耗時／自身錯誤是直接證據）。兩種情況覆寫：
+    - 沒有 trace、退回 fallback 算子：用 fallback 算子自己宣告的等級（預設的 topological 是 topology_inference）
+    - 第一名只代表症狀位置（_conclude）：symptom_location，排名與分數不變"""
+
+    conclusion = "confirmed"
 
     def __init__(self, self_weight: float = 1.0, error_weight: float = 0.5, log_weight: float = 0.0,
                  min_requests: int = 20, min_self_increase_ms: float = 5.0, min_self_increase_ratio: float = 0.2,
@@ -276,7 +283,9 @@ class EvidenceRootCause(RootCauseOperator):
                                                "不改用拓撲推測，避免在資料源出問題時把下游服務當成根因")
             if not self.fallback:
                 return self._insufficient(ctx, "這一輪沒有撈到 trace（span），無法比較各服務的自身耗時")
-            ranked = OperatorRegistry.create(self.fallback, {}).rank(incident, ctx)
+            fallback = OperatorRegistry.create(self.fallback, {})
+            ranked = fallback.rank(incident, ctx)
+            ctx.rca_conclusion_type = fallback.conclusion  # 候選是它給的，等級也照它宣告的（不看名稱）
             name = self.fallback.removeprefix("rca.root_cause.")
             ctx.rca_root_note = (f"這一輪沒有 trace 證據，以上改用 {name} 依拓撲／Lot 流向推測，不是自身耗時判斷"
                                  "（拓撲假設異常從被呼叫端往呼叫端傳，碰到上游流量放大會排反）" if ranked
@@ -372,6 +381,7 @@ class EvidenceRootCause(RootCauseOperator):
                              for r in ordered_rows if r["score"] >= top["score"] / self.min_dominance)
             return self._insufficient(ctx, f"前幾名拉不開（第一名 < 第二名 × {self.min_dominance:g}）：{close}。"
                                            "幾個服務一起變慢且程度相近，常見於共同的外部因素，不指認單一服務")
+        self._conclude(ctx, top, spans, start, end)
         kinds = resource_kinds(spans)
         out = []
         for r in ordered_rows:
@@ -379,6 +389,31 @@ class EvidenceRootCause(RootCauseOperator):
             out.append(RootCandidate(r["entity"], r["score"], self._reason(r, bursts, base_min, load, kinds),
                                      dependency, self._amplifier(r, self._async(r, attribution), load, ingress)))
         return out
+
+    def _conclude(self, ctx, top, spans, start, end) -> None:
+        """第一名只代表症狀位置時，把這一次的結論降成 symptom_location（不改排名）。三種情況，都是通用的資料特徵：
+        1. 第一名沒過顯著門檻（分數是相對值：別人更不顯著時它也會排第一，理由裡已標「僅供參考」）
+        2. 它處理訊息時自己出錯、生產者在發布時窗沒有症狀（mq_suspect）：trace 看不到訊息內容
+        3. 它只有自己出錯、而且是在依賴成功回應之後才失敗（stages/rca/conclusion.symptom_only，含判準依據與死區）
+        第一名的分數有一部分是從別人轉記來的（流量放大者、訊息生產者）時不降：那是量到的扇出／發布時窗異常，不是症狀位置。"""
+        entity = top["entity"]
+        if not top["hit"]:
+            ctx.rca_conclusion_type = "symptom_location"
+            ctx.rca_conclusion_reason = (f"第一名 {entity} 的自身耗時與自身錯誤率增量都沒有過顯著門檻（排第一只是相對其他候選），"
+                                         "不足以確認是根因")
+            return
+        if top["moved_in"] or top.get("amp_of") or top.get("mq_in") or top.get("amp_added") or "pub" in top:
+            return
+        slower = top["self_raw"] >= max(self.min_self_ms, top["b"].self_ms_per_request * self.min_self_ratio)
+        if top.get("mq_suspect") and not slower:
+            ctx.rca_conclusion_type = "symptom_location"
+            ctx.rca_conclusion_reason = (f"{entity} 處理訊息時自己出錯，訊息生產者在發布時窗沒有症狀；trace 看不到訊息內容，"
+                                         "分不出是它自己的程式錯還是訊息內容有問題。根因未確認")
+            return
+        why = symptom_only(entity, top["b"], top["d"], spans, start, end, min_self_ms=self.min_self_ms,
+                           min_self_ratio=self.min_self_ratio, min_error_increase=self.min_error_increase)
+        if why:
+            ctx.rca_conclusion_type, ctx.rca_conclusion_reason = "symptom_location", why
 
     def _dependency(self, r, kinds: dict[str, str]) -> tuple[str, dict]:
         """單一下游資源佔了這個服務自身耗時增量（或入口失敗）的 min_dependency_share 以上，就是下鑽歸因。

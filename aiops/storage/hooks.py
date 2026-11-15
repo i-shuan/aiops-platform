@@ -245,6 +245,8 @@ class StorageHooks:
                 if o.changed:
                     Incidents.update_snapshot(o.id, o.incident.to_dict(), o.severity)
             ExternalAnomalies.mark_processed(ctx.external_anomaly_ids)
+            if ctx.incident_id is not None and ctx.rca_root_algorithm:  # RCA 跑過根因節點：結論等級記回事件群
+                Incidents.record_rca(ctx.incident_id, ctx.rca_conclusion_type, ctx.now)
 
         run_in_transaction(write)
         ctx.incident_ids.update(new_ids)

@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import timedelta
 from typing import Any
 
 from aiops.engine.context import PipelineContext, RootCandidate
@@ -46,7 +47,9 @@ from aiops.stages.enrichment.evidence_extractor import (LLM_ALL_REJECTED, LLM_BA
                                                         known_entities, resolve_provider)
 from aiops.stages.enrichment.masking import MASK_FAILED, Masker, MaskError, MaskPolicy, mask_or_fail, rca_keep_names
 from aiops.stages.rca.base import RootCauseOperator, first_seen
+from aiops.stages.rca.conclusion import symptom_only
 from aiops.stages.rca.mq import async_attribution
+from aiops.stages.rca.spans import window_stats
 
 logger = logging.getLogger("aiops.enrichment")
 
@@ -496,7 +499,13 @@ class LLMRootCause(RootCauseOperator):
 
     敏感資訊遮罩：事實（detail 裡的日誌樣板）、日誌證據的 quote、呼叫圖在組 prompt 之前遮過，驗證也對遮過的那份比
     （數字、資源名都不遮，所以 attribution 從事實抄的數字不變；已知名稱就算長得像 IP 也保留）。遮罩失敗 = mask_failed，不送。
+
+    結論等級（engine/rca_types.ConclusionType）：有候選時是 confirmed（每個候選都引用了通過驗證的事實或日誌證據）。
+    例外：第一名沒有引用任何關於它自己的日誌證據，而 span 顯示它只有症狀位置（stages/rca/conclusion.symptom_only，
+    跟確定性的 evidence 同一個判準）時降成 symptom_location——LLM 看到的事實同樣來自 span，分不出回應內容對不對。
     """
+
+    conclusion = "confirmed"
 
     def __init__(self, provider: str | None = None, model: str | None = None, base_url: str | None = None,
                  json_mode: bool = True, timeout_seconds: float = 60.0, retries: int = 0, max_facts: int = 150,
@@ -568,7 +577,9 @@ class LLMRootCause(RootCauseOperator):
         accepted.sort(key=lambda c: -c["confidence"])  # 穩定排序：信心相同時維持 LLM 給的順序
         in_incident = set(incident.entities)
         out: list[RootCandidate] = []
-        for c in merge_by_entity(accepted)[:self.top_k]:
+        merged = merge_by_entity(accepted)[:self.top_k]
+        self._conclude(ctx, incident, merged[0], evidence)
+        for c in merged:
             entity, cites = c["entity"], c["cites"]
             attribution = resource_attribution(entity, c["resources"], facts, cites)
             notes: list[str] = []
@@ -599,6 +610,24 @@ class LLMRootCause(RootCauseOperator):
                 ensure_ascii=False))
             out.append(RootCandidate(entity, round(c["confidence"], 4), reason, dependency, attribution))
         return out
+
+    @staticmethod
+    def _conclude(ctx: PipelineContext, incident: Incident, top: dict, evidence: list[dict]) -> None:
+        """第一名只代表症狀位置時把這一次的結論降成 symptom_location（不改排名）。它引用了關於自己的日誌證據
+        （例如它自己的 OOM、死結）就不降：那是 span 以外的直接證據。沒有 span、或樣本不足以比較，也不降（判不出來）。"""
+        cited_own_log = any(e["id"] in top["cites"] and e.get("entity") == top["entity"] and e.get("state") == "present"
+                            for e in evidence)
+        spans = ctx.rca_spans
+        if cited_own_log or not spans:
+            return
+        start, end = as_utc(incident.start), as_utc(incident.end) + timedelta(minutes=1)
+        first_ts = as_utc(ctx.rca_main_start) if ctx.rca_main_start else min(as_utc(s.ts) for s in spans)
+        if first_ts >= start:
+            return
+        why = symptom_only(top["entity"], window_stats(spans, first_ts, start).get(top["entity"]),
+                           window_stats(spans, start, end).get(top["entity"]), spans, start, end)
+        if why:
+            ctx.rca_conclusion_type, ctx.rca_conclusion_reason = "symptom_location", why
 
     @staticmethod
     def _undetermined(ctx: PipelineContext, code: str, detail: str) -> list[RootCandidate]:

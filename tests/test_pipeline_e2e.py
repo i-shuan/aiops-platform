@@ -317,6 +317,8 @@ def test_factory_groups_and_root_cause_points_to_the_upstream_tool(now, sent):
 
     rca = run("rca_report", incident_id=result["incidents"][0]["id"])
     roots = next(s["body"] for s in rca["sections"] if s["key"] == "root_cause_candidates")
+    level, roots = roots.split("\n", 1)  # 第一行是結論等級：工廠沒有 trace，依 Lot 流向推測
+    assert level.startswith("【結論等級：拓撲推測（topology_inference）】")
     assert roots.startswith("1. LITHO-02")  # 上游機台是源頭（方向跟 IT 相反）
 
 
@@ -330,5 +332,7 @@ def test_rca_gets_topology_and_trace_evidence_without_the_caller_passing_anythin
     assert [i["entities"] for i in result["incidents"]] == [["cart", "frontend"]]  # 拓撲自動推導 -> 併成一件
     rca = run("rca_report", incident_id=result["incidents"][0]["id"])
     sections = {s["key"]: s["body"] for s in rca["sections"]}
-    assert sections["root_cause_candidates"].startswith("1. cart")
+    level, candidates = sections["root_cause_candidates"].split("\n", 1)  # 第一行是結論等級：這裡沒有 span，是拓撲推測
+    assert level.startswith("【結論等級：拓撲推測（topology_inference）】")
+    assert candidates.startswith("1. cart")
     assert "錯誤率最高 100%" in sections["trace_evidence"]

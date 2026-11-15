@@ -447,7 +447,10 @@ def test_rca_ranks_root_causes_from_traces_fetched_on_demand(now, monkeypatch):
     # 排不出根因時「可能的源頭」段落不再整段消失，而是寫明證據不足（以前是放進 skipped）
     assert without["root_cause"]["candidates"] == [] and without["trace_fetch"]["spans"] == 0
     candidates = {s["key"]: s["body"] for s in without["sections"]}["root_cause_candidates"]
-    assert candidates.startswith("證據不足") and "沒有 trace" in candidates
+    # 段落第一行現在固定是結論等級的標示（engine/rca_types.CONCLUSION_LABELS），原因從第二行開始
+    level, reason = candidates.split("\n", 1)
+    assert level.startswith("【結論等級：無法判定（undetermined）】")
+    assert reason.startswith("證據不足") and "沒有 trace" in candidates
 
     # 這個測試驗的是「隨需撈 trace -> 還原拓撲 -> 拓撲排序」這條路，所以明確指定 topological
     # （rca_report 的預設根因改成 evidence 了，見下面）
