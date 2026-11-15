@@ -1,0 +1,865 @@
+{
+  "uid": "data-health",
+  "title": "資料健康度：資料有沒有進來、是誰的問題",
+  "description": "平台每一輪記下每條資料流（管線 × 服務 × 查詢）有沒有抓到資料，以及整輪管線的執行結果。資料來自平台資料庫的 data_stream_health、pipeline_run_health（唯讀帳號），只顯示、不發通知。",
+  "tags": [
+    "aiops",
+    "data-health"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "pipeline",
+        "label": "管線",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "aiops-platform-db"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "query": "SELECT DISTINCT pipeline FROM pipeline_run_health UNION SELECT DISTINCT pipeline FROM data_stream_health ORDER BY 1",
+        "definition": "SELECT DISTINCT pipeline FROM pipeline_run_health UNION SELECT DISTINCT pipeline FROM data_stream_health ORDER BY 1"
+      },
+      {
+        "name": "service",
+        "label": "服務",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "aiops-platform-db"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "query": "SELECT DISTINCT entity FROM data_stream_health WHERE pipeline IN ($pipeline) ORDER BY 1",
+        "definition": "SELECT DISTINCT entity FROM data_stream_health WHERE pipeline IN ($pipeline) ORDER BY 1"
+      },
+      {
+        "name": "scope",
+        "label": "時間軸範圍",
+        "type": "custom",
+        "includeAll": false,
+        "multi": false,
+        "query": "只看出過問題的 : problem,全部資料流 : all",
+        "current": {
+          "selected": true,
+          "text": "只看出過問題的",
+          "value": "problem"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "只看出過問題的",
+            "value": "problem"
+          },
+          {
+            "selected": false,
+            "text": "全部資料流",
+            "value": "all"
+          }
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "目前有問題的資料流",
+      "description": "每條資料流最新的狀態不是「正常」的都列在這裡（不用先選服務）。沒有資料（斷流）= 以前有資料、現在沒有；從未有過資料 = 平台開始檢查以來一筆都沒有（多半是還沒埋點、或查詢對不到）；設定或查詢錯誤 = 資料源說查詢不合法或欄位不存在。這張表是空的 = 目前每條資料流都有資料進來。",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aiops-platform-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aiops-platform-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT pipeline AS \"管線\", entity AS \"服務\", query AS \"查詢\", status AS \"狀態\", message AS \"訊息\",\n  started_at AS \"從什麼時候開始\", last_checked_at AS \"最後確認\", checks AS \"連續幾輪\"\nFROM data_stream_health\nWHERE is_current AND status <> 'ok' AND pipeline IN ($pipeline) AND entity IN ($service)\nORDER BY started_at"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "狀態"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "text": "正常",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "no_data": {
+                        "text": "沒有資料（斷流）",
+                        "color": "red",
+                        "index": 1
+                      },
+                      "never_seen": {
+                        "text": "從未有過資料",
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "config_error": {
+                        "text": "設定或查詢錯誤",
+                        "color": "orange",
+                        "index": 3
+                      },
+                      "unreachable": {
+                        "text": "資料源連不上",
+                        "color": "dark-red",
+                        "index": 4
+                      },
+                      "error": {
+                        "text": "其他錯誤",
+                        "color": "yellow",
+                        "index": 5
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "訊息"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 360
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "管線目前的執行結果",
+      "description": "每條管線最近一輪的結果。整輪失敗時平台不會送出任何通知、心跳也不續命；管線定義載入失敗 = 這條管線根本沒在跑。「最後一輪」離現在很久 = 排程沒有在跑，或資料庫當時連不上（那段時間不會有紀錄）。",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aiops-platform-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aiops-platform-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT pipeline AS \"管線\", status AS \"狀態\", message AS \"訊息\", started_at AS \"從什麼時候開始\",\n  last_checked_at AS \"最後一輪\", runs AS \"連續幾輪\", targets AS \"序列數\", failed_targets AS \"出錯的序列\"\nFROM pipeline_run_health\nWHERE is_current AND pipeline IN ($pipeline)\nORDER BY CASE WHEN status = 'ok' THEN 1 ELSE 0 END, pipeline"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "狀態"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "text": "成功",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "degraded": {
+                        "text": "完成但有序列出錯",
+                        "color": "yellow",
+                        "index": 1
+                      },
+                      "infrastructure_error": {
+                        "text": "整輪失敗（基礎設施／資料斷流）",
+                        "color": "red",
+                        "index": 2
+                      },
+                      "workflow_error": {
+                        "text": "管線定義載入失敗（沒有執行）",
+                        "color": "orange",
+                        "index": 3
+                      },
+                      "error": {
+                        "text": "整輪失敗（其他錯誤）",
+                        "color": "dark-red",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "訊息"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 360
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "state-timeline",
+      "title": "每條資料流的狀態時間軸（用上方「服務」下拉選單看單一服務的歷史）",
+      "description": "一列一條資料流（管線 / 服務 / 查詢），顏色 = 狀態。最後一次檢查之後是空白：平台沒有再檢查到這條資料流（管線沒跑、整輪在抓到它之前就失敗、或紀錄寫不進資料庫），不是「正常」。兩段不同狀態之間畫成前一個狀態延續到下一次紀錄；要精確的起訖時間看最下面的表（開始、最後確認）。預設只畫時間範圍內出過問題的資料流。",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aiops-platform-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aiops-platform-db"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT t AS \"time\", stream AS metric, v AS value FROM (\n  SELECT CASE WHEN h.started_at < $__timeFrom() THEN $__timeFrom() ELSE h.started_at END AS t, h.pipeline || ' / ' || h.entity || ' / ' || h.query AS stream, CASE h.status WHEN 'ok' THEN 0 WHEN 'no_data' THEN 1 WHEN 'never_seen' THEN 2 WHEN 'config_error' THEN 3 WHEN 'unreachable' THEN 4 WHEN 'error' THEN 5 END AS v\n  FROM data_stream_health h WHERE h.started_at <= $__timeTo() AND h.last_checked_at >= $__timeFrom() AND h.pipeline IN ($pipeline) AND h.entity IN ($service) AND ('$scope' = 'all' OR EXISTS (SELECT 1 FROM data_stream_health p WHERE p.pipeline = h.pipeline AND p.entity = h.entity AND p.query = h.query AND p.status <> 'ok' AND p.started_at <= $__timeTo() AND p.last_checked_at >= $__timeFrom()))\n  UNION\n  SELECT h.last_checked_at AS t, h.pipeline || ' / ' || h.entity || ' / ' || h.query AS stream, CASE h.status WHEN 'ok' THEN 0 WHEN 'no_data' THEN 1 WHEN 'never_seen' THEN 2 WHEN 'config_error' THEN 3 WHEN 'unreachable' THEN 4 WHEN 'error' THEN 5 END AS v\n  FROM data_stream_health h WHERE h.started_at <= $__timeTo() AND h.last_checked_at >= $__timeFrom() AND h.pipeline IN ($pipeline) AND h.entity IN ($service) AND ('$scope' = 'all' OR EXISTS (SELECT 1 FROM data_stream_health p WHERE p.pipeline = h.pipeline AND p.entity = h.entity AND p.query = h.query AND p.status <> 'ok' AND p.started_at <= $__timeTo() AND p.last_checked_at >= $__timeFrom()))\n  UNION\n  SELECT h.last_checked_at + interval '1 second' AS t, h.pipeline || ' / ' || h.entity || ' / ' || h.query AS stream, -1 AS v\n  FROM data_stream_health h WHERE h.is_current AND h.started_at <= $__timeTo() AND h.last_checked_at >= $__timeFrom() AND h.pipeline IN ($pipeline) AND h.entity IN ($service) AND ('$scope' = 'all' OR EXISTS (SELECT 1 FROM data_stream_health p WHERE p.pipeline = h.pipeline AND p.entity = h.entity AND p.query = h.query AND p.status <> 'ok' AND p.started_at <= $__timeTo() AND p.last_checked_at >= $__timeFrom()))\n) x ORDER BY 1"
+        }
+      ],
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "正常",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "沒有資料（斷流）",
+                  "color": "red",
+                  "index": 1
+                },
+                "2": {
+                  "text": "從未有過資料",
+                  "color": "purple",
+                  "index": 2
+                },
+                "3": {
+                  "text": "設定或查詢錯誤",
+                  "color": "orange",
+                  "index": 3
+                },
+                "4": {
+                  "text": "資料源連不上",
+                  "color": "dark-red",
+                  "index": 4
+                },
+                "5": {
+                  "text": "其他錯誤",
+                  "color": "yellow",
+                  "index": 5
+                },
+                "-1": {
+                  "text": "沒有紀錄（平台沒有檢查到）",
+                  "color": "transparent",
+                  "index": 6
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "state-timeline",
+      "title": "管線每輪的執行結果",
+      "description": "一列一條管線，顏色 = 執行結果。最後一輪之後是空白：沒有任何一輪留下紀錄（排程沒跑，或資料庫當時連不上）。",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aiops-platform-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aiops-platform-db"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT t AS \"time\", pipeline AS metric, v AS value FROM (\n  SELECT CASE WHEN h.started_at < $__timeFrom() THEN $__timeFrom() ELSE h.started_at END AS t, h.pipeline, CASE h.status WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 WHEN 'infrastructure_error' THEN 2 WHEN 'workflow_error' THEN 3 WHEN 'error' THEN 4 END AS v\n  FROM pipeline_run_health h WHERE h.started_at <= $__timeTo() AND h.last_checked_at >= $__timeFrom() AND h.pipeline IN ($pipeline)\n  UNION\n  SELECT h.last_checked_at AS t, h.pipeline, CASE h.status WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 WHEN 'infrastructure_error' THEN 2 WHEN 'workflow_error' THEN 3 WHEN 'error' THEN 4 END AS v\n  FROM pipeline_run_health h WHERE h.started_at <= $__timeTo() AND h.last_checked_at >= $__timeFrom() AND h.pipeline IN ($pipeline)\n  UNION\n  SELECT h.last_checked_at + interval '1 second' AS t, h.pipeline, -1 AS v\n  FROM pipeline_run_health h WHERE h.is_current AND h.started_at <= $__timeTo() AND h.last_checked_at >= $__timeFrom() AND h.pipeline IN ($pipeline)\n) x ORDER BY 1"
+        }
+      ],
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "成功",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "完成但有序列出錯",
+                  "color": "yellow",
+                  "index": 1
+                },
+                "2": {
+                  "text": "整輪失敗（基礎設施／資料斷流）",
+                  "color": "red",
+                  "index": 2
+                },
+                "3": {
+                  "text": "管線定義載入失敗（沒有執行）",
+                  "color": "orange",
+                  "index": 3
+                },
+                "4": {
+                  "text": "整輪失敗（其他錯誤）",
+                  "color": "dark-red",
+                  "index": 4
+                },
+                "-1": {
+                  "text": "沒有紀錄（平台沒有檢查到）",
+                  "color": "transparent",
+                  "index": 5
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "管線執行結果的變化（時間範圍內）",
+      "description": "每一列是一段連續相同的結果：從「開始」到「最後一輪」共幾輪。",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aiops-platform-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aiops-platform-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT pipeline AS \"管線\", status AS \"狀態\", started_at AS \"開始\", last_checked_at AS \"最後一輪\", runs AS \"幾輪\",\n  targets AS \"序列數\", failed_targets AS \"出錯的序列\", message AS \"訊息\"\nFROM pipeline_run_health\nWHERE started_at <= $__timeTo() AND last_checked_at >= $__timeFrom() AND pipeline IN ($pipeline)\nORDER BY started_at DESC\nLIMIT 500"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "狀態"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "text": "成功",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "degraded": {
+                        "text": "完成但有序列出錯",
+                        "color": "yellow",
+                        "index": 1
+                      },
+                      "infrastructure_error": {
+                        "text": "整輪失敗（基礎設施／資料斷流）",
+                        "color": "red",
+                        "index": 2
+                      },
+                      "workflow_error": {
+                        "text": "管線定義載入失敗（沒有執行）",
+                        "color": "orange",
+                        "index": 3
+                      },
+                      "error": {
+                        "text": "整輪失敗（其他錯誤）",
+                        "color": "dark-red",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "訊息"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 360
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "設定錯誤清單（時間範圍內）",
+      "description": "查詢寫錯、欄位不存在、資料源回應格式不對（資料流層級），以及管線定義載入失敗（管線層級）。這些要改設定才會好，等不會好。",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aiops-platform-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aiops-platform-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT '資料流' AS \"層級\", pipeline AS \"管線\", entity AS \"服務\", query AS \"查詢\", message AS \"訊息\",\n  started_at AS \"開始\", last_checked_at AS \"最後確認\", is_current AS \"目前仍是\"\nFROM data_stream_health\nWHERE status = 'config_error' AND started_at <= $__timeTo() AND last_checked_at >= $__timeFrom() AND pipeline IN ($pipeline) AND entity IN ($service)\nUNION ALL\nSELECT '管線定義' AS \"層級\", pipeline AS \"管線\", '' AS \"服務\", '' AS \"查詢\", message AS \"訊息\",\n  started_at AS \"開始\", last_checked_at AS \"最後確認\", is_current AS \"目前仍是\"\nFROM pipeline_run_health\nWHERE status = 'workflow_error' AND started_at <= $__timeTo() AND last_checked_at >= $__timeFrom() AND pipeline IN ($pipeline)\nORDER BY 6 DESC\nLIMIT 500"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "狀態"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "text": "正常",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "no_data": {
+                        "text": "沒有資料（斷流）",
+                        "color": "red",
+                        "index": 1
+                      },
+                      "never_seen": {
+                        "text": "從未有過資料",
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "config_error": {
+                        "text": "設定或查詢錯誤",
+                        "color": "orange",
+                        "index": 3
+                      },
+                      "unreachable": {
+                        "text": "資料源連不上",
+                        "color": "dark-red",
+                        "index": 4
+                      },
+                      "error": {
+                        "text": "其他錯誤",
+                        "color": "yellow",
+                        "index": 5
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "訊息"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 360
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "資料流出問題的紀錄（時間範圍內，依上方篩選）",
+      "description": "每一列是一段連續相同的非正常狀態。要證明「某個時間點沒有資料進來」看這裡：該時間落在哪一列的「開始」與「最後確認」之間。",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aiops-platform-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aiops-platform-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT pipeline AS \"管線\", entity AS \"服務\", query AS \"查詢\", status AS \"狀態\", started_at AS \"開始\",\n  last_checked_at AS \"最後確認\", checks AS \"幾輪\", message AS \"訊息\"\nFROM data_stream_health\nWHERE started_at <= $__timeTo() AND last_checked_at >= $__timeFrom() AND pipeline IN ($pipeline) AND entity IN ($service) AND status <> 'ok'\nORDER BY started_at DESC\nLIMIT 500"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "狀態"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "text": "正常",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "no_data": {
+                        "text": "沒有資料（斷流）",
+                        "color": "red",
+                        "index": 1
+                      },
+                      "never_seen": {
+                        "text": "從未有過資料",
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "config_error": {
+                        "text": "設定或查詢錯誤",
+                        "color": "orange",
+                        "index": 3
+                      },
+                      "unreachable": {
+                        "text": "資料源連不上",
+                        "color": "dark-red",
+                        "index": 4
+                      },
+                      "error": {
+                        "text": "其他錯誤",
+                        "color": "yellow",
+                        "index": 5
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "訊息"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 360
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

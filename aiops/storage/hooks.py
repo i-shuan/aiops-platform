@@ -37,8 +37,10 @@ from aiops.storage.repository import (
     LotPaths,
     Mappings,
     Notifications,
+    RunHealth,
     ServiceEdges,
     Silences,
+    StreamHealth,
     Traces,
 )
 
@@ -161,6 +163,7 @@ class StorageHooks:
                                                           model["artifact_format"])
         last = Anomalies.latest_ts(ctx.pipeline, target.entity, target.query)
         ctx.last_anomaly_ts = as_utc(last) if last else None
+        ctx.stream_seen_before = StreamHealth.ever_ok(ctx.pipeline, target.entity, target.query)
         if detector_nodes:
             ctx.training_exclusions = self._exclusions_for(ctx, target.entity, (target.attrs or {}).get("dept"))
 
@@ -272,4 +275,19 @@ class StorageHooks:
                 Incidents.mark_resolved(incident_id, ctx.now.replace(tzinfo=None))
 
         if sent or ctx.resolved_incident_ids:
+            run_in_transaction(write)
+
+    def record_health(self, ctx: PipelineContext) -> None:
+        """資料健康度：這一輪每條資料流的檢查結果與整輪的執行結果，寫成狀態區間（狀態沒變只把最後確認時間往後推）。
+        引擎在整輪結束時呼叫——成功、整輪失敗（InfrastructureError…）都會呼叫；載入失敗（WorkflowError）由組裝點
+        interfaces/runner 呼叫。跟 persist_batch 分開的交易：整輪失敗時最終結果沒有寫，但「這一輪失敗了、哪些資料流沒資料」要留下來。
+        資料庫本身連不上時這裡也寫不進去（呼叫端只記 log）：那段時間在紀錄上是空白，不是「正常」。"""
+        def write() -> None:
+            for c in ctx.stream_checks:
+                StreamHealth.record(ctx.pipeline, c.entity, c.query, c.source_type, c.status, c.message, ctx.now)
+            if ctx.run_check is not None:
+                RunHealth.record(ctx.pipeline, ctx.run_check.status, ctx.run_check.message, ctx.now,
+                                 ctx.run_check.targets, ctx.run_check.failed)
+
+        if ctx.stream_checks or ctx.run_check is not None:
             run_in_transaction(write)

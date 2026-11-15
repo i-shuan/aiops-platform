@@ -8,7 +8,7 @@ import importlib
 import logging
 import pkgutil
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from aiops.engine.context import PipelineContext
 from aiops.engine.errors import BadRequest, NotFound, WorkflowError
+from aiops.engine.health import run_status
 from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
 from aiops.storage.hooks import StorageHooks
 from aiops.storage.repository import Incidents
@@ -108,6 +109,30 @@ def run_context(workflow: str, *, request: BaseModel | None = None, incident_id:
                 strict: bool = True, allow_file: bool = False) -> PipelineContext:
     return build_pipeline(workflow, allow_file=allow_file).run(now=now, targets=targets, incident_id=incident_id,
                                                                request=request, strict=strict)
+
+
+def run_scheduled(workflow: str, now: datetime | None = None) -> PipelineContext:
+    """排程入口（interfaces/cli）跑一輪：某條序列失敗只記在 errors（strict=False），可以用自己的 YAML 檔。
+    跟 run_context 的差別只有一件事：管線定義載入失敗（WorkflowError：YAML 寫錯、算子參數不合法）時，這一輪根本沒跑、
+    引擎沒機會記，在這裡補記一筆管線層級的 workflow_error（資料健康度），事後才查得到「那段時間管線沒在跑、原因是設定」。
+    只有排程補記：API 與手動動作的設定錯誤直接回給呼叫的人，而且維持「報錯之前不碰資料庫」（tests/test_fail_fast.py）。"""
+    try:
+        pipeline = build_pipeline(workflow, allow_file=True)
+    except WorkflowError as e:
+        record_load_failure(workflow, e, now)
+        raise
+    return pipeline.run(now=now, strict=False)
+
+
+def record_load_failure(workflow: str, error: WorkflowError, now: datetime | None = None) -> None:
+    """名稱用呼叫時給的（內建管線 = 檔名 = YAML 的 name；自己的 YAML 檔用檔名，讀不到檔案裡的 name）。
+    寫不進去（資料庫連不上）只記 log，照原本的錯誤往外丟。"""
+    ctx = PipelineContext(pipeline=Path(workflow).stem[:128], now=now or datetime.now(timezone.utc))
+    ctx.run_check = run_status(error, targets=0, failed_entities=[])
+    try:
+        StorageHooks().record_health(ctx)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("管線 %s 載入失敗的健康度紀錄寫不進去：%s", ctx.pipeline, e)
 
 
 def run(workflow: str, **kwargs: Any) -> dict[str, Any]:

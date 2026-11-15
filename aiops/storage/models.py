@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, Index, Integer, LargeBinary, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aiops.storage.db import Base, create_all, drop_all
@@ -333,6 +333,58 @@ class IncidentKnowledgeRow(Base):
     window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     context: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+# ── 資料健康度 ──
+
+
+class DataStreamHealthRow(Base):
+    """每條資料流（管線 × 實體 × 查詢）的狀態區間：狀態沒變只把 last_checked_at 往後推，狀態變了才開新的一列。
+    事後查得到「那個時間點資料有沒有進來」：區間 [started_at, last_checked_at] 內每一輪都是這個狀態；
+    兩個區間之間、或最後一個區間之後沒有紀錄的時段 = 平台那段時間沒有檢查到這條資料流（管線沒跑、或紀錄寫不進資料庫）。
+
+    status 見 engine/health.STREAM_STATUSES。is_current = 這條資料流最新的一列（Grafana「目前有問題的資料流」直接篩它）。
+    時間是那一輪的邏輯時間（ctx.now）；比現有紀錄更早的時間（回放）不寫。寫入者只有 StorageHooks.record_health。
+    migrations/postgres/0011。"""
+
+    __tablename__ = "data_stream_health"
+    __table_args__ = (
+        Index("ix_data_stream_health_stream", "pipeline", "entity", "query", "started_at"),
+        Index("ix_data_stream_health_current", "is_current", "status"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pipeline: Mapped[str] = mapped_column(String(128))
+    entity: Mapped[str] = mapped_column(String(256))
+    query: Mapped[str] = mapped_column(String(512))
+    source_type: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(String(1000), default="", server_default="")  # 區間內最近一次的訊息
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime)
+    checks: Mapped[int] = mapped_column(Integer, default=1, server_default="1")  # 這個區間涵蓋幾輪檢查
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class PipelineRunHealthRow(Base):
+    """每條管線執行結果的狀態區間（同 DataStreamHealthRow 的做法：結果沒變只推 last_checked_at 與 runs）。
+    status 見 engine/health.RUN_STATUSES：整輪失敗（infrastructure_error）、定義載入失敗（workflow_error，那一輪根本沒跑）都在這裡。
+    targets／failed_targets 是區間內最近一輪的數字。migrations/postgres/0011。"""
+
+    __tablename__ = "pipeline_run_health"
+    __table_args__ = (
+        Index("ix_pipeline_run_health_pipeline", "pipeline", "started_at"),
+        Index("ix_pipeline_run_health_current", "is_current", "status"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pipeline: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(String(1000), default="", server_default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime)
+    runs: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    targets: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    failed_targets: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
 
 def reset_all() -> None:

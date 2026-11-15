@@ -260,3 +260,50 @@ def max_of(model: Any, column: str, **filters: Any) -> Any:
     stmt = select(func.max(getattr(model, column))).where(*_where(model, filters))
     with read_session() as s:
         return s.scalar(stmt)
+
+
+# ── 狀態區間（資料健康度）──
+
+
+def record_interval(model: Any, key: dict[str, Any], status: str, at: Any, counter: str,
+                    **fields: Any) -> dict[str, Any] | None:
+    """把「key 這條線在 at 這個時間是 status」記成狀態區間（model 要有 status、started_at、last_checked_at、is_current 與 counter 欄）。
+    最新的區間（is_current）狀態相同：last_checked_at 推到 at、counter 加一、fields 蓋成這一次的；
+    狀態不同（或還沒有任何區間）：舊的 is_current 關掉、開一列新的。at 比最新區間的 last_checked_at 還早（回放舊時間）就不寫，回 None。
+    讀了再寫：同一條 key 同時只能有一個寫入者（同一條管線同時只跑一輪）；要放在 run_in_transaction 裡。"""
+    at = utc_naive(at)
+    with write_session() as s:
+        open_rows = list(s.scalars(select(model).where(*_where(model, key), model.is_current.is_(True))
+                                   .order_by(model.id.desc())))
+        current = open_rows[0] if open_rows else None
+        if current is not None and at < current.last_checked_at:
+            return None
+        for stale in open_rows[1:]:  # 兩輪重疊執行時可能各開了一列：只留最新的，其餘關掉，不然舊的會永遠被當成「目前狀態」
+            stale.is_current = False
+        if current is not None and current.status == status:
+            current.last_checked_at = at
+            setattr(current, counter, getattr(current, counter) + 1)
+            for k, v in _clean(fields).items():
+                setattr(current, k, v)
+            s.flush()
+            return row_to_dict(current)
+        if current is not None:
+            current.is_current = False
+        row = model(**_clean(key), status=status, started_at=at, last_checked_at=at, is_current=True,
+                    **{counter: 1}, **_clean(fields))
+        s.add(row)
+        s.flush()
+        return row_to_dict(row)
+
+
+def find_intervals(model: Any, *, since: Any = None, until: Any = None, limit: int = 500,
+                   **filters: Any) -> list[dict[str, Any]]:
+    """跟 [since, until] 有重疊的狀態區間（started_at <= until 且 last_checked_at >= since），由新到舊最多 limit 筆。
+    filters 裡值是 None 的欄位不篩（API 的選填參數原樣傳進來）。"""
+    stmt = select(model).where(*_where(model, {k: v for k, v in filters.items() if v is not None}))
+    if since is not None:
+        stmt = stmt.where(model.last_checked_at >= utc_naive(since))
+    if until is not None:
+        stmt = stmt.where(model.started_at <= utc_naive(until))
+    with read_session() as s:
+        return [row_to_dict(r) for r in s.scalars(stmt.order_by(model.started_at.desc(), model.id.desc()).limit(limit))]

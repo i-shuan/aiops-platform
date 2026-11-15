@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
 from aiops.engine.errors import InfrastructureError, NoDataError, PlatformError, WorkflowError
+from aiops.engine.health import StreamCheck, run_status, stream_status
 from aiops.engine.operator import NodeInfo
 from aiops.engine.registry import OperatorRegistry
 
@@ -151,6 +152,10 @@ class Hooks(Protocol):
         寫失敗則 after_finalize 節點（心跳）不會跑。"""
         ...
 
+    def record_health(self, ctx: PipelineContext) -> None:
+        """資料健康度（ctx.stream_checks、ctx.run_check）：整輪結束時呼叫，成功或失敗都會。寫不進去不影響這一輪的結果。"""
+        ...
+
 
 class NullHooks:
     def load_batch(self, ctx: PipelineContext) -> None: ...
@@ -162,6 +167,19 @@ class NullHooks:
     def persist_batch(self, ctx: PipelineContext) -> None: ...
 
     def finalize_batch(self, ctx: PipelineContext) -> None: ...
+
+    def record_health(self, ctx: PipelineContext) -> None: ...
+
+
+def _stream_check(ctx: PipelineContext, error: BaseException | None) -> StreamCheck | None:
+    """這條序列這一輪的資料流狀態（engine/health.stream_status）。以前有沒有過資料：有過 ok 的健康度紀錄、
+    或已經有基準線、或存過異常點（後兩者讓加這個功能之前就在跑的資料流第一次斷流時不會被記成「從未有過資料」）。"""
+    target = ctx.target
+    assert target is not None
+    seen = ctx.stream_seen_before or bool(ctx.detector_states) or ctx.last_anomaly_ts is not None
+    verdict = stream_status(fetched=ctx.raw_df is not None, empty=ctx.raw_df is not None and ctx.raw_df.empty,
+                            error=error, seen_before=seen)
+    return None if verdict is None else StreamCheck(target.entity, target.query, target.source_type, *verdict)
 
 
 def _run_node(node: NodeSpec, op: Any, ctx: PipelineContext) -> PipelineContext:
@@ -297,10 +315,33 @@ class Pipeline:
         if self.workflow.lot_edges is not None:
             batch.lot_edges = [LotEdge(e["from"], e["to"], int(e.get("lots", 1))) for e in self.workflow.lot_edges]
             batch.lot_edges_explicit = True
+        # 資料健康度只記排程模式（strict=False）且有逐序列節點的管線：手動動作（strict=True）的失敗直接回給呼叫的人
+        record = bool(self.target_nodes) and not strict
+        specs = list(targets if targets is not None else self.workflow.targets) if self.target_nodes else []
+        try:
+            batch = self._run(batch, specs, now, request, strict)
+        except Exception as e:
+            self._record_health(batch, e, len(specs), record)
+            raise
+        self._record_health(batch, None, len(specs), record)
+        return batch
+
+    def _record_health(self, batch: PipelineContext, error: BaseException | None, targets: int, record: bool) -> None:
+        """整輪結束（成功或失敗）時把資料健康度交給 hooks 寫。寫不進去（資料庫連不上）只記 log：
+        不讓一輪成功的結果因為旁路紀錄而變成失敗，也不蓋掉原本要丟出去的例外。"""
+        if not record:
+            return
+        batch.run_check = run_status(error, targets=targets, failed_entities=[e.entity for e in batch.errors])
+        try:
+            self.hooks.record_health(batch)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("資料健康度寫入失敗（%s 這一輪 %s，沒有留下紀錄）：%s", batch.pipeline, batch.run_check.status, e)
+
+    def _run(self, batch: PipelineContext, specs: list[TargetSpec], now: datetime, request: BaseModel | None,
+             strict: bool) -> PipelineContext:
         self.hooks.load_batch(batch)
 
         if self.target_nodes:
-            specs = list(targets if targets is not None else self.workflow.targets)
             starved: list[str] = []  # 抓不到資料的序列：資料源說沒資料（NoDataError）、或抓回來是空的
             for spec in specs:
                 ctx = PipelineContext(pipeline=self.workflow.name, now=now, target=spec.to_target(), request=request,
@@ -313,20 +354,25 @@ class Pipeline:
                 # 把正在發生的事故學成常態（11/3 真實資料回放：75 個異常點掉到 51 個）
                 ctx.baseline_nodes = [name for name, _ in active
                                       if getattr(self._detectors[name][1], "requires_training", True)]
+                loaded = False  # 這條序列的輸入載入完了：之後的錯才算在「抓這條資料流」頭上（載入失敗是資料庫的事）
                 try:
                     # 被跳過的節點不載基準線與調參；也不會進 detector_runs，裁決時不算參與者
                     self.hooks.load_target(ctx, active)
+                    loaded = True
                     for node, op in self.target_nodes:
                         if node.name in skipped:
                             ctx.log(f"{node.name}:skipped:{skipped[node.name]}")
                             continue
                         ctx = _run_node(node, op, ctx)
                     self.hooks.persist_target(ctx)
-                except InfrastructureError:
+                except InfrastructureError as e:
+                    if loaded:  # 抓這條資料流時資料源連不上：留下紀錄再讓整輪失敗
+                        batch.stream_checks.extend(c for c in [_stream_check(ctx, e)] if c)
                     raise  # 資料庫、資料源連不上：整輪失敗，不要假裝只是這條序列的問題
                 except PlatformError as e:
                     if strict:
                         raise
+                    batch.stream_checks.extend(c for c in [_stream_check(ctx, e)] if c)
                     batch.errors.append(TargetError(ctx.target.entity, str(e)))
                     if isinstance(e, NoDataError):  # 只有「資料源沒資料」算斷流；偵測器自己查不到東西（NotFound）不算
                         starved.append(ctx.target.entity)
@@ -335,8 +381,10 @@ class Pipeline:
                     if strict:
                         raise
                     logger.exception("target %s 失敗：%s", ctx.target.entity, e)
+                    batch.stream_checks.extend(c for c in [_stream_check(ctx, e)] if c)
                     batch.errors.append(TargetError(ctx.target.entity, f"{type(e).__name__}: {e}"))
                     continue
+                batch.stream_checks.extend(c for c in [_stream_check(ctx, None)] if c)
                 if ctx.raw_df is not None and ctx.raw_df.empty:
                     if strict:  # 手動動作：跟資料源說「沒資料」一樣是 404，不要同一件事一邊 404、一邊 503 斷流
                         raise NoDataError(f"{ctx.target.entity}：這段時間抓回來是空的（資料源回 200 但零筆）")

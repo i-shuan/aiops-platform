@@ -15,6 +15,7 @@ from aiops.storage import crud
 from aiops.storage.models import (
     ActiveDetectorConfigRow,
     AnomalyRow,
+    DataStreamHealthRow,
     DetectorModelRow,
     ExternalAnomalyRow,
     FeedbackRow,
@@ -23,6 +24,7 @@ from aiops.storage.models import (
     IncidentRow,
     LotPathRow,
     NotificationRow,
+    PipelineRunHealthRow,
     ServiceAsyncEdgeRow,
     ServiceEdgeRow,
     SilenceRow,
@@ -402,3 +404,41 @@ class Knowledge:
                 if r["window_start"] is not None and r["window_end"] is not None
                 and (entity == ANY or entity in (r["entities"] or []))]
         return sorted(rows, key=lambda r: r["window_start"])
+
+
+class StreamHealth:
+    """每條資料流（管線 × 實體 × 查詢）的狀態區間（DataStreamHealthRow）。寫入只有 StorageHooks.record_health。"""
+
+    @staticmethod
+    def record(pipeline: str, entity: str, query: str, source_type: str, status: str, message: str,
+               at: datetime) -> Row | None:
+        return crud.record_interval(DataStreamHealthRow, {"pipeline": pipeline, "entity": entity, "query": query},
+                                    status, at, "checks", message=message, source_type=source_type)
+
+    @staticmethod
+    def ever_ok(pipeline: str, entity: str, query: str) -> bool:
+        """這條資料流有沒有過任何一段「有資料」的紀錄。"""
+        return crud.find_one(DataStreamHealthRow, pipeline=pipeline, entity=entity, query=query, status="ok") is not None
+
+    @staticmethod
+    def list(pipeline: str | None = None, entity: str | None = None, status: str | None = None,
+             current: bool | None = None, since: datetime | None = None, until: datetime | None = None,
+             limit: int = 500) -> list[Row]:
+        """狀態區間，由新到舊。current=True 只看每條資料流最新的一段；since／until 取跟這段時間有重疊的區間。"""
+        return crud.find_intervals(DataStreamHealthRow, since=since, until=until, limit=limit, pipeline=pipeline,
+                                   entity=entity, status=status, is_current=current)
+
+
+class RunHealth:
+    """每條管線執行結果的狀態區間（PipelineRunHealthRow）。"""
+
+    @staticmethod
+    def record(pipeline: str, status: str, message: str, at: datetime, targets: int = 0, failed: int = 0) -> Row | None:
+        return crud.record_interval(PipelineRunHealthRow, {"pipeline": pipeline}, status, at, "runs",
+                                    message=message, targets=targets, failed_targets=failed)
+
+    @staticmethod
+    def list(pipeline: str | None = None, status: str | None = None, current: bool | None = None,
+             since: datetime | None = None, until: datetime | None = None, limit: int = 500) -> list[Row]:
+        return crud.find_intervals(PipelineRunHealthRow, since=since, until=until, limit=limit, pipeline=pipeline,
+                                   status=status, is_current=current)

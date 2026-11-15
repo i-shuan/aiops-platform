@@ -19,12 +19,12 @@ from datetime import datetime
 from aiops.engine.errors import PlatformError
 from aiops.interfaces.bootstrap.fallback import report_failure
 from aiops.interfaces.bootstrap import init_infrastructure
-from aiops.interfaces.runner import run, run_context
+from aiops.interfaces.runner import run, run_scheduled
 
 
 def run_once(workflow: str, now: datetime | None) -> int:
     try:
-        ctx = run_context(workflow, now=now, strict=False, allow_file=True)  # CLI 可以指定自己的 YAML 檔
+        ctx = run_scheduled(workflow, now)  # CLI 可以指定自己的 YAML 檔；定義載入失敗會留一筆健康度紀錄
     except PlatformError as e:
         report_failure(e, {"workflow": workflow})
         print(json.dumps({"workflow": workflow, "error": str(e)}, ensure_ascii=False), file=sys.stderr, flush=True)

@@ -13,9 +13,12 @@ pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="沒有安�
 
 # 會讓 Grafana 自己「發出通知」或做告警判斷的東西
 ALERTING_FILES = ("alert-rules", "contact-points", "policies", "notification-policies", "mute-timings", "templates")
-# 舊引擎已移除：這些參照出現就代表搬進了壞掉的東西
-DEAD_REFERENCES = re.compile(r"aiops-db|aiops_alerts|aiops_anomalies|aiops_tuning|aiops_feedback|localhost:18080|"
-                             r"grafana-postgresql-datasource|aiops-api")
+# 舊引擎已移除：這些參照出現就代表搬進了壞掉的東西（舊資料庫的資料源 uid、舊資料表、舊 API）。
+# PostgreSQL 資料源類型本身不在這裡：平台自己的資料庫現在有一個唯讀資料源 aiops-platform-db（資料健康度儀表板），
+# 它讀的只能是下面 PLATFORM_DB_TABLES 這兩張表，由 test_platform_db_datasource_* 與 tests/test_data_health.py 把關
+DEAD_REFERENCES = re.compile(r"aiops-db|aiops_alerts|aiops_anomalies|aiops_tuning|aiops_feedback|localhost:18080|aiops-api")
+PLATFORM_DB = "aiops-platform-db"
+PLATFORM_DB_TABLES = {"data_stream_health", "pipeline_run_health"}
 
 
 def _render(*sets: str) -> list[dict]:
@@ -44,8 +47,9 @@ def test_no_alerting_provisioning_files_or_mounts():
 
 def test_datasources_are_read_only_and_known():
     ds = {d["uid"]: d for d in _datasources()}
-    assert set(ds) == {"apm-metrics", "apm-traces", "apm-logs", "aiops-alertmanager"}
-    assert {d["type"] for d in ds.values()} == {"elasticsearch", "alertmanager"}
+    assert set(ds) == {"apm-metrics", "apm-traces", "apm-logs", "aiops-alertmanager", PLATFORM_DB}
+    # 都是 Grafana 內建的資料源類型（不用裝外掛：GF_PLUGINS_PREINSTALL_DISABLED 開著）
+    assert {d["type"] for d in ds.values()} == {"elasticsearch", "alertmanager", "grafana-postgresql-datasource"}
     am = ds["aiops-alertmanager"]
     assert am["jsonData"]["handleGrafanaManagedAlerts"] is False  # 不把 Grafana 自己的告警送進去
     assert am["jsonData"]["implementation"] == "prometheus"
@@ -61,6 +65,44 @@ def test_datasource_credentials_come_from_environment_only():
         assert "${" in secret, f"疑似明文機密：{secret[:30]}"
 
 
+def test_platform_db_datasource_uses_a_read_only_account_from_the_secret():
+    """平台資料庫的資料源：位址、資料庫、帳號、密碼全部來自 envSecret；帳號變數是唯讀帳號那一組，不是平台可寫的 AIOPS_DATABASE_URL。"""
+    db = next(d for d in _datasources() if d["uid"] == PLATFORM_DB)
+    assert db["url"] == "${AIOPS_DB_HOST}" and db["user"] == "${AIOPS_DB_RO_USER}"
+    assert db["jsonData"]["database"] == "${AIOPS_DB_NAME}" and db["secureJsonData"] == {"password": "${AIOPS_DB_RO_PASSWORD}"}
+    text = "\n".join(p.read_text(encoding="utf-8") for p in CHART.rglob("*") if p.is_file() and p.suffix in (".yaml", ".tpl"))
+    assert "${AIOPS_DATABASE_URL}" not in text  # 平台那組可寫的連線字串不准拿來給 Grafana
+    values = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+    assert values["platformDb"] == {"sslmode": "require"}  # 預設要 TLS；values 裡沒有位址與帳密
+    migration = (CHART.parents[2] / "migrations" / "postgres" / "0011_data_health.sql").read_text(encoding="utf-8")
+    assert "GRANT SELECT ON data_stream_health, pipeline_run_health TO aiops_grafana_ro" in migration
+
+
+def test_platform_db_sslmode_is_rendered_from_values():
+    def rendered(*sets):
+        cm = next(d for d in _render(*sets) if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "grafana-datasources")
+        ds = yaml.safe_load(cm["data"]["aiops.yaml"])["datasources"]
+        return next(d for d in ds if d["uid"] == PLATFORM_DB)["jsonData"]["sslmode"]
+
+    assert rendered() == "require" and rendered("platformDb.sslmode=disable") == "disable"
+    assert "__DB_SSLMODE__" not in json.dumps(_render(), ensure_ascii=False)
+
+
+def test_only_the_data_health_dashboard_reads_the_platform_db_and_only_its_two_tables():
+    for board in (CHART / "files" / "dashboards").glob("*.json"):
+        d = json.loads(board.read_text(encoding="utf-8"))
+        sql = [t["rawSql"] for p in d["panels"] for t in p.get("targets", []) if "rawSql" in t]
+        sql += [v["query"] for v in d.get("templating", {}).get("list", [])
+                if (v.get("datasource") or {}).get("uid") == PLATFORM_DB]
+        uses_db = PLATFORM_DB in board.read_text(encoding="utf-8")
+        assert uses_db == (board.stem == "data-health"), board.name
+        for statement in sql:
+            assert set(re.findall(r"(?:FROM|JOIN)\s+([a-z_]+)", statement)) <= PLATFORM_DB_TABLES, statement[:80]
+            assert not re.search(r"(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT)", statement, re.I)
+    rendered = next(d for d in _render() if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "grafana-dashboards")
+    assert json.loads(rendered["data"]["data-health.json"])["uid"] == "data-health"  # 真的有被 chart 帶進去
+
+
 def test_no_dead_references_to_removed_engine():
     for path in (p for p in CHART.rglob("*") if p.is_file() and p.suffix in (".yaml", ".json", ".tpl")):
         assert not DEAD_REFERENCES.search(path.read_text(encoding="utf-8")), f"{path.name} 含有已移除的舊引擎參照"
@@ -69,7 +111,8 @@ def test_no_dead_references_to_removed_engine():
 def test_dashboards_read_only_from_provisioned_datasources():
     uids = {d["uid"] for d in _datasources()}
     boards = list((CHART / "files" / "dashboards").glob("*.json"))
-    assert sorted(b.stem for b in boards) == ["aiops-incidents", "apm-overview"]  # 新增事件群儀表板（只讀 aiops-alertmanager）
+    # 事件群儀表板只讀 aiops-alertmanager；資料健康度儀表板只讀 aiops-platform-db（唯讀帳號）
+    assert sorted(b.stem for b in boards) == ["aiops-incidents", "apm-overview", "data-health"]
     for board in boards:
         d = json.loads(board.read_text(encoding="utf-8"))
         used = {(p.get("datasource") or {}).get("uid") for p in d["panels"] if p["type"] != "text"}  # 說明用的 text 面板沒有資料源

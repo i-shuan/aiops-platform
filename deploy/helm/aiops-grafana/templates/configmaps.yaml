@@ -9,7 +9,7 @@ metadata:
 data:
   aiops.yaml: |
 {{- $ds := .Files.Get "files/datasource.yaml" }}
-{{- $ds = $ds | replace "__ES_INDEX_METRICS__" .Values.esIndices.metrics | replace "__ES_INDEX_TRACES__" .Values.esIndices.traces | replace "__ES_INDEX_LOGS__" .Values.esIndices.logs }}
+{{- $ds = $ds | replace "__ES_INDEX_METRICS__" .Values.esIndices.metrics | replace "__ES_INDEX_TRACES__" .Values.esIndices.traces | replace "__ES_INDEX_LOGS__" .Values.esIndices.logs | replace "__DB_SSLMODE__" .Values.platformDb.sslmode }}
 {{ $ds | indent 4 }}
 ---
 apiVersion: v1
