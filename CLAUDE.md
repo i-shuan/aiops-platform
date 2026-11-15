@@ -29,7 +29,7 @@
 3. **LLM 的位置（告警路徑零依賴、RCA 路徑必要）**：告警路徑（偵測 → 收斂 → 計分 → 抑制 → 通知，`pipelines/detection/`）**嚴禁依賴 LLM**——那些 YAML 不准掛 `enrichment.*` 節點，`stages/` 除了 `enrichment/` 本身都不准 import `aiops.stages.enrichment`。RCA 路徑的 LLM 是**必要元件**（`enrichment.extract_evidence` 抽證據、`enrichment.rca_narrator` 寫摘要，沒有 `noop`）：沒設定、連不上、逾時、格式不合、驗證全數被拒、或根本沒有事實與證據可判（`no_evidence`）時報告照出，`ctx.rca_status = "undetermined"` 並在 `rca_undetermined_reason` 寫代碼與原因，不整份失敗、不退回舊規則硬猜、不無限重試。舊引擎的 `enrichment.llm_summary`／`llm_briefing` 保留 `provider: noop`（預設），完全不連外、直接用模板。
 4. **模型序列化安全**：整個 `aiops/` 嚴禁 import `pickle`／`joblib`／`dill`／`cloudpickle`／`shelve`／`marshal`，也不准出現 `allow_pickle=True`。非 JSON 的模型本體只能用 npz（`pack_arrays`／`unpack_arrays`）。
 5. **RCA 不寫死**：報告段落是 `rca.section.*`、根因演算法是 `rca.root_cause.*`，都走 `OperatorRegistry`；`stages/rca/report.py` 不得 import 具體段落或演算法。
-6. **關係圖只有一個查詢入口**：實體之間的關係（同步呼叫、訊息佇列、Lot 流向）一律問 `ctx.graph`（`engine/graph.py` 的 `ServiceGraph`）。`stages/`、`control_plane/` 不准讀 `ctx.topology`／`ctx.lot_edges`／`ctx.async_edges` 自己拼圖，也不准直接用 `propagation_edges`；那三個欄位只是載入與存檔的格式（寫入不擋：`rca.build_dynamic_topology`）。每條邊帶語意型別（`EdgeKind`），「異常往哪個方向傳」寫在 `KINDS` 一張表，新增邊的型別就是加一格，不准在算子裡自己翻方向。圖可以有環，不要假設它是 DAG。
+6. **關係圖只有一個查詢入口**：實體之間的關係（同步呼叫、訊息佇列、Lot 流向）一律問 `ctx.graph`（`engine/graph.py` 的 `ServiceGraph`）。`stages/`、`control_plane/` 不准讀 `ctx.topology`／`ctx.lot_edges`／`ctx.async_edges`／`ctx.declared_edges`／`ctx.imported_edges` 自己拼圖，也不准直接用 `propagation_edges`；那三個欄位只是載入與存檔的格式（寫入不擋：`rca.build_dynamic_topology`）。每條邊帶語意型別（`EdgeKind`），「異常往哪個方向傳」寫在 `KINDS` 一張表，新增邊的型別就是加一格，不准在算子裡自己翻方向。圖可以有環，不要假設它是 DAG。人宣告的邊（Workflow 的 `graph`、`admin.graph_import`）每條必寫 `kind`（`call`／`supply`／`flow`／`async`），沒有預設值；`call A -> B` 與 `supply B -> A` 是同一個依賴關係（`dependencies()`），不同型別把同一對實體宣告成相反方向在載入期報錯（`docs/DECLARED_GRAPH.md`）。
 
 ---
 
@@ -255,6 +255,8 @@ nodes:
    👉 寫入 `aiops/stages/rca/algorithms/<name>.py`，繼承 `RootCauseOperator`、註冊成 `rca.root_cause.<name>`，在 `rca_report*.yaml` 換掉 `root_cause` 節點。
  * **要新增 RCA 報告段落？**
    👉 寫入 `aiops/stages/rca/sections/<name>.py`，繼承 `RcaSection`、註冊成 `rca.section.<key>`，加進 `rca.report` 的 `sections` 清單。
+ * **沒有 trace 的環境要提供依賴關係（CMDB、供電／管線、設備清冊）？**
+   👉 不寫程式：少量就寫在管線 YAML 的 `graph`，大量或要跟 CMDB 同步就 `POST /api/v1/ingestion/graph/import`（`admin.graph_import`）。每條邊寫 `kind`，方向照資料來源的說法，不要自己翻。
  * **要讓偵測器動態找同儕（同 service 的所有 pod）？**
    👉 不寫程式：target 加 `peer_group: {query, by}`。資料源要支援多序列分組就實作 `BaseDataSourceSpec.fetch_group`。
  * **要新增手動動作（核准、匯入、查詢這類 `admin.*`）？**
