@@ -17,11 +17,18 @@ nodes:
   - name: stopped_rounds
     operator: detector.rules
     params: {lower: 1, consecutive: 3}
-  # 團隊的告警管道斷了：連續 6 格（30 分鐘）一筆心跳都沒有。團隊 Grafana 的 repeat interval 要 ≤ 15 分鐘（docs/EXTERNAL_ALERTS.md），
-  # 留兩倍的餘裕；心跳間隔更長的團隊在 target 的 overrides 把 consecutive 加大
+  # 團隊的告警管道斷了：連續 10 格（50 分鐘）一筆心跳都沒有。
+  # 門檻怎麼來的（通用式，不是挑讓模擬種子不誤報的值；docs/WATCHDOG.md）：容許連續漏掉 N 筆心跳，
+  #   consecutive = (N + 1) × I ÷ 格寬 + 1
+  #   I = 文件允許的最大心跳間隔 15 分鐘（docs/EXTERNAL_ALERTS.md），格寬 5 分鐘；
+  #   漏掉 N 筆時兩筆之間隔 (N+1)×I，再加送達延遲（< 1 格）最多湊出 (N+1)×I÷格寬 格空的，所以要再多 1 格才不會剛好踩線。
+  #   N = 2：漏 1 筆是日常（假設每筆 1% 會掉、一天 96 筆，約每天一次），連漏 2 筆約萬分之一（每個來源約 100 天一次）。
+  #   N = 2、I = 15 -> 3 × 15 ÷ 5 + 1 = 10。上一版是 6 = (1+1)×15÷5，沒有多那 1 格：漏 1 筆加上延遲就會誤報。
+  # 代價：心跳真的停了要 50 分鐘才抓到（上一版 30 分鐘）。心跳比 15 分鐘密的團隊想更快抓到，可以在 target 的 overrides
+  # 用同一個式子代入自己的 I 把 consecutive 調小；比 15 分鐘疏的不符合文件要求，要先改他們的 repeat interval
   - name: stopped_heartbeats
     operator: detector.rules
-    params: {lower: 1, consecutive: 6}
+    params: {lower: 1, consecutive: 10}
   # 整輪失敗變多：稀疏計數票（平常幾乎都是 0 的計數，看最近 window 格一共幾筆是不是比訓練期多太多）。
   # 參數是偵測器的預設值，沒有為看門狗調過（docs/SPARSE_COUNT.md、docs/WATCHDOG.md）
   - name: failures

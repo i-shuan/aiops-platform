@@ -47,10 +47,10 @@
 repeat interval 5～15 分鐘。平台收到後：
 
 - 存成心跳（`status = heartbeat`），**不進任何管線、不開事故卡**，不需要 `service` 標籤。
-- 平台看門狗（`aiops/pipelines/watchdog/platform_watchdog.yaml`）數每個來源的心跳；連續 30 分鐘一筆都沒有，平台自己會發一張卡
+- 平台看門狗（`aiops/pipelines/watchdog/platform_watchdog.yaml`）數每個來源的心跳；連續 50 分鐘一筆都沒有（容許連續漏掉 2 筆 15 分鐘一筆的心跳，依據見 `docs/WATCHDOG.md`），平台自己會發一張卡
   （「team-a 的告警管道斷了」），而不是默默以為你那邊沒事。要讓看門狗看你的來源，平台那邊要在看門狗 YAML 的 targets 加一行
   （`alerts/<你的 source>/heartbeats`，寫法在 YAML 註解裡）。
-- 心跳間隔比 15 分鐘長的團隊，看門狗那一行要把 `consecutive` 加大，不然會誤報。
+- 心跳間隔不要超過 15 分鐘：門檻是照 15 分鐘算的，間隔更長會誤報。間隔更短、想更快被發現的團隊，平台那邊可以用同一個式子調小（沒有驗證過）。
 
 沒有設心跳的來源，看門狗不會替它判斷任何事（見 `docs/WATCHDOG.md`）。
 

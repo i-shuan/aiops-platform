@@ -8,7 +8,10 @@
 看門狗用出貨的 YAML 原樣跑（只多加三個團隊的心跳 target，寫法跟 YAML 註解的範例一樣），參數一個都沒改。
 每 15 分鐘跑一輪（偵測看最近 180 分鐘，所以每一格都會被看到），延遲的解析度是 15 分鐘。
 
-用法：python scripts/backtest/watchdog_replay.py --workdir <資料夾> [--seeds 42 7 2026] [--eval-days 14]
+用法：python scripts/backtest/watchdog_replay.py --workdir <資料夾> [--seeds 42 7 2026] [--eval-days 14] [--watchdog-yaml <檔>]
+  --watchdog-yaml：拿另一份看門狗 YAML 跑（例如改門檻之前的版本），預設是出貨的 aiops/pipelines/watchdog/platform_watchdog.yaml
+種子的用途（docs/WATCHDOG.md）：42、7、2026 是發現 15 分鐘心跳誤報、決定改門檻時用過的（調整組）；
+11、23、101、777、31337 是改門檻時還沒跑過的（留出組），只拿來報成績。
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ TRAIN_DAYS = 14
 P_FAIL, P_SKIP, P_DROP = 0.002, 0.003, 0.01
 TEAMS = {"team-a": 5, "team-c": 10, "team-b": 15}  # 心跳間隔（分鐘）
 GRACE = timedelta(minutes=60)  # 故障結束後這段時間內的告警還算這個故障的
+DEFAULT_YAML = ROOT / "aiops" / "pipelines" / "watchdog" / "platform_watchdog.yaml"
 
 
 @dataclass(frozen=True)
@@ -90,7 +94,7 @@ def build_records(start: datetime, end: datetime, rng: random.Random, eval_start
     return runs, beats
 
 
-def replay(seed: int, workdir: Path, eval_days: int) -> dict:
+def replay(seed: int, workdir: Path, eval_days: int, watchdog_yaml: Path = DEFAULT_YAML) -> dict:
     db_path = workdir / f"watchdog-{seed}.db"
     db_path.unlink(missing_ok=True)
     os.environ["AIOPS_DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
@@ -110,7 +114,7 @@ def replay(seed: int, workdir: Path, eval_days: int) -> dict:
     crud.create_many(PipelineRunRow, runs)
     crud.create_many(ExternalAnomalyRow, beats)
 
-    wf = load_workflow(ROOT / "aiops" / "pipelines" / "watchdog" / "platform_watchdog.yaml")
+    wf = load_workflow(watchdog_yaml)
     extra = [TargetSpec(source_type="platform", query=f"alerts/{team}/heartbeats", entity=team, detectors=["stopped_heartbeats"])
              for team in TEAMS]
     wf = Workflow.model_validate(wf.model_dump() | {"targets": [*wf.model_dump()["targets"], *[t.model_dump() for t in extra]]})
@@ -139,16 +143,19 @@ def replay(seed: int, workdir: Path, eval_days: int) -> dict:
     false = [(found, ent, node) for found, ent, node, _ in alarms
              if not any(ent == f.entity and node == f.node and a <= found <= b + GRACE for f, a, b in windows)]
     episodes: dict[str, int] = {}
+    by_entity: dict[str, int] = {}  # "實體/節點" -> 次數：分得出是哪個來源（例如 15 分鐘一筆的 team-b）在誤報
     last: dict[tuple[str, str], datetime] = {}
     for found, ent, node in sorted(false):
         key = (ent, node)
         if key not in last or found - last[key] > GRACE:
             episodes[node] = episodes.get(node, 0) + 1
+            by_entity[f"{ent}/{node}"] = by_entity.get(f"{ent}/{node}", 0) + 1
         last[key] = found
     return {"seed": seed, "eval_days": eval_days, "rounds": rounds, "seconds": round(time.time() - began),
             "records": {"runs": len(runs), "heartbeats": len(beats),
                         "background_failures": sum(1 for r in runs if r["status"] == "failed")},
-            "faults": results, "false_alarm_episodes": episodes, "false_alarm_points": len(false),
+            "faults": results, "false_alarm_episodes": episodes, "false_alarm_episodes_by_entity": by_entity,
+            "false_alarm_points": len(false), "watchdog_yaml": str(watchdog_yaml),
             "notified_incidents_by_severity": severities, "errors": errors}
 
 
@@ -157,11 +164,12 @@ def main() -> None:
     ap.add_argument("--workdir", type=Path, required=True)
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 2026])
     ap.add_argument("--eval-days", type=int, default=14)
+    ap.add_argument("--watchdog-yaml", type=Path, default=DEFAULT_YAML)
     args = ap.parse_args()
     args.workdir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("AIOPS_NOTIFIER", "log")
     logging.disable(logging.WARNING)
-    out = [replay(seed, args.workdir, args.eval_days) for seed in args.seeds]
+    out = [replay(seed, args.workdir, args.eval_days, args.watchdog_yaml) for seed in args.seeds]
     text = json.dumps(out, ensure_ascii=False, indent=2)
     (args.workdir / "watchdog_replay.json").write_text(text, encoding="utf-8")
     print(text)
