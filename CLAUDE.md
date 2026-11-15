@@ -31,6 +31,22 @@
 5. **RCA 不寫死**：報告段落是 `rca.section.*`、根因演算法是 `rca.root_cause.*`，都走 `OperatorRegistry`；`stages/rca/report.py` 不得 import 具體段落或演算法。
 6. **關係圖只有一個查詢入口**：實體之間的關係（同步呼叫、訊息佇列、Lot 流向）一律問 `ctx.graph`（`engine/graph.py` 的 `ServiceGraph`）。`stages/`、`control_plane/` 不准讀 `ctx.topology`／`ctx.lot_edges`／`ctx.async_edges` 自己拼圖，也不准直接用 `propagation_edges`；那三個欄位只是載入與存檔的格式（寫入不擋：`rca.build_dynamic_topology`）。每條邊帶語意型別（`EdgeKind`），「異常往哪個方向傳」寫在 `KINDS` 一張表，新增邊的型別就是加一格，不准在算子裡自己翻方向。圖可以有環，不要假設它是 DAG。
 
+### 1.1 權責邊界與架構隔離（平台管到哪裡為止）
+
+**平台內部：單向依賴**
+
+1. **引擎不認識控制面**：`engine/`、`stages/`、`sources/`、`storage/`（資料收容、偵測、`ServiceGraph` 收斂、RCA）是通用底層，不准 import `aiops.control_plane`。只有組裝點 `interfaces/` 同時認識兩邊。（`control_plane/` 在 `aiops/` 套件裡面，所以規則是「這四層不准反向依賴它」，不是「`aiops/` 不准」。）
+2. **平台不依賴周邊**：整個 `aiops/` 不准 import repo 裡自己以外的東西（`scripts/`、`tests/`、`deploy/`）；不准用相對 import。
+3. **控制面只能透過「提案 → 回測 → 核准 → 寫入資料庫」影響引擎**：調參、欄位對照、靜音、宣告的圖，都是寫進資料庫、下一輪由 `StorageHooks` 載進新的 `PipelineContext`。不准直接改執行中管線的記憶體狀態（模組層級、類別層級的可變狀態本來就不准，§100.3）。致命界線（`detector.hard_limit`，`accepts_tuning = False`）只認 YAML，控制面的提案一律拒絕。
+
+**平台與外部團隊：防腐層**
+
+4. **資料源缺口不在引擎裡補**：外部系統負責照標準格式（OTel、Prometheus、標準日誌欄位、宣告的圖）把資料送進來。沒埋點、沒送日誌、時間戳錯、CMDB 填錯，是資料源端的缺口——平台的做法是**照實說看不到**（序列錯誤、`rca_skipped`、`undetermined`、文件裡的「已知限制」），不准在引擎裡寫業務特判去猜或補洞（§100.5）。格式差異只能在 `sources/` 與欄位對照（`admin` 的欄位對照）吸收，不准漏進 `stages/`。
+5. **遮罩的責任分界**：送往 LLM 的內容只有一個出口 `stages/enrichment/masking.send`，先遮罩再送，遮罩出錯就不送（`MaskError`）。它擋的是格式可辨識的敏感資訊（帳號、信箱、IP、憑證這類）；自由文字裡的業務機密沒有格式可認，由資料產生端在寫日誌之前負責去識別化（死區見 `masking.py` 與 `tests/test_llm_masking.py`）。**送往 Alertmanager 的通知內容不經過這個遮罩**，通知裡只放結構化欄位，不放日誌原文。
+6. **輸出即終點**：平台的產出是收斂後的事故卡、標準通知 payload（交給 Alertmanager 派發）、RCA 證據報告（證據不足就是 `undetermined`）。派工、聯絡、重啟、退版、改設定是外部維運系統與業務團隊的事。`aiops/` 不准起子行程、不准帶叢集或遠端執行的函式庫、不准呼叫任何修復腳本；RCA 報告的「建議動作」只是文字。
+
+自動檢查（`tests/test_architecture.py`）：`test_pipeline_layers_never_import_the_control_plane`、`test_platform_imports_nothing_from_outside_its_own_package`、`test_platform_never_executes_commands_or_remediation`，加上既有的 `test_algorithms_do_not_special_case_entities_or_lengths`、LLM 出口與 `hard_limit` 調參的測試。第 4 點「有沒有替外部補洞」與第 5 點「通知裡有沒有原文」機器只能擋一部分，靠 code review。
+
 ---
 
 ## 2. 算子合約規範 (Operator Protocols)

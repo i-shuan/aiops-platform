@@ -476,3 +476,42 @@ def test_operators_ask_the_service_graph_instead_of_reading_raw_edge_lists():
         if "aiops.engine.topology.propagation_edges" in _imports(f):
             bad.append(f"{rel} import 了 propagation_edges")
     assert not bad, "\n".join(bad)
+
+
+# ---- 權責邊界（CLAUDE.md 第 1.1 節）----
+
+def test_pipeline_layers_never_import_the_control_plane():
+    """單向依賴：control_plane 可以用 engine／stages／sources／storage，反過來不行。
+    engine、sources、storage 另有各自的測試；這裡補上 stages，四層一起列出來當作一條規則。"""
+    files = [*_py("engine"), *_py("stages"), *_py("sources"), *_py("storage")]
+    assert len(files) > 50, "掃描範圍是空的，這個檢查會變成空轉"
+    assert not _violations(files, ["aiops.control_plane"])
+
+
+def test_platform_imports_nothing_from_outside_its_own_package():
+    """aiops/ 不准 import repo 裡自己以外的東西（scripts、tests、deploy…）：周邊腳本可以用平台，平台不能依賴周邊。
+    以 repo 根目錄實際存在的資料夾與 .py 為準，不寫死名單。"""
+    repo = ROOT.parent
+    outside = {p.name for p in repo.iterdir() if p.is_dir() and p.name != "aiops" and not p.name.startswith(".")}
+    outside |= {p.stem for p in repo.glob("*.py")}
+    assert {"scripts", "tests"} <= outside, "repo 的版面變了，這個檢查會變成空轉"
+    assert not _violations(_py(), sorted(outside))
+    relative = [f"{f.relative_to(ROOT).as_posix()}:{n.lineno}" for f in _py() for n in ast.walk(ast.parse(_src(f)))
+                if isinstance(n, ast.ImportFrom) and n.level]
+    assert not relative, f"相對 import 會繞過分層檢查：{relative}"
+
+
+# 會在主機或叢集上「動手」的函式庫：平台的終點是事故卡、通知與 RCA 報告，不執行修復
+REMEDIATION_LIBS = ["subprocess", "pty", "kubernetes", "paramiko", "fabric", "docker", "ansible", "ansible_runner", "winrm"]
+_EXEC_CALLS = {"system", "popen", "execv", "execve", "execvp", "spawnv", "spawnl", "startfile"}
+
+
+def test_platform_never_executes_commands_or_remediation():
+    """輸出即終點：aiops/ 不准起子行程、不准帶叢集／遠端執行的函式庫。通知只走 notifier.*（Alertmanager）。"""
+    bad = _violations(_py(), REMEDIATION_LIBS)
+    for f in _py():
+        for n in ast.walk(ast.parse(_src(f))):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _EXEC_CALLS \
+                    and getattr(n.func.value, "id", "") == "os":
+                bad.append(f"{f.relative_to(ROOT).as_posix()}:{n.lineno}: os.{n.func.attr}()")
+    assert not bad, "\n".join(bad)
