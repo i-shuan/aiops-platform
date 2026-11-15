@@ -53,7 +53,7 @@ def scenario_6() -> H.Result:
     w.build()
     H.fresh_db()
     with H.es_for(w, INC - timedelta(minutes=80), end + timedelta(minutes=5)):
-        wf = H.detection_workflow("it_otel", H.targets(["ord-svc", "pay-api"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["ord-svc", "pay-api"]))
         H.replay(wf, INC - timedelta(minutes=30), end)
         inc = H.pick(H.incidents(), "ord-svc", INC - timedelta(minutes=5))
         if not r.check("偵測到 ord-svc 事件群", "有", bool(inc), bool(inc)):
@@ -145,7 +145,7 @@ def _s7_run(spike_minutes: int) -> dict:
     H.fresh_db()
     out: dict = {"median": med, "mad": mad, "value": val}
     with H.es_for(w) as es:
-        wf = H.detection_workflow("it_otel", H.targets(["bill-svc"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["bill-svc"]))
         rp = H.replay(wf, INC, end)
         incs = H.incidents()
         out["incidents"] = [(i["id"], i["incident"]["start"][11:16], i["incident"]["end"][11:16]) for i in incs]
@@ -211,7 +211,7 @@ def scenario_8() -> H.Result:
     H.fresh_db()
     client = TestClient(create_app(), headers={"Authorization": "Bearer chaos-token"})
     with H.es_for(w):
-        wf = H.detection_workflow("it_apm", H.targets(["bill-svc"]))
+        wf = H.detection_workflow("sample_it_apm", H.targets(["bill-svc"]))
         rp = H.replay(wf, INC - timedelta(minutes=20), end)
         incs = H.incidents()
         r.notes.append(f"偵測（it_apm／zscore）：{rp.rounds} 輪、異常 {rp.anomalies}、errors {rp.errors[:2]}、事件群 {[(i['id'], i['incident']['start'][11:16], i['severity']) for i in incs]}")
@@ -226,7 +226,7 @@ def scenario_8() -> H.Result:
 
         def create(threshold):
             return client.post("/api/v1/tuning/proposals", json={"source": "manual", "detector": "detector.zscore", "params": {"threshold": threshold},
-                                                                 "proposer": "chaos", "pipeline": "it_apm", "entity": "bill-svc", "reason": "chaos"})
+                                                                 "proposer": "chaos", "pipeline": "sample_it_apm", "entity": "bill-svc", "reason": "chaos"})
 
         p25 = create(25.0)
         r.check("使用者指定的 25.0：建立階段就被參數範圍擋下（第一道防線）", "HTTP 400、超出範圍", f"HTTP {p25.status_code}：{p25.text[:70]}", p25.status_code == 400 and "超出範圍" in p25.text)
@@ -280,7 +280,7 @@ def scenario_9() -> H.Result:
     H.fresh_db()
 
     def profile(world, at: datetime, q: str | None = None):
-        req = SeriesProfile(metric=MetricIn(source_type="elasticsearch", query=q or qps_q), pipeline="it_otel", entity="bill-svc", days=14, step_seconds=300, end=at)
+        req = SeriesProfile(metric=MetricIn(source_type="elasticsearch", query=q or qps_q), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=at)
         with H.es_for(world):
             return run("admin_series_profile", request=req, targets=req.to_targets(), now=at)
 
@@ -303,7 +303,7 @@ def scenario_9() -> H.Result:
             f"r168h={c['r_168h']}；advice={short.get('advice', '')[:60]}；proposal={short.get('proposal')}", c["r_168h"] is None and "資料不足" in short.get("advice", "") and short.get("proposal") is None)
     r.check("同一份只有 7.5 天的資料改用 sum 聚合：同樣要標記資料不足", "r168h=None、advice 說資料不足", f"r168h={d['r_168h']}；advice={short_sum.get('advice', '')[:60]}",
             d["r_168h"] is None and "資料不足" in short_sum.get("advice", ""))
-    advisory = Proposals.with_status("detector.hourly_baseline", "it_otel", "bill-svc", ["advisory"])
+    advisory = Proposals.with_status("detector.hourly_baseline", "sample_it_otel", "bill-svc", ["advisory"])
     r.check("三次體檢後資料庫沒有任何 advisory 提案", "0 筆", f"{len(advisory)} 筆", not advisory)
     return r
 
@@ -319,7 +319,7 @@ def scenario_10() -> H.Result:
     H.fresh_db()
     uid = "inc-chaos-concurrency"
     t0 = datetime(2026, 11, 3, 15, 40)
-    Knowledge.upsert(uid, pipeline="it_otel", entities=["bill-svc"], metrics=["latency"], signals=["latency"], resolution="", root_cause="tax-gw:443",
+    Knowledge.upsert(uid, pipeline="sample_it_otel", entities=["bill-svc"], metrics=["latency"], signals=["latency"], resolution="", root_cause="tax-gw:443",
                      author="amy", verdict="true_positive", severity="P0", window_start=t0, window_end=t0 + timedelta(minutes=30), context={"base": "起始"})
     n_workers, n_rounds = 10, 5
     errors: list[str] = []
@@ -382,7 +382,7 @@ def scenario_10() -> H.Result:
     def inserter(i: int):
         try:
             barrier3.wait()
-            Knowledge.upsert(new_uid, pipeline="it_otel", entities=["bill-svc"], metrics=[], signals=[], resolution="", root_cause="", author=f"w{i}",
+            Knowledge.upsert(new_uid, pipeline="sample_it_otel", entities=["bill-svc"], metrics=[], signals=[], resolution="", root_cause="", author=f"w{i}",
                              verdict="true_positive", severity="P0", window_start=t0, window_end=t0, context={"w": i})
         except Exception as e:  # noqa: BLE001
             ins_errors.append(f"{type(e).__name__}")

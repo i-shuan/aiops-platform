@@ -50,7 +50,7 @@ def scenario_1() -> H.Result:
         n500 = sum(1 for d in es.trace_docs if d.get("http", {}).get("response", {}).get("status_code", 0) >= 500)
         n_span_fail = sum(1 for d in es.trace_docs if d["processor"]["event"] == "span" and d["event"]["outcome"] == "failure")
         r.check("世界資料：整段沒有任何 HTTP 500（陷阱成立）", "0 筆 500", f"{n500} 筆 500；{n_span_fail} 個客戶端 span 逾時失敗", n500 == 0 and n_span_fail > 0)
-        wf = H.detection_workflow("it_otel", H.targets(["ord-svc", "cart-api", "pay-api"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["ord-svc", "cart-api", "pay-api"]))
         rp = H.replay(wf, INC - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、事件群 {[(i['id'], i['incident']['entities']) for i in incs]}")

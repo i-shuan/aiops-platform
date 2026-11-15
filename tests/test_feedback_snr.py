@@ -25,7 +25,7 @@ from aiops.storage.hooks import StorageHooks
 from aiops.storage.repository import ActiveConfigs, Incidents
 
 TPE = ZoneInfo("Asia/Taipei")
-PIPELINE = "it_otel"
+PIPELINE = "sample_it_otel"
 QUERY = "synth:svc"
 
 
@@ -118,7 +118,7 @@ def _seed(pipeline):
 
 def test_it_otel_snr_nodes_are_detected():
     assert snr_nodes(PIPELINE, "detector.residual_chronic") == ["detect_rchronic"]
-    assert snr_feedback.has_snr(PIPELINE) and not snr_feedback.has_snr("factory")
+    assert snr_feedback.has_snr(PIPELINE) and not snr_feedback.has_snr("sample_factory")
 
 
 def test_false_positive_feedback_produces_an_approvable_scale_that_silences_the_same_kind_of_false_alarm(pipeline):

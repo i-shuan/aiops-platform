@@ -65,27 +65,27 @@ def test_a_detector_that_scores_infinity_fails_that_series_instead_of_emitting_a
         scores = pd.Series(np.inf, index=df.index)
         return self._result(df, scores, scores > 3)
 
-    healthy = run_context("metrics_only", now=now, strict=False)
+    healthy = run_context("sample_metrics_only", now=now, strict=False)
     assert healthy.incidents and not healthy.errors  # 對照組：同一條管線正常時有事件、沒錯誤
     with db.read_session() as s:
         before = s.scalar(select(func.count()).select_from(AnomalyRow))
 
     monkeypatch.setattr(ZScoreDetector, "detect", broken)
-    ctx = run_context("metrics_only", now=now + timedelta(hours=2), strict=False)
+    ctx = run_context("sample_metrics_only", now=now + timedelta(hours=2), strict=False)
     assert ctx.errors and all("ValueError" in e.message and "AnomalyEvent.score" in e.message and "inf" in e.message
                               for e in ctx.errors)
     assert ctx.detected_anomalies == []
     with db.read_session() as s:
         assert s.scalar(select(func.count()).select_from(AnomalyRow)) == before
     with pytest.raises(ValueError, match="AnomalyEvent.score"):
-        run_context("metrics_only", now=now + timedelta(hours=2), strict=True)
+        run_context("sample_metrics_only", now=now + timedelta(hours=2), strict=True)
 
 
 def test_api_rejects_non_finite_external_anomalies_at_the_door(client, now):
     """ge=0 擋得住 NaN（NaN >= 0 是 False）但擋不住 Infinity：要在入口就回 422，不能收進資料庫。"""
     for field, bad in [("score", "Infinity"), ("score", "NaN"), ("value", "Infinity"), ("value", "-Infinity"), ("value", "NaN")]:
         item = {"external_id": f"x-{field}-{bad}", "entity": "ETCH-01", "metric": "rf", "ts": now.isoformat(), "score": 5, field: 0}
-        body = json.dumps({"pipeline": "factory", "source": "fdc", "anomalies": [item]}).replace(f'"{field}": 0', f'"{field}": {bad}')
+        body = json.dumps({"pipeline": "sample_factory", "source": "fdc", "anomalies": [item]}).replace(f'"{field}": 0', f'"{field}": {bad}')
         r = client.post("/api/v1/ingestion/anomalies", content=body, headers={"Content-Type": "application/json"})
         assert r.status_code == 422, (field, bad, r.text)
     for field, bad in [("score", float("inf")), ("value", float("nan"))]:
@@ -98,19 +98,19 @@ def test_api_rejects_non_finite_external_anomalies_at_the_door(client, now):
 def test_a_poisoned_external_row_is_dropped_with_an_error_and_does_not_fail_every_round(now, sent):
     """繞過 API 寫進資料庫的 Inf（舊資料、手動補資料）：那一筆記錯誤並標成已處理，同批其他筆照常開單；
     下一輪不會再撞到它（不然每一輪都失敗、也永遠不會好）。"""
-    body = IngestAnomalies(pipeline="factory", source="fdc", anomalies=[ExternalAnomalyIn(
+    body = IngestAnomalies(pipeline="sample_factory", source="fdc", anomalies=[ExternalAnomalyIn(
         external_id="ok", entity="ETCH-01", metric="rf", ts=now, score=5, attrs={"dept": "fab-etch"})])
     assert run("admin_ingest_anomalies", request=body)["accepted"] == 1
     with db.write_session() as s:
-        s.add(ExternalAnomalyRow(pipeline="factory", source="fdc", external_id="bad", entity="LITHO-02", metric="focus",
+        s.add(ExternalAnomalyRow(pipeline="sample_factory", source="fdc", external_id="bad", entity="LITHO-02", metric="focus",
                                  ts=now.replace(tzinfo=None), score=float("inf"), value=None, attrs={}))
-    ctx = run_context("factory", now=now, strict=False, targets=[])
+    ctx = run_context("sample_factory", now=now, strict=False, targets=[])
     assert [i.entities for i in ctx.incidents] == [["ETCH-01"]]
     assert [(e.entity, e.message.startswith("external:fdc:AnomalyEvent.score"), "inf" in e.message) for e in ctx.errors] == [
         ("LITHO-02", True, True)]
     with db.read_session() as s:
         assert set(s.scalars(select(ExternalAnomalyRow.status))) == {"processed"}
-    again = run_context("factory", now=now, strict=False, targets=[])
+    again = run_context("sample_factory", now=now, strict=False, targets=[])
     assert again.errors == []
 
 
@@ -230,8 +230,8 @@ class _CountingLLM(BaseLLM):
 def _rca_incident(now):
     items = [ExternalAnomalyIn(external_id="sf1", entity="svc-a", metric="latency", ts=now - timedelta(minutes=1), score=3),
              ExternalAnomalyIn(external_id="sf2", entity="svc-b", metric="latency", ts=now - timedelta(minutes=2), score=6)]
-    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="it_otel", source="x", anomalies=items))
-    wf = load_workflow(workflow_path("it_otel"))
+    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="sample_it_otel", source="x", anomalies=items))
+    wf = load_workflow(workflow_path("sample_it_otel"))
     wf.topology = [("svc-a", "svc-b")]
     return Pipeline(wf, StorageHooks()).run(now=now, targets=[]).to_result()["incidents"][0]["id"]
 
@@ -348,19 +348,19 @@ def test_two_overlapping_rounds_do_not_double_the_anomalies(now, sent, monkeypat
     第二個在第一個寫入之前就讀了那個時間，兩邊都認為這批點是新的、都去寫。這一段要靠唯一鍵：數量不變，也沒有 IntegrityError。"""
     from aiops.storage import repository
 
-    first = run_context("metrics_only", now=now, strict=False)
+    first = run_context("sample_metrics_only", now=now, strict=False)
     assert first.detected_anomalies and not first.errors
     keys = {(e.entity, e.metric, e.ts, e.detector_node) for e in first.detected_anomalies}
     assert len(keys) == len(first.detected_anomalies)  # 一輪之內本來就不會撞鍵：唯一鍵沒有吃掉任何合法的列
     written = _anomaly_count()
     assert written == len(first.detected_anomalies)
 
-    sequential = run_context("metrics_only", now=now, strict=True)  # 對照組：依序重跑，new_only 自己就擋掉了
+    sequential = run_context("sample_metrics_only", now=now, strict=True)  # 對照組：依序重跑，new_only 自己就擋掉了
     assert sequential.detected_anomalies == [] and _anomaly_count() == written
 
     # 重疊：第二個 worker 讀到的是第一個寫入之前的狀態（還沒有任何已存的異常）
     monkeypatch.setattr(repository.Anomalies, "latest_ts", staticmethod(lambda *a, **k: None))
-    racing = run_context("metrics_only", now=now, strict=True)  # strict：有 IntegrityError 就會直接丟出來
+    racing = run_context("sample_metrics_only", now=now, strict=True)  # strict：有 IntegrityError 就會直接丟出來
     assert {(e.entity, e.metric, e.ts, e.detector_node) for e in racing.detected_anomalies} == keys and not racing.errors
     assert _anomaly_count() == written
 
@@ -383,6 +383,6 @@ def test_a_retried_transaction_writes_the_anomalies_once(now, sent, monkeypatch,
         return real_mark(ids)
 
     monkeypatch.setattr(repository.ExternalAnomalies, "mark_processed", staticmethod(mark))
-    ctx = run_context("metrics_only", now=now, strict=True)
+    ctx = run_context("sample_metrics_only", now=now, strict=True)
     assert calls["n"] == 2 and db_retry_waits == [0.5]
     assert ctx.detected_anomalies and _anomaly_count() == len(ctx.detected_anomalies)

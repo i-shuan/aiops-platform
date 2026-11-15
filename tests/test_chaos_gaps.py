@@ -25,7 +25,7 @@ T0 = datetime(2026, 11, 3, 15, 40)
 
 
 def _row(uid, **over):
-    base = dict(pipeline="it_otel", entities=["bill-svc"], metrics=["latency"], signals=["latency"], resolution="", root_cause="",
+    base = dict(pipeline="sample_it_otel", entities=["bill-svc"], metrics=["latency"], signals=["latency"], resolution="", root_cause="",
                 author="amy", verdict="true_positive", severity="P0", window_start=T0, window_end=T0 + timedelta(minutes=30), context={})
     return Knowledge.upsert(uid, **{**base, **over})
 
@@ -111,7 +111,7 @@ def test_merge_json_sql_uses_database_side_concatenation_on_postgresql():
 
 def test_confirming_the_same_incident_twice_merges_both_contexts(client, now):
     """admin.feedback_submit 的 true_positive 兩次（兩個人各補不同的 context）：以前整包寫回會蓋掉先寫的。"""
-    ctx = run_context("metrics_only", now=now, strict=False)
+    ctx = run_context("sample_metrics_only", now=now, strict=False)
     uid = ctx.incidents[0].uid
     run("admin_feedback_submit", request=FeedbackSubmit(incident_uid=uid, verdict="true_positive", text="真的", author="amy",
                                                       resolution="重啟收集器", context={"tags": ["collector"]}))
@@ -125,7 +125,7 @@ def test_confirming_the_same_incident_twice_merges_both_contexts(client, now):
 
 
 def test_fetch_span_includes_the_end_point_so_single_point_windows_are_not_empty():
-    ctx = PipelineContext(pipeline="metrics_only", now=datetime(2026, 11, 8, 12, tzinfo=timezone.utc),
+    ctx = PipelineContext(pipeline="sample_metrics_only", now=datetime(2026, 11, 8, 12, tzinfo=timezone.utc),
                           target=Target("mock", "cpu", "metric_a"))
     end = datetime(2026, 11, 8, 6, 0, tzinfo=timezone.utc)
     df = fetch_span(ctx, end - timedelta(minutes=30), end, 60)
@@ -154,9 +154,9 @@ def test_quantile_inference_now_covers_a_one_minute_false_positive(monkeypatch, 
             return pd.DataFrame({"ts": ts, "value": value})
 
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: HalfOpenSpec())
-    ctx = PipelineContext(pipeline="metrics_only", now=now, target=Target("elasticsearch", "q", "metric_a"))
+    ctx = PipelineContext(pipeline="sample_metrics_only", now=now, target=Target("elasticsearch", "q", "metric_a"))
     got = threshold.infer(ctx, MADDetector, {"threshold": 3.5}, [Series("metric_a", "elasticsearch", "q")],
-                          "metrics_only", "metric_a", spike, spike)
+                          "sample_metrics_only", "metric_a", spike, spike)
     assert isinstance(got, dict), got  # 舊版回字串「時窗內沒有資料」
     assert got["s_max"] > 3.5 and got["target"] >= got["s_max"] * 1.05 and got["series"][0]["window_points"] == 1
 
@@ -203,10 +203,10 @@ def test_series_profile_marks_low_coverage_as_insufficient_and_makes_no_proposal
     monkeypatch.setattr(P, "doc_counts", lambda ctx, start, end, step: docs)
     q = json.dumps({"index": "metrics-apm.transaction.1m-*", "agg": "sum", "value_field": "transaction.duration.summary.value_count",
                     "filter": {"term": {"service.name": "bill-svc"}}})
-    req = SeriesProfile(metric=MetricIn(source_type="elasticsearch", query=q), pipeline="it_otel", entity="bill-svc", days=14, step_seconds=300, end=now)
+    req = SeriesProfile(metric=MetricIn(source_type="elasticsearch", query=q), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=now)
     out = run("admin_series_profile", request=req, targets=req.to_targets(), now=now)
     assert out["proposal"] is None and "資料不足" in out["advice"] and "43%" in out["advice"]
-    assert out["profile"]["coverage"] == pytest.approx(6 / 14, abs=1e-3) and not Proposals.with_status("detector.hourly_baseline", "it_otel", "bill-svc", ["advisory"])
+    assert out["profile"]["coverage"] == pytest.approx(6 / 14, abs=1e-3) and not Proposals.with_status("detector.hourly_baseline", "sample_it_otel", "bill-svc", ["advisory"])
 
 
 def test_doc_counts_query_is_the_same_filter_with_count_aggregation(monkeypatch):
@@ -220,7 +220,7 @@ def test_doc_counts_query_is_the_same_filter_with_count_aggregation(monkeypatch)
 
     monkeypatch.setattr(P, "fetch_span", fake_fetch_span)
     q = {"index": "metrics-apm.transaction.1m-*", "agg": "sum", "value_field": "x", "filter": {"term": {"service.name": "bill-svc"}}}
-    ctx = PipelineContext(pipeline="it_otel", now=datetime(2026, 11, 8, tzinfo=timezone.utc), target=Target("elasticsearch", json.dumps(q), "bill-svc"))
+    ctx = PipelineContext(pipeline="sample_it_otel", now=datetime(2026, 11, 8, tzinfo=timezone.utc), target=Target("elasticsearch", json.dumps(q), "bill-svc"))
     s = P.doc_counts(ctx, datetime(2026, 11, 7, tzinfo=timezone.utc), datetime(2026, 11, 8, tzinfo=timezone.utc), 300)
     assert seen["query"] == {"index": q["index"], "agg": "count", "filter": q["filter"]} and s is not None and len(s) > 0
     assert P.doc_counts(PipelineContext(pipeline="p", now=ctx.now, target=Target("mock", "cpu", "e")), ctx.now, ctx.now, 60) is None

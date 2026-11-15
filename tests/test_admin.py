@@ -109,13 +109,13 @@ def test_a_stale_proposal_cannot_overwrite_a_newer_config(now):
 
 def test_approved_params_are_used_by_the_next_detection_run(now):
     """預設門檻 3 只抓到 mock 的那個尖峰；核准更敏感的門檻 1.0 後，下一輪就會在尖峰之後多抓到點。"""
-    first = run_context("metrics_only", now=now, strict=False)
+    first = run_context("sample_metrics_only", now=now, strict=False)
     spike_ts = max(a.ts for a in first.anomalies)
     assert len(first.anomalies) == 1
     pid = _propose(params={"threshold": 1.0})
     _backtest(pid, now)
     _approve(pid)
-    second = run_context("metrics_only", now=now, strict=False)
+    second = run_context("sample_metrics_only", now=now, strict=False)
     assert second.anomalies and all(a.ts > spike_ts for a in second.anomalies)  # new_only：只留尖峰之後的新異常
 
 
@@ -138,7 +138,7 @@ def test_backtest_needs_peers_for_peer_detectors_and_known_proposal(now):
 
 @pytest.fixture
 def uid(now):
-    return run_context("metrics_only", now=now, strict=False).incidents[0].uid
+    return run_context("sample_metrics_only", now=now, strict=False).incidents[0].uid
 
 
 def _feedback(uid, verdict="false_positive", detector="detector.zscore"):

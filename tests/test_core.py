@@ -106,7 +106,7 @@ def test_infrastructure_errors_fail_the_whole_run_even_when_not_strict():
 
 
 def test_explicit_empty_topology_means_do_not_derive():
-    wf = _wf(("b", "test.batch_count", {}))
+    wf = _wf(("b", "test.batch_count", {}), targets=())  # 只有批次節點：targets 用不到，帶了會在載入期報錯
     wf.topology = []
     ctx = Pipeline(wf).run(now=NOW)
     assert ctx.topology == [] and ctx.topology_explicit is True

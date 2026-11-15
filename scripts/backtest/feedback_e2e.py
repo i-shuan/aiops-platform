@@ -190,12 +190,12 @@ def carry_over(src: Path, dst: Path) -> None:
 
 
 def online(service: str, query: str, test_start, test_end) -> list[pd.Timestamp]:
-    """測試期每 5 分鐘一輪跑 it_otel（StorageHooks 寫資料庫），回傳寫進資料庫的告警分鐘。"""
+    """測試期每 5 分鐘一輪跑 sample_it_otel（StorageHooks 寫資料庫），回傳寫進資料庫的告警分鐘。"""
     from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
     from aiops.interfaces.runner import workflow_path
     from aiops.storage.hooks import StorageHooks
 
-    pipe = Pipeline(load_workflow(workflow_path("it_otel")), StorageHooks())
+    pipe = Pipeline(load_workflow(workflow_path("sample_it_otel")), StorageHooks())
     target = TargetSpec(source_type=SOURCE["type"], query=query, entity=service)
     minutes: set[pd.Timestamp] = set()
     now = test_start + pd.Timedelta(minutes=60)
@@ -322,10 +322,10 @@ def reject_demo(service, query, data_start, test_end, train_ratio, rounds) -> di
     if pick["golden_safe_max"] >= 10.0:
         return {"skipped": f"每個偵測器的倍率到 10 都不會讓黃金事故消失（最低上限 {pick['golden_safe_max']}），沒有能示範的過度提案"}
     scale = min(10.0, round(pick["golden_safe_max"] + 0.5, 2))
-    current = (ActiveConfigs.get(pick["detector"], "it_otel", service) or {}).get("params", {})
+    current = (ActiveConfigs.get(pick["detector"], "sample_it_otel", service) or {}).get("params", {})
     pid = run("admin_proposal_create", request=ProposalCreate(
         source="manual", detector=pick["detector"], params={**current, "threshold_scale": scale}, proposer="e2e",
-        reason=f"示範：超過黃金事故安全上限 {pick['golden_safe_max']}", pipeline="it_otel", entity=service))["proposal"]["id"]
+        reason=f"示範：超過黃金事故安全上限 {pick['golden_safe_max']}", pipeline="sample_it_otel", entity=service))["proposal"]["id"]
     req = ProposalBacktest(proposal_id=pid, metric={"source_type": SOURCE["type"], "query": query}, entity=service,
                            time_range={"start": data_start.to_pydatetime(), "end": (test_end - pd.Timedelta(seconds=1)).to_pydatetime()},
                            train_ratio=train_ratio)
@@ -368,8 +368,10 @@ def main() -> None:
     configure_env(None if args.synthetic else args.secrets, args.workdir / "before.db")
 
     from aiops.interfaces.runner import load_all
+    from scripts.sample_pipelines import use_sample_pipelines
 
     load_all()
+    use_sample_pipelines()  # 偵測回放用 scripts/pipelines/sample_it_otel（出貨的 it_otel 只吃外部告警、不跑偵測器）
     if args.synthetic:
         SOURCE["type"] = "mock"
         service, query = "synth-svc", SYNTH_QUERY

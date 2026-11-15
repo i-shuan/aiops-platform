@@ -226,13 +226,13 @@ def test_api_rejects_unknown_request_fields_instead_of_running_with_defaults(cli
     res = client.post("/api/v1/alerts/silences", json={**ok, "entitys": ["cart-api"]})
     assert res.status_code == 422
     assert "entitys" in res.text
-    res = client.post("/api/v1/runs", json={"workflow": "it_otel", "target": []})  # targets 少了 s
+    res = client.post("/api/v1/runs", json={"workflow": "sample_it_otel", "target": []})  # targets 少了 s
     assert res.status_code == 422
     assert "target" in res.text
 
 
 def test_api_rejects_a_bad_override_value_with_400_not_500(client):
-    body = {"workflow": "it_otel", "targets": [
+    body = {"workflow": "sample_it_otel", "targets": [
         {"source_type": "mock", "query": "a", "entity": "a", "overrides": {"detect_rshift": {"threshold": -3}}}]}
     res = client.post("/api/v1/runs", json=body)
     assert res.status_code == 400

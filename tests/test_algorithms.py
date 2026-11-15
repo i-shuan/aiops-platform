@@ -111,13 +111,13 @@ targets:
 def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
     from aiops.interfaces.runner import workflow_path
 
-    wf = load_workflow(workflow_path("it_otel"))
+    wf = load_workflow(workflow_path("sample_it_otel"))
     nodes = {n.name: n for n in wf.nodes}
     assert nodes["detect"].operator == "detector.hourly_baseline"
     assert nodes["fetch"].params["train_lookback_minutes"] >= 10080
 
 
-@pytest.mark.parametrize("name", ["factory"])
+@pytest.mark.parametrize("name", ["sample_factory"])
 def test_default_detection_is_a_majority_vote_of_three_detectors(name):
     """真實資料回放：多數決比聯集少 88% 的警報分鐘數。factory 預設是這個組合（it_otel 改成 R+SNR，
     見 tests/test_residual_ensemble.py::test_it_otel_detects_with_three_complementary_votes_and_two_bypass_tracks）。
@@ -133,7 +133,7 @@ def test_default_detection_is_a_majority_vote_of_three_detectors(name):
     assert vote.params == {"strategy": "majority", "bypass": ["fatal"]}
     # it_otel 刻意用 min_weeks: 1（多數決下誤報較少）；factory 保留預設的安全退回
     hourly = next(n for n in wf.nodes if n.operator == "detector.hourly_baseline")
-    assert hourly.params.get("min_weeks") == (1 if name == "it_otel" else None)
+    assert hourly.params.get("min_weeks") == (1 if name == "sample_it_otel" else None)
     pipeline = Pipeline(wf)
     assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_mad", "detect_qdrift", "fatal"]  # 投票節點不載基準線
     voters = [n for n, op in pipeline.nodes if getattr(op, "has_baseline", False) and op.votes]

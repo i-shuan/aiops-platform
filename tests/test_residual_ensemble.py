@@ -278,7 +278,7 @@ def _detection_nodes(variant: str = "R") -> list[NodeSpec]:
 
 def test_it_otel_detects_with_three_complementary_votes_and_two_bypass_tracks():
     """it_otel 的偵測段 = R+SNR：三票互補（週期、殘差突變、殘差漂移）、軟投票，hard_limit 與旁路漂移票單獨成立。"""
-    pipe = Pipeline(load_workflow(workflow_path("it_otel")))
+    pipe = Pipeline(load_workflow(workflow_path("sample_it_otel")))
     ops = {n.name: n.operator for n, _ in pipe.target_nodes}
     vote = next(op for n, op in pipe.target_nodes if n.operator == "detector.soft_vote")
     voters = [n.name for n, op in pipe.target_nodes if getattr(op, "has_baseline", False) and n.name not in vote.bypass]

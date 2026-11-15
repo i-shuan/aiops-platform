@@ -50,7 +50,7 @@ def scenario_2() -> H.Result:
         r.check("世界資料：事故前 15 分鐘 bill-svc 入口請求 < 20", "< 20（約 8）", f"{pre} 筆", pre < 20)
         # bill-svc 每分鐘 0～3 筆：延遲用「每筆請求的平均」（ES 查詢的 divide_by）。原本的 avg(summary.sum) 是當分鐘總耗時，
         # 01:33 那一分鐘剛好 3 筆 = 平常的 3 倍，注入前就誤報（缺口 9）。世界資料與注入都沒動，只有這條 target 的查詢換了。
-        wf = H.detection_workflow("it_otel", H.targets(["bill-svc"], kind="latency_mean") + H.targets(["pay-api"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["bill-svc"], kind="latency_mean") + H.targets(["pay-api"]))
         rp = H.replay(wf, inc - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、事件群 {[(i['id'], i['incident']['entities']) for i in incs]}")
@@ -96,7 +96,7 @@ def scenario_3() -> H.Result:
     w.build()
     H.fresh_db()
     with H.es_for(w, INC - timedelta(minutes=80), end + timedelta(minutes=5)):
-        wf = H.detection_workflow("it_otel", H.targets(["cart-api", "pay-api"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["cart-api", "pay-api"]))
         rp = H.replay(wf, INC - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、事件群 {[(i['id'], i['incident']['entities']) for i in incs]}")
@@ -155,7 +155,7 @@ def scenario_4() -> H.Result:
         seen = {(e["caller"], e["callee"]) for e in topo["edges"]}
         r.check("拓撲由排程動作從 trace 沉澱（不手動灌邊）", "gateway→order-api、order-api→inventory-svc",
                 sorted(seen), seen == {("gateway", "order-api"), ("order-api", "inventory-svc")})
-        wf = H.detection_workflow("it_otel", H.targets(["gateway", "order-api", "inventory-svc"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["gateway", "order-api", "inventory-svc"]))
         rp = H.replay(wf, INC - timedelta(minutes=30), end)
         incs = H.incidents()
         first = sorted(rp.first_alarm.items(), key=lambda kv: kv[1])
@@ -198,7 +198,7 @@ def scenario_5() -> H.Result:
         tx500 = sum(1 for d in inc_docs if d["processor"]["event"] == "transaction" and d["http"]["response"]["status_code"] == 500)
         r.check("世界資料：事故期間 cart-api 只有 root transaction", "0 個子 span、有 500", f"{kids} 個子 span、{tx500} 筆 500", kids == 0 and tx500 > 0)
         # 事故期間延遲反而變短，看延遲偵測不到：cart-api 用「每分鐘失敗請求數」
-        wf = H.detection_workflow("it_otel", H.targets(["cart-api"], signal="errors", kind="errors") + H.targets(["pay-api"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["cart-api"], signal="errors", kind="errors") + H.targets(["pay-api"]))
         rp = H.replay(wf, INC - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、事件群 {[(i['id'], i['incident']['entities']) for i in incs]}")
@@ -277,7 +277,7 @@ def scenario_11() -> H.Result:
         same_start = sum(1 for ks in by_tx.values() if len(ks) == 2 and ks[0]["timestamp"]["us"] == ks[1]["timestamp"]["us"])
         r.check("世界資料：ord-svc 兩個子 span 同一起點（並行成立）", "全部同一起點", f"{same_start}／{len(by_tx)} 個請求",
                 same_start == len(by_tx) > 0)
-        wf = H.detection_workflow("it_otel", H.targets(["ord-svc", "cart-api", "pay-api"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["ord-svc", "cart-api", "pay-api"]))
         rp = H.replay(wf, INC - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、"

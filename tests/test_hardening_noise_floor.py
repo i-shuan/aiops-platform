@@ -138,7 +138,7 @@ def test_it_otel_example_target_overrides_min_scale():
     from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
     from aiops.interfaces.runner import workflow_path
 
-    wf = load_workflow(workflow_path("it_otel"))
+    wf = load_workflow(workflow_path("sample_it_otel"))
     overrides = [t.overrides for t in wf.targets if t.overrides]
     assert any("min_scale" in o.get("detect_rshift", {}) for o in overrides)
     Pipeline(wf)  # 合法

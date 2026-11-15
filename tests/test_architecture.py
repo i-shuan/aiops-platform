@@ -399,12 +399,14 @@ def test_exceptions_are_never_swallowed_silently():
 
 def test_algorithms_do_not_special_case_entities_or_lengths():
     """不准對特定服務名或特定資料長度走不同邏輯（== "cart-api"、len(x) == 120）。
-    服務名以內建 YAML 的 targets 與 kebab-case 字面值為準；CLI 子命令名（run-once 這類）不算。"""
+    服務名以內建 YAML 與偵測管線樣本（scripts/pipelines/）的 targets、以及 kebab-case 字面值為準；
+    CLI 子命令名（run-once 這類）不算。出貨的使用者管線只吃外部告警、沒有 targets，名單主要來自樣本。"""
     import re
 
     import yaml
 
-    entities = {t["entity"] for f in (ROOT / "pipelines").rglob("*.yaml")
+    yamls = [*(ROOT / "pipelines").rglob("*.yaml"), *(ROOT.parent / "scripts" / "pipelines").glob("*.yaml")]
+    entities = {t["entity"] for f in yamls
                 for t in (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).get("targets") or [] if "entity" in t}
     kebab = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)+$")
     bad = []

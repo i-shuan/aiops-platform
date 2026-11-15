@@ -73,7 +73,7 @@ def source(monkeypatch):
 
 
 def _pipeline(queries, hooks=None, **workflow_fields) -> Pipeline:
-    wf = load_workflow(workflow_path("metrics_only"))
+    wf = load_workflow(workflow_path("sample_metrics_only"))
     data = wf.model_dump() | {"targets": [TargetSpec(source_type="mock", query=q, entity=f"svc-{q}") for q in queries]}
     return Pipeline(Workflow.model_validate(data | workflow_fields), hooks or StorageHooks())
 
@@ -201,14 +201,14 @@ def test_first_seen_keeps_the_first_time_and_is_written_once(source):
     for m in range(3):
         pipeline.run(now=_t(m))
     [row] = StreamFirstSeen.list()
-    assert (row["pipeline"], row["entity"], row["query"], row["first_data_at"]) == ("metrics_only", "svc-a", "a", _naive(0))
-    assert StreamFirstSeen.record_many("metrics_only", [("svc-a", "a")], _t(9)) == 1  # 再寫一次不會改掉最早那一次
+    assert (row["pipeline"], row["entity"], row["query"], row["first_data_at"]) == ("sample_metrics_only", "svc-a", "a", _naive(0))
+    assert StreamFirstSeen.record_many("sample_metrics_only", [("svc-a", "a")], _t(9)) == 1  # 再寫一次不會改掉最早那一次
     assert [r["first_data_at"] for r in StreamFirstSeen.list()] == [_naive(0)]
 
 
 def test_a_stream_with_stored_anomalies_from_before_this_feature_is_not_never_seen(source):
     """加這個功能之前就在跑的資料流沒有「第一次收到資料」的紀錄：已經存過異常點（或基準線）就算「以前有過資料」。"""
-    Anomalies.create_many([{"pipeline": "metrics_only", "entity": "svc-a", "metric": "a", "ts": _t(-600), "value": 1.0,
+    Anomalies.create_many([{"pipeline": "sample_metrics_only", "entity": "svc-a", "metric": "a", "ts": _t(-600), "value": 1.0,
                             "score": 9.0, "detector_name": "detector.zscore", "detector_node": "detect",
                             "level": "anomaly", "attrs": {}}])
     source["a"] = source["b"] = "empty"
@@ -374,12 +374,12 @@ def test_pruning_only_touches_the_pipeline_that_is_running(source):
     pipeline = _pipeline(["a"], health_retention_days=1)
     pipeline.run(now=_t(0))
     pipeline.run(now=_t(30 * day))
-    assert [at for at, _ in _runs(pipeline="metrics_only")] == [_naive(30 * day)]
+    assert [at for at, _ in _runs(pipeline="sample_metrics_only")] == [_naive(30 * day)]
     assert [at for at, _ in _runs(pipeline="other_pipeline")] == [_naive(0)]  # 別條管線的紀錄不動
 
 
 def test_retention_is_a_workflow_setting_validated_at_load():
-    wf = load_workflow(workflow_path("metrics_only"))
+    wf = load_workflow(workflow_path("sample_metrics_only"))
     assert wf.health_retention_days == 180  # 預設
     for bad in (0, -1, 5000):
         with pytest.raises(Exception, match="health_retention_days"):
@@ -457,17 +457,17 @@ def test_api_lists_current_problems_point_in_time_history_runs_and_first_seen(so
     pipeline.run(now=_t(1))
     current = client.get("/api/v1/data-health/streams", params={"current": "true"}).json()["result"]
     assert {(r["entity"], r["status"]) for r in current} == {("svc-a", "no_data"), ("svc-b", "config_error")}
-    bad = client.get("/api/v1/data-health/streams", params={"status": "config_error", "pipeline": "metrics_only"}).json()["result"]
+    bad = client.get("/api/v1/data-health/streams", params={"status": "config_error", "pipeline": "sample_metrics_only"}).json()["result"]
     assert [r["entity"] for r in bad] == ["svc-b"] and bad[0]["query"] == "b"
     at_t0 = client.get("/api/v1/data-health/streams", params={"entity": "svc-a", "since": _t(0).isoformat(),
                                                               "until": _t(0).isoformat()}).json()["result"]
     assert [r["status"] for r in at_t0] == ["ok"]
-    runs = client.get("/api/v1/data-health/runs", params={"pipeline": "metrics_only"}).json()["result"]
+    runs = client.get("/api/v1/data-health/runs", params={"pipeline": "sample_metrics_only"}).json()["result"]
     assert [r["status"] for r in runs] == ["degraded", "ok"]  # 由新到舊
     only_t0 = client.get("/api/v1/data-health/runs", params={"since": _t(0).isoformat(), "until": _t(0).isoformat()}).json()["result"]
     assert [r["status"] for r in only_t0] == ["ok"]
     assert client.get("/api/v1/data-health/runs", params={"status": "failed"}).json()["result"] == []
-    first = client.get("/api/v1/data-health/first-seen", params={"pipeline": "metrics_only"}).json()["result"]
+    first = client.get("/api/v1/data-health/first-seen", params={"pipeline": "sample_metrics_only"}).json()["result"]
     assert {r["entity"] for r in first} == {"svc-a", "svc-b"}
     assert client.get("/api/v1/data-health/streams", params={"limit": 0}).status_code == 422
 
@@ -521,7 +521,7 @@ def _dashboard() -> dict:
     return json.loads(DASHBOARD.read_text(encoding="utf-8"))
 
 
-def _sql(raw: str, *, pipelines=("metrics_only",), services=("svc-a", "svc-b"), scope="problem",
+def _sql(raw: str, *, pipelines=("sample_metrics_only",), services=("svc-a", "svc-b"), scope="problem",
          time_from=_t(-60), time_to=_t(60)) -> str:
     """把 Grafana 的巨集與變數換成它實際會展開的樣子（多選變數 = 逗號分隔的單引號字串；$__timeFilter(欄位) =
     欄位 BETWEEN 起 AND 迄），並把三處 PostgreSQL 的時間運算換成 SQLite 的寫法（時間加一秒、依分鐘分格、取 epoch）。
@@ -625,7 +625,7 @@ def test_dashboard_queries_return_the_right_rows(source):
     all_services = ("svc-a", "svc-b", "svc-c")
 
     # 下拉選單
-    assert [r["pipeline"] for r in _query(_dashboard()["templating"]["list"][0]["query"])] == ["metrics_only"]
+    assert [r["pipeline"] for r in _query(_dashboard()["templating"]["list"][0]["query"])] == ["sample_metrics_only"]
     assert [r["entity"] for r in _query(_dashboard()["templating"]["list"][1]["query"])] == list(all_services)
 
     # 面板 1：目前有問題的資料流（狀態、訊息、從什麼時候開始）——不含正常的 svc-c
@@ -644,11 +644,11 @@ def test_dashboard_queries_return_the_right_rows(source):
     by_stream: dict[str, list] = {}
     for r in points:
         by_stream.setdefault(r["metric"], []).append(r["value"])
-    assert set(by_stream) == {"metrics_only / svc-a / a", "metrics_only / svc-b / b"}  # 預設只畫出過問題的
-    assert by_stream["metrics_only / svc-a / a"] == [0, 1, 1, -1]
-    assert by_stream["metrics_only / svc-b / b"] == [0, 3, 3, -1]
+    assert set(by_stream) == {"sample_metrics_only / svc-a / a", "sample_metrics_only / svc-b / b"}  # 預設只畫出過問題的
+    assert by_stream["sample_metrics_only / svc-a / a"] == [0, 1, 1, -1]
+    assert by_stream["sample_metrics_only / svc-b / b"] == [0, 3, 3, -1]
     everything = {r["metric"] for r in _query(_raw(3), services=all_services, scope="all")}
-    assert "metrics_only / svc-c / c" in everything
+    assert "sample_metrics_only / svc-c / c" in everything
     assert [str(r["time"])[:16] for r in points] == sorted(str(r["time"])[:16] for r in points)  # 依時間排好
 
     # 面板 4：管線每輪的執行結果（一分鐘一格），最後一輪之後用 -1 收尾；面板 5：沒有成功的輪次，最新的在上面
@@ -666,9 +666,9 @@ def test_dashboard_queries_return_the_right_rows(source):
 def test_dashboard_shows_failed_rounds_with_their_failure_type_and_groups_broken_definitions():
     """整輪失敗的輪次，畫面上的「狀態」是失敗類型；管線定義載入失敗在設定錯誤清單裡同一個訊息合成一列。"""
     for m in (0, 1, 2):
-        PipelineRuns.record("metrics_only", _t(m), "failed", "workflow_error", "nodes.0.params：lookback_minutes 必須大於 0")
-    PipelineRuns.record("metrics_only", _t(3), "failed", "infrastructure_error", "資料斷流：2/2", 2, 2)
-    PipelineRuns.record("metrics_only", _t(4), "ok", "", "", 2, 0)
+        PipelineRuns.record("sample_metrics_only", _t(m), "failed", "workflow_error", "nodes.0.params：lookback_minutes 必須大於 0")
+    PipelineRuns.record("sample_metrics_only", _t(3), "failed", "infrastructure_error", "資料斷流：2/2", 2, 2)
+    PipelineRuns.record("sample_metrics_only", _t(4), "ok", "", "", 2, 0)
     assert [r["狀態"] for r in _query(_raw(5))] == ["infrastructure_error", "workflow_error", "workflow_error", "workflow_error"]
     [latest] = _query(_raw(2))
     assert (latest["狀態"], latest["範圍內輪數"], latest["範圍內失敗輪數"]) == ("ok", 5, 4)

@@ -59,7 +59,7 @@ def flaky_source(monkeypatch):
 
 
 def _detection(targets, **workflow_fields):
-    wf = load_workflow(workflow_path("metrics_only"))
+    wf = load_workflow(workflow_path("sample_metrics_only"))
     data = wf.model_dump() | {"targets": [TargetSpec(source_type="mock", query=q, entity=e) for q, e in targets]} | workflow_fields
     return Pipeline(Workflow.model_validate(data), StorageHooks())
 

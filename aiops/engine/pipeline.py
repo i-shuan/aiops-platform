@@ -237,9 +237,16 @@ class Pipeline:
         # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only、ensemble 這類不需要）
         self.detector_nodes = [(n.name, n.operator) for n, op in self.target_nodes if getattr(op, "has_baseline", False)]
         self._detectors = {n.name: (n.operator, op) for n, op in self.target_nodes if getattr(op, "has_baseline", False)}
+        self._check_targets_are_used(workflow.targets, f"Workflow {workflow.name} 的 targets")
         for spec in workflow.targets:
             self.check_target(spec)
         self._check_entity_routing(workflow.targets)
+
+    def _check_targets_are_used(self, targets: list[TargetSpec], label: str) -> None:
+        """沒有逐序列節點的管線（只吃外部告警）給了 targets：不會抓、不會偵測，卻回成功——寫錯就報錯，不默默忽略。"""
+        if targets and not self.target_nodes:
+            raise WorkflowError(f"{label}：這條管線沒有逐序列的節點（不抓資料、不跑偵測器，只處理推進來的外部告警），"
+                                f"targets 不會被用到；告警請從 /api/v1/ingestion/grafana-alerts 或 /anomalies 推進來")
 
     # ── 每條 target 跑哪些偵測節點 ──
 
@@ -310,6 +317,7 @@ class Pipeline:
             strict: bool = False) -> PipelineContext:
         """strict=False（排程）：某條序列失敗記在 errors，其他序列照跑；strict=True（手動動作）：失敗直接丟出。"""
         now = now or datetime.now(timezone.utc)
+        self._check_targets_are_used(targets or [], f"Workflow {self.workflow.name}")
         for spec in targets or []:
             self.check_target(spec)  # API 傳進來的 targets 跟 YAML 的一樣要檢查，在做任何事之前擋下
         batch = PipelineContext(pipeline=self.workflow.name, now=now, incident_id=incident_id, request=request,
@@ -319,8 +327,9 @@ class Pipeline:
         if self.workflow.lot_edges is not None:
             batch.lot_edges = [LotEdge(e["from"], e["to"], int(e.get("lots", 1))) for e in self.workflow.lot_edges]
             batch.lot_edges_explicit = True
-        # 資料健康度只記排程模式（strict=False）且有逐序列節點的管線：手動動作（strict=True）的失敗直接回給呼叫的人
-        record = bool(self.target_nodes) and not strict
+        # 資料健康度只記排程的輪次（strict=False、不是針對某個事件群、也不是帶請求的手動動作）：手動動作與 RCA 的失敗直接回給呼叫的人。
+        # 沒有逐序列節點的管線（只吃外部告警）也記：每一輪一列，證明平台那時候有在跑——告警沒來時分得出是對方沒推還是平台沒跑
+        record = not strict and incident_id is None and request is None
         specs = list(targets if targets is not None else self.workflow.targets) if self.target_nodes else []
         try:
             batch = self._run(batch, specs, now, request, strict)

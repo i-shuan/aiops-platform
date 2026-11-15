@@ -206,5 +206,5 @@ def test_source_check_api_and_unconfigured_source_returns_503(client, monkeypatc
     assert client.get("/api/v1/ingestion/sources/check").json()["result"]["ok"] is True
 
     # 資料源沒設定是基礎設施問題，不是「這條序列沒資料」：整輪失敗回 503，而不是回 200 然後把錯誤藏在 errors 裡
-    body = {"workflow": "metrics_only", "targets": [{"source_type": "prometheus", "query": "up", "entity": "x"}]}
+    body = {"workflow": "sample_metrics_only", "targets": [{"source_type": "prometheus", "query": "up", "entity": "x"}]}
     assert client.post("/api/v1/runs", json=body).status_code == 503

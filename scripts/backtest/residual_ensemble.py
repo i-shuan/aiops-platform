@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore")
 TZ = "Asia/Taipei"
 LOOKBACK, STEP = 60, 5
 SERVICES = ["mes-api", "wip-worker", "report-svc", "order-svc", "cart-api", "pay-api"]
-VARIANTS = {v: "it_otel" for v in ALL_VARIANTS}  # 組別 -> 從哪條管線改出來（scripts/backtest/variants.py）
+VARIANTS = {v: "sample_it_otel" for v in ALL_VARIANTS}  # 組別 -> 從哪條管線改出來（scripts/backtest/variants.py）
 INJECTIONS = {"step": np.full(20, 0.3), "ramp": np.r_[np.linspace(1.0, 0.3, 15), np.full(20, 0.3)],
               "mild": np.full(60, 0.8)}
 

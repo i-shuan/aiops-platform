@@ -87,7 +87,7 @@ def test_resolved_path_outside_the_workflow_dir_is_refused(tmp_path, monkeypatch
 
 def test_cli_may_load_its_own_file_but_the_api_path_may_not(tmp_path, now):
     custom = tmp_path / "mine.yaml"
-    shutil.copy(workflow_path("metrics_only"), custom)
+    shutil.copy(workflow_path("sample_metrics_only"), custom)
     with pytest.raises(BadRequest):
         workflow_path(str(custom))  # 預設（API 用的）不接受檔案路徑
     assert workflow_path(str(custom), allow_file=True) == custom
@@ -139,7 +139,7 @@ def test_directory_link_inside_pipelines_pointing_outside_is_refused(tmp_path, m
 
 
 def _two_zscore_nodes():
-    wf = load_workflow(workflow_path("metrics_only"))
+    wf = load_workflow(workflow_path("sample_metrics_only"))
     at = next(i for i, n in enumerate(wf.nodes) if n.name == "detect")
     wf.nodes[at:at + 1] = [NodeSpec(name="detect_a", operator=ZSCORE, params={"threshold": 1.0}),
                            NodeSpec(name="detect_b", operator=ZSCORE, params={"threshold": 9.0})]
@@ -151,14 +151,14 @@ def test_same_algorithm_twice_keeps_separate_baselines_and_lineage(now):
     assert {a.detector_node for a in ctx.anomalies} == {"detect_a", "detect_b"}
     assert {a.detector for a in ctx.anomalies} == {ZSCORE}
     for node in ("detect_a", "detect_b"):
-        assert DetectorModels.get("metrics_only", "metric_a", "metric_a", ZSCORE, node)["points"] > 0
+        assert DetectorModels.get("sample_metrics_only", "metric_a", "metric_a", ZSCORE, node)["points"] > 0
     rows = crud.find(AnomalyRow)
     assert {r["detector_node"] for r in rows} == {"detect_a", "detect_b"}
     assert {r["detector_name"] for r in rows} == {ZSCORE}  # 算子名，不再是演算法短名或「最後一個偵測器」
 
 
 def test_each_anomaly_is_stored_with_its_own_detector_when_algorithms_differ(now):
-    wf = load_workflow(workflow_path("metrics_only"))
+    wf = load_workflow(workflow_path("sample_metrics_only"))
     at = next(i for i, n in enumerate(wf.nodes) if n.name == "detect")
     wf.nodes[at:at + 1] = [NodeSpec(name="z", operator=ZSCORE, params={"threshold": 1.0}),
                            NodeSpec(name="m", operator="detector.mad", params={"threshold": 10.0})]
@@ -170,7 +170,7 @@ def test_each_anomaly_is_stored_with_its_own_detector_when_algorithms_differ(now
 
 
 def test_anomaly_event_roundtrip_keeps_lineage(now):
-    ctx = run_context("metrics_only", now=now, strict=False)
+    ctx = run_context("sample_metrics_only", now=now, strict=False)
     event = ctx.incidents[0].events[0]
     assert event.detector == ZSCORE and event.detector_node == "detect"
     from aiops.engine.types import AnomalyEvent
@@ -220,14 +220,14 @@ def test_entity_names_with_colons_do_not_collide():
 
 def test_a_tuned_pipeline_does_not_affect_other_pipelines(now):
     _set({"threshold": 1.0}, pipeline="some_other_pipeline")
-    assert len(run_context("metrics_only", now=now, strict=False).anomalies) == 1  # 不受影響：只抓到尖峰
+    assert len(run_context("sample_metrics_only", now=now, strict=False).anomalies) == 1  # 不受影響：只抓到尖峰
 
 
 def test_tuning_for_this_pipeline_is_applied(now):
-    _set({"threshold": 1.0}, pipeline="metrics_only")
-    ctx = run_context("metrics_only", now=now, strict=False)
+    _set({"threshold": 1.0}, pipeline="sample_metrics_only")
+    ctx = run_context("sample_metrics_only", now=now, strict=False)
     assert len(ctx.anomalies) > 1
-    assert any(line.startswith("params:detect:detector.zscore@metrics_only/*") for line in ctx.audit)
+    assert any(line.startswith("params:detect:detector.zscore@sample_metrics_only/*") for line in ctx.audit)
 
 
 def test_proposals_for_different_layers_do_not_invalidate_each_other(now):
@@ -322,7 +322,7 @@ def test_too_little_data_to_split_is_rejected(now):
 
 
 def _feedback_for_incident(now):
-    uid = run_context("metrics_only", now=now, strict=False).incidents[0].uid
+    uid = run_context("sample_metrics_only", now=now, strict=False).incidents[0].uid
     return lambda: run("admin_feedback_submit", request=FeedbackSubmit(
         incident_uid=uid, verdict="false_positive", detector=ZSCORE, text="誤報", author="a"))["feedback"]["id"]
 
@@ -335,9 +335,9 @@ def test_feedback_scopes_pick_the_right_layer(now):
     new_feedback = _feedback_for_incident(now)
     assert _propose_from(new_feedback(), scope="global")["pipeline"] == ANY
     pipeline_level = _propose_from(new_feedback())  # 預設 scope=pipeline
-    assert (pipeline_level["pipeline"], pipeline_level["entity"]) == ("metrics_only", ANY)
+    assert (pipeline_level["pipeline"], pipeline_level["entity"]) == ("sample_metrics_only", ANY)
     entity_level = _propose_from(new_feedback(), scope="entity")  # 事件群只有一個實體，可省略 entity
-    assert (entity_level["pipeline"], entity_level["entity"]) == ("metrics_only", "metric_a")
+    assert (entity_level["pipeline"], entity_level["entity"]) == ("sample_metrics_only", "metric_a")
 
 
 def test_feedback_entity_must_belong_to_the_incident(now):
@@ -347,7 +347,7 @@ def test_feedback_entity_must_belong_to_the_incident(now):
 
 
 def test_feedback_proposal_starts_from_the_layers_current_params(now):
-    _set({"threshold": 4.0}, pipeline="metrics_only")
+    _set({"threshold": 4.0}, pipeline="sample_metrics_only")
     proposal = _propose_from(_feedback_for_incident(now)())
     assert proposal["params"]["threshold"] == pytest.approx(4.8)  # 4.0 調高 20%，而不是從預設 3.0 起算
     assert proposal["base_version"] == 1

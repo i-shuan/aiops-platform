@@ -65,7 +65,7 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 | 目錄 | 是什麼 |
 |---|---|
 | `aiops/engine/` | 底座：`PipelineContext`（強型別）、Pipeline 引擎、算子註冊中心、`BaseOperator`、錯誤型別、請求模型 |
-| `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`）、`rca/`（`rca_report` 等）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
+| `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`：只吃各團隊推進來的外部告警、不跑偵測器，見 `docs/EXTERNAL_ALERTS.md`）、`rca/`（`rca_report` 等）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
 | `aiops/stages/` | 管線算子，依執行順序分段：`ingestion` → `detectors` → `ensemble` → `grouping` → `scoring` → `suppression` → `rca` → `enrichment`（LLM，含 `noop`）→ `notification` |
 | `aiops/control_plane/` | 控制面手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） |
 | `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch`；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
@@ -100,10 +100,10 @@ aiops/
 │   ├── topology.py                  IT 呼叫關係與工廠 Lot 流向，統一成「異常會從 A 傳到 B」的有向邊
 │   └── signature.py                 事件群特徵簽章與 Jaccard 相似度（歷史相似案例用）
 ├── pipelines/                       管線 YAML（沒有 Python，調整流程只改這裡；以名稱載入，名稱不准重複）
-│   ├── detection/                   偵測告警管線
-│   │   ├── it_otel.yaml             IT：抓指標 → 168 時段偵測 → 拓撲收斂 → 黃金訊號計分 → 抑制 → 通知
-│   │   ├── it_apm.yaml              IT：APM 產品資料，有服務拓撲與黃金訊號（偵測用 zscore，不是 168 時段）
-│   │   ├── factory.yaml             工廠：Lot 履歷收斂，沒有黃金訊號與同根因抑制
+│   ├── detection/                   告警管線：只吃各團隊推進來的外部告警（偵測演算法只當平台自己的看門狗，不給使用者用）
+│   │   ├── it_otel.yaml             IT：外部告警 → 拓撲收斂 → 黃金訊號計分 → 抑制 → 通知（RCA 走 rca_report_llm）
+│   │   ├── it_apm.yaml              IT：APM 產品資料，同上
+│   │   ├── factory.yaml             工廠：外部告警（含 FDC）→ Lot 履歷收斂，沒有黃金訊號與同根因抑制
 │   │   └── metrics_only.yaml        只有時序指標，沒有 trace 與拓撲
 │   ├── rca/                         RCA 診斷管線
 │   │   └── rca_report.yaml          針對一個事件群產生 RCA 報告（根因用拓撲）
@@ -243,9 +243,15 @@ PowerShell 先執行 `$env:AIOPS_AUTH_DISABLED = "true"` 再啟動。啟動後�
 
 **`source_type` 一律必填（API 合約變更）**：`POST /api/v1/runs` 的 `targets[].source_type`、`targets[].peers[].source_type`，以及 `POST /api/v1/tuning/proposals/backtest` 的 `metric.source_type`、`peers[].source_type`，都沒有預設值。以前漏寫會默默變成 `mock`（假資料），現在漏寫或只給空白回 **422**，`detail[].loc` 指出是哪一個 `source_type`；workflow YAML 的 target 漏寫則在載入時就失敗。要用模擬資料請明寫 `"source_type": "mock"`。`peer_group.source_type` 不受影響：空字串仍代表「跟 target 同一個資料源」。
 
+告警從哪裡來：各團隊在**自己的** Grafana 設告警規則，Webhook 通知管道打到平台（設定步驟與標籤規範見 `docs/EXTERNAL_ALERTS.md`）。
+手動模擬一筆（內容是 Grafana 實際送出的格式，樣本在 `tests/fixtures/grafana_webhook/`）：
+
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_API_TOKEN" -H "Content-Type: application/json" -d '{"workflow": "it_otel", "targets": [{"source_type": "prometheus", "query": "up{job=\"cart\"}", "entity": "cart"}]}'
+curl -X POST "http://127.0.0.1:8000/api/v1/ingestion/grafana-alerts?pipeline=it_otel&source=team-a" -H "Authorization: Bearer $AIOPS_API_TOKEN" -H "Content-Type: application/json" --data-binary @tests/fixtures/grafana_webhook/firing_CheckoutCpuHigh.json
 ```
+
+出貨的 `it_otel`、`it_apm`、`factory`、`metrics_only` 不抓資料、不跑偵測器，`POST /api/v1/runs` 帶 `targets` 會回 400；
+上面 `source_type` 的規則適用於帶偵測器的管線（目前只有測試與回測用的 `scripts/pipelines/sample_*`）。
 
 ### 跑排程
 
@@ -273,6 +279,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/runs -H "Authorization: Bearer $AIOPS_
 - **LLM 供應商**：放一個檔案到 `aiops/stages/enrichment/`，用 `@register("名稱")` 登記即可，啟動時自動掃描載入，不用改其他地方。
 
 ### 偵測演算法一覽
+
+> **適用範圍（2026-11-15 起）**：這些偵測演算法只用來監控 AIOps 平台自己（看門狗），不掛在使用者的管線上；使用者的告警由他們自己的 Grafana 推進來（`docs/EXTERNAL_ALERTS.md`）。下面提到的 `it_otel`、`factory` 預設設定，現在是 `scripts/pipelines/sample_it_otel.yaml`、`sample_factory.yaml`（給測試與回測用），下面各節的回放數字也是那時候量的。
 
 | 算子 | 比什麼 | 什麼時候用 | 要注意 |
 |---|---|---|---|

@@ -51,7 +51,8 @@ def test_api_backtest_without_source_type_is_rejected(client):
 
 
 def test_api_run_with_explicit_source_type_still_works(client):
-    r = client.post("/api/v1/runs", json={"workflow": "metrics_only",
+    # 帶偵測器的樣本：出貨的 metrics_only 只吃外部告警，給 targets 會 400（不會被用到）
+    r = client.post("/api/v1/runs", json={"workflow": "sample_metrics_only",
                                           "targets": [{"source_type": "mock", "query": "metric_a", "entity": "metric_a"}]})
     assert r.status_code == 200
 

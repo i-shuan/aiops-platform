@@ -16,7 +16,7 @@ from aiops.sources.elasticsearch import ElasticsearchSpec
 from aiops.interfaces.runner import run, run_context
 from aiops.storage.repository import Anomalies, DetectorModels, Incidents, Notifications
 
-WF = "metrics_only"
+WF = "sample_metrics_only"
 
 
 def _go(now, workflow=WF, **kw):
@@ -130,13 +130,13 @@ def test_silence_created_through_admin_suppresses_the_next_run(now, sent):
 def test_external_anomalies_join_the_next_run_once(now, sent):
     from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
 
-    body = IngestAnomalies(pipeline="factory", source="fdc", anomalies=[ExternalAnomalyIn(
+    body = IngestAnomalies(pipeline="sample_factory", source="fdc", anomalies=[ExternalAnomalyIn(
         external_id="a1", entity="ETCH-01", metric="rf", ts=now, score=5, attrs={"dept": "fab-etch"})])
     assert run("admin_ingest_anomalies", request=body)["accepted"] == 1
-    assert run("admin_ingest_anomalies", request=body) == {"pipeline": "factory", "source": "fdc", "accepted": 0, "duplicates": 1}
-    ctx = run_context("factory", now=now, strict=False, targets=[])
+    assert run("admin_ingest_anomalies", request=body) == {"pipeline": "sample_factory", "source": "fdc", "accepted": 0, "duplicates": 1}
+    ctx = run_context("sample_factory", now=now, strict=False, targets=[])
     assert [i.entities for i in ctx.incidents] == [["ETCH-01"]] and sent[0].labels["dept"] == "fab-etch"
-    assert run_context("factory", now=now, strict=False, targets=[]).incidents == []  # 處理過就不再讀
+    assert run_context("sample_factory", now=now, strict=False, targets=[]).incidents == []  # 處理過就不再讀
 
 
 def test_external_anomalies_record_which_source_judged_them(now, sent):
@@ -146,14 +146,14 @@ def test_external_anomalies_record_which_source_judged_them(now, sent):
     from aiops.storage import crud
     from aiops.storage.models import AnomalyRow
 
-    body = IngestAnomalies(pipeline="factory", source="fdc", anomalies=[ExternalAnomalyIn(
+    body = IngestAnomalies(pipeline="sample_factory", source="fdc", anomalies=[ExternalAnomalyIn(
         external_id="lineage1", entity="ETCH-01", metric="rf", ts=now, score=5)])
     run("admin_ingest_anomalies", request=body)
-    ctx = run_context("factory", now=now, strict=False, targets=[])
+    ctx = run_context("sample_factory", now=now, strict=False, targets=[])
     assert [(e.detector, e.detector_node) for e in ctx.incidents[0].events] == [("external:fdc", "")]
     snapshot = Incidents.get(ctx.incident_ids[ctx.incidents[0].fingerprint])["incident"]
     assert [e["detector"] for e in snapshot["events"]] == ["external:fdc"]
-    assert crud.find(AnomalyRow, pipeline="factory") == []
+    assert crud.find(AnomalyRow, pipeline="sample_factory") == []
 
 
 # ── 接線 1：欄位對照 ──
@@ -277,7 +277,7 @@ def test_derived_topology_merges_incidents_and_explicit_empty_topology_disables_
     from aiops.interfaces.runner import workflow_path
     from aiops.storage.hooks import StorageHooks
 
-    wf = load_workflow(workflow_path("it_otel"))
+    wf = load_workflow(workflow_path("sample_it_otel"))
     ctx = Pipeline(wf, StorageHooks()).run(now=now, targets=targets)
     assert ctx.topology == [("frontend", "cart")] and ctx.errors == []
     wf.topology = []
@@ -300,7 +300,7 @@ def test_lot_paths_flow_is_derived_idempotently_and_has_no_topology_field(now):
     out = run("admin_merge_lot_paths", request=LotPathsMerge(steps=_lot_steps(now)))
     run("admin_merge_lot_paths", request=LotPathsMerge(steps=_lot_steps(now)))  # 重送
     assert out["lot_edges"] == [{"from": "LITHO-02", "to": "ETCH-01", "lots": 3}] and "topology" not in out
-    ctx = run_context("factory", now=now, strict=False, targets=[])
+    ctx = run_context("sample_factory", now=now, strict=False, targets=[])
     assert [(e.upstream, e.downstream, e.lots) for e in ctx.lot_edges] == [("LITHO-02", "ETCH-01", 3)]
 
 
@@ -310,8 +310,8 @@ def test_factory_groups_and_root_cause_points_to_the_upstream_tool(now, sent):
     run("admin_merge_lot_paths", request=LotPathsMerge(steps=_lot_steps(now)))
     items = [ExternalAnomalyIn(external_id="e", entity="ETCH-01", metric="rf_power", ts=now, score=5),
              ExternalAnomalyIn(external_id="l", entity="LITHO-02", metric="focus", ts=now - timedelta(minutes=30), score=4)]
-    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="factory", source="fdc", anomalies=items))
-    result = run_context("factory", now=now, strict=False, targets=[]).to_result()
+    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="sample_factory", source="fdc", anomalies=items))
+    result = run_context("sample_factory", now=now, strict=False, targets=[]).to_result()
     assert [i["entities"] for i in result["incidents"]] == [["ETCH-01", "LITHO-02"]]
     assert "lot_path_chain" in result["incidents"][0]["tags"]
 
@@ -327,8 +327,8 @@ def test_rca_gets_topology_and_trace_evidence_without_the_caller_passing_anythin
 
     items = [ExternalAnomalyIn(external_id="f", entity="frontend", metric="latency", ts=now - timedelta(minutes=29), score=3),
              ExternalAnomalyIn(external_id="c", entity="cart", metric="latency", ts=now - timedelta(minutes=30), score=6)]
-    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="it_otel", source="x", anomalies=items))
-    result = run_context("it_otel", now=now, strict=False, targets=[]).to_result()
+    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="sample_it_otel", source="x", anomalies=items))
+    result = run_context("sample_it_otel", now=now, strict=False, targets=[]).to_result()
     assert [i["entities"] for i in result["incidents"]] == [["cart", "frontend"]]  # 拓撲自動推導 -> 併成一件
     rca = run("rca_report", incident_id=result["incidents"][0]["id"])
     sections = {s["key"]: s["body"] for s in rca["sections"]}

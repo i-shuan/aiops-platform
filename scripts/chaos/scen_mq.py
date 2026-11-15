@@ -115,7 +115,7 @@ def _play(r: H.Result, w: World, end: datetime, consumer_signal: str, victim: st
         if refresh:
             from scripts.chaos.scen_detect_rca import topology_refresh
             topo = topology_refresh(*refresh)
-        rp = H.replay(H.detection_workflow("it_otel", _targets(consumer_signal)), INC - timedelta(minutes=30), end)
+        rp = H.replay(H.detection_workflow("sample_it_otel", _targets(consumer_signal)), INC - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、"
                        f"事件群 {[(i['id'], i['incident']['entities'], i['incident']['start'][11:16]) for i in incs]}")

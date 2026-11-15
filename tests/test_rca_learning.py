@@ -113,8 +113,8 @@ def test_incident_series_reports_every_series_it_could_not_fetch(monkeypatch):
 def _chain_incident(now, tag):
     items = [ExternalAnomalyIn(external_id=f"{tag}{i}", entity=e, metric="latency", ts=now - timedelta(minutes=m), score=s)
              for i, (e, m, s) in enumerate([("svc-a", 1, 2), ("svc-b", 2, 8), ("svc-c", 3, 3)])]
-    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="it_otel", source="x", anomalies=items))
-    wf = load_workflow(workflow_path("it_otel"))
+    run("admin_ingest_anomalies", request=IngestAnomalies(pipeline="sample_it_otel", source="x", anomalies=items))
+    wf = load_workflow(workflow_path("sample_it_otel"))
     wf.topology = CHAIN
     return Pipeline(wf, StorageHooks()).run(now=now, targets=[]).to_result()["incidents"][0]
 
@@ -140,7 +140,7 @@ def test_switching_the_root_cause_algorithm_is_only_a_yaml_change(now):
 def test_incident_series_runs_end_to_end_on_a_stored_incident(now):
     """ingestion.incident_series 目前沒掛在任何管線上（保留給新 RCA 引擎的 metric_shift 事實）：
     在最小 workflow 裡從資料庫載入事件群、重抓那個實體的時序，不出錯。"""
-    ctx = run_context("metrics_only", now=now, strict=False)
+    ctx = run_context("sample_metrics_only", now=now, strict=False)
     wf = Workflow(name="series_only", nodes=[NodeSpec(
         name="series", operator="ingestion.incident_series", optional=True,
         params={"before_minutes": 30, "after_minutes": 10, "step_seconds": 60, "max_series": 20})])
@@ -173,7 +173,7 @@ def test_a_section_can_also_be_its_own_yaml_node(now, tmp_path):
 
 
 def _missed(client, **over):
-    body = {"verdict": "missed", "text": "凌晨 DB 卡住但沒告警", "author": "amy", "pipeline": "metrics_only",
+    body = {"verdict": "missed", "text": "凌晨 DB 卡住但沒告警", "author": "amy", "pipeline": "sample_metrics_only",
             "entity": "metric_a", "detector": "detector.zscore",
             "time_range": {"start": "2026-11-08T05:58:00Z", "end": "2026-11-08T06:02:00Z"}, **over}
     return client.post("/api/v1/tuning/feedback", json=body)
@@ -183,7 +183,7 @@ def test_a_real_miss_can_be_reported_without_an_incident(client):
     r = _missed(client)
     assert r.status_code == 200
     fb = r.json()["result"]["feedback"]
-    assert fb["incident_uid"] is None and fb["pipeline"] == "metrics_only" and fb["time_start"].startswith("2026-11-08T05:58")
+    assert fb["incident_uid"] is None and fb["pipeline"] == "sample_metrics_only" and fb["time_start"].startswith("2026-11-08T05:58")
     assert _missed(client, time_range=None).status_code == 422
     assert _missed(client, verdict="false_positive").status_code == 422  # 沒有事件群只能是漏報
 
@@ -192,7 +192,7 @@ def test_a_reported_miss_becomes_a_scoped_proposal_and_the_backtest_checks_that_
     fid = _missed(client).json()["result"]["feedback"]["id"]
     proposal = client.post("/api/v1/tuning/feedback/propose",
                            json={"feedback_id": fid, "proposer": "bot", "scope": "entity"}).json()["result"]["proposal"]
-    assert (proposal["pipeline"], proposal["entity"]) == ("metrics_only", "metric_a")
+    assert (proposal["pipeline"], proposal["entity"]) == ("sample_metrics_only", "metric_a")
     assert proposal["params"]["threshold"] < 3.0  # 漏報 = 太遲鈍，門檻調低
     body = {"proposal_id": proposal["id"], "metric": {"source_type": "mock", "query": "cpu"},
             "time_range": {"start": "2026-11-08T00:00:00Z", "end": "2026-11-08T12:00:00Z"}}
@@ -212,14 +212,14 @@ def test_metric_names_ignore_labels_and_promql_functions():
 
 
 def test_confirmed_incidents_with_a_fix_show_up_as_similar_cases_later(client, now):
-    first = run_context("metrics_only", now=now, strict=False)
+    first = run_context("sample_metrics_only", now=now, strict=False)
     first_uid, first_id = first.incidents[0].uid, _first_incident_id(first)
     r = client.post("/api/v1/tuning/feedback", json={
         "incident_uid": first_uid, "verdict": "true_positive", "text": "真的有事", "author": "amy",
         "resolution": "重啟 metric_a 的收集器", "root_cause": "收集器記憶體洩漏"})
     assert r.status_code == 200 and r.json()["result"]["knowledge"]["entities"] == ["metric_a"]
 
-    second = run_context("metrics_only", now=now + timedelta(hours=3), strict=False)
+    second = run_context("sample_metrics_only", now=now + timedelta(hours=3), strict=False)
     report = run("rca_report", incident_id=_first_incident_id(second))
     similar = next(s["body"] for s in report["sections"] if s["key"] == "similar_cases")
     assert first_uid in similar and "重啟 metric_a 的收集器" in similar and "收集器記憶體洩漏" in similar
@@ -245,7 +245,7 @@ def test_similarity_weights_entities_metrics_and_signals():
 # ── B.5 調參成效報表、規則升級器 ──
 
 
-def _approve(client, params, pipeline="metrics_only", entity="metric_a", detector="detector.zscore"):
+def _approve(client, params, pipeline="sample_metrics_only", entity="metric_a", detector="detector.zscore"):
     pid = client.post("/api/v1/tuning/proposals", json={"source": "manual", "detector": detector, "params": params,
                                                          "proposer": "amy", "pipeline": pipeline,
                                                          "entity": entity}).json()["result"]["proposal"]["id"]
@@ -258,7 +258,7 @@ def _approve(client, params, pipeline="metrics_only", entity="metric_a", detecto
 
 
 def test_tuning_metrics_compares_before_and_after_each_approval(client, now):
-    ctx = run_context("metrics_only", now=now, strict=False)
+    ctx = run_context("sample_metrics_only", now=now, strict=False)
     client.post("/api/v1/tuning/feedback", json={"incident_uid": ctx.incidents[0].uid, "verdict": "false_positive",
                                                  "detector": "detector.zscore", "text": "誤報", "author": "amy"})
     pid = _approve(client, {"threshold": 3.5})
@@ -266,19 +266,19 @@ def test_tuning_metrics_compares_before_and_after_each_approval(client, now):
     change = next(c for c in report["changes"] if c["proposal_id"] == pid)
     assert change["before"]["incidents"] == 1 and change["before"]["false_positive"] == 1
     assert change["after"]["incidents"] == 0 and "不代表因果" in report["caveat"]
-    other_scope = _approve(client, {"threshold": 3.2}, pipeline="it_otel", entity="cart")
+    other_scope = _approve(client, {"threshold": 3.2}, pipeline="sample_it_otel", entity="cart")
     change = next(c for c in client.get("/api/v1/tuning/metrics").json()["result"]["changes"] if c["proposal_id"] == other_scope)
     assert change["before"]["incidents"] == 0  # 別條管線的事件群不算在這個調參頭上
 
 
 def test_rule_promoter_turns_repeated_tuning_into_a_rule_proposal(client, now):
-    run_context("metrics_only", now=now, strict=False)  # 先有基準線
+    run_context("sample_metrics_only", now=now, strict=False)  # 先有基準線
     for threshold in (3.2, 3.4, 3.6):
         _approve(client, {"threshold": threshold})
     out = client.post("/api/v1/tuning/rules/promote", json={"min_approvals": 3}).json()["result"]
     assert len(out["created"]) == 1
     rule = out["created"][0]["proposal"]
-    assert rule["detector_name"] == "detector.rules" and (rule["pipeline"], rule["entity"]) == ("metrics_only", "metric_a")
+    assert rule["detector_name"] == "detector.rules" and (rule["pipeline"], rule["entity"]) == ("sample_metrics_only", "metric_a")
     assert rule["params"]["lower"] < rule["params"]["upper"] and rule["status"] == "pending"
     again = client.post("/api/v1/tuning/rules/promote", json={"min_approvals": 3}).json()["result"]
     assert not again["created"] and "待處理" in again["skipped"][0]["reason"]

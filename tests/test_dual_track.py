@@ -71,7 +71,7 @@ class _FetchProbe(_Frame):
         return ctx
 
 
-def _shipped(fatal: dict | None, *, seed=0, points=None, entity="ETCH-01", dual=True, name="factory",
+def _shipped(fatal: dict | None, *, seed=0, points=None, entity="ETCH-01", dual=True, name="sample_factory",
              fetch="test.dual_frame") -> Workflow:
     """出貨的 workflow，fetch 換成固定資料。dual=False：把雙軌制的節點與參數拿掉（等於改動前的 workflow）。"""
     wf = load_workflow(workflow_path(name))
@@ -204,16 +204,16 @@ def test_it_otel_soft_vote_also_misses_the_single_point_and_the_fatal_track_catc
     """it_otel 的統計軌是 R+SNR（殘差三票＋軟投票）：同樣的單點（偏離約 2.5 個尺度），軟投票加總也到不了 2 票等值；
     致命軌照樣單點成立、直接 P0。5 組雜訊都一樣。"""
     for seed in range(5):
-        before = _run(_shipped(None, seed=seed, points={"ETCH-01": {40: value}}, name="it_otel"))
+        before = _run(_shipped(None, seed=seed, points={"ETCH-01": {40: value}}, name="sample_it_otel"))
         assert not _at(before.anomalies, 40) and before.notifications == []
         assert any(line.startswith("soft_vote:vote:voters=3:need=2:") for line in before.audit)
-        after = _run(_shipped(limits, seed=seed, points={"ETCH-01": {40: value}}, name="it_otel"))
+        after = _run(_shipped(limits, seed=seed, points={"ETCH-01": {40: value}}, name="sample_it_otel"))
         assert not _at(after.anomalies, 40, "detector.soft_vote")
         assert [(e.detector, e.detector_node) for e in _at(after.anomalies, 40)] == [("detector.hard_limit", "fatal")]
         assert [n.labels["severity"] for n in after.notifications] == ["P0"]
 
 
-@pytest.mark.parametrize("name", ["it_otel", "factory"])
+@pytest.mark.parametrize("name", ["sample_it_otel", "sample_factory"])
 def test_shipped_workflows_wire_the_fatal_track(name):
     ctx = _run(_shipped({"fatal_ceiling": 1100}, points={"ETCH-01": {40: BASE + 150}}, name=name))
     assert [n.labels["severity"] for n in ctx.notifications] == ["P0"]

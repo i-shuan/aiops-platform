@@ -42,6 +42,24 @@ def fresh_db(monkeypatch):
     return recorded
 
 
+@pytest.fixture(scope="session")
+def _workflow_dir_with_samples(tmp_path_factory):
+    """出貨的 aiops/pipelines/ 加上 scripts/pipelines/ 的偵測管線樣本（sample_*），放在一個暫存目錄。
+    出貨的使用者管線只吃外部告警、不跑偵測器（偵測演算法只當平台自己的看門狗）；偵測機制的端到端測試用 sample_* 這幾條，
+    生產程式不變，靠這裡把 runner.WORKFLOW_DIR 指到暫存目錄（跟回測、混沌腳本同一個 scripts/sample_pipelines.py）。"""
+    from scripts.sample_pipelines import merged_workflow_dir
+
+    return merged_workflow_dir(tmp_path_factory.mktemp("workflows"))
+
+
+@pytest.fixture(autouse=True)
+def sample_pipelines(monkeypatch, _workflow_dir_with_samples):
+    from aiops.interfaces import runner
+
+    monkeypatch.setattr(runner, "WORKFLOW_DIR", _workflow_dir_with_samples)
+    return _workflow_dir_with_samples
+
+
 @pytest.fixture(autouse=True)
 def retry_waits(monkeypatch):
     """資料源重試（sources/_http）的等待不要真的睡：改成記下每次要等幾秒，測試可以檢查重試了幾次、間隔對不對。"""

@@ -103,7 +103,8 @@ Grafana 是用 SQL 主動查（每次開儀表板、每次自動重新整理）�
 | 整輪結束或失敗 | 引擎呼叫 `engine/health.run_status`，放在 `ctx.run_check` | 同上（跟 `persist_batch` 分開的交易：整輪失敗時最終結果沒有寫，但「失敗了」要留下來） |
 | 排程的 YAML 載入失敗（管線沒跑） | 排程入口用的 `interfaces/runner.run_scheduled` | 同上 |
 
-只記**排程模式**（`strict=False`）而且有逐序列節點的管線。手動動作（`admin_*`、手動回測）與 RCA 不記：它們的失敗直接回給呼叫的人。
+只記**排程的輪次**（`strict=False`、不是針對某個事件群、也不是帶請求的手動動作）。手動動作（`admin_*`、手動回測）與 RCA 不記：它們的失敗直接回給呼叫的人。
+只吃外部告警的使用者管線（不抓資料、沒有資料流）也記：每一輪一列 `pipeline_runs`（`targets` 是 0），證明平台那時候有在跑——告警沒來時，配合外部異常的接收時間（`external_anomalies.received_at`，依 `source` 分），分得出是對方沒推還是平台沒跑。
 `stages/` 的算子完全不知道這件事，也碰不到資料庫；三張表只能透過 `storage/repository.py`（`StreamHealth`、`PipelineRuns`、`StreamFirstSeen`）讀寫。
 
 ## 怎麼查

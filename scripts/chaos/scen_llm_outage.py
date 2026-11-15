@@ -110,7 +110,7 @@ def scenario_24() -> list[H.Result]:
     H.fresh_db()
     with H.es_for(w, INC - timedelta(minutes=80), end + timedelta(minutes=5)) as es:
         log_texts = {str(d.get("message", "")) for d in es.log_docs}
-        wf = H.detection_workflow("it_otel", H.targets(["ord-svc"], signal="errors", kind="errors") + H.targets(["pay-api"]))
+        wf = H.detection_workflow("sample_it_otel", H.targets(["ord-svc"], signal="errors", kind="errors") + H.targets(["pay-api"]))
         rp = H.replay(wf, INC - timedelta(minutes=30), end)
         incs = H.incidents()
         target = H.pick(incs, "ord-svc", INC - timedelta(minutes=5))

@@ -26,7 +26,7 @@ GOLDEN = (T0 - timedelta(hours=6), T0 - timedelta(hours=5, minutes=50))  # 真�
 TINY = (T0 - timedelta(hours=9), T0 - timedelta(hours=8, minutes=50))  # 小事故：+1（z ≈ 0.5，現行門檻 3 本來就抓不到）
 FALSE_ALARM = (T0 - timedelta(hours=2), T0 - timedelta(hours=1, minutes=55))  # 誤報：+10（z ≈ 5）
 ZSCORE = "detector.zscore"
-PIPELINE = "metrics_only"  # ingestion.fetch：train_lookback 1440 分鐘、step 60 秒；偵測節點是 detector.zscore
+PIPELINE = "sample_metrics_only"  # ingestion.fetch：train_lookback 1440 分鐘、step 60 秒；偵測節點是 detector.zscore
 
 _BUMPS = {"synth:svc": [(GOLDEN, 12.0), (TINY, 1.0), (FALSE_ALARM, 10.0)]}
 
@@ -92,7 +92,7 @@ def test_true_positive_always_enters_the_golden_set_even_without_a_resolution():
     assert k["context"]["root_cause"] == "tax-gw:443"
     assert k["context"]["series"] == [{"entity": "svc", "source_type": "mock", "query": "synth:svc"}]
     assert [g["incident_uid"] for g in Knowledge.golden(PIPELINE, "svc")] == [uid]
-    assert Knowledge.golden(PIPELINE, "other") == [] and Knowledge.golden("factory", "svc") == []
+    assert Knowledge.golden(PIPELINE, "other") == [] and Knowledge.golden("sample_factory", "svc") == []
     # 沒寫處置的不進 RCA 相似案例（那一段要列「當時怎麼處理」）
     assert Knowledge.recent(10) == []
     _confirm(uid, resolution="切到備援 tax-gw")
@@ -142,12 +142,12 @@ def test_a_proposal_that_still_catches_every_golden_incident_passes():
 
 
 def test_a_wildcard_proposal_checks_golden_incidents_of_every_pipeline_and_entity():
-    uid = _incident(GOLDEN, pipeline="factory")
+    uid = _incident(GOLDEN, pipeline="sample_factory")
     _confirm(uid)
     p = _backtest(_proposal(8.0, pipeline=ANY, entity=ANY))
     assert p["status"] == "rejected"
     assert [(m["incident_uid"], m["pipeline"], m["entity"]) for m in p["backtest"]["safety"]["missed_golden"]] == \
-        [(uid, "factory", "svc")]
+        [(uid, "sample_factory", "svc")]
 
 
 def test_golden_incidents_the_current_params_already_miss_do_not_block():
@@ -224,7 +224,7 @@ def test_golden_windows_are_excluded_from_the_normal_score_distribution():
     old = (T0 - timedelta(days=10), T0 - timedelta(days=10) + timedelta(minutes=120))
     _BUMPS["synth:svc"] = [(old, 14.0), (FALSE_ALARM, 10.0)]
     try:
-        uid = _incident(old, pipeline="factory")
+        uid = _incident(old, pipeline="sample_factory")
         _confirm(uid)
         with_exclusion = _propose(_false_alarm_feedback())["quantile"]
         Knowledge.upsert(uid, verdict="false_positive")
@@ -262,7 +262,7 @@ def test_pipeline_scope_and_missing_data_fall_back_to_the_fixed_rule(monkeypatch
 
 
 def _profile(client, query, entity):
-    body = {"metric": {"source_type": "mock", "query": query}, "pipeline": "it_otel", "entity": entity,
+    body = {"metric": {"source_type": "mock", "query": query}, "pipeline": "sample_it_otel", "entity": entity,
             "end": T0.isoformat()}
     r = client.post("/api/v1/tuning/profile", json=body)
     assert r.status_code == 200, r.text

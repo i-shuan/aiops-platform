@@ -76,7 +76,7 @@ def _play(r: H.Result, w: World, end: datetime, names: list[str], victim: str = 
         # 服務拓撲跟生產一樣由 admin.topology_refresh 從事故前的 trace 沉澱（收斂才知道誰呼叫誰），不手動灌邊
         from scripts.chaos.scen_detect_rca import topology_refresh
         topology_refresh(INC - timedelta(minutes=60), INC - timedelta(minutes=5))
-        rp = H.replay(H.detection_workflow("it_otel", H.targets(names)), INC - timedelta(minutes=30), end)
+        rp = H.replay(H.detection_workflow("sample_it_otel", H.targets(names)), INC - timedelta(minutes=30), end)
         incs = H.incidents()
         r.notes.append(f"偵測：{rp.rounds} 輪、異常 {rp.anomalies} 筆、errors {rp.errors[:2]}、"
                        f"事件群 {[(i['id'], i['incident']['entities'], i['incident']['start'][11:16]) for i in incs]}")

@@ -26,6 +26,9 @@ MIGRATION = ROOT / "migrations" / "postgres" / "0005_knowledge_golden_incidents.
 
 from aiops.engine.pipeline import Pipeline, TargetSpec, Workflow, load_workflow  # noqa: E402
 from aiops.interfaces.runner import load_all, workflow_path  # noqa: E402
+from scripts.sample_pipelines import use_sample_pipelines  # noqa: E402
+
+use_sample_pipelines()  # 偵測回放用 scripts/pipelines/sample_*（出貨的使用者管線不跑偵測器）
 from aiops.sources.elasticsearch import ElasticsearchSpec  # noqa: E402
 from aiops.storage import db, models  # noqa: E402
 from aiops.storage.hooks import StorageHooks  # noqa: E402

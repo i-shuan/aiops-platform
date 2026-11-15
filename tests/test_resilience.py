@@ -31,7 +31,7 @@ class _Boom(BaseOperator):
 
 def _pipeline(*, optional: bool, **params) -> Pipeline:
     """真實的 metrics_only 流程，在「通知內容」前插入一個一定會失敗的批次節點。"""
-    wf = load_workflow(workflow_path("metrics_only"))
+    wf = load_workflow(workflow_path("sample_metrics_only"))
     at = next(i for i, n in enumerate(wf.nodes) if n.operator == "alert.notify_payload")
     wf.nodes.insert(at, NodeSpec(name="flaky", operator="test.boom", params=params, optional=optional))
     return Pipeline(wf, StorageHooks())
@@ -102,10 +102,10 @@ def test_update_for_a_row_that_does_not_exist_is_a_conflict_not_an_insert():
 def test_pipeline_rerun_after_training_bumps_the_version_only_when_it_retrains(now):
     from aiops.interfaces.runner import run_context
 
-    run_context("metrics_only", now=now, strict=False)
-    row = DetectorModels.get("metrics_only", "cpu", "cpu", "detector.zscore") or next(iter(_all_models()), None)
+    run_context("sample_metrics_only", now=now, strict=False)
+    row = DetectorModels.get("sample_metrics_only", "cpu", "cpu", "detector.zscore") or next(iter(_all_models()), None)
     assert row is not None and row["version"] == 1
-    run_context("metrics_only", now=now, strict=False)  # 基準線沒過期：不重訓、不寫、版本不變
+    run_context("sample_metrics_only", now=now, strict=False)  # 基準線沒過期：不重訓、不寫、版本不變
     assert _all_models()[0]["version"] == 1
 
 
@@ -125,7 +125,7 @@ def test_concurrent_first_training_in_the_pipeline_logs_a_conflict_and_keeps_the
     monkeypatch.setattr(hooks.StorageHooks, "load_target", load_then_other_worker_wins)
     from aiops.interfaces.runner import run_context
 
-    ctx = run_context("metrics_only", now=now, strict=False)
+    ctx = run_context("sample_metrics_only", now=now, strict=False)
     assert any("conflict-kept-newer" in line for line in ctx.audit)
     assert _all_models()[0]["state"] == {"winner": True}
 

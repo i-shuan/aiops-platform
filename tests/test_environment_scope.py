@@ -44,11 +44,12 @@ def _loaded(environment: str, **kw) -> PipelineContext:
 
 
 def _workflow(name: str, environment: str) -> Workflow:
-    return load_workflow(workflow_path("it_otel")).model_copy(update={"name": name, "environment": environment})
+    # 帶偵測器的樣本（出貨的 it_otel 只吃外部告警、不收 targets）：target 實體夾帶環境名的檢查要有逐序列節點才驗得到
+    return load_workflow(workflow_path("sample_it_otel")).model_copy(update={"name": name, "environment": environment})
 
 
 def _detect(name: str, environment: str) -> list[list[str]]:
-    """cart、inventory、pricing 同時異常：照這條管線環境的拓撲跑一輪內建偵測管線（it_otel 的節點），回各事件群的實體。"""
+    """cart、inventory、pricing 同時異常：照這條管線環境的拓撲跑一輪偵測管線（sample_it_otel 的節點），回各事件群的實體。"""
     items = [ExternalAnomalyIn(external_id=f"{name}-{e}", entity=e, metric="latency", ts=NOW - timedelta(minutes=3), score=5)
              for e in ("cart", "inventory", "pricing")]
     run("admin_ingest_anomalies", request=IngestAnomalies(pipeline=name, source="x", anomalies=items))

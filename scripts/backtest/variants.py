@@ -1,4 +1,5 @@
-"""偵測段的對照變體（回測與測試共用）。現行設定 R+SNR 就是 it_otel.yaml 的偵測段；另外三組由它改出來，
+"""偵測段的對照變體（回測與測試共用）。現行設定 R+SNR 就是偵測管線樣本 scripts/pipelines/sample_it_otel.yaml 的偵測段
+（出貨的 it_otel 現在只吃外部告警、不跑偵測器）；另外三組由它改出來，
 對應的管線 YAML 已刪除（四組並列的歷史數字在 commit 67a29a1 的 docs/RESIDUAL_SNR_ENSEMBLE.md）：
 
   R+SNR  it_otel 原樣：hourly_baseline＋residual_shift＋residual_chronic 開 snr、detector.soft_vote、旁路 hard_limit／drift_solo
@@ -13,18 +14,18 @@ from typing import Any
 import yaml
 
 from aiops.engine.pipeline import NodeSpec
-from aiops.interfaces.runner import workflow_path
+from scripts.sample_pipelines import SAMPLE_DIR
 
 VARIANTS = ("R+SNR", "R", "A", "A+SNR")
 VOTERS = ("detector.ensemble", "detector.soft_vote")
 _DEFAULT_SNR = {"p_fa": 0.001, "tz": "Asia/Taipei"}
 
 
-def detection_specs(workflow: str = "it_otel", variant: str = "R+SNR") -> list[tuple[str, str, dict[str, Any]]]:
+def detection_specs(workflow: str = "sample_it_otel", variant: str = "R+SNR") -> list[tuple[str, str, dict[str, Any]]]:
     """workflow YAML 的偵測段（fetch 之後到裁決節點，含）改成 variant，回傳 (節點名, 算子, params)。"""
     if variant not in VARIANTS:
         raise ValueError(f"variant 只能是 {VARIANTS}")
-    raw = yaml.safe_load(workflow_path(workflow).read_text(encoding="utf-8"))["nodes"]
+    raw = yaml.safe_load((SAMPLE_DIR / f"{workflow}.yaml").read_text(encoding="utf-8"))["nodes"]
     stop = next(i for i, n in enumerate(raw) if n["operator"] in VOTERS)
     specs = [(n["name"], n["operator"], dict(n.get("params") or {})) for n in raw[1:stop + 1]]
     if variant == "R+SNR":
@@ -51,7 +52,7 @@ def detection_specs(workflow: str = "it_otel", variant: str = "R+SNR") -> list[t
     return out
 
 
-def detection_nodes(fetch_operator: str, variant: str = "R+SNR", *, workflow: str = "it_otel",
+def detection_nodes(fetch_operator: str, variant: str = "R+SNR", *, workflow: str = "sample_it_otel",
                     keep_members: bool = False) -> list[NodeSpec]:
     """偵測段的 NodeSpec 清單，fetch 換成 fetch_operator（回放、測試用）。keep_members：裁決保留各票事件。"""
     nodes = [NodeSpec(name="fetch", operator=fetch_operator)]
