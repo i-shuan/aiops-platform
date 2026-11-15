@@ -6,6 +6,7 @@ from aiops.engine.requests import (
     PIPELINE_NAME,
     SOURCE_NAME,
     GrafanaAlertIngest,
+    GraphImport,
     IngestAnomalies,
     LotPathsMerge,
     MappingApprove,
@@ -42,6 +43,11 @@ def merge_traces(req: TraceMerge):
 @router.post("/topology/refresh")
 def refresh_topology(req: TopologyRefresh):
     return {"result": run("admin_topology_refresh", request=req)}
+
+
+@router.post("/graph/import")
+def import_graph(req: GraphImport):
+    return {"result": run("admin_graph_import", request=req)}
 
 
 @router.post("/lot-paths/merge")

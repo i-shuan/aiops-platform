@@ -21,6 +21,7 @@ from aiops.engine.context import (
     TrainingExclusion,
 )
 from aiops.engine.errors import NotFound
+from aiops.engine.graph import Edge, EdgeKind
 from aiops.engine.params import pick_most_specific
 from aiops.engine.platform_series import ALL_SOURCES, FIELDS, PLATFORM_SOURCE, split_platform_query
 from aiops.engine.topology import lot_edges_from_paths
@@ -30,6 +31,7 @@ from aiops.storage.repository import (
     ActiveConfigs,
     Anomalies,
     AsyncEdges,
+    DeclaredEdges,
     DetectorModels,
     ExternalAnomalies,
     Feedbacks,
@@ -108,6 +110,9 @@ class StorageHooks:
                 ctx.topology = [(a, b) for a, b in snapshot["topology"]]
             if not ctx.lot_edges_explicit and snapshot.get("lot_edges"):
                 ctx.lot_edges = [LotEdge(e["from"], e["to"], e["lots"]) for e in snapshot["lot_edges"]]
+            if "declared" in snapshot:  # 建立當下的宣告邊優先（可重現：之後 CMDB 改了，舊事件群的報告不跟著變）
+                ctx.imported_edges = [Edge(e["from"], e["to"], EdgeKind(e["kind"]), float(e["weight"]))
+                                      for e in snapshot["declared"]]
             rows = Traces.window(incident.entities, incident.start - _RCA_TRACE_MARGIN,
                                  incident.end + _RCA_TRACE_MARGIN)
             for r in rows:
@@ -134,6 +139,9 @@ class StorageHooks:
                                for e in AsyncEdges.all(environment)}
         if not ctx.lot_edges_explicit:
             ctx.lot_edges = lot_edges_from_paths(LotPaths.paths(environment))
+        # 匯入的宣告邊（admin.graph_import）：整份換成這個環境的（RCA 換環境重載時不會留下上一個環境的）
+        ctx.imported_edges = [Edge(r["source"], r["target"], EdgeKind(r["kind"]), float(r["weight"]))
+                              for r in DeclaredEdges.all(environment)]
 
     def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None:
         target = ctx.target
@@ -262,6 +270,9 @@ class StorageHooks:
                     "topology": [[a, b] for a, b in ctx.topology if a in entities or b in entities],
                     "lot_edges": [{"from": e.upstream, "to": e.downstream, "lots": e.lots} for e in ctx.lot_edges
                                   if e.upstream in entities or e.downstream in entities],
+                    "declared": [{"from": e.source, "to": e.target, "kind": e.kind.value, "weight": e.weight}
+                                 for e in [*ctx.declared_edges, *ctx.imported_edges]
+                                 if e.source in entities or e.target in entities],
                 }
                 row = Incidents.create(inc.uid, ctx.pipeline, inc.to_dict(), inc.severity, inc.suppressed_by,
                                        ctx.pipeline, snapshot)

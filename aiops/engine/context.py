@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel
 
-from aiops.engine.graph import ServiceGraph
+from aiops.engine.graph import Edge, ServiceGraph
 from aiops.engine.health import RunCheck, StreamCheck
 from aiops.engine.rca_types import ConclusionType, EvidenceItem, Fact, RcaStatus
 from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
@@ -327,6 +327,11 @@ class PipelineContext:
     # alert.messaging_link 用它把「生產者先出事、消費者隔一段延遲才出事」的兩群併成一群
     async_edges: dict[tuple[str, str], float] = field(default_factory=dict)
     # Workflow 明確給了（含給空清單）就不要再從 trace／Lot 履歷自動推導
+    # 宣告的邊，每條自帶型別（call／supply／flow／async）：declared_edges 是這條 Workflow 的 graph 寫的，
+    # imported_edges 是 admin.graph_import 匯進資料庫、引擎依環境載入的（RCA 時是事件群建立當下的快照）。
+    # 跟上面三個欄位一樣只是載入與存檔的格式，算子一律問 ctx.graph
+    declared_edges: list[Edge] = field(default_factory=list)
+    imported_edges: list[Edge] = field(default_factory=list)
     topology_explicit: bool = False
     lot_edges_explicit: bool = False
     external_anomaly_ids: list[int] = field(default_factory=list)  # 這一輪處理掉的外部匯入異常
@@ -425,7 +430,8 @@ class PipelineContext:
     def graph(self) -> ServiceGraph:
         """實體關係圖（engine/graph.py）。每次從當下的 topology／lot_edges／async_edges 現算、不快取：
         rca.build_dynamic_topology 會在一輪中途改 topology，快取會讓後面的節點讀到舊圖。"""
-        return ServiceGraph.from_parts(self.topology, self.lot_edges, self.async_edges)
+        return ServiceGraph.from_parts(self.topology, self.lot_edges, self.async_edges,
+                                       [*self.declared_edges, *self.imported_edges])
 
     @property
     def is_suppressed(self) -> bool:

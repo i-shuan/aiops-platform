@@ -1,0 +1,5 @@
+name: admin_graph_import
+description: "手動動作：graph_import（匯入宣告的關係邊，每條必寫 kind）"
+nodes:
+  - name: graph_import
+    operator: admin.graph_import

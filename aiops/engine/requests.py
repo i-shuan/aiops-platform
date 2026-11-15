@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from aiops.engine.pipeline import EnvironmentName, PeerGroupSpec, PeerSpec, SourceType, StrictModel, TargetSpec
+from aiops.engine.pipeline import EnvironmentName, GraphEdgeSpec, PeerGroupSpec, PeerSpec, SourceType, StrictModel, TargetSpec
 
 
 class TimeRangeIn(StrictModel):
@@ -126,6 +126,17 @@ class TopologyRefresh(StrictModel):
     # 邊寫進哪個環境、prune 只刪哪個環境（= 讀它的管線的 Workflow.environment；'' = 不分）。
     # 設了環境時，撈 span 也只撈這個環境的（deployment.environment／service.environment；查詢時濾一次、回來再濾一次）
     environment: EnvironmentName = ""
+
+
+class GraphImport(StrictModel):
+    """admin.graph_import：匯入宣告的關係邊（CMDB、設備清冊、供電／管線圖）。每條邊必寫 kind。
+    mode = replace：這個環境的宣告邊整份換成這一批（CMDB 同步用，edges 可以是空的 = 清空）；merge：加進去、同一條邊更新 weight。
+    只動宣告的邊：trace 沉澱的 service_edges、Lot 履歷推導的流向都不受影響。"""
+
+    edges: list[GraphEdgeSpec] = Field(max_length=50000)
+    mode: Literal["replace", "merge"]
+    environment: EnvironmentName = ""
+    source: str = Field("", max_length=128)  # 這一批是哪裡來的（cmdb、手動…），只記錄不參與判斷
 
 
 class LotStepIn(StrictModel):
