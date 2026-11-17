@@ -156,6 +156,27 @@ RCA（06:50 開卡後立刻跑，事故 5）：
 - 看門狗封頂 P2 只有測試驗證（`tests/test_e2e_drill_fixes.py`）；真實紀錄裡沒有出現失敗暴增，沒有實際觸發過。
 - 日誌仍是 0 筆（問題 7）。
 
+## 第三次驗證（2026-11-17，關係圖出處，映像檔 `aiops-platform:drill3`）
+
+- 排程：`helm upgrade` 後多一個 CronJob `aiops-topology`（`7 * * * *`）。用它手動開一個 Job 跑完成功，
+  `service_edges` 有 `rca-mes-api → rca-wip-worker`（`last_seen` 06:00:38 UTC）。排程自己到點觸發還沒等到，沒驗證。
+- 新事故卡（事故 8，06:01:37 注入、06:05:03 開卡、P0）跑 `rca_report`：confirmed、`rca-wip-worker`，「關係圖依據」段落：
+
+  ```
+  rca-mes-api 呼叫 rca-wip-worker（call）
+    - 這次事件的 trace 直接觀測到（1539 次呼叫；最後一筆 2026-11-17 06:03 UTC，事件開始後 2 分）
+    - 人工宣告（匯入）（drill-manual；最後更新 2026-11-16 02:56 UTC，事件開始前 1 天 3 小時）
+  圖資時間（整張圖每種來源最新的一筆）：人工宣告（匯入） 2026-11-16 02:56 UTC；這次事件的 trace 直接觀測到 2026-11-17 06:03 UTC
+  ```
+- 修正前建立的事故 5 重跑：宣告的那條邊寫「來源未記錄（事件群建立時的版本沒有記邊的出處）」，照預期。
+- 已知的呈現取捨：同一條呼叫邊在資料表（平台從 trace 沉澱）與這次事件的 span 都看得到時，報告只寫後者
+  （這次事件直接看到的是較強的依據），資料表那一筆的「最後觀測」不會另外列出。沒有 trace 的報告才會看到「平台從 trace 沉澱」。
+- 沒驗證：訊息佇列邊與 Lot 流向的出處（演練服務沒有這兩種）；純拓撲推測（topology_inference）的報告只有測試驗證，
+  演練裡有 trace，結論都是 confirmed。
+
+順帶觀察到的真實看門狗行為：叢集昨晚關機、今天 05:20 重開後，看門狗第一輪開了兩張 P3 卡（`it_otel` 排程停了、`drill-team` 心跳斷了），
+05:30 結案。這次是真的停過（不是問題 1 的誤報），等級是 P3。
+
 ### 4. 演練服務的共用腳本在 Windows 簽出後是 CRLF
 
 `rca-lib.sh` 直接做成 ConfigMap 會讓 `rca-mes-api` 一直重啟（`syntax error: unexpected end of file`）。
