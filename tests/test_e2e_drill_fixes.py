@@ -69,3 +69,13 @@ def test_a_single_point_incident_gets_the_spans_of_its_own_minute(monkeypatch):
     assert spec.queries[0] == (T - timedelta(minutes=15), T + timedelta(minutes=1))
     during = [s for s in ctx.rca_spans if T <= s.ts < T + timedelta(minutes=1)]
     assert len(during) == 6  # 每 10 秒一筆，整分鐘都在
+
+
+def test_watchdog_cards_never_go_above_p2():
+    """看門狗最高 P2：稀疏計數的分數（−log10 p）沒有上限，分數再高也不能變成 P0／P1。"""
+    params = _nodes(PIPELINES / "watchdog" / "platform_watchdog.yaml")["alert.notify_payload"]["params"]
+    assert not {"P0", "P1"} & set(params["severity_thresholds"])
+    payload = OperatorRegistry.create("alert.notify_payload", params)
+    for score in (2.0, 4.0, 6.0, 10.0, 300.0):
+        inc = Incident([AnomalyEvent("it_otel", "runs/it_otel/failed", T, score)], score=score)
+        assert payload.severity_of(inc) in ("P2", "P3"), score
