@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel
 
-from aiops.engine.graph import Edge, ServiceGraph
+from aiops.engine.graph import Edge, Provenance, ServiceGraph
 from aiops.engine.health import RunCheck, StreamCheck
 from aiops.engine.rca_types import ConclusionType, EvidenceItem, Fact, RcaStatus
 from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
@@ -332,6 +332,9 @@ class PipelineContext:
     # 跟上面三個欄位一樣只是載入與存檔的格式，算子一律問 ctx.graph
     declared_edges: list[Edge] = field(default_factory=list)
     imported_edges: list[Edge] = field(default_factory=list)
+    # 上面三個載入格式（topology／lot_edges／async_edges）放不下出處，另外記：(型別的值, source, target) -> 出處。
+    # 載入端與寫入端（StorageHooks、引擎、rca.build_dynamic_topology）填，算子一樣問 ctx.graph（Edge.provenance）
+    edge_provenance: dict[tuple[str, str, str], Provenance] = field(default_factory=dict)
     topology_explicit: bool = False
     lot_edges_explicit: bool = False
     external_anomaly_ids: list[int] = field(default_factory=list)  # 這一輪處理掉的外部匯入異常
@@ -431,7 +434,7 @@ class PipelineContext:
         """實體關係圖（engine/graph.py）。每次從當下的 topology／lot_edges／async_edges 現算、不快取：
         rca.build_dynamic_topology 會在一輪中途改 topology，快取會讓後面的節點讀到舊圖。"""
         return ServiceGraph.from_parts(self.topology, self.lot_edges, self.async_edges,
-                                       [*self.declared_edges, *self.imported_edges])
+                                       [*self.declared_edges, *self.imported_edges], self.edge_provenance)
 
     @property
     def is_suppressed(self) -> bool:

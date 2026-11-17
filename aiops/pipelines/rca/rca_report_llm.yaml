@@ -26,7 +26,7 @@ nodes:
     operator: rca.report
     params:
       sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
-                 propagation_path, facts, trace_evidence, log_patterns, similar_cases, suggested_actions]
+                 propagation_path, graph_basis, facts, trace_evidence, log_patterns, similar_cases, suggested_actions]
       section_params: {trace_evidence: {traces_datasource: apm-traces}}
   # 戰情摘要：只吃已判好的候選、事實與證據；驗證不過退模板，旁路不影響根因結論
   - name: narrator

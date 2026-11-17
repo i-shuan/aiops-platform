@@ -21,13 +21,19 @@ ctx.graph；三個欄位留著當「載入與存檔的格式」（YAML、資料�
 weight 的意義跟著型別：CALL、SUPPLY 沒有用到（固定 1）、ASYNC 是延遲 P95 毫秒、FLOW 是走過這條邊的 Lot 數
 （宣告的 flow 邊沒寫 weight 就是 1；算子用 min_lots 篩流向時，要通過就把 weight 寫成實際的量）。
 
+每條邊帶出處（Provenance）：哪裡來的（origin）、來源的細節（detail）、最後觀測或更新的時間（last_seen）。
+出處只用來「交代這條邊憑什麼存在」（RCA 報告的 rca.section.graph_basis），不參與任何判斷：兩條邊相不相等、
+傳播方向、收斂都不看它（compare=False）。同一對實體可以同時有宣告的邊與觀測到的邊，各自帶自己的出處。
+沒有「圖資版本」：用時間代替——as_of() 回每種出處最新的 last_seen，報告照實寫「這次用的圖是什麼時候的」。
+
 沒有狀態：ServiceGraph 建好就不變，ctx.graph 每次從當下的三個欄位現算、不快取（rca.build_dynamic_topology 會在
 一輪中途改 ctx.topology，快取會讓後面的節點讀到舊圖）。
 """
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -57,12 +63,32 @@ KINDS: dict[EdgeKind, KindSpec] = {
 }
 
 
+# 邊的出處（Provenance.origin）
+ORIGIN_TRACE = "trace"  # admin.topology_refresh／admin.merge_traces 從 trace 沉澱進資料表的；last_seen = 最近一次刷新看到它
+ORIGIN_INCIDENT_TRACE = "incident_trace"  # 這次 RCA 撈到的 span 裡直接看到的；last_seen = 這條邊最後一筆 span 的時間
+ORIGIN_DECLARED = "declared"  # admin.graph_import 匯入的宣告；detail = 匯入時填的來源，last_seen = 最後更新時間
+ORIGIN_WORKFLOW = "workflow"  # 管線 YAML 寫死的（topology／lot_edges／graph）；沒有時間
+ORIGIN_LOT = "lot_paths"  # 從 Lot 履歷推導的流向；沒有時間
+ORIGIN_UNKNOWN = ""  # 沒記（舊的事件群快照、測試直接給的邊）
+
+
+@dataclass(frozen=True)
+class Provenance:
+    origin: str = ORIGIN_UNKNOWN
+    detail: str = ""
+    last_seen: datetime | None = None
+
+
+UNKNOWN = Provenance()
+
+
 @dataclass(frozen=True)
 class Edge:
     source: str
     target: str
     kind: EdgeKind
     weight: float = 1.0
+    provenance: Provenance = field(default=UNKNOWN, compare=False)  # 出處不算進相等與雜湊：同一條邊就是同一條邊
 
     @property
     def is_loop(self) -> bool:
@@ -101,12 +127,20 @@ class ServiceGraph:
     @classmethod
     def from_parts(cls, calls: Iterable[Any] = (), lot_edges: Iterable[Any] = (),
                    async_edges: Mapping[tuple[str, str], float] | None = None,
-                   declared: Iterable[Edge] = ()) -> ServiceGraph:
+                   declared: Iterable[Edge] = (),
+                   provenance: Mapping[tuple[str, str, str], Provenance] | None = None) -> ServiceGraph:
         """從載入格式組圖：calls 是 (caller, callee)；lot_edges 的元素有 upstream／downstream／lots；
-        async_edges 是 (producer, consumer) -> 延遲 P95 毫秒。順序照給的順序，自迴圈與重複都留著（查詢時才濾）。"""
-        edges = [Edge(str(a), str(b), EdgeKind.CALL) for a, b in calls]
-        edges += [Edge(e.upstream, e.downstream, EdgeKind.FLOW, float(e.lots)) for e in lot_edges]
-        edges += [Edge(p, c, EdgeKind.ASYNC, float(lag)) for (p, c), lag in (async_edges or {}).items()]
+        async_edges 是 (producer, consumer) -> 延遲 P95 毫秒。順序照給的順序，自迴圈與重複都留著（查詢時才濾）。
+        provenance：(型別的值, source, target) -> 出處，給前三種載入格式的邊用（它們的格式放不下出處）；宣告的邊自己帶。"""
+        known = provenance or {}
+
+        def why(kind: EdgeKind, a: str, b: str) -> Provenance:
+            return known.get((kind.value, a, b), UNKNOWN)
+
+        edges = [Edge(str(a), str(b), EdgeKind.CALL, provenance=why(EdgeKind.CALL, str(a), str(b))) for a, b in calls]
+        edges += [Edge(e.upstream, e.downstream, EdgeKind.FLOW, float(e.lots), why(EdgeKind.FLOW, e.upstream, e.downstream))
+                  for e in lot_edges]
+        edges += [Edge(p, c, EdgeKind.ASYNC, float(lag), why(EdgeKind.ASYNC, p, c)) for (p, c), lag in (async_edges or {}).items()]
         edges += list(declared)  # 宣告的邊（每條自帶型別）接在觀測到的後面；重複的邊查詢時是集合，不會算兩次
         return cls(edges)
 
@@ -153,6 +187,20 @@ class ServiceGraph:
     def dependency_adjacent(self) -> set[frozenset[str]]:
         """無向相鄰：兩個實體之間有沒有依賴邊（不管誰依賴誰）。只有 CALL 邊的圖，結果跟 adjacent(EdgeKind.CALL) 一樣。"""
         return {frozenset(p) for p in self.dependencies()}
+
+    def between(self, entities: Iterable[str]) -> tuple[Edge, ...]:
+        """兩端都在 entities 裡的邊（所有型別、不含自迴圈），照建圖順序。同一對實體有幾種出處就回幾條。"""
+        wanted = set(entities)
+        return tuple(e for e in self._edges if not e.is_loop and e.source in wanted and e.target in wanted)
+
+    def as_of(self) -> dict[str, datetime]:
+        """每種出處最新的 last_seen（沒有時間的出處不列）：「這張圖是什麼時候的」，代替圖資版本。"""
+        out: dict[str, datetime] = {}
+        for e in self._edges:
+            p = e.provenance
+            if p.last_seen is not None and (p.origin not in out or p.last_seen > out[p.origin]):
+                out[p.origin] = p.last_seen
+        return out
 
     def nodes(self, kind: EdgeKind | None = None) -> set[str]:
         """邊上出現過的實體（含只出現在自迴圈上的）。"""

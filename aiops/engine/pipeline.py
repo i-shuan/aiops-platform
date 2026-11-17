@@ -20,7 +20,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
-from aiops.engine.graph import Edge, EdgeKind, contradictions
+from aiops.engine.graph import ORIGIN_WORKFLOW, Edge, EdgeKind, Provenance, contradictions
 from aiops.engine.errors import InfrastructureError, NoDataError, PlatformError, WorkflowError
 from aiops.engine.health import StreamCheck, run_status, stream_status
 from aiops.engine.operator import NodeInfo
@@ -83,7 +83,7 @@ class GraphEdgeSpec(StrictModel):
     weight: float = Field(1.0, gt=0, allow_inf_nan=False)
 
     def to_edge(self) -> Edge:
-        return Edge(self.source, self.target, EdgeKind(self.kind), float(self.weight))
+        return Edge(self.source, self.target, EdgeKind(self.kind), float(self.weight), Provenance(ORIGIN_WORKFLOW))
 
 
 def check_declared(edges: list[Edge]) -> None:
@@ -362,9 +362,13 @@ class Pipeline:
                                 environment=self.workflow.environment)
         if self.workflow.topology is not None:
             batch.topology, batch.topology_explicit = list(self.workflow.topology), True
+            batch.edge_provenance.update({(EdgeKind.CALL.value, str(a), str(b)): Provenance(ORIGIN_WORKFLOW)
+                                          for a, b in batch.topology})
         if self.workflow.lot_edges is not None:
             batch.lot_edges = [LotEdge(e["from"], e["to"], int(e.get("lots", 1))) for e in self.workflow.lot_edges]
             batch.lot_edges_explicit = True
+            batch.edge_provenance.update({(EdgeKind.FLOW.value, e.upstream, e.downstream): Provenance(ORIGIN_WORKFLOW)
+                                          for e in batch.lot_edges})
         batch.declared_edges = [e.to_edge() for e in self.workflow.graph]
         # 資料健康度只記排程的輪次（strict=False、不是針對某個事件群、也不是帶請求的手動動作）：手動動作與 RCA 的失敗直接回給呼叫的人。
         # 沒有逐序列節點的管線（只吃外部告警）也記：每一輪一列，證明平台那時候有在跑——告警沒來時分得出是對方沒推還是平台沒跑

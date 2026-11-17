@@ -99,7 +99,7 @@ trace 讀得到之後，日誌仍然是 0 筆（事件期間與基準都是 0）
 要修需要三樣：唯讀 key 加上 `k8s-*` 的讀取權限（要再用一次 ES 管理員密碼）、平台的日誌索引改指過去（`AIOPS_ES_LOG_INDEX`）、
 以及那個形狀的欄位對照（服務名、等級、訊息、trace_id 的欄位名跟 OTel 原生的不同）。還沒做，等決定。
 
-### 8. 關係圖的「trace 聚合」那一半在叢集上是空的：chart 沒有排程去沉澱拓撲（2026-11-17 查到，未修）
+### 8. 關係圖的「trace 聚合」那一半在叢集上是空的：chart 沒有排程去沉澱拓撲（2026-11-17 查到，已修）
 
 兩次演練的收斂（`topology_chain`）只靠我手動匯入的那一條宣告邊（`declared_edges` 1 列，origin `drill-manual`）。
 `service_edges`（從 trace 沉澱的呼叫邊）是 0 列：`admin_topology_refresh` 要有人或排程去跑，而 `deploy/helm/aiops-platform`
@@ -112,6 +112,13 @@ trace 讀得到之後，日誌仍然是 0 筆（事件期間與基準都是 0）
 另外對照架構圖「邊來源／最後觀測時間／圖資版本」：資料表有來源與時間（宣告邊的 `origin`、`updated_at`；trace 邊的 `last_seen`），
 但組進關係圖（`engine/graph.py` 的 `Edge`）之後只剩型別與權重，RCA 報告說不出某條邊是宣告的還是觀測到的、多久前看到的；
 「圖資版本」目前不存在。
+
+修正（分支 `feat/graph-provenance`）：
+- chart 多一個 CronJob `topology`，每小時跑一次 `admin_topology_refresh`（回看 60 分鐘，窗口相接）。
+- 關係圖的每條邊帶出處（來源、細節、最後觀測時間），事件群快照一起存；RCA 報告多一段「關係圖依據」，
+  列出這張卡用到的每條邊是人宣告的、平台從 trace 沉澱的、還是這次事件的 trace 直接看到的，以及多久前。
+- 圖資版本沒有做：報告最後一行寫每種來源最新的時間代替。
+- 修正前建立的事故卡，快照沒有記出處，報告會寫「來源未記錄」。
 
 ## 第二次演練（2026-11-16，修正後，映像檔 `aiops-platform:drill2`）
 

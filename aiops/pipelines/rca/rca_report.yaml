@@ -28,7 +28,7 @@ nodes:
     operator: rca.report
     params:
       sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
-                 propagation_path, trace_evidence, log_patterns, similar_cases, suggested_actions]
+                 propagation_path, graph_basis, trace_evidence, log_patterns, similar_cases, suggested_actions]
       # 深度連結：設定了環境變數 AIOPS_GRAFANA_URL 時，最慢的 trace 附 Explore 連結（鎖 trace.id）
       section_params: {trace_evidence: {traces_datasource: apm-traces}}
   # 可選 AI 總結：provider 設為 noop 即完全不連外、直接用模板；金鑰只從環境變數 AIOPS_LLM_API_KEY 讀
