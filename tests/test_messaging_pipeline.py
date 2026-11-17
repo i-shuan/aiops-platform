@@ -104,7 +104,7 @@ def fetch_traces(monkeypatch, spec, **params) -> PipelineContext:
 def test_follow_messaging_off_fetches_exactly_what_it_did_before(monkeypatch):
     spec = _Traces(world())
     ctx = fetch_traces(monkeypatch, spec)
-    assert spec.calls == [("spans", at(-15), at(5), None, 20000)]
+    assert spec.calls == [("spans", at(-15), at(6), None, 20000)]  # 撈到最後一點那一分鐘的結尾（事件期間是 [開始, 結束 + 1 分鐘)，docs/E2E_DRILL.md 問題 6）
     assert sorted(s.span_id for s in ctx.rca_spans) == sorted(["gw0", *(f"c{i}" for i in range(10))])
     assert "mq" not in ctx.result["trace_fetch"]
     assert (ctx.rca_mq, ctx.rca_mq_note, ctx.rca_main_start, ctx.errors) == ([], "", None, [])
@@ -115,9 +115,9 @@ def test_follow_messaging_goes_back_to_when_the_messages_were_published(monkeypa
     spec = _Traces(world(how=how))
     ctx = fetch_traces(monkeypatch, spec, follow_messaging=True)
     main, linked, window = spec.calls
-    assert main == ("spans", at(-15), at(5), None, 20000)
+    assert main == ("spans", at(-15), at(6), None, 20000)  # 撈到最後一點那一分鐘的結尾（事件期間是 [開始, 結束 + 1 分鐘)，docs/E2E_DRILL.md 問題 6）
     # 第一輪：消費者指到的生產者 span 不在手上 → 依 trace id 往回最多 max_lag_minutes 撈
-    assert linked == ("linked", tuple(f"t{i}" for i in range(10)), at(-120), at(5), 20000)
+    assert linked == ("linked", tuple(f"t{i}" for i in range(10)), at(-120), at(6), 20000)
     (edge,) = ctx.rca_mq
     assert (edge.producer, edge.consumer, edge.queue, edge.messages, edge.linked_by, edge.failed) \
         == (PRODUCER, CONSUMER, QUEUE, 10, how, 0)

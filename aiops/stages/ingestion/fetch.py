@@ -250,9 +250,17 @@ class IncidentSeriesFetch(BaseOperator):
         return ctx
 
 
+# 事件時間點的桶寬：一個點代表它起算的這一分鐘（跟 stages/rca 的事件期間 [start, end + 1 分鐘) 同一個定義；ingestion 不 import rca）
+EVENT_BUCKET = timedelta(minutes=1)
+
+
 @OperatorRegistry.register("ingestion.incident_traces")
 class IncidentTracesFetch(BaseOperator):
-    """RCA 用：隨需撈 [事件開始 - before, 事件結束 + after] 的 span 放進 ctx.rca_spans。
+    """RCA 用：隨需撈 [事件開始 - before, 事件最後一點那一分鐘的結尾 + after] 的 span 放進 ctx.rca_spans。
+
+    事件的時間點是分鐘桶的起點：最後一點 03:04 代表 [03:04, 03:05)。根因演算法與 facts 的「事件期間」是
+    [開始, 結束 + 1 分鐘)，撈取要蓋到同一個結尾。以前只撈到最後一點的起點，最後一分鐘沒撈；外部告警的事故卡
+    開始＝結束（只有一個點），事件期間就一筆 span 都沒有（docs/E2E_DRILL.md 問題 6）。
 
     只在跑 RCA 報告時執行，日常偵測不碰 trace。這是旁路佐證，撈不到不該讓整份報告失敗：
     資料源沒設定 -> 略過（記在 audit）；連不上、查詢錯 -> 記進 errors 並略過，報告照出（拓撲就只用既有的）。
@@ -344,7 +352,7 @@ class IncidentTracesFetch(BaseOperator):
                           services: list[str] | None, inc_start: datetime, start: datetime, end: datetime,
                           used: timedelta) -> tuple[list[SpanRecord], dict]:
         """訊息佇列跨時窗（見類別說明）。回 (併好補撈結果的 span, 寫進 trace_fetch.mq 的摘要)。"""
-        hi = end + timedelta(minutes=1)
+        hi = end  # execute 已經把最後一點那一分鐘算進 end
         consumers = consumer_entries(spans, entities, inc_start, hi)
         info: dict = {"consumers": len(consumers), "linked_traces": 0, "extra_spans": 0, "queries": 0, "edges": 0}
         if len(consumers) < self.min_consumer_spans:
@@ -407,7 +415,7 @@ class IncidentTracesFetch(BaseOperator):
         if not is_configured(self.source_type):
             return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
         inc_start = as_utc(incident.start)
-        start, end = inc_start - self.before, as_utc(incident.end) + self.after
+        start, end = inc_start - self.before, as_utc(incident.end) + EVENT_BUCKET + self.after
         services = sorted(set(incident.entities)) if self.only_incident_services else None
         entities = sorted(set(incident.entities))
         spell = _spelled_like_entities(incident.entities)

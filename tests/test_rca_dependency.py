@@ -208,7 +208,7 @@ def test_lookback_extends_the_baseline_window_in_contiguous_steps_and_the_report
     _use(monkeypatch, fake)
     ctx = OperatorRegistry.create("ingestion.incident_traces", {"max_before_minutes": 60}).execute(_rca_ctx())
     assert ctx.rca_trace_lookback == (15, 60)
-    end = _incident().end  # after_minutes 0：事件最後一筆
+    end = _incident().end + timedelta(minutes=1)  # after_minutes 0：事件最後一點那一分鐘的結尾（以前是最後一點的起點，docs/E2E_DRILL.md 問題 6）
     # 每次撈取是「一頁 + 一次 search_after 的空頁」兩個請求，所以看去重後的範圖；三段連續、不重疊、不跨週
     assert list(dict.fromkeys(fake.ranges)) == [(T0 - timedelta(minutes=15), end),
                                                 (T0 - timedelta(minutes=30), T0 - timedelta(minutes=15)),

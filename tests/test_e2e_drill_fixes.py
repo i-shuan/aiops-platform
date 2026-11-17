@@ -36,3 +36,36 @@ def test_shipped_pipelines_keep_a_card_open_across_the_longest_documented_resend
     absorb = nodes["alert.absorb_open"]["params"]["resolve_after_minutes"]
     assert heartbeat == absorb, "absorb_open 與 heartbeat 的 resolve_after_minutes 要一樣"
     assert heartbeat >= MAX_REPEAT_INTERVAL + MAX_GROUP_INTERVAL + MINUTE_ROUNDING + DELIVERY
+
+
+class _Spans:
+    """假資料源：每 10 秒一筆入口 span，只回查詢區間內的。記下每次查詢的區間。"""
+
+    def __init__(self):
+        self.queries = []
+
+    def fetch_spans(self, start, end, services=None, max_spans=20000, **_):
+        self.queries.append((start, end))
+        first = datetime(2026, 11, 16, 2, 0, tzinfo=timezone.utc)
+        out = []
+        for i in range(2 * 60 * 6):
+            ts = first + timedelta(seconds=10 * i)
+            if start <= ts <= end:
+                out.append({"trace_id": f"t{i}", "span_id": f"s{i}", "parent_id": None, "service": "wip-worker",
+                            "ts": ts, "duration_ms": 10.0, "error": False})
+        return out, False
+
+
+def test_a_single_point_incident_gets_the_spans_of_its_own_minute(monkeypatch):
+    """外部告警的事故卡開始＝結束（一個點，代表 03:04 這一分鐘）。事件期間 [03:04, 03:05) 的 span 要撈得到：
+    以前只撈到 03:04:00，事件期間剩下剛好落在 03:04:00 的那一筆，根因演算法只能回「入口請求不足」。"""
+    spec = _Spans()
+    monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
+    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+    ctx = PipelineContext(pipeline="rca", now=T + timedelta(minutes=10))
+    ctx.incidents = [Incident([AnomalyEvent("wip-worker", "WipWorkerProbeSlow", T, 6.0)])]
+    OperatorRegistry.create("ingestion.incident_traces", {"before_minutes": 15, "after_minutes": 0}).execute(ctx)
+
+    assert spec.queries[0] == (T - timedelta(minutes=15), T + timedelta(minutes=1))
+    during = [s for s in ctx.rca_spans if T <= s.ts < T + timedelta(minutes=1)]
+    assert len(during) == 6  # 每 10 秒一筆，整分鐘都在
