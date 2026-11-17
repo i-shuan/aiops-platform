@@ -25,7 +25,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SECRETS = ROOT / "secrets.local.yaml"
 EXAMPLE = ROOT / "secrets.local.example.yaml"
-INDICES = ["metrics-apm.transaction.1m-*", "traces-apm-*", "logs-apm.*"]
+# APM 與 OTel 兩種資料模型的索引（sources/es_models.py 的 trace_index／log_index）；平台用哪一種看 AIOPS_ES_DATA_MODEL
+INDICES = ["metrics-apm.transaction.1m-*", "traces-apm-*", "logs-apm.*", "traces-*.otel-*", "logs-*.otel-*"]
 KEY_LINE = re.compile(r"^(?P<indent>[ \t]*)AIOPS_ES_API_KEY:.*$", re.MULTILINE)
 
 
