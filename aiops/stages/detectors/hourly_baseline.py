@@ -21,7 +21,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import DetectorOperator, guard_scale
+from aiops.stages.detectors.base import MIN_SCALE_RATIO_TUNABLE, DetectorOperator, floored_scale
 
 HOURS_PER_WEEK = 168
 
@@ -31,12 +31,11 @@ class HourlyBaselineDetector(DetectorOperator):
     """params: threshold（偏離幾個該時段標準差）、tz（時區，預設 UTC）、
     min_points（時段最少訓練點，預設 3）、min_weeks（時段至少要看過幾次完整的一週，預設 2）。
 
-    分母就是該時段量到的標準差，沒有下限（「全段 std 的一成」與 min_scale 底噪已於 2026-11-20 移除）；
-    只防除以 0：時段 std 不是正數就用全段 std，全段也不是就 1.0（base.guard_scale）。"""
+    分母：時段 std 不是正數就用全段 std，而且不小於該時段平均的 min_scale_ratio（預設 1%，base.floored_scale）。"""
 
     algorithm = "hourly_baseline"
     whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
-    tunable = {"threshold": (3.0, 1.0, 10.0)}
+    tunable = {"threshold": (3.0, 1.0, 10.0), **MIN_SCALE_RATIO_TUNABLE}
     other_params = frozenset({"tz", "min_points", "min_weeks"})
 
     def __init__(self, **params: Any):
@@ -108,6 +107,7 @@ class HourlyBaselineDetector(DetectorOperator):
             if not self._ready(n, occ):
                 m, s = g_mean, g_std  # 回退：全段 z-score
             means.append(m)
-            stds.append(guard_scale(s, g_std))  # 只防除以 0：時段 std -> 全段 std -> 1.0
+            # 時段 std -> 全段 std；再不小於該時段平均的 min_scale_ratio（預設 1%）；都是 0 才 1.0
+            stds.append(floored_scale(m, self.param("min_scale_ratio"), s, g_std))
         scores = ((df["value"].astype(float) - np.array(means)) / np.array(stds)).abs()
         return self._result(df, scores, scores > self.param("threshold"))

@@ -87,3 +87,15 @@ def test_the_trace_half_of_the_graph_is_refreshed_on_a_schedule():
     assert spec["schedule"] == "7 * * * *" and spec["concurrencyPolicy"] == "Forbid"
     off = [c["metadata"]["name"] for c in _render("existingSecret=s", "topology.enabled=false")["CronJob"]]
     assert off == ["p-tasks", "p-watchdog"]
+
+
+def test_grafana_rule_detection_is_its_own_cronjob_and_off_until_grafana_is_configured():
+    """演算法偵測（對象來自 Grafana 規則的標籤）是另一個 CronJob，預設關：沒設 Grafana 連線就開，會每一輪失敗。"""
+    assert "p-detect" not in [c["metadata"]["name"] for c in _render("existingSecret=s")["CronJob"]]
+    crons = {c["metadata"]["name"]: c for c in _render("existingSecret=s", "grafanaDetect.enabled=true")["CronJob"]}
+    spec = crons["p-detect"]["spec"]
+    assert spec["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"] == [
+        "python", "-m", "aiops.interfaces.cli", "run-once", "-w", "grafana_detect"]
+    assert spec["schedule"] == "*/5 * * * *" and spec["concurrencyPolicy"] == "Forbid"
+    assert set(crons) == {"p-tasks", "p-watchdog", "p-topology", "p-detect"}
+

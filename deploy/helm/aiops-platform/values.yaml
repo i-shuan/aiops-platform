@@ -74,3 +74,17 @@ devPostgres:
   enabled: false
   image: postgres:16-alpine
   password: aiops-dev-only
+
+# 演算法偵測：偵測對象與嚴重度由使用者在 Grafana 告警規則上貼標籤決定（aiops_detect: <workflow>、aiops_severity），
+# 平台每一輪從 Grafana 讀規則、拿規則自己的查詢要資料（aiops/pipelines/grafana/grafana_detect.yaml）。
+# 預設關：要先設好 Grafana 的連線——env 裡的 AIOPS_GRAFANA_URL（平台連得到的網址）、AIOPS_GRAFANA_PUBLIC_URL
+# （人從瀏覽器點得到的網址，卡片上的連結用）、AIOPS_GRAFANA_TRACES_UID／AIOPS_GRAFANA_LOGS_UID（有 trace／日誌才設），
+# 以及 Secret 裡的 AIOPS_GRAFANA_TOKEN。只讀資料用 Viewer 就夠；要把事件群寫成 Grafana 註記要 Editor。
+# Grafana 讀不到規則時這一輪會失敗（不當成「沒有對象」）。
+grafanaDetect:
+  enabled: false
+  schedule: "*/5 * * * *"
+  workflow: grafana_detect
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}

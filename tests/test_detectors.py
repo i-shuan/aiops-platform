@@ -93,9 +93,16 @@ def test_threshold_param():
 
 
 def test_constant_training_does_not_divide_by_zero():
-    # 訓練期完全不變（std = 0）時分母退到 1.0（base.guard_scale，只防除以 0；以前這裡是整數序列底噪的 1，數字剛好一樣）：
-    # 5→6 是 1 分、不是異常；跳 10 個單位照樣抓得到
+    # 訓練期完全不變（std = 0）。2026-11-20 放回相對底噪（min_scale_ratio，預設 1%）之後斷言改了：
+    # 改之前（分母只防除以 0，退到 1.0）：5→6 是 1.0 分、不是異常；5→15 是 10.0 分。
+    # 改之後（分母 = max(量到的 0, |平均 5| × 1%) = 0.05）：5→6 是 20.0 分、是異常；5→15 是 200.0 分。
+    # 水位小於 100 的常數序列，相對底噪（水位的 1%）比原本的 1.0 小，所以分數變高——這是 floored_scale 的定義
+    # （有底噪就不再退 1.0），不是為了過測試調的輸入；輸入序列沒有動。
     r = _algo("detector.hourly_baseline").fit(_df([5.0] * 30)).detect(_df([5.0] * 28 + [6.0, 15.0]))
+    assert np.isfinite(r.scores).all() and r.scores[28] == 20.0 and r.is_anomaly[28]
+    assert r.is_anomaly[29] and r.scores[29] == 200.0
+    # min_scale_ratio: 0（關掉相對底噪）= 改之前的行為：量到的尺度與底噪都是 0 才退 1.0，原本的斷言原樣保留
+    r = _algo("detector.hourly_baseline", min_scale_ratio=0).fit(_df([5.0] * 30)).detect(_df([5.0] * 28 + [6.0, 15.0]))
     assert np.isfinite(r.scores).all() and r.scores[28] == 1.0 and not r.is_anomaly[28]
     assert r.is_anomaly[29] and r.scores[29] == 10.0
 

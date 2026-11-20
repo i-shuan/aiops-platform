@@ -74,9 +74,12 @@ TUNABLE_CASES = _tunable_cases()
 def test_the_sweep_really_covers_every_tunable_detector():
     covered = {c.values[0] for c in TUNABLE_CASES}
     assert {"detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic", "detector.sparse_count"} <= covered
-    # 4 個偵測器共 6 個可調參數 × 5 種壞值 = 30。2026-11-20 以前是 16 個（>= 80）：min_scale、min_scale_ratio、fpr、
-    # max_tail_factor 這 10 個（跨三個偵測器）隨分母底噪與尾巴校正移除，掃描本身沒有變
-    assert len(TUNABLE_CASES) == 30
+    # 4 個偵測器共 9 個可調參數 × 5 種壞值 = 45。2026-11-20 以前是 16 個（>= 80）：min_scale、min_scale_ratio、fpr、
+    # max_tail_factor 這 10 個（跨三個偵測器）隨分母底噪與尾巴校正移除，剩 6 個（30）；同一天 min_scale_ratio 放回
+    # hourly_baseline、residual_shift、residual_chronic 三個偵測器（+3 個參數），所以 30 -> 45。掃描本身沒有變
+    assert len(TUNABLE_CASES) == 45
+    with_ratio = {c.values[0] for c in TUNABLE_CASES if c.values[1] == "min_scale_ratio"}
+    assert with_ratio == {"detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic"}
 
 
 @pytest.mark.parametrize("operator,key,value", TUNABLE_CASES)

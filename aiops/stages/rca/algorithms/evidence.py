@@ -48,7 +48,8 @@
 沒有 span 時分兩種：
   - trace 來源有設定、但這一輪連不上或讀失敗（ctx.rca_traces_failed，例如 ES 重啟）：證據被吃掉了，證據不足、不指認，
     不拿拓撲硬猜（大家一起變慢時拓撲一定會挑一個下游出來頂罪）
-  - 這個場景本來就沒有 trace（工廠、沒設定 trace 來源）：退回 fallback 算子（預設 rca.root_cause.topological，依 Lot 流向或
+  - 這個場景本來就沒有 trace（工廠、沒設定 trace 來源），或有撈到 span 但沒有一筆是事件裡的實體的
+    （純指標的產線設備跟有 trace 的服務共用同一個 trace 來源）：退回 fallback 算子（預設 rca.root_cause.topological，依 Lot 流向或
     呼叫拓撲推測），並在 ctx.rca_root_note 寫明「沒有 trace 證據、以下是拓撲推測」。fallback 設成空字串就一律證據不足。
 
 證據不足時不指認（ctx.rca_root_note 寫明原因，報告的「可能的源頭」段落會照出）：
@@ -277,7 +278,11 @@ class EvidenceRootCause(RootCauseOperator):
 
     def rank(self, incident, ctx):
         spans = ctx.rca_spans
-        if not spans:
+        entities = set(incident.entities)
+        # 有撈到 span、但沒有任何一筆是事件裡的實體的（同一台 Grafana 有服務的 trace，事件卻是純指標的產線設備）：
+        # 對這個事件群來說就是沒有 trace，走跟「沒有 trace」同一條路，不是「入口請求不足」
+        covered = any(s.service in entities for s in spans)
+        if not spans or not covered:
             if ctx.rca_traces_failed:
                 return self._insufficient(ctx, "trace 資料源這一輪連不上或讀取失敗（見 errors），沒有自身耗時可以比較；"
                                                "不改用拓撲推測，避免在資料源出問題時把下游服務當成根因")
@@ -287,9 +292,10 @@ class EvidenceRootCause(RootCauseOperator):
             ranked = fallback.rank(incident, ctx)
             ctx.rca_conclusion_type = fallback.conclusion  # 候選是它給的，等級也照它宣告的（不看名稱）
             name = self.fallback.removeprefix("rca.root_cause.")
-            ctx.rca_root_note = (f"這一輪沒有 trace 證據，以上改用 {name} 依拓撲／Lot 流向推測，不是自身耗時判斷"
+            why = "這一輪沒有 trace 證據" if not spans else "事件裡的實體在 trace 裡沒有任何 span（它們沒有被追蹤）"
+            ctx.rca_root_note = (f"{why}，以上改用 {name} 依拓撲／Lot 流向推測，不是自身耗時判斷"
                                  "（拓撲假設異常從被呼叫端往呼叫端傳，碰到上游流量放大會排反）" if ranked
-                                 else f"證據不足，不指認根因：這一輪沒有 trace，{name} 也排不出（沒有拓撲或 Lot 流向）")
+                                 else f"證據不足，不指認根因：{why}，{name} 也排不出（沒有拓撲或 Lot 流向）")
             return ranked
         start, end = as_utc(incident.start), as_utc(incident.end) + timedelta(minutes=1)
         # 補撈過生產者發布時段時，手上最早的 span 是幾十分鐘前的；事件前基準仍從主撈取窗算起

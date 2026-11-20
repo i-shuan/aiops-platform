@@ -163,7 +163,9 @@ def test_a_manual_proposal_on_an_snr_node_is_backtested_on_the_whole_segment_wit
 # ── 已移除的參數：寫了就報錯；資料庫裡舊的調參被略過 ──
 
 
-@pytest.mark.parametrize("removed", [{"threshold_scale": 2.0}, {"min_scale": 0.5}, {"min_scale_ratio": 0.05},
+# min_scale_ratio 原本也在這張清單裡；2026-11-20 同一天依實測結果放回（相對底噪，base.MIN_SCALE_RATIO_TUNABLE），
+# 現在是合法的可調參數，所以從清單拿掉。其餘被移除的參數一個都沒少。
+@pytest.mark.parametrize("removed", [{"threshold_scale": 2.0}, {"min_scale": 0.5},
                                      {"fpr": 0.01}, {"max_tail_factor": 5.0}, {"min_run": 10}, {"min_train_points": 10}])
 def test_removed_parameters_are_rejected_in_yaml_and_in_proposals(removed):
     with pytest.raises(TypeError, match="沒有參數"):
@@ -175,14 +177,17 @@ def test_removed_parameters_are_rejected_in_yaml_and_in_proposals(removed):
 
 
 def test_stale_tuned_keys_from_removed_mechanisms_are_ignored_not_fatal(pipeline):
-    """active_detector_configs 裡以前核准的 threshold_scale／底噪／尾巴校正：略過並記 log，偵測照常。"""
-    stale = {"threshold_scale": 4.0, "min_scale": 50.0, "min_scale_ratio": 0.5, "fpr": 0.05, "max_tail_factor": 10.0}
+    """active_detector_configs 裡以前核准的 threshold_scale／絕對底噪／尾巴校正：略過並記 log，偵測照常。
+    min_scale_ratio 原本也在 stale 裡（當時是已移除的參數）；2026-11-20 放回後它是合法的調參、會被套用，
+    所以從 stale 拿掉，log 斷言的鍵清單跟著少一個；它「會被套用」另外斷言在下面第二行。"""
+    stale = {"threshold_scale": 4.0, "min_scale": 50.0, "fpr": 0.05, "max_tail_factor": 10.0}
     assert layer_params(ResidualChronicDetector, stale, {}, {}) == {}
+    assert layer_params(ResidualChronicDetector, {**stale, "min_scale_ratio": 0.5}, {}, {}) == {"min_scale_ratio": 0.5}
     for det in ("detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic"):
         assert ActiveConfigs.set(det, stale, "auto", 0, expected_version=0, pipeline=PIPELINE, entity="svc") is not None
     ctx = pipeline.run(now=FP1[1] + timedelta(minutes=6), targets=[TARGET])
     assert not ctx.errors
-    assert any(line == "params:detect_rchronic:ignored-unknown:fpr,max_tail_factor,min_scale,min_scale_ratio,threshold_scale"
+    assert any(line == "params:detect_rchronic:ignored-unknown:fpr,max_tail_factor,min_scale,threshold_scale"
                for line in ctx.audit)
     assert [e for e in ctx.detected_anomalies if FP1[0] <= e.ts <= FP1[1]]  # 照常偵測（×4 的倍率沒有被套用）
 

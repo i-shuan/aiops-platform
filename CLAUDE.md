@@ -89,6 +89,7 @@ class BaseOperator(ABC):
    * 事件等級只有 `ANOMALY`／`WARNING`（`engine/types.py`）。warning 由基底依 `threshold × warning_ratio` 產生，演算法只管回傳分數與越線旗標。
    * **人訂的靜態門檻不做在平台**：上下限、致命界線這類「踩到就是出事」的規則一律是 Grafana 告警規則，經 webhook 推進來（`docs/EXTERNAL_ALERTS.md`）；平台沒有靜態規則偵測器，也不准加回來。平台只留需要統計的演算法：`hourly_baseline`、`residual_shift`、`residual_chronic`、`sparse_count`，加上不判異常、只濾掉舊點的 `new_only`。
    * **偵測段不放減少誤報的機制**（使用者決定，2026-11-20：偵測要最敏感）。已移除、不准加回偵測段的：多票表決（`detector.soft_vote`、`votes`／`bypass`）、連續越線才算（`residual_chronic` 的 `min_run`）、把門檻往上乘的調參（`threshold_scale`）與誤報回饋自動提「調鈍」的提案、尾巴校正（`fpr`／`max_tail_factor`）、分母下限（`min_scale`／`min_scale_ratio`、整數序列至少 1、`hourly_baseline` 的全段 std 一成）、冷啟動棄權（`min_train_points`）、`sparse_count` 的 `min_events`。殘差偵測器的分母就是 σ = 1.4826 × MAD；分母唯一的保底是 `base.guard_scale`（量到的尺度有限而且 > 0 就照用，否則 1.0），只防除以 0。要少吵，做在收斂、抑制、通知（`stages/grouping`、`stages/suppression`、`stages/notification`）或由人改 YAML 的 `threshold`／`p_fa`、走 `admin.proposal_create` 人工提案；`admin.feedback_propose` 只處理漏報（把門檻調低），誤報回饋回 400。資料庫裡舊基準線、舊調參帶著的已移除鍵一律略過（`tuning_keys`、各偵測器的 `load_state`），不准因此報錯。移除後的吵雜程度只在合成資料上量過（`tests/test_residual_ensemble.py` 的正常週分鐘數），沒有用真實資料重跑。
+   * **唯一放回來的一個：相對底噪**（使用者決定，2026-11-20，同一天）：`hourly_baseline`、`residual_shift`、`residual_chronic` 的分母不小於「序列水位 × `min_scale_ratio`」，預設 1%（`base.floored_scale`；YAML 可調，0 = 關掉）。原因是實測：沒有它時，故障移除後正常值（延遲 0.0988 秒）在很穩定的序列上得到一萬多分，每一輪都有新異常，事件群不會結案。其他已移除的機制沒有放回來，也不准因為這一條就順手加回去；要再放回任何一個，先有真實資料上的證據、再問使用者。
    * 需要看整條 workflow 才能驗的接線（引用的節點存不存在、前後順序）寫在算子的 `check_workflow(nodes: list[NodeInfo])`，引擎在 `Pipeline.__init__` 逐一呼叫，`TypeError`／`ValueError` 轉成 `WorkflowError`；不准延到 `execute` 才發現。
  * **節點 scope**：`target`（逐序列）→ `batch`（所有序列合併後）→ `after_persist`（資料庫寫入成功後才跑：所有 `notifier.*`）→ `after_finalize`（「已通知」與結案也寫成功後才跑：只有 `notifier.watchdog` 心跳，這一輪每一步都成功才續命）。順序錯在 `Pipeline.__init__` 報錯。
    * 寫入順序鐵律：異常點、事件群在 `hooks.persist_batch` 的**單一交易**落地（資料庫短暫斷線整筆回復後重試，`storage/db.run_in_transaction`），然後才送通知；通知都送出去了，引擎才呼叫 `hooks.finalize_batch` 記「已通知」與結案。推送失敗時事件群留在進行中，下一輪 `alert.heartbeat` 用同一組標籤補送（含 `endsAt`）。任何算子都不准在寫入前送出外部通知。
@@ -127,7 +128,7 @@ class BaseOperator(ABC):
 
 原始值的相鄰差（已移除的 detector.shift）每天 09:00／19:00 的流量階梯切換都會舉牌；這裡先白化（base.fit_seasonal_profile：
 原值 − 該 週幾×小時 的訓練平均），每天固定的切換在殘差裡相鄰差接近 0，只有「這個時段不該有的斷崖」才會跳。
-分數 = |Δe| / σ，σ = 1.4826 × 訓練期 Δe 的 MAD（base.noise_stats）；σ 為 0 時分母退到 1.0，只防除以 0（base.guard_scale）。
+分數 = |Δe| / σ，σ = 1.4826 × 訓練期 Δe 的 MAD（base.noise_stats）；分母不小於序列水位的 min_scale_ratio（預設 1%）；σ 與水位都是 0 才退到 1.0（base.floored_scale）。
 跳上去之後是新水位，不再報（持續偏離交給 residual_chronic）。
 """
 from __future__ import annotations
@@ -138,7 +139,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import (DetectorOperator, fit_seasonal_profile, guard_scale, noise_stats, parse_tz,
+from aiops.stages.detectors.base import (DetectorOperator, MIN_SCALE_RATIO_TUNABLE, fit_seasonal_profile, floored_scale, noise_stats, parse_tz,
                                          seasonal_residual)
 
 
@@ -149,7 +150,7 @@ class ResidualShiftDetector(DetectorOperator):
 
     algorithm = "residual_shift"
     whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
-    tunable = {"threshold": (4.0, 1.0, 20.0)}
+    tunable = {"threshold": (4.0, 1.0, 20.0), **MIN_SCALE_RATIO_TUNABLE}
     other_params = frozenset({"tz", "min_slot_points", "ref_points"})
 
     def __init__(self, **params: Any):
@@ -172,22 +173,25 @@ class ResidualShiftDetector(DetectorOperator):
     def fit(self, df: pd.DataFrame) -> ResidualShiftDetector:
         self.profile_, resid = fit_seasonal_profile(df, self.tz, self.min_slot_points)
         self.noise_ = noise_stats(self._jump(resid).to_numpy()[1:])
+        self.level_ = float(df["value"].median())  # 序列水位：相對底噪用（base.floored_scale）
         self.fitted = True
         return self
 
     def get_state(self) -> dict:
         self._require_fitted()
-        return {"profile": self.profile_, "noise": self.noise_}
+        return {"profile": self.profile_, "noise": self.noise_, "level": self.level_}
 
     def load_state(self, state: dict) -> ResidualShiftDetector:
-        # 舊基準線多帶的 level、integer 與 noise 裡的 tail_q、fpr（已移除的底噪與尾巴校正）不讀
+        # 舊基準線多帶的 integer 與 noise 裡的 tail_q、fpr（已移除的整數底噪與尾巴校正）不讀
         self.profile_, self.noise_ = dict(state["profile"]), {"noise": float(state["noise"]["noise"])}
+        # 沒記水位的基準線（放回相對底噪之前存的）：level 是 None，相對底噪等下次重訓才有
+        self.level_ = float(state["level"]) if state.get("level") is not None else None
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
-        scale = guard_scale(self.noise_["noise"])
+        scale = floored_scale(self.level_, self.param("min_scale_ratio"), self.noise_["noise"])
         jump = self._jump(seasonal_residual(df, self.profile_))
         jump.index = df.index
         scores = jump.abs() / scale

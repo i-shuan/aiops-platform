@@ -150,14 +150,30 @@ def test_flat_training_gets_scale_one_instead_of_learning_the_jump():
 
 
 def test_old_baselines_with_tail_and_floor_bookkeeping_still_load(three_weeks):
-    """舊基準線的 noise 多帶 tail_q／fpr，state 多帶 level／integer：都不讀，分數跟新訓練的一樣（σ 本來就存在 noise 裡）。"""
+    """舊基準線的 noise 多帶 tail_q／fpr，state 多帶 integer：都不讀，分數跟新訓練的一樣（σ 本來就存在 noise 裡）。
+
+    2026-11-20 放回相對底噪之後改了這個測試：level 又是基準線的一部分（訓練期中位數，相對底噪用），不再是「多帶、不讀」的鍵。
+    改之前：old.update(level=291.0, integer=True)，斷言跟新訓練的完全一樣（level 被忽略）。
+    改之後：(1) 只多帶 tail_q／fpr／integer、level 保留訓練出來的值 -> 跟新訓練的完全一樣；
+            (2) 放回之前存的基準線（沒有 level）-> 載得進來，沒有相對底噪，跟 min_scale_ratio: 0 的新訓練完全一樣；
+            (3) level 真的被讀：寫成 291.0（這份訓練資料的中位數是 140.0）分母就跟著變，residual_chronic 的分數不再一樣。"""
     train, test = three_weeks
     for name in ("detector.residual_shift", "detector.residual_chronic"):
         fresh = _create(name).fit(train)
         old = json.loads(json.dumps(fresh.get_state()))
+        assert old["level"] == 140.0
         old["noise"].update(tail_q=123.4, fpr=0.001)
-        old.update(level=291.0, integer=True)
+        old.update(integer=True)
         assert _create(name).load_state(old).detect(test).to_dict() == fresh.detect(test).to_dict()
+        without_level = {k: v for k, v in old.items() if k != "level"}
+        no_floor = _create(name, min_scale_ratio=0).fit(train)
+        assert _create(name).load_state(without_level).detect(test).to_dict() == no_floor.detect(test).to_dict()
+    # residual_chronic：σ = 2.03，水位 140 的 1% = 1.40（σ 贏），水位寫成 291 的 1% = 2.91（底噪贏）-> 分數變小
+    chronic = _create("detector.residual_chronic").fit(train)
+    moved = {**json.loads(json.dumps(chronic.get_state())), "level": 291.0}
+    assert chronic.noise_["noise"] == pytest.approx(2.0262, abs=1e-4)
+    assert max(_create("detector.residual_chronic").load_state(moved).detect(test).scores) \
+        == pytest.approx(max(chronic.detect(test).scores) * chronic.noise_["noise"] / 2.91, rel=1e-3)
 
 
 # ── 兩個算子 ──
@@ -381,15 +397,16 @@ def test_low_traffic_mild_drop_is_seen_by_the_drift_detector_alone():
 # ── 正常週有多吵（移除減少誤報的機制之後，照實量） ──
 
 
-def _normal_week_minutes(train, test) -> tuple[int, dict]:
-    """三個節點用 p_fa = 0.001 換算的門檻（3.29）對整個正常的測試週判一次：任何一個越線的分鐘數，與各節點自己的分鐘數。"""
+def _normal_week_minutes(train, test, **extra) -> tuple[int, dict]:
+    """三個節點用 p_fa = 0.001 換算的門檻（3.29）對整個正常的測試週判一次：任何一個越線的分鐘數，與各節點自己的分鐘數。
+    extra：三個節點都多帶的參數（min_scale_ratio=0 = 關掉相對底噪）。"""
     from aiops.stages.detectors.base import gaussian_threshold
 
     z = gaussian_threshold(0.001)
     flags = {
-        "detect": _create("detector.hourly_baseline", min_weeks=1, threshold=z).fit(train).detect(test).is_anomaly,
-        "detect_rshift": _create("detector.residual_shift", threshold=z).fit(train).detect(test).is_anomaly,
-        "detect_rchronic": _create("detector.residual_chronic", threshold=z).fit(train).detect(test).is_anomaly,
+        "detect": _create("detector.hourly_baseline", min_weeks=1, threshold=z, **extra).fit(train).detect(test).is_anomaly,
+        "detect_rshift": _create("detector.residual_shift", threshold=z, **extra).fit(train).detect(test).is_anomaly,
+        "detect_rchronic": _create("detector.residual_chronic", threshold=z, **extra).fit(train).detect(test).is_anomaly,
     }
     union = np.logical_or.reduce([np.array(f) for f in flags.values()])
     return int(union.sum()), {k: int(sum(f)) for k, f in flags.items()}
@@ -402,7 +419,10 @@ def _normal_week_minutes(train, test) -> tuple[int, dict]:
     ("low-traffic-14d", dict(days=21, seed=3, poisson=True, day=40.0, night=15.0, weekend_day=20.0, weekend_night=8.0), 14,
      (133, {"detect": 20, "detect_rshift": 72, "detect_rchronic": 46})),
     # 改版前：93 分鐘／週（訓練只有 7 天，每個時段只看過一次，雜訊量得偏小）
-    ("busy-7d", dict(days=14, seed=5), 7, (290, {"detect": 19, "detect_rshift": 6, "detect_rchronic": 268})),
+    # 2026-11-20 放回相對底噪（min_scale_ratio 1%）後重量：290 -> 163（漂移 268 -> 141，hourly 19、突變 6 沒變）。
+    # 漂移節點量到的 σ = 1.2792，水位（訓練期中位數 140）的 1% = 1.40，分母由 1.2792 變 1.40（大 9.4%）。
+    # 四個案例只有這一個的底噪大過量到的 σ，其餘三個數字沒變（各自的 σ 與底噪寫在 docstring）
+    ("busy-7d", dict(days=14, seed=5), 7, (163, {"detect": 19, "detect_rshift": 6, "detect_rchronic": 141})),
     # 改版前：110 分鐘／週
     ("low-traffic-7d", dict(days=14, seed=7, poisson=True, day=40.0, night=15.0, weekend_day=20.0, weekend_night=8.0), 7,
      (681, {"detect": 17, "detect_rshift": 108, "detect_rchronic": 579})),
@@ -411,6 +431,18 @@ def test_normal_week_alert_minutes_after_removing_the_false_alarm_mechanisms(lab
     """沒有注入任何異常的合成測試週（7 天 = 10080 分鐘）會有幾分鐘告警。這不是「該有的值」，是移除軟投票、min_run、
     尾巴校正、分母底噪之後量到的現況，釘住是為了之後有人動到分母或門檻時看得到變化。改版前的數字寫在各案例上面
     （scratch 腳本在同一份合成資料上量的：軟投票用各節點分數 / 3.29 加總 >= 2 重算，不是跑完整管線）。
-    只在合成資料上量過，沒有用真實資料重跑（docs/RESIDUAL_SNR_ENSEMBLE.md 的 ES 數字是移除前的）。"""
+    只在合成資料上量過，沒有用真實資料重跑（docs/RESIDUAL_SNR_ENSEMBLE.md 的 ES 數字是移除前的）。
+
+    2026-11-20 放回相對底噪（min_scale_ratio 預設 1%）後四個案例全部重量（關掉底噪 -> 預設 1%，任一節點越線的分鐘數）：
+      busy-14d         31 ->  31（突變 σ 13.34、漂移 σ 2.03，底噪 140 × 1% = 1.40：σ 都比較大，底噪沒作用）
+      low-traffic-14d 133 -> 133（突變 σ 5.93、漂移 σ 0.94，底噪 17 × 1% = 0.17：沒作用）
+      busy-7d         290 -> 163（漂移 σ 1.28 < 底噪 1.40：漂移 268 -> 141）
+      low-traffic-7d  681 -> 681（突變 σ 5.93、漂移 σ 0.60，底噪 0.17：沒作用）
+    hourly_baseline 四個案例都沒變（時段 std 都大過時段平均的 1%）。相對底噪只在「量到的 σ 小於水位 1%」時有作用，
+    這四條合成序列的雜訊都在水位的幾個百分點以上，所以它幾乎沒讓正常週變安靜；busy-7d 少掉的 127 分鐘來自
+    1.28 與 1.40 相差 9% 的邊緣情況，不能當成底噪普遍有效的證據。"""
     train, test = _split(_series(**series_kw), train_days)
     assert _normal_week_minutes(train, test) == expected
+    off = dict(min_scale_ratio=0)  # 關掉相對底噪 = 放回之前的數字，一起釘住：四個案例裡只有 busy-7d 不一樣
+    before = (290, {"detect": 19, "detect_rshift": 6, "detect_rchronic": 268}) if label == "busy-7d" else expected
+    assert _normal_week_minutes(train, test, **off) == before

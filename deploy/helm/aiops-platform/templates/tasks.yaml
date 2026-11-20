@@ -51,3 +51,7 @@ spec:
 ---
 {{ include "aiops.cronjob" (list . "topology" .Values.topology) }}
 {{- end }}
+{{- if .Values.grafanaDetect.enabled }}
+---
+{{ include "aiops.cronjob" (list . "detect" .Values.grafanaDetect) }}
+{{- end }}

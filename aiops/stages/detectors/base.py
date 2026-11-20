@@ -306,7 +306,7 @@ SNR_STATE_KEY = "_snr"
 
 def tuning_keys(cls: type[DetectorOperator]) -> set[str]:
     """調參（ctx.detector_params／核准的提案）可以帶哪些鍵：tunable 與 other_params。
-    資料庫裡舊調參帶的其他鍵（2026-11-20 移除的 threshold_scale、min_scale、min_scale_ratio、fpr、max_tail_factor）
+    資料庫裡舊調參帶的其他鍵（2026-11-20 移除的 threshold_scale、min_scale、fpr、max_tail_factor）
     不在這裡面：effective_params／layer_params 直接略過並記 log，不會讓序列失敗。"""
     return {*cls.tunable, *cls.other_params}
 
@@ -333,12 +333,39 @@ def is_integer_series(values: pd.Series | np.ndarray) -> bool:
 
 def guard_scale(*candidates: float | None) -> float:
     """分母唯一的保底，只防除以 0：依序取第一個「有限而且 > 0」的尺度，都沒有就 1.0。
-    量到的尺度多小都照用，不墊高（min_scale、min_scale_ratio、整數序列至少 1、時段 std 至少全段的一成，
-    這些分母下限已於 2026-11-20 移除：幾乎不動的序列一點小變動分數就會很高，這是決定好的取捨）。"""
+    量到的尺度多小都照用，不墊高。演算法實際用的是 floored_scale：在這之上只多一個相對底噪（水位的 1%）。
+    其他分母下限（min_scale、整數序列至少 1、時段 std 至少全段的一成）已於 2026-11-20 移除，沒有放回來。"""
     for c in candidates:
         if c is not None and math.isfinite(c) and c > 0:
             return float(c)
     return 1.0
+
+
+# 相對底噪：分母至少是「序列水位 × min_scale_ratio」，預設 1%。
+# 來源：這是 2026-11-20 之前就有的預設值（當時跟絕對下限、整數下限、尾巴校正一起被移除），同一天依實測結果只放回這一個。
+# 驗證的資料（演練叢集，真實服務指標經 Grafana 取得）：沒有它的時候，故障移除後 20 分鐘，rca-mes-api 的 p95 延遲
+#   0.0988 秒（正常值）在 residual_chronic 得到 11,247 分、模擬產線的佇列深度 35（正常值）得到 182 分，每一輪都有新異常，
+#   事件群不會結案——很穩定的序列量到的雜訊尺度趨近 0，任何一點偏差除下去都是幾千分。
+# 留出驗證：沒有。1% 沒有在其他序列上比較過別的值（0.5%、2%），只確認了放回去之後上面那兩條序列在故障後回到門檻以下。
+# 代價與已知的邊界（tests/test_hardening_noise_floor.py 釘著）：
+#   - 很穩定的序列上，看不到的範圍是「門檻 × 1%」：偏離水位 3%（hourly、chronic）或 4%（shift）以內不會報，不只是 1%。
+#   - 訓練期完全不動的序列（σ = 0）分母從以前的 1.0 變成水位的 1%：水位小於 100 的反而比沒放回來之前更敏感
+#     （固定是 5 的序列，5→6 現在是 20 分）。
+#   - 水位接近 0 的序列（稀疏計數、平常是 0 的值）底噪也接近 0，等於沒有。
+#   - 兩個殘差偵測器用整段訓練的中位數當水位，不分時段；hourly 用該時段的平均。日夜差很大的序列，白天的實際底噪不到 1%。
+#   - 沒記水位的舊基準線（放回之前存的）沒有底噪，要等重訓。
+# 要更靈敏就在節點 YAML 把 min_scale_ratio 調小，0 = 關掉。
+MIN_SCALE_RATIO_TUNABLE: dict[str, tuple[float, float, float]] = {"min_scale_ratio": (0.01, 0.0, 1.0)}
+
+
+def floored_scale(level: float | None, ratio: float, *candidates: float | None) -> float:
+    """分母 = max(量到的尺度, |水位| × ratio)。量到的尺度依序取第一個有限而且 > 0 的（同 guard_scale）；
+    兩者都是 0（沒量到尺度、水位也是 0 或不知道）才退回 1.0，只防除以 0。
+    level 是 None（基準線是放回相對底噪之前存的，沒記水位）時沒有相對底噪，等下次重訓。"""
+    measured = next((float(c) for c in candidates if c is not None and math.isfinite(c) and c > 0), 0.0)
+    floor = abs(float(level)) * float(ratio) if level is not None and math.isfinite(level) else 0.0
+    out = max(measured, floor)
+    return out if out > 0 else 1.0
 
 
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:
@@ -456,8 +483,8 @@ def seasonal_residual(df: pd.DataFrame, profile: dict[str, Any]) -> np.ndarray:
 # 分數 = |統計量| / σ，分數 > threshold 就舉牌。σ = 1.4826 × MAD(訓練期統計量)：常態下等於標準差，不會被訓練期的尖峰拉大。
 # 統計量的分布直接在訓練期殘差上量（滾動平均就量滾動平均），所以殘差的自相關、時段基準的週間誤差都已經算進去，
 # 不用 std/√window 那種「點與點獨立」的假設。
-# 沒有尾巴校正、沒有底噪（fpr／max_tail_factor／min_scale 已於 2026-11-20 移除）：尾巴比常態肥的序列會比常態假設吵。
-# σ 為 0（訓練期幾乎不動）時分母由 guard_scale 退到 1.0，只防除以 0。
+# 沒有尾巴校正、沒有絕對底噪（fpr／max_tail_factor／min_scale 已於 2026-11-20 移除；相對底噪 min_scale_ratio 同日放回，見 floored_scale）：尾巴比常態肥的序列會比常態假設吵。
+# σ 為 0（訓練期幾乎不動）時分母是水位的 min_scale_ratio；水位也是 0 才退到 1.0（floored_scale）。
 
 _MAD_TO_STD_RES = 1.4826
 

@@ -10,7 +10,7 @@
 回測的 warmup_points／can_evaluate 也沿用 chronic 的寫法。代價是要湊滿 window 個點：慢滑要幾分鐘才累積到門檻。
 
 分數 = |滾動平均(e)| / σ，σ = 1.4826 × MAD，在訓練期「滾動平均(e)」本身的分布上量（base.noise_stats），
-殘差的自相關與時段基準的週間誤差都已經算進去。σ 為 0 時分母退到 1.0，只防除以 0（base.guard_scale）。
+殘差的自相關與時段基準的週間誤差都已經算進去。分母不小於序列水位的 min_scale_ratio（預設 1%）；σ 與水位都是 0 才退到 1.0（base.floored_scale）。
 滾動平均一越線就成立（連續越線 min_run 個點才算的條件已於 2026-11-20 移除）。
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import (DetectorOperator, fit_seasonal_profile, guard_scale, noise_stats, parse_tz,
+from aiops.stages.detectors.base import (DetectorOperator, MIN_SCALE_RATIO_TUNABLE, fit_seasonal_profile, floored_scale, noise_stats, parse_tz,
                                          seasonal_residual)
 
 
@@ -31,7 +31,7 @@ class ResidualChronicDetector(DetectorOperator):
 
     algorithm = "residual_chronic"
     whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
-    tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 3.0, 1440.0)}
+    tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 3.0, 1440.0), **MIN_SCALE_RATIO_TUNABLE}
     other_params = frozenset({"tz", "min_slot_points"})
 
     def __init__(self, **params: Any):
@@ -52,16 +52,19 @@ class ResidualChronicDetector(DetectorOperator):
             rolling = pd.Series(resid)
         self.noise_ = noise_stats(rolling.to_numpy())
         self.window_ = int(self.param("window"))
+        self.level_ = float(df["value"].median())  # 序列水位：相對底噪用（base.floored_scale）
         self.fitted = True
         return self
 
     def get_state(self) -> dict:
         self._require_fitted()
-        return {"profile": self.profile_, "noise": self.noise_, "window": self.window_}
+        return {"profile": self.profile_, "noise": self.noise_, "window": self.window_, "level": self.level_}
 
     def load_state(self, state: dict) -> ResidualChronicDetector:
-        # 舊基準線多帶的 level 與 noise 裡的 tail_q、fpr（已移除的底噪與尾巴校正）不讀
+        # 舊基準線 noise 裡多帶的 tail_q、fpr（已移除的尾巴校正）不讀
         self.profile_, self.noise_ = dict(state["profile"]), {"noise": float(state["noise"]["noise"])}
+        # 沒記水位的基準線（放回相對底噪之前存的）：level 是 None，相對底噪等下次重訓才有
+        self.level_ = float(state["level"]) if state.get("level") is not None else None
         self.window_ = int(state["window"])
         self.fitted = True
         return self
@@ -78,7 +81,7 @@ class ResidualChronicDetector(DetectorOperator):
             # 後台改了 window：雜訊尺度是在舊窗口的滾動平均上量的，換窗口後尺度不對。照舊窗口判，下次重訓才換
             self.notes.append(f"window-changed:{self.window_}->{int(self.param('window'))}:until-retrain")
             self.params = {**self.params, "window": self.window_}
-        scale = guard_scale(self.noise_["noise"])
+        scale = floored_scale(self.level_, self.param("min_scale_ratio"), self.noise_["noise"])
         rolling = self._rolling(seasonal_residual(df, self.profile_))
         rolling.index = df.index
         scores = (rolling.abs() / scale).fillna(0.0)
