@@ -41,3 +41,6 @@ nodes:
     operator: enrichment.llm_briefing
     optional: true
     params: {provider: noop}
+  # 把結論補到 Grafana 圖表時間軸上那一筆事件群的註記（Grafana 沒設定就不做；寫失敗只記錯誤，報告照出）
+  - name: annotate
+    operator: notifier.grafana_annotations

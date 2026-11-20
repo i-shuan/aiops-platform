@@ -68,7 +68,10 @@ def test_optional_summary_in_rca_report_workflow_is_marked_optional():
     # 兩個 LLM 旁路節點（summary／claims 總結、三行止血摘要）都是 optional：沒金鑰、連不上、驗證不過都不能擋報告
     assert {n.name: n.optional for n in wf.nodes} == {"fetch_traces": False, "build_topology": False,
                                                        "fetch_logs": False, "root_cause": False, "report": False,
-                                                       "summary": True, "briefing": True}
+                                                       "summary": True, "briefing": True,
+                                                       # 2026-11-20 加的 Grafana 註記節點：不標 optional，它自己接住寫失敗
+                                                       # （記進 errors、報告照出；tests/test_grafana_annotations.py）
+                                                       "annotate": False}
 
 
 # ── 偵測器基準線：樂觀鎖 ──

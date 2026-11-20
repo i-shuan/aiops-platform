@@ -51,6 +51,9 @@ nodes:
     params: {resolve_after_minutes: 15}
   - name: notify
     operator: notifier.auto
+  # 把事件群標在 Grafana 圖表的時間軸上（嚴重度、摘要、連回規則的連結）；寫失敗只記錯誤，不影響通知
+  - name: annotate
+    operator: notifier.grafana_annotations
   - name: watchdog
     operator: notifier.watchdog
     params: {ttl_minutes: 30}

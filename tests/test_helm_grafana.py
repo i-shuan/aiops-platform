@@ -115,7 +115,8 @@ def test_dashboards_read_only_from_provisioned_datasources():
     assert sorted(b.stem for b in boards) == ["aiops-incidents", "apm-overview", "data-health"]
     for board in boards:
         d = json.loads(board.read_text(encoding="utf-8"))
-        used = {(p.get("datasource") or {}).get("uid") for p in d["panels"] if p["type"] != "text"}  # 說明用的 text 面板沒有資料源
+        # 說明用的 text 面板沒有資料源；annolist 面板列的是 Grafana 自己存的註記（平台寫進去的事件群，標籤 aiops），也不讀任何資料源
+        used = {(p.get("datasource") or {}).get("uid") for p in d["panels"] if p["type"] not in ("text", "annolist")}
         used |= {(v.get("datasource") or {}).get("uid") for v in d.get("templating", {}).get("list", []) if v.get("datasource")}
         assert used <= uids, f"{board.name} 用了沒定義的資料源：{used - uids}"
         assert d["panels"] and all(p["type"] != "text" or "iframe" not in json.dumps(p) for p in d["panels"])
@@ -146,3 +147,16 @@ def test_resource_names_match_the_running_release_so_helm_can_take_over():
     names = {(d["kind"], d["metadata"]["name"]) for d in _render()}
     assert {("Deployment", "grafana"), ("Service", "grafana"), ("ConfigMap", "grafana-datasources"),
             ("ConfigMap", "grafana-dashboards"), ("ConfigMap", "grafana-dashboard-provider")} <= names
+
+
+def test_incident_dashboard_lists_what_the_platform_judged_from_grafana_annotations_only():
+    """平台判出的異常與 RCA 結論在 Grafana 看（2026-11-20）：平台把事件群寫成註記，儀表板只列註記，
+    不讀平台的資料庫（唯讀帳號的授權不必放寬），也不需要平台自己的網頁。"""
+    d = json.loads((CHART / "files" / "dashboards" / "aiops-incidents.json").read_text(encoding="utf-8"))
+    lists = [p for p in d["panels"] if p["type"] == "annolist"]
+    assert lists and all("aiops" in p["options"]["tags"] and "datasource" not in p for p in lists)
+    assert {tuple(p["options"]["tags"]) for p in lists} >= {("aiops",), ("aiops", "severity:P0"), ("aiops", "severity:P1")}
+    (query,) = d["annotations"]["list"]
+    assert query["target"] == {"type": "tags", "tags": ["aiops"], "matchAny": False, "limit": 200} and query["enable"]
+    assert "rawSql" not in json.dumps(d)
+
