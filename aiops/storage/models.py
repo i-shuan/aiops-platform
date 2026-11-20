@@ -56,6 +56,9 @@ class IncidentRow(Base):
     # 每次重跑 RCA 覆蓋。migrations/postgres/0010
     rca_conclusion_type: Mapped[str] = mapped_column(String(32), default="", server_default="")
     rca_concluded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 最近一次 RCA 排第一的候選（'' = 沒有候選或還沒跑過）。覆核 RCA 時要知道「平台當時指的是誰」，
+    # 報告本身不落地、重跑會變，所以記在這裡。migrations/postgres/0013
+    rca_root_entity: Mapped[str] = mapped_column(String(256), default="", server_default="")
 
 
 class SilenceRow(Base):
@@ -296,6 +299,9 @@ class FeedbackRow(Base):
     author: Mapped[str] = mapped_column(String(128))
     proposal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    # 分項覆核（engine/requests.ReviewIn 有填的項目）＋ "platform"：送出當下平台對這張卡的說法
+    # （嚴重度、狀態、實體、RCA 結論等級與第一候選）。{} = 沒有分項覆核（含加欄位之前的舊列）。migrations/postgres/0013
+    review: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
 
 
 class ActiveDetectorConfigRow(Base):

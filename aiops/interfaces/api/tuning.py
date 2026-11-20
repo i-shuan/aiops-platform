@@ -7,6 +7,7 @@ from aiops.engine.requests import (
     ProposalApprove,
     ProposalBacktest,
     ProposalCreate,
+    ReviewMetricsQuery,
     RulePromote,
     SeriesProfile,
     TuningMetricsQuery,
@@ -50,6 +51,12 @@ def propose_from_feedback(req: FeedbackPropose):
 @router.get("/metrics")
 def tuning_metrics(req: TuningMetricsQuery = Depends()):
     return {"result": run("admin_tuning_metrics", request=req)}
+
+
+@router.get("/review")
+def review_metrics(req: ReviewMetricsQuery = Depends()):
+    """分項覆核統計（收斂、RCA、結案、嚴重度各看過幾張、錯在哪）。只是報表，不改任何設定。"""
+    return {"result": run("admin_review_metrics", request=req)}
 
 
 @router.post("/rules/promote")
