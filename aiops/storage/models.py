@@ -88,7 +88,7 @@ class NotificationRow(Base):
 
 class AnomalyRow(Base):
     """偵測結果（只增不改）。由 hooks.persist_batch 跟事件群在同一筆交易寫入（不是 persist_target）。
-    detector.ensemble 的裁決事件只存裁決節點（detector_node = 裁決節點名稱），投票者 voted_by 只在事件群快照裡。
+    detector.soft_vote 的裁決事件只存裁決節點（detector_node = 裁決節點名稱），投票者 voted_by 只在事件群快照裡。
 
     唯一鍵：一個偵測節點對一條序列的一個時間點只有一筆。同一輪被重跑時 Anomalies.create_many 撞到就跳過（留先寫的），
     不會寫出兩份。既有的 PostgreSQL 靠 migrations/postgres/0008 補這個鍵。"""
@@ -102,7 +102,7 @@ class AnomalyRow(Base):
     ts: Mapped[datetime] = mapped_column(DateTime)
     value: Mapped[float] = mapped_column(Float)
     score: Mapped[float] = mapped_column(Float)
-    detector_name: Mapped[str] = mapped_column(String(64))  # 算子名，例如 detector.zscore（外部匯入的異常不經這裡）
+    detector_name: Mapped[str] = mapped_column(String(64))  # 算子名，例如 detector.hourly_baseline（外部匯入的異常不經這裡）
     detector_node: Mapped[str] = mapped_column(String(128), default="", server_default="")  # Workflow 節點名稱
     # anomaly（越過門檻）或 warning（接近門檻的預警）
     level: Mapped[str] = mapped_column(String(16), default="anomaly", server_default="anomaly")

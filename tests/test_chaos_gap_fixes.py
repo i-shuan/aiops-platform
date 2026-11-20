@@ -18,7 +18,7 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import AnomalyEvent, Incident
 from aiops.sources.elasticsearch import ElasticsearchSpec
 from aiops.sources.query.elasticsearch import build_search_body, bucket_value, parse_es_query
-from aiops.stages.detectors.mad import MADDetector
+from aiops.stages.detectors.hourly_baseline import HourlyBaselineDetector
 from aiops.stages.enrichment.narrative import briefing_whitelist
 from aiops.stages.rca.algorithms.evidence import OTHER_RESOURCE_SHARE
 
@@ -193,17 +193,17 @@ def test_mean_latency_of_a_sparse_service_does_not_alarm_on_a_three_request_minu
     n, total = _sparse_minutes()
     assert (n == 3).sum() >= 20  # 3 筆的分鐘並不罕見（這批資料有幾十個）
     mean = total / n
-    det = MADDetector().fit(_frame(mean))
+    det = HourlyBaselineDetector().fit(_frame(mean))
     result = det.detect(_frame(mean[n >= 3]))
     assert int(np.sum(result.is_anomaly)) == 0  # 每筆平均：請求數多寡不影響數值
     # 真的變慢（每筆 5 秒）照樣抓得到
     assert bool(det.detect(_frame(np.array([5_000_000.0]))).is_anomaly[0])
 
 
-@pytest.mark.xfail(strict=True, reason="死區：avg(summary.sum) 是當分鐘總耗時，低流量服務 3 筆的那一分鐘 = 平常 3 倍，MAD 一定判異常。"
+@pytest.mark.xfail(strict=True, reason="死區：avg(summary.sum) 是當分鐘總耗時，低流量服務 3 筆的那一分鐘 = 平常 3 倍，逐點偵測器一定判異常。"
                                        "偵測器分不出『請求變多』與『變慢』，只能從查詢下手（divide_by）")
 def test_total_duration_of_a_sparse_service_does_not_alarm_on_a_three_request_minute():
     n, total = _sparse_minutes()
-    det = MADDetector().fit(_frame(total))
+    det = HourlyBaselineDetector().fit(_frame(total))
     result = det.detect(_frame(total[n >= 3]))
     assert int(np.sum(result.is_anomaly)) == 0

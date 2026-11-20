@@ -87,7 +87,7 @@ def build_notifications(incident: Incident, preset: str, severity: str, ends_at:
     if feedback:  # 設了 AIOPS_PUBLIC_URL 才有：卡片上一條連到平台回饋頁的連結（學習閉環的入口）
         annotations["feedback_url"] = feedback
     fatal = tagged_with(incident, [FATAL_TAG])
-    if fatal:  # 致命硬上限踩線：接收端（值班、自動觸發 RCA 的 webhook）靠這個欄位知道不用等統計確認
+    if fatal:  # 事件群帶 fatal 標籤（目前沒有算子會打；外部告警之後若帶進來可用）：接收端（值班、自動觸發 RCA 的 webhook）靠這個欄位知道不用等統計確認
         annotations["fatal"] = ", ".join(fatal)
     if path:
         annotations["escalation_path"] = " -> ".join(path)

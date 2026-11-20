@@ -16,6 +16,7 @@ from aiops.control_plane.learning import snr_feedback
 from aiops.control_plane.learning.segment import Segment, snr_nodes
 from aiops.engine.errors import BadRequest, Conflict
 from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
+from aiops.engine.registry import OperatorRegistry
 from aiops.engine.requests import FeedbackPropose, FeedbackSubmit, ProposalApprove, ProposalBacktest, ProposalCreate
 from aiops.interfaces.runner import run, workflow_path
 from aiops.sources.mock import MockSpec, _splitmix
@@ -118,7 +119,7 @@ def _seed(pipeline):
 
 def test_it_otel_snr_nodes_are_detected():
     assert snr_nodes(PIPELINE, "detector.residual_chronic") == ["detect_rchronic"]
-    assert snr_feedback.has_snr(PIPELINE) and not snr_feedback.has_snr("sample_factory")
+    assert snr_feedback.has_snr(PIPELINE) and not snr_feedback.has_snr("sample_metrics_only")  # 沒開 snr 的管線
 
 
 def test_false_positive_feedback_produces_an_approvable_scale_that_silences_the_same_kind_of_false_alarm(pipeline):
@@ -185,14 +186,20 @@ def test_the_proposer_never_goes_past_the_golden_safe_limit(pipeline):
 # ── 規則與防呆 ──
 
 
-def test_threshold_scale_only_goes_up_and_needs_a_threshold():
+def test_threshold_scale_only_goes_up_and_needs_a_threshold(monkeypatch):
     with pytest.raises(BadRequest):
         run("admin_proposal_create", request=ProposalCreate(
             source="manual", detector="detector.residual_chronic", params={THRESHOLD_SCALE: 0.5}, proposer="x",
             pipeline=PIPELINE, entity="svc"))
-    with pytest.raises(BadRequest):
+
+    # 出貨的偵測器現在都有 threshold（原本用的 detector.hard_limit 已移除）：用測試專用、沒有 threshold 的偵測器走這條路
+    class NoThreshold(ResidualChronicDetector):
+        tunable = {"window": (30.0, 3.0, 1440.0)}
+
+    monkeypatch.setitem(OperatorRegistry._items, "test.no_threshold_probe", NoThreshold)
+    with pytest.raises(BadRequest, match="沒有 threshold"):
         run("admin_proposal_create", request=ProposalCreate(
-            source="manual", detector="detector.hard_limit", params={THRESHOLD_SCALE: 2.0}, proposer="x",
+            source="manual", detector="test.no_threshold_probe", params={THRESHOLD_SCALE: 2.0}, proposer="x",
             pipeline=PIPELINE, entity="svc"))
     assert ResidualChronicDetector(threshold_scale=2.5).threshold_scale == 2.5
 

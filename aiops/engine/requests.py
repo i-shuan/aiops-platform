@@ -198,7 +198,7 @@ class GrafanaAlertIngest(StrictModel):
 
 class ProposalCreate(StrictModel):
     source: Literal["auto", "llm", "manual"]
-    detector: str  # 算子名，例如 detector.zscore
+    detector: str  # 算子名，例如 detector.hourly_baseline
     params: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
     proposer: str
@@ -348,13 +348,3 @@ class ReviewMetricsQuery(StrictModel):
 
     lookback_days: int = Field(90, ge=1, le=365)
     pipeline: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]+$", max_length=128)
-
-
-class RulePromote(StrictModel):
-    """規則升級：同一層（偵測器 × 管線 × 實體）在 window_days 天內被核准調參 >= min_approvals 次，
-    就用它目前的基準線產生一個 detector.rules 靜態規則的提案（仍要回測、核准才生效）。"""
-
-    min_approvals: int = Field(3, ge=2, le=50)
-    window_days: int = Field(30, ge=1, le=365)
-    consecutive: int = Field(3, ge=1, le=60)
-    proposer: str = "rule_promoter"

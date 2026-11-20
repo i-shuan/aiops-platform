@@ -16,7 +16,7 @@ def ensure_incidents(ctx: PipelineContext) -> list[Incident]:
     return ctx.incidents
 
 
-# alert.fatal_floor 打在事件群上的標籤前綴：fatal:<偵測節點名稱>
+# 事件群上的致命標籤前綴（fatal:<名稱>）。平台內已經沒有算子會打這個標籤；抑制算子的 exempt_tags／escalate_tags 仍可用任何標籤
 FATAL_TAG = "fatal"
 
 

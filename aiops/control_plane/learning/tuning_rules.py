@@ -68,7 +68,7 @@ def quantile_step(target: float, tunable: dict, current: dict[str, float]) -> tu
     note = f"目標 {target} 超出範圍，夾到 {value}。" if value != target else ""
     if value <= now:
         return None, (f"目標門檻 {value} 不高於現行 {now}：誤報時窗裡這個偵測器的分數沒有越線，"
-                      "誤報不是它造成的（例如是多數決裡其他節點）")
+                      "誤報不是它造成的（例如是投票裡其他節點）")
     cap = math.floor(now * (1 + _MAX_CHANGE) * 10000) / 10000 if now else value
     if value > cap:
         note += (f"目標 {round(value, 4)} 超過單次上限 {int(_MAX_CHANGE * 100)}%，這次先調到 {cap}"

@@ -1,5 +1,13 @@
 # 殘差白化＋自適應門檻＋SNR 軟投票（it_otel 的偵測段：R+SNR）
 
+> **歷史紀錄（2026-11-20 註）**：本文件拿來比較的偵測器與裁決——`detector.mad`、`detector.quantile_drift`、`detector.zscore`、
+> `detector.rules`、`detector.hard_limit`（連同 `alert.fatal_floor` 與「致命軌」旁路）、布林多數決 `detector.ensemble`——已於 2026-11-20 移除，
+> `scripts/backtest/variants.py` 的對照變體 R、A、A+SNR 也跟著拿掉，只剩 R+SNR。下面的數字與敘述原樣保留，當作現行組合
+> （`hourly_baseline`＋`residual_shift`＋`residual_chronic`＋`detector.soft_vote`，旁路 `detect_drift_solo`）怎麼選出來的紀錄；
+> 文中的四組比較已經無法用現在的程式重跑。現行的偵測段在 `scripts/pipelines/sample_it_otel.yaml`（出貨的 `it_otel.yaml` 自 2026-11-15 起不跑偵測器），
+> 沒有 `fatal`（hard_limit）旁路。`sample_factory` 也改成同一組三票＋`soft_vote`（沒有在機台感測值上驗證過），
+> `sample_it_apm`／`sample_metrics_only` 改成 `hourly_baseline`。人訂的靜態門檻改由 Grafana 告警規則推進來，不在平台裡做。
+
 > **現況（`feat/adopt-r-snr`）**：it_otel 已採用 R+SNR；誤報走回饋閉環（門檻倍率提案、整段回測、黃金事故防護罩、人核准），
 > 見「採用」「誤報走回饋閉環」兩節。下面的回測數字是演進過程（R -> R+SNR）量的，各節註明 commit。
 

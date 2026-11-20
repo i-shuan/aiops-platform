@@ -16,7 +16,7 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
 )
-from aiops.stages.detectors.quantile_drift import QuantileDriftDetector
+from aiops.stages.detectors.residual_chronic import ResidualChronicDetector
 from aiops.stages.enrichment import registry
 from aiops.stages.enrichment.base import BaseLLM
 from aiops.stages.enrichment.providers import build_llm
@@ -26,7 +26,7 @@ from aiops.storage.hooks import StorageHooks
 from aiops.storage.models import AnomalyRow
 from aiops.storage.repository import ActiveConfigs, DetectorModels
 
-ZSCORE = "detector.zscore"
+DETECTOR = "detector.hourly_baseline"  # 樣本管線 detect 節點跑的偵測器
 
 
 # ── P0-1 路徑穿越 ──
@@ -138,56 +138,56 @@ def test_directory_link_inside_pipelines_pointing_outside_is_refused(tmp_path, m
 # ── P0-2 節點血緣 ──
 
 
-def _two_zscore_nodes():
+def _same_algorithm_twice():
     wf = load_workflow(workflow_path("sample_metrics_only"))
     at = next(i for i, n in enumerate(wf.nodes) if n.name == "detect")
-    wf.nodes[at:at + 1] = [NodeSpec(name="detect_a", operator=ZSCORE, params={"threshold": 1.0}),
-                           NodeSpec(name="detect_b", operator=ZSCORE, params={"threshold": 9.0})]
+    wf.nodes[at:at + 1] = [NodeSpec(name="detect_a", operator=DETECTOR, params={"threshold": 1.0}),
+                           NodeSpec(name="detect_b", operator=DETECTOR, params={"threshold": 9.0})]
     return Pipeline(wf, StorageHooks())
 
 
 def test_same_algorithm_twice_keeps_separate_baselines_and_lineage(now):
-    ctx = _two_zscore_nodes().run(now=now)
+    ctx = _same_algorithm_twice().run(now=now)
     assert {a.detector_node for a in ctx.anomalies} == {"detect_a", "detect_b"}
-    assert {a.detector for a in ctx.anomalies} == {ZSCORE}
+    assert {a.detector for a in ctx.anomalies} == {DETECTOR}
     for node in ("detect_a", "detect_b"):
-        assert DetectorModels.get("sample_metrics_only", "metric_a", "metric_a", ZSCORE, node)["points"] > 0
+        assert DetectorModels.get("sample_metrics_only", "metric_a", "metric_a", DETECTOR, node)["points"] > 0
     rows = crud.find(AnomalyRow)
     assert {r["detector_node"] for r in rows} == {"detect_a", "detect_b"}
-    assert {r["detector_name"] for r in rows} == {ZSCORE}  # 算子名，不再是演算法短名或「最後一個偵測器」
+    assert {r["detector_name"] for r in rows} == {DETECTOR}  # 算子名，不再是演算法短名或「最後一個偵測器」
 
 
 def test_each_anomaly_is_stored_with_its_own_detector_when_algorithms_differ(now):
     wf = load_workflow(workflow_path("sample_metrics_only"))
     at = next(i for i, n in enumerate(wf.nodes) if n.name == "detect")
-    wf.nodes[at:at + 1] = [NodeSpec(name="z", operator=ZSCORE, params={"threshold": 1.0}),
-                           NodeSpec(name="m", operator="detector.mad", params={"threshold": 10.0})]
+    wf.nodes[at:at + 1] = [NodeSpec(name="z", operator=DETECTOR, params={"threshold": 1.0}),
+                           NodeSpec(name="m", operator="detector.residual_shift", params={"threshold": 10.0})]
     Pipeline(wf, StorageHooks()).run(now=now)
     by_node = {}
     for r in crud.find(AnomalyRow):
         by_node.setdefault(r["detector_node"], set()).add(r["detector_name"])
-    assert by_node["z"] == {ZSCORE} and by_node["m"] == {"detector.mad"}
+    assert by_node["z"] == {DETECTOR} and by_node["m"] == {"detector.residual_shift"}
 
 
 def test_anomaly_event_roundtrip_keeps_lineage(now):
     ctx = run_context("sample_metrics_only", now=now, strict=False)
     event = ctx.incidents[0].events[0]
-    assert event.detector == ZSCORE and event.detector_node == "detect"
+    assert event.detector == DETECTOR and event.detector_node == "detect"
     from aiops.engine.types import AnomalyEvent
 
     again = AnomalyEvent.from_dict(event.to_dict())
-    assert (again.detector, again.detector_node) == (ZSCORE, "detect")
+    assert (again.detector, again.detector_node) == (DETECTOR, "detect")
 
 
 # ── P0-3 調參分層 ──
 
 
-def _set(params, pipeline=ANY, entity=ANY, detector=ZSCORE):
+def _set(params, pipeline=ANY, entity=ANY, detector=DETECTOR):
     return ActiveConfigs.set(detector, params, "manual", 1, expected_version=0, pipeline=pipeline, entity=entity)
 
 
 def _resolve(pipeline, entity):
-    row = pick_most_specific(ActiveConfigs.candidates(ZSCORE, pipeline, entity), pipeline, entity)
+    row = pick_most_specific(ActiveConfigs.candidates(DETECTOR, pipeline, entity), pipeline, entity)
     return row["params"]["threshold"] if row else None
 
 
@@ -208,7 +208,7 @@ def test_candidates_come_from_a_single_query(now, monkeypatch):
     calls = []
     real = crud.find_matching
     monkeypatch.setattr(crud, "find_matching", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
-    _two_zscore_nodes().run(now=now)  # 兩個節點都是 zscore、一條序列
+    _same_algorithm_twice().run(now=now)  # 兩個節點同一個演算法、一條序列
     assert len(calls) == 1
 
 
@@ -227,13 +227,13 @@ def test_tuning_for_this_pipeline_is_applied(now):
     _set({"threshold": 1.0}, pipeline="sample_metrics_only")
     ctx = run_context("sample_metrics_only", now=now, strict=False)
     assert len(ctx.anomalies) > 1
-    assert any(line.startswith("params:detect:detector.zscore@sample_metrics_only/*") for line in ctx.audit)
+    assert any(line.startswith("params:detect:detector.hourly_baseline@sample_metrics_only/*") for line in ctx.audit)
 
 
 def test_proposals_for_different_layers_do_not_invalidate_each_other(now):
     def propose(pipeline, entity):
         return run("admin_proposal_create", request=ProposalCreate(
-            source="manual", detector=ZSCORE, params={"threshold": 4.0}, proposer="a", pipeline=pipeline,
+            source="manual", detector=DETECTOR, params={"threshold": 4.0}, proposer="a", pipeline=pipeline,
             entity=entity))["proposal"]["id"]
 
     def backtest(pid):
@@ -246,7 +246,7 @@ def test_proposals_for_different_layers_do_not_invalidate_each_other(now):
     backtest(pipeline_level)
     run("admin_proposal_approve", request=ProposalApprove(proposal_id=pipeline_level, approver="b"))
     run("admin_proposal_approve", request=ProposalApprove(proposal_id=entity_level, approver="b"))  # 不同層，不算過期
-    assert ActiveConfigs.get(ZSCORE, "p", ANY)["version"] == 1 and ActiveConfigs.get(ZSCORE, "p", "cpu")["version"] == 1
+    assert ActiveConfigs.get(DETECTOR, "p", ANY)["version"] == 1 and ActiveConfigs.get(DETECTOR, "p", "cpu")["version"] == 1
 
 
 # ── P0-4 參數合併 ──
@@ -266,7 +266,7 @@ def _rolling_ctx(tuned):
 
 
 def test_yaml_keys_are_locked_but_other_keys_take_the_tuned_value():
-    op = QuantileDriftDetector(threshold=5.0)
+    op = ResidualChronicDetector(threshold=5.0)
     op.node_name = "detect"
     ctx = _rolling_ctx({"threshold": 2.0, "window": 10})
     assert op.effective_params(ctx) == {"threshold": 5.0, "window": 10}  # YAML 沒寫 window，所以吃調參
@@ -274,7 +274,7 @@ def test_yaml_keys_are_locked_but_other_keys_take_the_tuned_value():
 
 
 def test_unknown_tuned_keys_are_ignored_instead_of_failing():
-    op = QuantileDriftDetector()
+    op = ResidualChronicDetector()
     op.node_name = "detect"
     ctx = _rolling_ctx({"threshold": 2.0, "removed_in_new_version": 1})
     assert op.effective_params(ctx) == {"threshold": 2.0}
@@ -284,7 +284,7 @@ def test_unknown_tuned_keys_are_ignored_instead_of_failing():
 # ── P1-5 回測切段 ──
 
 
-def _propose(detector=ZSCORE, params=None):
+def _propose(detector=DETECTOR, params=None):
     return run("admin_proposal_create", request=ProposalCreate(
         source="manual", detector=detector, params=params or {"threshold": 1.0}, proposer="a"))["proposal"]["id"]
 
@@ -309,7 +309,7 @@ def test_spike_in_the_test_segment_is_scored(now):
 
 
 def test_rolling_detectors_get_warmup_points_that_are_not_scored(now):
-    bt = _backtest(_propose("detector.quantile_drift", {"threshold": 3.0, "window": 30}), now, 0.3)
+    bt = _backtest(_propose("detector.residual_chronic", {"threshold": 3.0, "window": 30}), now, 0.3)
     assert bt["warmup_points"] == 29
 
 
@@ -324,7 +324,7 @@ def test_too_little_data_to_split_is_rejected(now):
 def _feedback_for_incident(now):
     uid = run_context("sample_metrics_only", now=now, strict=False).incidents[0].uid
     return lambda: run("admin_feedback_submit", request=FeedbackSubmit(
-        incident_uid=uid, verdict="false_positive", detector=ZSCORE, text="誤報", author="a"))["feedback"]["id"]
+        incident_uid=uid, verdict="false_positive", detector=DETECTOR, text="誤報", author="a"))["feedback"]["id"]
 
 
 def _propose_from(fid, **kw):

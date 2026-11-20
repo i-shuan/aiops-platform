@@ -30,7 +30,7 @@ WARNING = "warning"
 @dataclass(frozen=True)
 class AnomalyEvent:
     """一筆異常。建立後不可修改（frozen）：偵測器名稱、分數一旦產生，下游（收斂、計分、裁決）只能讀、不能改，
-    要調整就產生新的事件（例如 detector.ensemble 產生的裁決事件）。"""
+    要調整就產生新的事件（例如 detector.soft_vote 產生的裁決事件）。"""
 
     entity: str
     metric: str
@@ -72,7 +72,7 @@ class AnomalyEvent:
                    tuple(d.get("voted_by", ())), d.get("level", ANOMALY))
 
 
-# 嚴重度門檻的預設值（分數 >= 門檻就是該等級）：alert.notify_payload 定嚴重度、alert.fatal_floor 換算地板分數都用這一份
+# 嚴重度門檻的預設值（分數 >= 門檻就是該等級）：alert.notify_payload 定嚴重度用這一份
 DEFAULT_SEVERITY = {"P0": 10.0, "P1": 6.0, "P2": 3.0, "P3": 0.0}
 
 

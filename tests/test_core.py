@@ -24,7 +24,7 @@ def _wf(*nodes: tuple[str, str, dict], targets=("a", "b")):
 
 def test_registry_rejects_duplicates_and_non_operators():
     with pytest.raises(TypeError):
-        OperatorRegistry.register("detector.zscore")(type("Another", (BaseOperator,), {"execute": lambda s, c: c}))
+        OperatorRegistry.register("detector.hourly_baseline")(type("Another", (BaseOperator,), {"execute": lambda s, c: c}))
     with pytest.raises(TypeError):
         OperatorRegistry.register("x.not_an_operator")(type("NoExecute", (), {}))
 
@@ -33,7 +33,7 @@ def test_unknown_operator_and_unknown_params_fail_at_construction_not_at_runtime
     with pytest.raises(WorkflowError, match="未註冊"):
         Pipeline(_wf(("n", "detector.nope", {})))
     with pytest.raises(WorkflowError, match="參數"):
-        Pipeline(_wf(("n", "detector.zscore", {"treshold": 3})))  # 拼錯
+        Pipeline(_wf(("n", "detector.hourly_baseline", {"treshold": 3})))  # 拼錯
     with pytest.raises(WorkflowError, match="參數"):
         Pipeline(_wf(("n", "ingestion.fetch", {"lookback": 5})))
 
@@ -45,7 +45,7 @@ def test_target_nodes_must_precede_batch_nodes():
 
 def test_duplicate_node_names_rejected():
     with pytest.raises(ValueError):
-        _wf(("n", "ingestion.fetch", {}), ("n", "detector.zscore", {}))
+        _wf(("n", "ingestion.fetch", {}), ("n", "detector.hourly_baseline", {}))
 
 
 def test_every_shipped_workflow_loads_and_builds():

@@ -46,16 +46,6 @@ def _seed_runs(pipeline: str, start: datetime, end: datetime, failed_at: set[dat
     crud.create_many(PipelineRunRow, rows)
 
 
-def _seed_heartbeats(source: str, start: datetime, end: datetime, every: timedelta = STEP) -> None:
-    rows, t, i = [], start, 0
-    while t < end:
-        rows.append({"pipeline": "it_otel", "source": source, "external_id": f"hb-{i}", "entity": "heartbeat",
-                     "metric": "AIOpsHeartbeat", "ts": _naive(t), "score": 0.0, "value": None, "attrs": {},
-                     "received_at": _naive(t), "status": HEARTBEAT_STATUS})
-        t, i = t + every, i + 1
-    crud.create_many(ExternalAnomalyRow, rows)
-
-
 def _watchdog(now: datetime, extra_targets: list[TargetSpec] = ()):
     wf = load_workflow(WATCHDOG)
     if extra_targets:
@@ -104,14 +94,6 @@ def test_watchdog_stays_quiet_when_the_platform_is_healthy():
     assert ctx.errors == [] and ctx.detected_anomalies == [] and ctx.incidents == []
 
 
-def test_watchdog_catches_a_stopped_schedule():
-    _seed_runs("metrics_only", T - timedelta(days=14), T - timedelta(minutes=30))  # 最後半小時一輪都沒跑
-    ctx = _watchdog(T)
-    assert ("metrics_only", "stopped_rounds") in _fired(ctx)
-    [incident] = ctx.incidents
-    assert incident.entities == ["metrics_only"] and {e.metric for e in incident.events} == {"runs/metrics_only/rounds"}
-
-
 def test_watchdog_catches_a_burst_of_failed_rounds_with_the_sparse_count_detector():
     rare = {T - timedelta(days=d, hours=3) for d in (12, 8, 3)}  # 兩週裡零星失敗 3 輪：平常的發生率
     burst = {T - timedelta(minutes=m) for m in (40, 35, 30, 25, 20)}  # 最近 40 分鐘連續失敗 5 輪
@@ -126,52 +108,6 @@ def test_the_usual_rate_of_rare_failures_does_not_fire():
     rare = {T - timedelta(days=d, hours=3) for d in (12, 8, 3)} | {T - timedelta(hours=2)}
     _seed_runs("metrics_only", T - timedelta(days=14), T, failed_at=rare)
     assert ("metrics_only", "failures") not in _fired(_watchdog(T))
-
-
-def test_watchdog_catches_a_team_whose_heartbeat_stopped_and_not_one_that_keeps_beating():
-    targets = [TargetSpec(source_type=PLATFORM_SOURCE, query=f"alerts/{s}/heartbeats", entity=s, detectors=["stopped_heartbeats"])
-               for s in ("team-a", "team-b")]
-    _seed_runs("metrics_only", T - timedelta(days=2), T)
-    # 60 分鐘前起一筆心跳都沒有（門檻是連續 50 分鐘；上一版門檻 30 分鐘時這裡寫 40 分鐘，門檻放寬後 40 分鐘不該再成立）
-    _seed_heartbeats("team-a", T - timedelta(days=2), T - timedelta(minutes=60))
-    _seed_heartbeats("team-b", T - timedelta(days=2), T)
-    fired = _fired(_watchdog(T, targets))
-    assert ("team-a", "stopped_heartbeats") in fired and ("team-b", "stopped_heartbeats") not in fired
-
-
-MAX_HEARTBEAT_MINUTES = 15  # 文件允許的最大心跳間隔（docs/EXTERNAL_ALERTS.md）
-TOLERATED_MISSES = 2        # 連續漏掉幾筆還不算斷（docs/WATCHDOG.md 的依據）
-
-
-def test_the_heartbeat_threshold_follows_the_documented_formula():
-    """consecutive = (N + 1) × I ÷ 格寬 + 1：容許連續漏 N 筆、I 是允許的最大間隔，多 1 格吸收送達延遲。不准改成別的值而不改依據。"""
-    wf = load_workflow(WATCHDOG)
-    step = next(n.params["step_seconds"] for n in wf.nodes if n.operator == "ingestion.fetch") // 60
-    node = next(n for n in wf.nodes if n.name == "stopped_heartbeats")
-    assert node.params["consecutive"] == (TOLERATED_MISSES + 1) * MAX_HEARTBEAT_MINUTES // step + 1 == 10
-
-
-def _beats(source: str, times: list[datetime]) -> None:
-    crud.create_many(ExternalAnomalyRow, [
-        {"pipeline": "it_otel", "source": source, "external_id": f"{source}-{i}", "entity": "heartbeat", "metric": "AIOpsHeartbeat",
-         "ts": _naive(t), "score": 0.0, "value": None, "attrs": {}, "received_at": _naive(t), "status": HEARTBEAT_STATUS}
-        for i, t in enumerate(times)])
-
-
-@pytest.mark.parametrize("missed, fires", [(2, False), (3, True)])
-def test_a_15_minute_heartbeat_may_lose_two_in_a_row_but_not_three(missed, fires):
-    """15 分鐘一筆、每筆晚 59 秒送到（送達延遲的上限）；最後連續漏掉 missed 筆。漏 2 筆不叫、漏 3 筆要叫。
-    上一版門檻（連續 6 格）漏 1 筆加上延遲就可能誤報，漏 2 筆一定誤報。"""
-    every = timedelta(minutes=MAX_HEARTBEAT_MINUTES)
-    last_kept = T - every * (missed + 1)  # 現在這一筆（T）還沒到
-    times, t = [], T - timedelta(days=1)
-    while t <= last_kept:
-        times.append(t + timedelta(seconds=59))
-        t += every
-    _beats("team-b", times)
-    _seed_runs("metrics_only", T - timedelta(days=1), T)
-    target = TargetSpec(source_type=PLATFORM_SOURCE, query="alerts/team-b/heartbeats", entity="team-b", detectors=["stopped_heartbeats"])
-    assert (("team-b", "stopped_heartbeats") in _fired(_watchdog(T, [target]))) is fires
 
 
 def test_a_bad_platform_query_is_a_configuration_error_not_silence():
@@ -265,7 +201,7 @@ def test_runs_with_caller_series_only_work_on_the_watchdog_with_platform_records
         r = client.post("/api/v1/runs", json={"workflow": workflow, "targets": [_target(source, query)]})
         assert r.status_code == status, (workflow, source, r.text)
     ok = client.post("/api/v1/runs", json={"workflow": "platform_watchdog", "now": T.isoformat(),
-                                           "targets": [{**_target("platform", "runs/metrics_only/rounds"), "detectors": ["stopped_rounds"]}]})
+                                           "targets": [{**_target("platform", "runs/metrics_only/failed"), "detectors": ["failures"]}]})
     assert ok.status_code == 200, ok.text
     assert "偵測演算法只用來監控 AIOps 平台自己" in client.post("/api/v1/runs", json={
         "workflow": "it_otel", "targets": [_target("mock", "cpu")]}).json()["message"]

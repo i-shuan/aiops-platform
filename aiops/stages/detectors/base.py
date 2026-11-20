@@ -32,12 +32,12 @@ class DetectorOperator(BaseOperator):
     requires_training: ClassVar[bool] = True
     # 可調參數：名稱 -> (預設值, 最小值, 最大值)。調參（含 LLM 抽規則）只能改這些，且不能超出範圍
     tunable: ClassVar[dict[str, tuple[float, float, float]]] = {}
-    # 不開放自動調參、但合法的參數（例如靜態規則的上下限）
+    # 不開放自動調參、但合法的參數（例如時區、時段最少訓練點數）
     other_params: ClassVar[frozenset[str]] = frozenset()
-    # False：這個節點的事件不交給 detector.ensemble 表決（致命硬上限：單點踩線就成立，不能被統計多數決否決）。
-    # 排在 ensemble 前面的非投票節點必須列在 ensemble 的 bypass，載入期檢查；不然它會默默變成分母的一員
+    # False：這個節點的事件不交給 detector.soft_vote 加總（單獨成立、不該被其他票稀釋的節點）。
+    # 排在 soft_vote 前面的非投票節點必須列在它的 bypass，載入期檢查；不然它會默默變成參與者
     votes: ClassVar[bool] = True
-    # False：參數只認 YAML 與 target overrides，後台調參（含 LLM 抽規則、規則升級器）一律不套用、提案直接拒絕
+    # False：參數只認 YAML 與 target overrides，後台調參（含 LLM 抽規則）一律不套用、提案直接拒絕
     accepts_tuning: ClassVar[bool] = True
     # True：分數是對「時段（週幾×小時）基準」算的，季節訊號已經扣掉，分數單位就是雜訊尺度（hourly_baseline、residual_*）。
     # 開 snr 時決定門檻怎麼從 p_fa 換算（見 snr_threshold）；不開 snr 時沒有任何作用
@@ -209,7 +209,7 @@ class DetectorOperator(BaseOperator):
 
         ctx.detector_runs.append(key)  # 真的評估過這段資料才算參與（沒抓到異常 = 反對票）
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
-        # 每一筆都帶著自己是哪個演算法、哪個節點抓到的（要交集／多數決就接 detector.ensemble）
+        # 每一筆都帶著自己是哪個演算法、哪個節點抓到的（要合併多票就接 detector.ensemble）
         result = ctx.anomaly_result = algo.detect(df)
         if self.snr is not None:
             ctx.detector_evidence[key] = DetectorEvidence(result.timestamps, list(result.scores), algo.param("threshold"),
@@ -403,24 +403,6 @@ def scale_floor(scale: float, values: pd.Series | np.ndarray | None = None, min_
     return out if out > 0 else 1.0
 
 
-def limit_breach(values: pd.Series, upper: float | None, lower: float | None,
-                 consecutive: int = 1) -> tuple[pd.Series, pd.Series]:
-    """靜態上下限的越線判斷（detector.rules 與 detector.hard_limit 共用；偵測器之間不准互相 import）。
-    回傳 (分數, 是否成立)：超過 upper 或低於 lower 算違規，連續違規段長度 >= consecutive 的點才成立；
-    成立點的分數 = 1 + 超出比例（相對於那條界線），其餘 0。NaN 不算違規，也會把連續段切斷。"""
-    v = values
-    excess = pd.Series(0.0, index=v.index)
-    if upper is not None:
-        excess = excess.where(~(v > upper), (v - upper) / max(abs(float(upper)), 1e-9))
-    if lower is not None:
-        excess = excess.where(~(v < lower), (lower - v) / max(abs(float(lower)), 1e-9))
-    breach = excess > 0
-    # 連續違規的長度：遇到沒違規就歸零
-    run = breach.groupby((~breach).cumsum()).cumsum()
-    flagged = run >= int(consecutive)
-    return (excess + breach.astype(float)).where(flagged, 0.0), flagged
-
-
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:
     if key not in routing:
         return None
@@ -554,7 +536,7 @@ _MAD_TO_STD_RES = 1.4826
 def noise_stats(stat: np.ndarray, fpr: float) -> dict[str, float]:
     """fit 時量訓練期統計量：σ（1.4826 × MAD）與 |統計量| 的 1−fpr 分位數。存進基準線。
     MAD 為 0（訓練期幾乎不動）時不退標準差：標準差會被訓練期裡那幾個跳點自己撐大，等於把異常學成雜訊；
-    σ = 0 時 calibrated_scale 的上限也是 0，直接落到底噪（跟 detector.mad 的 MAD=0 一樣）。
+    σ = 0 時 calibrated_scale 的上限也是 0，直接落到底噪。
     fpr 改了要等下次重訓才生效（分位數是在訓練資料上量的）；threshold、max_tail_factor、底噪在 detect 時才套，改了立刻生效。"""
     raw = np.asarray(stat, dtype=float)
     raw = raw[np.isfinite(raw)]

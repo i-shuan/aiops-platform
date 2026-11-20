@@ -21,7 +21,6 @@
       │   漂移票 residual_chronic       殘差的 30 分鐘滾動平均           │
       │   三票都開 snr：門檻 = z_{1−p_fa/2}（p_fa 0.001 -> 3.29）× 門檻倍率 │
       │ 旁路（不投票、單獨成立）                                         │
-      │   致命 hard_limit               單點踩到 YAML 界線 -> 直接 P0     │
       │   漂移 detect_drift_solo        殘差漂移連續 10 分鐘 -> 單獨告警  │
       └──────────────────────────────────────────────────────────────┘
     → new_only → grouping → scoring → absorb_open → suppression → notify_payload → heartbeat → notifier.* → persist
@@ -37,6 +36,12 @@ RCA 管線
         → rca.report（含 Runbook 比對矩陣）→ llm_summary / llm_briefing（可 noop）
 ```
 
+**2026-11-20 移除的算子**：`detector.zscore`、`detector.mad`、`detector.quantile_drift`、`detector.hard_limit`、`detector.rules`、
+`detector.ensemble`（布林多數決；`detector.soft_vote` 保留）、`alert.fatal_floor`（連同整套「雙軌制／致命軌」設計）、`admin.rule_promote`
+（規則升級器）。留下的偵測算子：`hourly_baseline`、`residual_shift`、`residual_chronic`、`soft_vote`、`sparse_count`、`new_only`。
+人訂的靜態門檻（上下限、致命界線、「排程停了」、「團隊心跳停了」）不在平台裡做，一律是 Grafana 告警規則、經 webhook 推進來
+（`docs/EXTERNAL_ALERTS.md`）。看門狗原本的兩條靜態規則對應的 Grafana 規則還沒做，目前是缺口（`docs/WATCHDOG.md`）。
+
 圖上偵測畫成一個方塊，**YAML 裡仍是分開的節點**：每一票各自存基準線（以節點名稱）、各自能被回饋閉環調參
 （`threshold_scale`，分 偵測器×管線×實體），不包成複合算子。`topological` 也仍是獨立算子（`evidence` 的 fallback 參數），沒有併進 `evidence`。
 
@@ -47,10 +52,10 @@ RCA 管線
 | 階層 | 實際使用的算子 |
 | :--- | :--- |
 | 1. 抓資料 | `ingestion.fetch` |
-| 2. 偵測 | `hourly_baseline`、`residual_shift`、`residual_chronic`、`hard_limit` |
+| 2. 偵測 | `hourly_baseline`、`residual_shift`、`residual_chronic` |
 | 3. 裁決 | `soft_vote`（SNR 門檻）、`new_only` |
 | 4. 收斂 | `same_entity`、`topology_chain`、`messaging_link` |
-| 5. 計分 | `golden_signals`、`p0_boost`、`fatal_floor` |
+| 5. 計分 | `golden_signals`、`p0_boost` |
 | 6. 吸收與抑制 | `absorb_open`、`suppress_window`、`suppress_same_root_cause`、`suppress_dedup` |
 | 7. 通知 | `notify_payload`、`heartbeat`、`notifier.auto`、`notifier.watchdog` |
 | 8. 根因：撈證據 | `incident_traces`、`incident_logs`、`build_dynamic_topology`、`rca.facts`、`extract_evidence` |
@@ -78,7 +83,7 @@ RCA 管線
 - `detector.hourly_baseline`：週期票。拿「週幾 × 幾點」的歷史平均與標準差當基準，看現在偏離多少。
 - `detector.residual_shift`：突變票。先扣掉週期基準得到殘差，再看殘差有沒有突然跳一階。
 - `detector.residual_chronic`：慢性票。看殘差是不是連續偏向同一邊。管線裡掛兩次：一次投票，一次（連續 10 點）單獨成立、不經表決。
-- `detector.hard_limit`：致命界線。物理或業務上踩到就是出事的上下限，單點成立、不投票、不接受後台調參。
+- 人訂的靜態界線（上下限、致命界線）不在這一層：`detector.hard_limit`、`detector.rules` 已移除，改用 Grafana 告警規則推進來。
 
 第 3 層　裁決
 - `detector.soft_vote`：把三張統計票合成一個判定。門檻由誤報機率 `p_fa` 換算（預設 3.29 個雜訊標準差）；列在 `bypass` 的節點原樣放行。
@@ -92,7 +97,6 @@ RCA 管線
 第 5 層　計分（決定嚴重度 P0–P3）
 - `alert.golden_signals`：事故含黃金訊號（延遲、錯誤、流量、飽和度）時加權。
 - `alert.p0_boost`：事故牽涉到列為 P0 的實體時加分。
-- `alert.fatal_floor`：事故裡有致命界線事件時，分數至少拉到 P0 門檻並打上 `fatal:<節點>` 標籤。
 
 第 6 層　吸收與抑制
 - `alert.absorb_open`：新異常併入還在進行中的事故，一場事故從頭到尾只有一個編號。
@@ -158,7 +162,7 @@ RCA 管線
 
 | 階段 | 舊做什麼 | 新做什麼 |
 | :-- | :-- | :-- |
-| 偵測（detector.*） | it_otel：hourly_baseline＋mad＋quantile_drift 布林多數決（tag 1.1） | it_otel 改成 R+SNR（見 1.1 與 `docs/RESIDUAL_SNR_ENSEMBLE.md`）；factory 仍是三票布林多數決，it_apm／metrics_only 仍是 zscore |
+| 偵測（detector.*） | it_otel：hourly_baseline＋mad＋quantile_drift 布林多數決（tag 1.1） | R+SNR（見 1.1 與 `docs/RESIDUAL_SNR_ENSEMBLE.md`）。mad、quantile_drift、zscore 與布林多數決 `detector.ensemble` 已於 2026-11-20 移除：樣本管線 `sample_factory` 改成殘差組三票＋`soft_vote`（沒有在機台感測值上驗證過），`sample_it_apm`／`sample_metrics_only` 改成 `hourly_baseline` |
 | 誤報回饋 | 分位數反推單一偵測器的 threshold | R+SNR 節點改調 `threshold_scale`（只能 >= 1）：整段偵測重跑（軟投票＋旁路）回測、黃金事故防護罩、人核准 |
 | 收斂／計分／抑制／通知 | 事件群、靜音、冷卻、Alertmanager | 不動；仍**嚴禁依賴 LLM** |
 | 證據撈取 | `ingestion.incident_traces/logs`、拓撲沉澱（`incident_series` 保留但目前沒掛在管線上） | 不動 |
@@ -205,6 +209,9 @@ ctx.rca_facts / rca_evidence / rca_status("ok"|"undetermined") / rca_undetermine
 ---
 
 ## 二、過往測試結果
+
+> **歷史紀錄（2026-11-20 註）**：這一部分的數字是在 `detector.mad`、`quantile_drift`、`zscore`、`rules`、`hard_limit`、`detector.ensemble` 還在時量的。
+> 這些算子已在 2026-11-20 移除；數字與敘述原樣保留，當作現行組合（R+SNR）怎麼選出來的紀錄。移除之後沒有重跑混沌。
 
 ### 2.1 全套測試
 
@@ -278,15 +285,12 @@ aiops/
 │  ├─ detectors/                     # 異常偵測
 │  │  ├─ base.py                     # DetectorOperator：載基準線、調參、warning、訓練排除；演算法只寫 fit／detect
 │  │  │                              #   ＋時序白化、自適應尺度、序列 SNR／p_fa 門檻（節點參數 snr）、門檻倍率 threshold_scale
-│  │  ├─ hourly_baseline.py／residual_shift.py／residual_chronic.py   # it_otel 的三票（R+SNR）
-│  │  ├─ mad.py／zscore.py／quantile_drift.py                          # factory／it_apm／metrics_only 用
-│  │  ├─ rules.py                    # 規則偵測，不需訓練
-│  │  ├─ hard_limit.py               # 致命軌：單點踩線成立、不投票、界線只認 YAML
+│  │  ├─ hourly_baseline.py／residual_shift.py／residual_chronic.py   # 三票（R+SNR）
+│  │  ├─ sparse_count.py             # 稀疏計數票：只用在平台看門狗，不投票
 │  │  └─ new_only.py                 # 只報新出現的實體
-│  ├─ ensemble/ensemble.py           # detector.ensemble 布林多數決；bypass 的節點事件原樣留下
-│  ├─ ensemble/soft_vote.py          # detector.soft_vote 軟投票（it_otel）；投票節點必須開 snr、bypass 同 ensemble
+│  ├─ ensemble/soft_vote.py          # detector.soft_vote 軟投票；投票節點必須開 snr，bypass 的節點事件原樣留下
 │  ├─ grouping/                      # group.py 收斂；absorb.py 吸收進行中事件群
-│  ├─ scoring/score.py               # 計分、alert.fatal_floor
+│  ├─ scoring/score.py               # 計分：alert.golden_signals、alert.p0_boost
 │  ├─ suppression/suppress.py        # 靜音窗、冷卻、同根因
 │  ├─ notification/                  # payload.py、heartbeat.py（補送 endsAt）、notifiers.py、transport.py、links.py
 │  ├─ rca/                           # 根因分析
@@ -305,7 +309,7 @@ aiops/
 │
 ├─ control_plane/                    # 手動動作 admin.*（唯一可 import storage 的算子層）
 │  ├─ learning/                      # golden.py 黃金事故、learning.py 回饋、profile.py ACF 體檢、replay.py 回放、
-│  │                                 # threshold.py 分位數門檻、tuning.py／tuning_rules.py 調參與規則升級、
+│  │                                 # threshold.py 分位數門檻、tuning.py 調參提案／回測／核准、tuning_rules.py 從回饋文字抽調參規則、
 │  │                                 # segment.py 整段偵測重跑、snr_feedback.py R+SNR 的誤報提案／回測／防護罩
 │  └─ operations/                    # incidents.py、ingest.py、mappings.py 欄位對照、silences.py、sources.py、topology.py
 │
@@ -316,7 +320,7 @@ aiops/
 ├─ pipelines/                        # 流程只在 YAML 宣告，名稱全域唯一
 │  ├─ detection/                     # factory／it_apm／it_otel／metrics_only
 │  ├─ rca/                           # rca_report.yaml（備援）；【新】rca_report_llm.yaml（主力）
-│  └─ control/                       # admin_*.yaml（核准、回測、靜音、拓撲沉澱…共 20 支）
+│  └─ control/                       # admin_*.yaml（核准、回測、靜音、拓撲沉澱…共 22 支）
 │
 └─ interfaces/                       # 入口（零業務邏輯，嚴禁 if／for／try）
    ├─ app.py／runner.py              # 建立 app；runner 是組裝點、workflow 只接名稱
@@ -332,7 +336,7 @@ scripts/chaos/                       # 混沌驗收（只讀平台、不改平�
 └─ scripted_llm.py                   # 假 LLM：faithful／down／slow／garbage／hallucinate＋判斷節點 judge_faithful／judge_hallucinate
 
 scripts/backtest/                    # 偵測回測（ES 唯讀或離線合成）
-├─ residual_ensemble.py／variants.py／es_series.py   # R+SNR 與對照組（R、A、A+SNR）回放
+├─ residual_ensemble.py／variants.py／es_series.py   # R+SNR 回放（對照組 R、A、A+SNR 已隨算子移除）
 └─ feedback_e2e.py                   # 誤報回饋閉環端到端（--synthetic 離線；留出驗證）
 
 tests/                               # 驗證
@@ -340,7 +344,7 @@ tests/                               # 驗證
 ├─ test_load_time_validation.py      # 寫錯 YAML 在載入期報錯
 ├─ test_rca_facts.py／test_rca_extract_evidence.py／test_rca_llm_judge.py   # 【新】事實、證據抽取、LLM 判斷
 ├─ test_residual_ensemble.py／test_snr_soft_vote.py／test_feedback_snr.py   # 偵測 R+SNR 與誤報回饋閉環
-└─ test_chaos_*.py／test_dual_track.py／test_stability_guards.py…       # 既有行為測試
+└─ test_chaos_*.py／test_vote_bypass_and_tags.py／test_stability_guards.py…       # 既有行為測試
 ```
 
 ### 常用指令

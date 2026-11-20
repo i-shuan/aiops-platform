@@ -1,4 +1,4 @@
-"""算子註冊中心：@OperatorRegistry.register("detector.mad")。名稱由 Workflow YAML 引用。"""
+"""算子註冊中心：@OperatorRegistry.register("detector.residual_shift")。名稱由 Workflow YAML 引用。"""
 from __future__ import annotations
 
 from typing import Any, ClassVar

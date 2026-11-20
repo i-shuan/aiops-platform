@@ -40,7 +40,7 @@ def _detector_cls(name: str) -> type[DetectorOperator]:
 
 
 def _require_tunable(name: str) -> None:
-    """不收調參的偵測器（致命硬上限）：界線只認 workflow YAML，任何來源的提案（人工、自動、LLM、規則升級器）都拒絕。"""
+    """不收調參的偵測器（accepts_tuning = False）：參數只認 workflow YAML，任何來源的提案（人工、自動、LLM）都拒絕。"""
     if not _detector_cls(name).accepts_tuning:
         raise BadRequest(f"{name} 不接受調參提案：它的界線只能寫在 workflow YAML（節點 params 或 target overrides）")
 
@@ -294,7 +294,7 @@ class FeedbackProposeOp(BaseOperator):
         等於用一個服務的分佈去調其他所有服務；管線／全域層級維持固定規則。
       * 單次變動上限 50%（tuning_rules 的規則）：目標超過就這次先調到 +50%，reason 寫明目標值與還差多少。
         不切成多個提案：同一層的提案共用同一個基準版本，第一個核准後其他的一定變 stale，多步提案核准不了。
-      * S_max 不高於現行門檻（誤報不是這個偵測器的分數造成的，例如是多數決裡別的節點）、資料撈不到：
+      * S_max 不高於現行門檻（誤報不是這個偵測器的分數造成的，例如是投票裡別的節點）、資料撈不到：
         退回固定規則，原因寫在 reason 與結果的 quantile 欄位。
     - 其他情況（漏報、管線／全域層級）：固定規則，誤報 ×1.2、漏報 ×0.8。"""
 

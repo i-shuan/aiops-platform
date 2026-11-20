@@ -1,12 +1,11 @@
 """路線 B：RCA 根因演算法可抽換（拓撲、證據融合）、段落註冊、漏報補錄、歷史事故經驗庫、
-調參成效報表、規則升級器。"""
+調參成效報表。"""
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
-import pandas as pd
 import pytest
 
-from aiops.engine.context import KnowledgeCase, PipelineContext, Target
+from aiops.engine.context import KnowledgeCase, PipelineContext
 from aiops.engine.errors import WorkflowError
 from aiops.engine.pipeline import NodeSpec, Pipeline, Workflow, load_workflow
 from aiops.engine.registry import OperatorRegistry
@@ -20,7 +19,7 @@ T = datetime(2026, 11, 8, 11, 0, tzinfo=timezone.utc)
 
 
 def _ev(entity, minute, score, metric="latency", source_type=""):
-    return AnomalyEvent(entity, metric, T + timedelta(minutes=minute), score, {}, 1.0, "detector.zscore", "detect",
+    return AnomalyEvent(entity, metric, T + timedelta(minutes=minute), score, {}, 1.0, "detector.hourly_baseline", "detect",
                         source_type)
 
 
@@ -174,7 +173,7 @@ def test_a_section_can_also_be_its_own_yaml_node(now, tmp_path):
 
 def _missed(client, **over):
     body = {"verdict": "missed", "text": "凌晨 DB 卡住但沒告警", "author": "amy", "pipeline": "sample_metrics_only",
-            "entity": "metric_a", "detector": "detector.zscore",
+            "entity": "metric_a", "detector": "detector.hourly_baseline",
             "time_range": {"start": "2026-11-08T05:58:00Z", "end": "2026-11-08T06:02:00Z"}, **over}
     return client.post("/api/v1/tuning/feedback", json=body)
 
@@ -242,10 +241,10 @@ def test_similarity_weights_entities_metrics_and_signals():
     assert body.index("same-both") < body.index("same-entity") and "unrelated" not in body
 
 
-# ── B.5 調參成效報表、規則升級器 ──
+# ── B.5 調參成效報表 ──
 
 
-def _approve(client, params, pipeline="sample_metrics_only", entity="metric_a", detector="detector.zscore"):
+def _approve(client, params, pipeline="sample_metrics_only", entity="metric_a", detector="detector.hourly_baseline"):
     pid = client.post("/api/v1/tuning/proposals", json={"source": "manual", "detector": detector, "params": params,
                                                          "proposer": "amy", "pipeline": pipeline,
                                                          "entity": entity}).json()["result"]["proposal"]["id"]
@@ -260,7 +259,7 @@ def _approve(client, params, pipeline="sample_metrics_only", entity="metric_a", 
 def test_tuning_metrics_compares_before_and_after_each_approval(client, now):
     ctx = run_context("sample_metrics_only", now=now, strict=False)
     client.post("/api/v1/tuning/feedback", json={"incident_uid": ctx.incidents[0].uid, "verdict": "false_positive",
-                                                 "detector": "detector.zscore", "text": "誤報", "author": "amy"})
+                                                 "detector": "detector.hourly_baseline", "text": "誤報", "author": "amy"})
     pid = _approve(client, {"threshold": 3.5})
     report = client.get("/api/v1/tuning/metrics?window_days=7").json()["result"]
     change = next(c for c in report["changes"] if c["proposal_id"] == pid)
@@ -269,37 +268,3 @@ def test_tuning_metrics_compares_before_and_after_each_approval(client, now):
     other_scope = _approve(client, {"threshold": 3.2}, pipeline="sample_it_otel", entity="cart")
     change = next(c for c in client.get("/api/v1/tuning/metrics").json()["result"]["changes"] if c["proposal_id"] == other_scope)
     assert change["before"]["incidents"] == 0  # 別條管線的事件群不算在這個調參頭上
-
-
-def test_rule_promoter_turns_repeated_tuning_into_a_rule_proposal(client, now):
-    run_context("sample_metrics_only", now=now, strict=False)  # 先有基準線
-    for threshold in (3.2, 3.4, 3.6):
-        _approve(client, {"threshold": threshold})
-    out = client.post("/api/v1/tuning/rules/promote", json={"min_approvals": 3}).json()["result"]
-    assert len(out["created"]) == 1
-    rule = out["created"][0]["proposal"]
-    assert rule["detector_name"] == "detector.rules" and (rule["pipeline"], rule["entity"]) == ("sample_metrics_only", "metric_a")
-    assert rule["params"]["lower"] < rule["params"]["upper"] and rule["status"] == "pending"
-    again = client.post("/api/v1/tuning/rules/promote", json={"min_approvals": 3}).json()["result"]
-    assert not again["created"] and "待處理" in again["skipped"][0]["reason"]
-    assert not client.post("/api/v1/tuning/rules/promote", json={"min_approvals": 4}).json()["result"]["created"]
-
-
-def test_rule_promoter_explains_why_it_skips(client, now):
-    for threshold in (3.2, 3.4):
-        _approve(client, {"threshold": threshold}, pipeline="*", entity="*")
-    skipped = client.post("/api/v1/tuning/rules/promote", json={"min_approvals": 2}).json()["result"]["skipped"]
-    assert "管線 × 實體" in skipped[0]["reason"]
-
-
-def test_rules_detector_without_a_rule_stays_silent_when_rules_are_optional(now):
-    df = pd.DataFrame({"ts": pd.date_range(T, periods=10, freq="60s"), "value": [50.0] * 9 + [95.0]})
-    ctx = PipelineContext(pipeline="p", now=now, target=Target("mock", "q", "e"))
-    ctx.raw_df = df
-    op = OperatorRegistry.create("detector.rules", {"require_rule": False})
-    op.node_name = "rules"
-    assert op.execute(ctx).anomalies == []
-    ctx.detector_params["rules"] = {"upper": 90}  # 規則升級器的提案核准後，就從這裡進來
-    assert len(op.execute(ctx).anomalies) == 1
-    with pytest.raises(Exception, match="至少要給"):
-        OperatorRegistry.get("detector.rules")().validate_params()

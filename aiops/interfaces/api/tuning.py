@@ -8,7 +8,6 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
     ReviewMetricsQuery,
-    RulePromote,
     SeriesProfile,
     TuningMetricsQuery,
 )
@@ -57,11 +56,6 @@ def tuning_metrics(req: TuningMetricsQuery = Depends()):
 def review_metrics(req: ReviewMetricsQuery = Depends()):
     """分項覆核統計（收斂、RCA、結案、嚴重度各看過幾張、錯在哪）。只是報表，不改任何設定。"""
     return {"result": run("admin_review_metrics", request=req)}
-
-
-@router.post("/rules/promote")
-def promote_rules(req: RulePromote):
-    return {"result": run("admin_rule_promote", request=req)}
 
 
 @router.post("/profile")

@@ -30,7 +30,7 @@ def _backtest_req(pid, now, train_ratio=0.3):
         "start": now.replace(hour=0), "end": now, "step_seconds": 60})
 
 
-def _propose(detector="detector.zscore", params=None, source="auto"):
+def _propose(detector="detector.hourly_baseline", params=None, source="auto"):
     return run("admin_proposal_create", request=ProposalCreate(
         source=source, detector=detector, params=params if params is not None else {"threshold": 2.5}, proposer="amy"))["proposal"]["id"]
 
@@ -104,7 +104,7 @@ def test_a_stale_proposal_cannot_overwrite_a_newer_config(now):
     _backtest(auto, now)
     with pytest.raises(Conflict, match="已作廢"):
         _approve(auto)
-    assert Proposals.get(auto)["status"] == "stale" and ActiveConfigs.get("detector.zscore")["params"] == {"threshold": 4.0}
+    assert Proposals.get(auto)["status"] == "stale" and ActiveConfigs.get("detector.hourly_baseline")["params"] == {"threshold": 4.0}
 
 
 def test_approved_params_are_used_by_the_next_detection_run(now):
@@ -141,7 +141,7 @@ def uid(now):
     return run_context("sample_metrics_only", now=now, strict=False).incidents[0].uid
 
 
-def _feedback(uid, verdict="false_positive", detector="detector.zscore"):
+def _feedback(uid, verdict="false_positive", detector="detector.hourly_baseline"):
     return run("admin_feedback_submit", request=FeedbackSubmit(
         incident_uid=uid, verdict=verdict, detector=detector, text="半夜誤報，門檻太敏感", author="amy"))["feedback"]["id"]
 
@@ -164,11 +164,19 @@ def test_template_rule_raises_threshold_on_false_positive_and_only_once(uid):
         _propose_from(fid)
 
 
-def test_true_positive_and_untunable_detectors_do_not_propose(uid):
+def test_true_positive_and_untunable_detectors_do_not_propose(uid, monkeypatch):
     with pytest.raises(Conflict, match="真異常"):
         _propose_from(_feedback(uid, verdict="true_positive"))
+
+    # 出貨的偵測器現在都有可調參數（原本用的 detector.rules 已移除）：用測試專用的空 tunable 偵測器走這條路
+    class Untunable(peer_probe.PeerProbe):
+        tunable = {}
+
+    from aiops.engine.registry import OperatorRegistry
+
+    monkeypatch.setitem(OperatorRegistry._items, "test.untunable_probe", Untunable)
     with pytest.raises(BadRequest, match="沒有可自動調整"):
-        _propose_from(_feedback(uid, detector="detector.rules"))
+        _propose_from(_feedback(uid, detector="test.untunable_probe"))
 
 
 class _Fake(BaseLLM):

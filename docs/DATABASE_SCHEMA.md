@@ -272,13 +272,13 @@
   "events": [
     {"entity": "ingress-gw", "metric": "<指標查詢字串>", "ts": "2026-11-09T12:00:00+00:00",
      "score": 133.75, "value": 8962000.0, "attrs": {"dept": "payments", "signal": "latency"},
-     "detector": "detector.ensemble", "detector_node": "vote", "source_type": "elasticsearch",
-     "voted_by": ["detect", "detect_mad"], "level": "anomaly"}
+     "detector": "detector.soft_vote", "detector_node": "vote", "source_type": "elasticsearch",
+     "voted_by": ["detect", "detect_rshift"], "level": "anomaly"}
   ]
 }
 ```
-- `tags`：收斂方式與標記，例：`same_entity`、`topology_chain`、`absorbed`（被進行中事件群吸收）、`fatal:<節點>`（致命硬上限）、`escalated:P2>P0`（升級紀錄）。
-- `events[].detector` 與 `detector_node`：多數決成立時是 `detector.ensemble` 與投票節點名稱；`voted_by` 列出投票的節點。
+- `tags`：收斂方式與標記，例：`same_entity`、`topology_chain`、`absorbed`（被進行中事件群吸收）、`escalated:P2>P0`（升級紀錄）。2026-11-20 之前的舊資料列可能還有 `fatal:<節點>`（致命硬上限；`detector.hard_limit`／`alert.fatal_floor` 已移除，平台內已經沒有算子會打這個標籤）。
+- `events[].detector` 與 `detector_node`：軟投票成立時是 `detector.soft_vote` 與裁決節點名稱；`voted_by` 列出有實質貢獻（權重達半個門檻以上）的節點。2026-11-20 之前的舊資料列可能是 `detector.ensemble`（布林多數決）或其他已移除的算子名。
 - `events[].level`：`anomaly` 或 `warning`。
 
 ### 17.2 `incidents.context`
@@ -292,12 +292,10 @@
 
 | 算子 | state 的鍵 |
 |---|---|
-| `detector.zscore` | `mean`、`std`、`integer` |
-| `detector.mad` | `median`、`mad`、`integer` |
-| `detector.quantile_drift` | `center`、`scale`、`quantile` |
 | `detector.hourly_baseline` | `buckets`（時段編號字串 → `[平均, 標準差, 點數, 週數]`，共 168 格）、`global`、`tz`、`buckets_ready`、`min_weeks`、`integer` |
 | `detector.residual_shift` | `profile`（見下）、`noise`（`noise`、`tail_q`、`fpr`、`points`）、`level`、`integer` |
 | `detector.residual_chronic` | `profile`、`noise`、`window`、`level` |
+| `detector.sparse_count` | `window`、`points`、`events`、`zero_fraction`、`dispersion`、`countable` |
 
 `profile`（時段基準，`stages/detectors/base.fit_seasonal_profile`）：`tz`、`min_slot_points`、`slots`（週幾×小時編號字串 → `[平均, 點數]`）、
 `hours`（一天中的小時 → `[平均, 點數]`）、`global`、`slots_ready`、`hours_ready`、`lowo_share`。
@@ -307,7 +305,7 @@
 `snr_lin`、`snr_db`（資料不足時是 null）、`p_fa`、`threshold`、`threshold_source`（`gaussian`／`empirical`）。
 沒開 snr 的節點沒有這個鍵；舊基準線沒有這個鍵時照節點原本的 `threshold` 判，下次重訓才補上。
 
-其他算子（`rules`、`hard_limit`）各有自己的鍵。`state` 內只能是 JSON；非 JSON 的模型本體放 `artifact`。
+`detector.zscore`、`mad`、`quantile_drift`、`rules`、`hard_limit` 已於 2026-11-20 移除，資料庫裡它們留下的舊基準線列沒有算子會再讀。`state` 內只能是 JSON；非 JSON 的模型本體放 `artifact`。
 
 ### 17.4 `tuning_proposals.params`、`active_detector_configs.params`
 參數名 → 值的物件，鍵只能是該偵測器 `tunable` 範圍內的參數，且在載入期檢查範圍。例：`{"threshold": 4.5, "min_scale": 5000}`。`include_entities`、`exclude_entities` 等路由參數會被拒絕。

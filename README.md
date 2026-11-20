@@ -67,7 +67,7 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 | `aiops/engine/` | 底座：`PipelineContext`（強型別）、Pipeline 引擎、算子註冊中心、`BaseOperator`、錯誤型別、請求模型 |
 | `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`：只吃各團隊推進來的外部告警、不跑偵測器，見 `docs/EXTERNAL_ALERTS.md`）、`watchdog/`（`platform_watchdog`：偵測演算法只用來監控平台自己，見 `docs/WATCHDOG.md`）、`rca/`（`rca_report` 等）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
 | `aiops/stages/` | 管線算子，依執行順序分段：`ingestion` → `detectors` → `ensemble` → `grouping` → `scoring` → `suppression` → `rca` → `enrichment`（LLM，含 `noop`）→ `notification` |
-| `aiops/control_plane/` | 控制面手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） |
+| `aiops/control_plane/` | 控制面手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） |
 | `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch`；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
 | `aiops/storage/` | SQLAlchemy 資料表、repository、`hooks.py`（管線前後的載入／寫入） |
 | `aiops/interfaces/` | 對外介面：`api/`（薄薄一層 HTTP）、`app.py`（FastAPI 入口）、`cli/`（排程，`python -m aiops.interfaces.cli`）、`bootstrap/`（啟動初始化、token 驗證、故障看守）、`runner.py`（唯一組裝點） |
@@ -106,26 +106,24 @@ aiops/
 │   │   ├── factory.yaml             工廠：外部告警（含 FDC）→ Lot 履歷收斂，沒有黃金訊號與同根因抑制
 │   │   └── metrics_only.yaml        只有時序指標，沒有 trace 與拓撲
 │   ├── watchdog/                    平台看門狗：唯一准許掛偵測器的地方，只讀平台自己的紀錄（docs/WATCHDOG.md）
-│   │   └── platform_watchdog.yaml   排程停擺（rules）、整輪失敗暴增（sparse_count）、團隊心跳告警斷掉（rules）
+│   │   └── platform_watchdog.yaml   整輪失敗暴增（sparse_count）。排程停擺、團隊心跳斷掉兩條靜態規則已移除，改由 Grafana 告警規則負責（還沒做）
 │   ├── rca/                         RCA 診斷管線
 │   │   └── rca_report.yaml          針對一個事件群產生 RCA 報告（根因用拓撲）
 │   └── control/                     控制面手動動作
-│       └── admin_*.yaml             18 個，每個手動動作一個，API 呼叫時載入
+│       └── admin_*.yaml             22 個，每個手動動作一個，API 呼叫時載入
 ├── stages/                          管線算子，依執行順序分段（套件名稱不能以數字開頭，順序寫在 stages/__init__.py）
 │   ├── _common.py                   共用小工具（還沒有事件群時每筆異常先自成一群）
 │   ├── ingestion/                   1. 抓資料
 │   │   └── fetch.py                 唯一碰資料源的算子：ingestion.fetch、ingestion.incident_series
 │   ├── detectors/                   2. 偵測器（繼承 DetectorOperator，彼此不互相 import）
 │   │   ├── base.py                  共同骨架：參數合併、基準線載入／保存、異常血緣、模型檔（npz）打包
-│   │   ├── zscore.py                detector.zscore：偏離訓練期平均幾個標準差
-│   │   ├── mad.py                   detector.mad：中位數與 MAD，比 zscore 耐尖峰
 │   │   ├── hourly_baseline.py       detector.hourly_baseline：一週 168 時段各自一條基準線，可設時區
-│   │   ├── quantile_drift.py        detector.quantile_drift：滾動 p95 漂移，抓尾端變慢
-│   │   ├── rules.py                 detector.rules：人訂上下限加連續 N 點，不學習
-│   │   ├── hard_limit.py            detector.hard_limit：致命硬上限（雙軌制軌道一），單點踩線不投票、直通 P0
+│   │   ├── residual_shift.py        detector.residual_shift：殘差（原值 − 時段基準）的相鄰差，抓瞬間斷崖
+│   │   ├── residual_chronic.py      detector.residual_chronic：殘差的滾動平均，抓慢滑與持續偏離
+│   │   ├── sparse_count.py          detector.sparse_count：稀疏計數（平常幾乎都是 0）突然變多，只用在平台看門狗
 │   │   └── new_only.py              detector.new_only：只留比最後一筆已存異常更新的，重跑不重複告警
 │   ├── ensemble/                    3. 多偵測器裁決
-│   │   └── ensemble.py              detector.ensemble：多個偵測節點投票（聯集／交集／多數決／至少 N 票）
+│   │   └── soft_vote.py             detector.soft_vote：軟投票，每票 = 分數 ÷ 門檻，加總達到 votes（預設 2）才成立
 │   ├── grouping/                    4. 事件收斂
 │   │   └── group.py                 same_entity／topology_chain／lot_path_chain
 │   ├── scoring/                     5. 計分
@@ -162,7 +160,7 @@ aiops/
 │   │   ├── threshold.py             誤報的分位數反推門檻：max(S_max × 1.05, 30 天 99.9% 分位數)
 │   │   ├── profile.py               序列體檢：24h／168h 自相關，沒週期就建議排除 hourly_baseline（advisory）
 │   │   ├── replay.py                上面三個共用的現抓現算：任意序列抓一段、時窗前訓練、同一套排除窗
-│   │   └── learning.py              調參成效報表、頻繁調參轉靜態規則提案
+│   │   └── learning.py              調參成效報表
 │   └── operations/                  日常維運
 │       ├── incidents.py             事件群查詢與手動結案
 │       ├── silences.py              建立靜音／維護窗口
@@ -194,7 +192,7 @@ aiops/
     │   ├── runs.py                  POST /api/v1/runs、POST /api/v1/rca、GET /api/v1/operators
     │   ├── alerts.py                靜音（建立、列出）、事件群查詢與結案
     │   ├── ingestion.py             欄位對照、trace／Lot 合成、外部異常接收、資料源自我檢查
-    │   └── tuning.py                提案、回測、核准、回饋、成效報表（/metrics）、規則升級（/rules/promote）、序列體檢（/profile）
+    │   └── tuning.py                提案、回測、核准、回饋、成效報表（/metrics）、序列體檢（/profile）
     ├── cli/                         排程入口
     │   └── __main__.py              CLI：run-once、loop、source-check（只呼叫 Pipeline，不做運算）
     └── bootstrap/                   啟動組裝
@@ -273,34 +271,38 @@ curl -X POST "http://127.0.0.1:8000/api/v1/ingestion/grafana-alerts?pipeline=it_
 - **並發**：偵測器基準線與現行參數用 `version` 做樂觀鎖。兩個 worker 同時訓練同一條序列時，先寫的保留，後寫的不覆蓋。
 
 - **只能用名稱跑 workflow**：API（`/runs`、`/rca`）的 `workflow` 只接受 `[A-Za-z0-9_-]+` 的內建名稱，路徑、`..`、軟連結一律拒絕。只有排程 CLI（`-w ./my.yaml`）可以指定自己的檔案。
-- **偵測節點各自獨立**：基準線與異常都綁 Workflow 節點名稱。同一個演算法可以在同一條管線掛兩次（例如 zscore 短窗、長窗），各自有自己的基準線；`anomalies.detector_name` 是算子名（`detector.zscore`），`detector_node` 是節點名。
+- **偵測節點各自獨立**：基準線與異常都綁 Workflow 節點名稱。同一個演算法可以在同一條管線掛兩次（例如 `residual_chronic` 一個投票、一個當旁路單獨成立），各自有自己的基準線；`anomalies.detector_name` 是算子名（`detector.hourly_baseline`），`detector_node` 是節點名。
 - **參數合併**：演算法預設值 ← 後台核准的調參 ← YAML 的 `params`，逐個鍵合併。**YAML 寫了的鍵是鎖定的**，不會被後台調參蓋掉；沒寫的鍵才吃調參。想讓某個參數交給後台調，就不要寫在 YAML。
 - **調參分層**：核准的參數有 (偵測器, 管線, 實體) 三個維度，`*` 代表不限定。套用時取最具體的一層：管線×實體 > 管線 > 實體 > 全域。回饋轉提案可用 `scope: entity | pipeline | global` 選層級（預設 `pipeline`）。不同層的提案互不使對方過期。
 - **回測跟偵測同一組參數**：提案有指定管線時，回測會讀那條管線的 YAML，疊上該偵測器節點的 `params`（鎖定鍵）與該實體 target 的 `overrides`；被 YAML 鎖住的鍵提案改了也不會生效，結果的 `workflow.locked` 會列出來、`current_anomalies` 與 `proposed_anomalies` 會一樣。
-- **回測切段**：回測資料前 `train_ratio`（預設 0.7）拿來訓練、後面拿來測試，只計算測試段的異常，避免用同一段資料訓練又評分。滾動窗的偵測器（如 `quantile_drift`）會往前多帶 `warmup_points()` 個點讓窗口湊滿，這些點不計分。
+- **回測切段**：回測資料前 `train_ratio`（預設 0.7）拿來訓練、後面拿來測試，只計算測試段的異常，避免用同一段資料訓練又評分。滾動窗的偵測器（如 `residual_chronic`）會往前多帶 `warmup_points()` 個點讓窗口湊滿，這些點不計分。
 - **LLM 供應商**：放一個檔案到 `aiops/stages/enrichment/`，用 `@register("名稱")` 登記即可，啟動時自動掃描載入，不用改其他地方。
 
 ### 偵測演算法一覽
 
 > **適用範圍（2026-11-15 起）**：這些偵測演算法只用來監控 AIOps 平台自己（看門狗），不掛在使用者的管線上；使用者的告警由他們自己的 Grafana 推進來（`docs/EXTERNAL_ALERTS.md`）。下面提到的 `it_otel`、`factory` 預設設定，現在是 `scripts/pipelines/sample_it_otel.yaml`、`sample_factory.yaml`（給測試與回測用），下面各節的回放數字也是那時候量的。
+>
+> **2026-11-20 移除**：`detector.zscore`、`detector.mad`、`detector.quantile_drift`、`detector.hard_limit`、`detector.rules`、`detector.ensemble`（布林多數決）、`alert.fatal_floor`（連同「雙軌制／致命軌」設計）、`admin.rule_promote`（規則升級器）。人訂的靜態門檻（上下限、致命界線、「排程停了」、「團隊心跳停了」）不在平台裡做，一律是 Grafana 告警規則、經 webhook 推進來。下面各節標了「歷史紀錄」的回放數字是這些算子還在時量的，原樣保留，當作現行組合怎麼選出來的紀錄。
 
 | 算子 | 比什麼 | 什麼時候用 | 要注意 |
 |---|---|---|---|
-| `detector.zscore`、`mad` | 整段訓練期一組平均（中位數） | 沒有週期的指標 | 有日週期的指標會在高峰／低谷誤報或漏報 |
-| `detector.hourly_baseline` | 一週 168 個時段各自一組平均與標準差 | 流量、交易量這類有日週期／週末效應的指標（`it_otel`、`factory` 預設，與 `mad`、`quantile_drift` 一起多數決） | **冷啟動：流量類指標建議累積 3~4 週再信任它**。每個「週幾幾點」要看過至少 `min_weeks`（預設 2）週才會啟用，不夠的時段**自動退回全段統計（等同 `zscore`）**，所以 7 天訓練時整條等於 `zscore`，不會更吵但也還沒有週期效果。啟用：`train_lookback_minutes: 20160` 以上並把 `step_seconds` 調大（Prometheus 單次查詢約 11000 點上限）。時區用 `tz` 設，台灣設 `Asia/Taipei` |
-| `detector.quantile_drift` | 滾動 p95（可調）跟平常比 | 延遲：平均沒變、最慢那批越來越慢 | 單一尖峰不會觸發（刻意的） |
-| `detector.rules` | 人訂的上下限、連續 N 點 | 有明確規格的指標 | `require_rule: false` 時只用核准的規則提案，沒有規則的序列不判 |
-| `detector.hard_limit` | 致命硬上限：絕對上下限（`fatal_ceiling`／`fatal_lower`）、一步的變化量（`max_rise`／`max_drop`）、偏離前 N 點中位數的倍數（`max_deviation_ratio`） | 微電弧、瞬斷這類「踩到就是出事」的單點事件。不投票、不被多數決否決，直接 P0（`it_otel`、`factory` 預設有這個節點，**沒在 target `overrides.fatal` 訂界線的序列不受影響**） | 界線只能由人寫在 YAML，後台調參改不到；兩次取樣之間發生又結束的尖峰看不到；界線附近抖動每次越線都算一筆（同一張卡）；`plausible_max`／`plausible_min` 以外的值當成壞資料不判、記進 `errors`（統計軌照樣會看到那個值） |
-| `detector.ensemble` | 前面幾個偵測節點的投票 | 想用交集／多數決壓誤報 | 接在偵測節點後面、`new_only` 前面；分母只算這條序列真的評估過資料的節點（見下方） |
+| `detector.hourly_baseline` | 一週 168 個時段各自一組平均與標準差 | 流量、交易量這類有日週期／週末效應的指標（`sample_metrics_only`、`sample_it_apm` 單獨用它；`sample_it_otel`、`sample_factory` 拿它當週期票） | **冷啟動：流量類指標建議累積 3~4 週再信任它**。每個「週幾幾點」要看過至少 `min_weeks`（預設 2）週才會啟用，不夠的時段**自動退回全段統計（整段訓練期一組平均與標準差）**，所以 7 天訓練時整條都是全段統計，還沒有週期效果。啟用：`train_lookback_minutes: 20160` 以上並把 `step_seconds` 調大（Prometheus 單次查詢約 11000 點上限）。時區用 `tz` 設，台灣設 `Asia/Taipei` |
+| `detector.residual_shift` | 殘差（原值 − 該「週幾×小時」的訓練平均）的相鄰差 | 突變票：這個時段不該有的瞬間斷崖；每天固定的流量切換在殘差裡不會跳 | 跳上去之後當成新水位，不再報（持續偏離交給 `residual_chronic`） |
+| `detector.residual_chronic` | 殘差的滾動平均（`window`，預設 30 點）是不是持續偏離 0 | 漂移票：慢滑、持續偏低。同一條管線可以掛兩次：一次投票，一次設 `min_run`（連續越線幾點才成立）列進 `soft_vote` 的 `bypass` 單獨成立 | 要湊滿 `window` 個點，窗比資料長就棄權；`min_run` 只認 YAML，後台調參改不到 |
+| `detector.soft_vote` | 前面幾個偵測節點的逐點證據：每票 = 分數 ÷ 門檻，加總達到 `votes`（預設 2）就成立 | 把多張票合成一個判定（兩票各剛好在門檻上成立；一票超過門檻 2 倍單獨成立） | 接在偵測節點後面、`new_only` 前面；參與的節點都必須開 `snr`（節點參數 `snr: {p_fa: ...}`），不投票的節點要列進 `bypass`，都在載入期檢查；沒有 warning 級 |
+| `detector.sparse_count` | 最近 `window` 個點一共幾筆，跟訓練期的發生率比（Gamma-Poisson） | 平常幾乎都是 0 的計數序列；只用在平台看門狗的 `failures` 節點 | 不投票；只判變多、不判掉到 0；參數沒有調過，只在合成資料上測過（`docs/SPARSE_COUNT.md`） |
+| `detector.new_only` | （不是演算法）資料庫裡最後一筆已存的異常 | 放在偵測／裁決節點後面，重跑同一段時間不重複告警 | — |
 
-**分母底噪（`min_scale`／`min_scale_ratio`）**：`mad`、`zscore`、`hourly_baseline`、`quantile_drift` 的分母（MAD、標準差）都過 `stages/detectors/base.scale_floor`：取 max(算出來的值、`min_scale`、|中心| × `min_scale_ratio`、整數序列的 1 個單位)。以前 `mad` 在 MAD = 0 時除以 1e-6——失敗數序列 90% 是 0，平常 2 筆失敗就是 1,349,000 分（混沌場景 5 的誤報）；`zscore` 在 std = 0 時分數全 0，永遠不報。兩個都是 tunable（後台調參、節點 YAML、target `overrides` 都能改）：
+樣本管線的組合：`sample_it_otel`、`sample_factory` 是 `hourly_baseline`＋`residual_shift`＋`residual_chronic` 三票加 `soft_vote`（R+SNR，`docs/RESIDUAL_SNR_ENSEMBLE.md`）；這個組合只在每分鐘請求數上回測過，**沒有在機台感測值上驗證過**。`sample_metrics_only`、`sample_it_apm` 只有 `hourly_baseline`。
+
+**分母底噪（`min_scale`／`min_scale_ratio`）**：`hourly_baseline`、`residual_shift`、`residual_chronic` 的分母都過 `stages/detectors/base.scale_floor`：取 max(算出來的值、`min_scale`、|中心| × `min_scale_ratio`、整數序列的 1 個單位；`residual_chronic` 不套整數那一條)。當初加這個是因為（已移除的）`mad` 在 MAD = 0 時除以 1e-6——失敗數序列 90% 是 0，平常 2 筆失敗就是 1,349,000 分（混沌場景 5 的誤報）；（已移除的）`zscore` 在 std = 0 時分數全 0，永遠不報。兩個都是 tunable（後台調參、節點 YAML、target `overrides` 都能改）：
 
 | 參數 | 預設 | 範圍 | 意思 |
 |---|---|---|---|
-| `min_scale` | 0 | 0～1e12 | 絕對下限，**單位跟指標一樣**：每分鐘失敗數填 0.5、延遲 µs 填 5000；0 = 不用。平台不知道指標單位，所以寫在 target 的 `overrides`（`it_otel.yaml` 範例 target 有示範） |
+| `min_scale` | 0 | 0～1e12 | 絕對下限，**單位跟指標一樣**：每分鐘失敗數填 0.5、延遲 µs 填 5000；0 = 不用。平台不知道指標單位，所以寫在 target 的 `overrides`（`scripts/pipelines/sample_it_otel.yaml` 的 target 有示範） |
 | `min_scale_ratio` | 0.01 | 0～1 | 相對下限：中心值的 1%（延遲 1,000,000 µs 的序列分母至少 10,000）；沒填 `min_scale` 時的通用保底 |
 
-底噪只在 scale 趨近 0 時起作用：真實 11/3 五條延遲序列用預設參數重跑，373 個異常點連分數都一模一樣。`mad`／`zscore`／`hourly_baseline` 的基準線存原始的 MAD／標準差，底噪在偵測時才套，改 `min_scale` 不用等重訓；`quantile_drift`／`compare` 保留原本的退路（MAD → 標準差），最後一層才走底噪。多數決（`detector.ensemble`）不動。
+底噪只在 scale 趨近 0 時起作用：真實 11/3 五條延遲序列用預設參數重跑，373 個異常點連分數都一模一樣（歷史紀錄：當時跑的是 `mad`／`zscore`／`hourly_baseline`，前兩個已於 2026-11-20 移除）。`hourly_baseline` 的基準線存原始的標準差，底噪在偵測時才套，改 `min_scale` 不用等重訓。
 
 #### 每個服務跑哪些偵測器（target 白名單、overrides、止血）
 
@@ -313,16 +315,20 @@ nodes:
     operator: detector.hourly_baseline
     params:
       tz: Asia/Taipei
-      min_weeks: 1
+      snr: {p_fa: 0.001, tz: Asia/Taipei}   # 進軟投票的節點都要開 snr
       exclude_entities: [inv-svc]          # 緊急止血：這個節點對 inv-svc 先關掉（優先於一切）
-  - name: detect_mad
-    operator: detector.mad
-  - name: detect_qdrift
-    operator: detector.quantile_drift
-    params: {include_entities: [cart-api, ord-svc]}   # 灰度：只對這兩個服務開
+  - name: detect_rshift
+    operator: detector.residual_shift
+    params: {tz: Asia/Taipei, snr: {p_fa: 0.001, tz: Asia/Taipei}}
+  - name: detect_rchronic
+    operator: detector.residual_chronic
+    params:
+      tz: Asia/Taipei
+      snr: {p_fa: 0.001, tz: Asia/Taipei}
+      include_entities: [cart-api, ord-svc]   # 灰度：只對這兩個服務開
   - name: vote
-    operator: detector.ensemble
-    params: {strategy: majority, tie_breaker: strict}
+    operator: detector.soft_vote
+    params: {votes: 2}
   - {name: new_only, operator: detector.new_only}
 
 targets:
@@ -330,19 +336,21 @@ targets:
   - source_type: prometheus
     query: '...'
     entity: pay-api
-    detectors: [detect_mad, detector.quantile_drift]   # 節點名稱，或算子名稱（= 這個算子的所有節點）
+    detectors: [detect, detector.residual_shift]       # 節點名稱，或算子名稱（= 這個算子的所有節點）
   - source_type: prometheus
     query: '...'
     entity: ord-svc
     overrides:                                         # 這個服務自己的參數，key 是節點名稱
-      detect_mad: {threshold: 5.0}
+      detect_rshift: {min_scale: 0.5}
 ```
 
-- **`detectors`**：同一個算子掛兩個節點（例如 `z_short`、`z_long`）時寫節點名稱只跑那一個；寫算子名稱（`detector.zscore`）兩個都跑。不寫就是全部都跑。
+- **`detectors`**：同一個算子掛兩個節點（例如 `residual_chronic` 的投票節點與旁路節點）時寫節點名稱只跑那一個；寫算子名稱（`detector.residual_chronic`）兩個都跑。不寫就是全部都跑。
 - **`overrides`**：參數優先序 `演算法預設值 ← 後台核准的調參 ← 節點 YAML params ← target overrides`（逐鍵合併，overrides 最優先），一樣要通過演算法的範圍檢查。不要把演算法參數直接攤在 target 根層級。
 - **`include_entities`／`exclude_entities`**：寫在任何偵測節點的 `params`，不會傳給演算法、後台調參也改不到（提案帶這兩個鍵會被拒絕）。
-- **投票分母**：`detector.ensemble` 只算「真的評估過這段資料」的節點。被上面三個機制跳過的、這一輪沒資料的，都算棄權、不進分母；有評估但沒抓到的算反對票。只剩 1 個參與者時它抓到就通過；參與者是偶數（最常見：白名單只留 2 個）時看 `tie_breaker`：`strict`（預設）平手不算，2 個要 2 票；`loose` 平手就算，2 個裡 1 票即通過。`at_least` 的 `min_votes` 比參與者多時降為「全部參與者都抓到」。`detector.hourly_baseline` 時段資料不足時是退回全段統計繼續判斷，**不是跳過**，所以仍然算參與者。
+- **誰算參與者**：`detector.soft_vote` 只加總「真的評估過這段資料」的節點（扣掉 `bypass`）。被上面三個機制跳過的、這一輪沒資料的，都不進加總。`votes` 不會因為參與者變少而降低：只剩 1 個參與者時，它自己要達到門檻的 `votes` 倍（預設 2 倍）才成立。`detector.hourly_baseline` 時段資料不足時是退回全段統計繼續判斷，**不是跳過**，所以仍然算參與者。
 - **載入期就報錯**（`WorkflowError`，API 回 400）：`detectors` 寫了對不到的節點／算子名稱（訊息會列出可用節點）、`overrides` 的 key 不是偵測節點或這個 target 沒選它、overrides 參數拼錯或超出範圍、`include/exclude_entities` 寫了 workflow targets 裡沒有的實體（止血名單打錯字＝以為停了其實沒停，所以直接擋；workflow 沒宣告 targets、全由 API 傳入時無從比對，不檢查）、target 欄位拼錯（例如 `detector:`）。API 呼叫帶進來的 `targets` 也走同一套檢查。
+
+> **歷史紀錄（2026-11-20 註）**：下面這張表與 `loose` 的說明是用 `mad`、`quantile_drift` 與布林多數決 `detector.ensemble`（有 `tie_breaker`）量的，這三個算子已於 2026-11-20 移除；數字原樣保留。現行的 `soft_vote` 沒有 `tie_breaker`，也沒有用這批資料重跑同一張表。
 
 真實資料回放（5 個 scn 服務分鐘級延遲，訓練 7 天、回放到 11/3 16:20Z；事件區間 11/3 14:00–16:30Z，數字是「區間內／區間外」的異常點）：
 
@@ -450,7 +458,8 @@ targets:
 | 序列體檢（ACF） | `POST /api/v1/tuning/profile`（`metric`、`pipeline`、`entity`，可給 `days`（預設 14）、`step_seconds`（預設 300）、`end`）：算 24h／168h 自相關、偏態、峰度。兩個自相關都 < 0.3（沒有日／週週期）就產生 `status: advisory` 的提案，建議把 `detector.hourly_baseline` 從這個 target 排除。**它不會自動生效**：每條 target 跑哪些節點只由 YAML 決定，核准 advisory 回 409。要套用就改 workflow YAML，二選一：在 hourly 節點的 `params` 加 `exclude_entities: [<實體>]`，或在該 target 寫 `detectors:` 列出要跑的節點（不列 hourly 那個） |
 | 事故卡分項覆核 | `POST /api/v1/tuning/feedback` 帶 `review`：`grouping`、`rca`、`resolve`、`severity` 各自選填（沒看就不帶，`ok` = 看過是對的），細節 `unrelated_entities`、`same_as`、`actual_root_entity`。存檔時一併記下平台當時的嚴重度、RCA 結論等級與第一候選。`GET /api/v1/tuning/review?lookback_days=90&pipeline=…` 出統計（每一項的分母是有人看過的卡；RCA 依當時的結論等級分開；誤報落在哪個嚴重度）。**只收資料與出報表，不會自動調整任何設定**。升級既有 PostgreSQL 要跑 `migrations/postgres/0013_feedback_review.sql` |
 | 調參成效報表 | `GET /api/v1/tuning/metrics?window_days=7`：每個核准的調參，前後各 N 天同一層的事件群數與誤報／確認／漏報數。依偵測器血緣歸屬，是前後對照不是因果證明 |
-| 規則升級器 | `POST /api/v1/tuning/rules/promote`（或排程 `run-once -w admin_rule_promote`）：同一層（管線 × 實體）N 天內被調參太多次，就用它的基準線換算出 `detector.rules` 上下限提案。目前支援 `zscore`、`mad` |
+
+> **歷史紀錄（2026-11-20 註）**：下面的驗收是用 `detector.mad` 與布林多數決量的，兩者已於 2026-11-20 移除；數字原樣保留。
 
 **真實 ES 驗收（11/3 事故，it_otel 回放 14:00–16:20Z 每 5 分鐘一輪，29 輪 33 秒，產生 cart-api／ord-svc／bill-svc 三個 P0 事件群）**：
 - 黃金事故：bill-svc（15:40–16:10，根因 tax-gw:443）送 true_positive 後進庫。提案 `detector.mad` threshold 15（it_otel × bill-svc）回測（`time_range` 刻意設 08:00–13:00，不含事故）：防護罩另外抓了事故前 7 天（10,070 個訓練點）重跑，現行 3.5 在事故 30 分鐘內標 27 點、提案 0 點（該窗 mad 最高分 12.69）→ `safety.passed: false`、`rejected`、核准 409。threshold 4.0：27 → 21 點，通過、核准成功。
@@ -463,6 +472,8 @@ targets:
 
 **訓練時排除歷史事故窗（預設開）**：重訓基準線前，`StorageHooks` 會把這個實體近 35 天的事件群（扣掉被標成 `false_positive` 的）前後各擴 10 分鐘，加上 `kind: maintenance` 的靜音窗，放進 `ctx.training_exclusions`；偵測節點訓練時把這些點拿掉。拿掉後剩不到原本一半或不到 30 點，就退回用全部資料（audit 記 `exclusion-skipped`）。節點設 `exclude_incidents: false` 可關閉，這是節點參數，target `overrides` 不能改。
 
+> **歷史紀錄（2026-11-20 註）**：下表的 `mad`、`quantile_drift`、多數決三欄來自已於 2026-11-20 移除的算子；數字原樣保留。
+>
 > 真實資料（scn 5 個服務，11/3 16:20Z 重訓 7 天、窗內含 11/3 事故）：在同一時段再發生一次時，事故 110 分鐘裡被抓到的分鐘數——
 >
 > | 服務 | 排除的點 | `hourly_baseline` 沒排除 → 有排除 | `mad` | `quantile_drift` | 多數決 |
@@ -473,8 +484,10 @@ targets:
 >
 > 受害的是時段基準線：7 天訓練時那個時段只看過一次，那一次就是事故，所以下週同一時段再壞會完全抓不到。`mad`、`quantile_drift` 用全段穩健統計，100 點的污染影響不到。三選二多數決靠另外兩票撐住，最終結果幾乎一樣；單獨用 `hourly_baseline`（或 target 白名單只留它）時差別就是 1 分鐘 vs 91 分鐘。
 
-**warning／anomaly 兩級（預設關）**：偵測節點設 `warning_ratio`（0～1，例如 0.8）後，分數超過「門檻 × 比例」但沒越線的點記成 `level: warning`。`detector.ensemble` 越線票夠 → anomaly；不夠但越線＋預警票加起來夠 → warning。全部只是 warning 的事件群嚴重度固定 `warning`、通知帶 `level=warning` 標籤（`alert.notify_payload` 的 `notify_warnings: false` 改成只記錄不通知）。上一則是 warning、這次是 anomaly 時，`suppress_dedup` 不擋（升級一定發）。
+**warning／anomaly 兩級（預設關）**：偵測節點設 `warning_ratio`（0～1，例如 0.8）後，分數超過「門檻 × 比例」但沒越線的點記成 `level: warning`。`detector.soft_vote` 沒有 warning 級（權重加總只分成立／不成立，參與節點自己的事件不留下），所以 warning 只會來自不經軟投票的偵測節點（單一偵測節點的管線、列在 `bypass` 的節點）。全部只是 warning 的事件群嚴重度固定 `warning`、通知帶 `level=warning` 標籤（`alert.notify_payload` 的 `notify_warnings: false` 改成只記錄不通知）。上一則是 warning、這次是 anomaly 時，`suppress_dedup` 不擋（升級一定發）。
 
+> **歷史紀錄（2026-11-20 註）**：下面是布林多數決（`detector.ensemble`，已移除）還有 warning 級時量的；數字原樣保留。
+>
 > 真實資料回放（10/31 13:20Z → 11/3 16:20Z，訓練前 7 天，it_otel 預設三個偵測器多數決）：
 >
 > | | 事故窗內 | 窗外（誤報） |
@@ -531,7 +544,7 @@ receivers:
 - **先寫資料庫、再送通知**：所有 `notifier.*` 改在 `after_persist` 階段。異常點、事件群、進行中事件群的更新在 `persist_batch` 的**單一交易**寫完（資料庫短暫斷線時整筆回復、重試 2 次），通知才送；「已通知」紀錄與結案要等通知真的送出去（`finalize_batch`）。
   - 修掉一個會**永久遺失告警**的問題：以前異常點每條序列先寫、通知後送，推送失敗後下一輪重新偵測到同一個點，`detector.new_only` 會當成處理過而丟掉，那次告警再也不會發。實測（固定 11:40 的異常，推送失敗後恢復）：改前連跑 3 輪都是 0 筆；改後下一輪補送。
   - 結案那一輪推送失敗：事件群不會被標成已結案，下一輪再送一次 `endsAt`。
-- **冷啟動不亂學**：偵測節點參數 `min_train_points`（預設 60，每分鐘一點的 1 小時）。訓練點數不到就不學、不判、不投票，下一輪資料夠了再學；`detector.rules`（靜態上下限）不需要歷史資料，一個點也照判，剛上線的服務靠它兜底。**限制**：一上線就壞、而且壞超過 1 小時的服務，還是會把壞的狀態學成正常。
+- **冷啟動不亂學**：偵測節點參數 `min_train_points`（預設 60，每分鐘一點的 1 小時）。訓練點數不到就不學、不判、不投票，下一輪資料夠了再學；平台裡已經沒有不需要歷史資料的偵測器（`detector.rules` 已移除）：靜態上下限要用 Grafana 告警規則推進來，剛上線的服務在基準線學到之前靠它兜底。**限制**：一上線就壞、而且壞超過 1 小時的服務，還是會把壞的狀態學成正常。
 
 ### 升級既有 PostgreSQL（沒有 Alembic，要手動做一次）
 
@@ -585,7 +598,7 @@ psql -h <host> -U <user> -d aiops -f migrations/postgres/0009_graph_environment_
 
 > 實測（PostgreSQL 16.15 容器，`anomalies` 200 萬筆／266 MB）：沒人擋時 33 ms 跑完、filenode 不變（沒有整表重寫），200 萬筆都讀成 `anomaly`；重複執行只出 NOTICE；回滾 SQL 正常拿掉欄位。另開一個連線開著交易讀這張表時，migration 等滿 5 秒後報 `lock timeout` 放棄、欄位沒加；**等鎖這段時間，後面進來的一般讀取被卡了約 4 秒**——這是剩下的代價，尖峰時段不要跑。PostgreSQL 10 以下會整表重寫，沒測過。`0002` 會把舊基準線掛到名為 `detect` 的節點（內建 workflow 的名稱），自己改過節點名稱的 workflow 第一次執行會重訓一次。`0003` 加上模型檔欄位、漏報補錄欄位、提案核准時間與經驗庫資料表；既有已核准的提案沒有核准時間，不會出現在調參成效報表。每個檔都可以重複執行。**這些 SQL 還沒有在真的 PostgreSQL 上跑過**（測試只用 SQLite），第一次請先在備份或測試庫上試。
 
-`it_otel` 的偵測改成 `detector.hourly_baseline` 之後，舊的 `zscore` 基準線不會被沿用（演算法不同），第一次執行會抓 7 天資料重訓。
+`it_otel` 的偵測改成 `detector.hourly_baseline` 之後，舊的 `zscore`（已於 2026-11-20 移除）基準線不會被沿用（演算法不同），第一次執行會抓 7 天資料重訓。
 
 SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
 
@@ -635,6 +648,8 @@ SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
 pagerank、cross_correlation 已移除，這兩欄數字保留作歷史對照。互相關當時排不出來的原因：平台先做一階差分再算相關，緩升 10 分鐘的波形差分之後幾乎只剩雜訊（cart-api 對 bill-svc 差分後 r=0.25）；不差分直接比水位是 r=0.98、cart-api 領先 11 點。這是演算法的前處理問題，不是資料沒有先後。
 
 #### 指標的物理特性
+
+> **歷史紀錄（2026-11-20 註）**：延遲、錯誤率兩點提到的 `detector.mad`、`detector.quantile_drift`、`detector.ensemble` 已於 2026-11-20 移除；產生器的設計與當時的實測數字原樣保留。
 
 - **請求數**：入口 api-gw 有強日夜週期（台北時間 04:00 最低、16:00 最高）、週末 × 0.4、Poisson 噪音；下游依呼叫機率一路乘下去。給 `detector.hourly_baseline`（14 天訓練，`min_weeks` 預設 2 剛好夠）。
 - **延遲**：每筆請求對數常態（右偏長尾），沒有日夜波動。給 `detector.mad`、`detector.quantile_drift`。
@@ -738,13 +753,15 @@ helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiop
 
 ## 目前狀態
 
-已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、偵測算子（見上表，含 168 時段基準線、分位數漂移、多偵測器裁決）、工廠 Lot 收斂、RCA（可抽換的根因演算法：證據融合、拓撲、LLM 判斷、貝氏；10 個段落含歷史相似案例與錯誤日誌樣式比對）、訓練排除歷史事故窗、warning／anomaly 兩級告警、自我健康心跳、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、規則升級器、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
+已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、偵測算子（見上表：168 時段基準線、殘差突變／漂移、軟投票、稀疏計數）、工廠 Lot 收斂、RCA（可抽換的根因演算法：證據融合、拓撲、LLM 判斷、貝氏；10 個段落含歷史相似案例與錯誤日誌樣式比對）、訓練排除歷史事故窗、warning／anomaly 兩級告警、自我健康心跳、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
 
 **演算法還沒在真實資料上驗證過**，還沒有任何誤報率或根因準確度的數字；先別把「測試全過」當成「演算法有用」。計畫中的真實資料驗收有三項：
 
 1. 168 時段基準線 vs 舊 zscore：同一段真實時序整週回放，比較尖峰時段與離峰時段各跳幾次。
 2. 多偵測器裁決：聯集 vs 多數決濾掉多少單一算法的毛刺，留下的是不是大尖峰。
 3. RCA：根因演算法對一次真實發生的延遲尖峰排出的第一候選（原本計畫對照的時序互相關已移除）。
+
+（2026-11-20 註：第 1、2 項的對照組 `zscore` 與布林多數決已移除，這兩項照原樣做不了；現行組合的回測見 `docs/RESIDUAL_SNR_ENSEMBLE.md`。）
 
 這三項卡在上面的唯讀 ES key 還沒建。ES 裡實際有哪些服務、多少筆資料、涵蓋哪幾天，也還沒有確認過，以查到的為準。
 

@@ -140,7 +140,7 @@ def test_quantile_inference_now_covers_a_one_minute_false_positive(monkeypatch, 
     資料源用「含頭不含尾」的假源（跟 Elasticsearch 一樣），尖峰固定在一個時間戳上。"""
     from aiops.control_plane.learning import threshold
     from aiops.control_plane.learning.replay import Series
-    from aiops.stages.detectors.mad import MADDetector
+    from aiops.stages.detectors.hourly_baseline import HourlyBaselineDetector
     from aiops.stages.ingestion import fetch
 
     spike = datetime(2026, 11, 8, 6, 0, tzinfo=timezone.utc)
@@ -155,7 +155,7 @@ def test_quantile_inference_now_covers_a_one_minute_false_positive(monkeypatch, 
 
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: HalfOpenSpec())
     ctx = PipelineContext(pipeline="sample_metrics_only", now=now, target=Target("elasticsearch", "q", "metric_a"))
-    got = threshold.infer(ctx, MADDetector, {"threshold": 3.5}, [Series("metric_a", "elasticsearch", "q")],
+    got = threshold.infer(ctx, HourlyBaselineDetector, {"threshold": 3.5}, [Series("metric_a", "elasticsearch", "q")],
                           "sample_metrics_only", "metric_a", spike, spike)
     assert isinstance(got, dict), got  # 舊版回字串「時窗內沒有資料」
     assert got["s_max"] > 3.5 and got["target"] >= got["s_max"] * 1.05 and got["series"][0]["window_points"] == 1

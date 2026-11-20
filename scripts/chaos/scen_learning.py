@@ -154,10 +154,10 @@ def _s7_run(spike_minutes: int) -> dict:
         out["inc"] = inc
         if not inc:
             return out
-        fb = run("admin_feedback_submit", request=FeedbackSubmit(incident_uid=inc["uid"], verdict="false_positive", detector="detector.mad",
+        fb = run("admin_feedback_submit", request=FeedbackSubmit(incident_uid=inc["uid"], verdict="false_positive", detector="detector.hourly_baseline",
                                                                 text="瞬間網路抖動，不是事故", author="chaos"))["feedback"]
         n_before = len(es.requests)
-        res = run("admin_feedback_propose", request=FeedbackPropose(feedback_id=fb["id"], proposer="chaos", detector="detector.mad", scope="entity"))
+        res = run("admin_feedback_propose", request=FeedbackPropose(feedback_id=fb["id"], proposer="chaos", detector="detector.hourly_baseline", scope="entity"))
         out["proposal"] = res["proposal"]
         out["generated_by"] = res.get("generated_by")
         # 反推門檻時對 ES 發的查詢：誤報時窗的終點（lt）有沒有涵蓋事件群的最後一個點
@@ -225,7 +225,7 @@ def scenario_8() -> H.Result:
         tr = {"start": (INC - timedelta(hours=6)).isoformat(), "end": (INC - timedelta(hours=1)).isoformat(), "step_seconds": 60}
 
         def create(threshold):
-            return client.post("/api/v1/tuning/proposals", json={"source": "manual", "detector": "detector.zscore", "params": {"threshold": threshold},
+            return client.post("/api/v1/tuning/proposals", json={"source": "manual", "detector": "detector.hourly_baseline", "params": {"threshold": threshold},
                                                                  "proposer": "chaos", "pipeline": "sample_it_apm", "entity": "bill-svc", "reason": "chaos"})
 
         p25 = create(25.0)

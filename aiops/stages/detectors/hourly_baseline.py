@@ -3,7 +3,7 @@
 適合有明顯日週期／週末效應的指標（流量、交易量、登入數）：週一早上九點跟週日凌晨三點不該用同一條基準線。
 時段依 tz 參數換算成當地時間（預設 UTC；台灣請設 Asia/Taipei，不然「上班時間」會偏 8 小時）。
 
-冷啟動與資料不足時的安全回退（退回「全段的平均與標準差」，等同 detector.zscore，不會比 zscore 更吵）：
+冷啟動與資料不足時的安全回退（退回「全段的平均與標準差」，就是一般的 z-score）：
 - 某個時段的訓練點太少（< min_points）
 - 某個時段只看過不到 min_weeks 次（預設 2 次）：每個「週幾幾點」只看過一次的話，標準差只反映那一小時內的雜訊，
   不含週與週之間的變化，會被低估，平常的波動就會被當成異常。真實資料回放（7 天訓練）就是這樣吵起來的。
@@ -110,9 +110,11 @@ class HourlyBaselineDetector(DetectorOperator):
         for b in self._bucket(df["ts"]):
             m, s, n, occ = self.buckets_.get(int(b), (g_mean, g_std, 0, 0.0))
             if not self._ready(n, occ):
-                m, s = g_mean, g_std  # 回退：等同 zscore
+                m, s = g_mean, g_std  # 回退：全段 z-score
             means.append(m)
-            # 某時段剛好完全不變時，避免除以 0 把小雜訊放大成異常：全段 std 的一成、再不夠就底噪
-            stds.append(max(s, g_std * 0.1, scale_floor(0.0, None, min_scale, ratio, center=m, integer=self.integer_)))
+            # 某時段剛好完全不變時，避免除以 0 把小雜訊放大成異常：全段 std 的一成、再不夠就底噪。
+            # 量到的 std 要傳進 scale_floor：它在「所有下限都是 0」時退回 1.0，以前傳 0 進去，那個 1.0 會蓋掉真的 std
+            # （min_scale_ratio 設 0、或時段平均剛好是 0 的非整數序列，分母被墊到 1，分數小了幾十倍）
+            stds.append(scale_floor(max(s, g_std * 0.1), None, min_scale, ratio, center=m, integer=self.integer_))
         scores = ((df["value"].astype(float) - np.array(means)) / np.array(stds)).abs()
         return self._result(df, scores, scores > self.param("threshold"))

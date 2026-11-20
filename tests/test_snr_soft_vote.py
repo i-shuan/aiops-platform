@@ -15,7 +15,8 @@ from aiops.engine.pipeline import NodeSpec, Pipeline, TargetSpec, Workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import ANOMALY, AnomalyEvent
 from scripts.backtest.variants import detection_nodes
-from aiops.stages.detectors.base import SNR_STATE_KEY, gaussian_threshold, series_snr, snr_threshold
+from aiops.stages.detectors.base import (SNR_STATE_KEY, DetectorOperator, gaussian_threshold, series_snr,
+                                         snr_threshold)
 
 TZ = "Asia/Taipei"
 TPE = ZoneInfo(TZ)
@@ -79,15 +80,48 @@ def test_gaussian_threshold_is_the_two_sided_normal_quantile():
     assert gaussian_threshold(1e-5) > gaussian_threshold(1e-3)
 
 
+class _Unwhitened(DetectorOperator):
+    """沒白化的測試替身（不註冊）：分數 = 0.6745 × |值 − 全段中位數| ÷ MAD，季節訊號沒扣掉。
+    內建的沒白化偵測器（mad、quantile_drift）移除後，snr_threshold 的經驗分位數那條路只剩 sparse_count 走得到，
+    而它的分數是機率的對數、沒有「季節擺盪撐大門檻」可量，所以用替身固定那條路的行為。"""
+
+    algorithm = "unwhitened"
+    tunable = {"threshold": (3.5, 1.0, 20.0)}
+
+    def fit(self, df):
+        self.median_ = float(df["value"].median())
+        self.mad_ = float((df["value"] - self.median_).abs().median())
+        self.fitted = True
+        return self
+
+    def get_state(self):
+        return {"median": self.median_, "mad": self.mad_}
+
+    def load_state(self, state):
+        self.median_, self.mad_ = float(state["median"]), float(state["mad"])
+        self.fitted = True
+        return self
+
+    def detect(self, df):
+        scores = 0.6745 * (df["value"] - self.median_).abs() / self.mad_
+        return self._result(df, scores, scores > self.param("threshold"))
+
+
+class _NoThreshold(_Unwhitened):
+    """沒有 threshold 的測試替身（不註冊）：內建偵測器現在都有 threshold，snr 的這個檢查只能用替身碰到。"""
+
+    tunable = {}
+
+
 def test_whitened_nodes_get_the_gaussian_threshold_and_unwhitened_ones_measure_the_seasonal_swing(train):
     hourly = OperatorRegistry.create("detector.hourly_baseline", {"tz": TZ, "min_weeks": 1}).fit(train)
     assert snr_threshold(hourly, train, 0.001) == (pytest.approx(3.29053, abs=1e-4), "gaussian")
-    mad = OperatorRegistry.create("detector.mad").fit(train)
-    tau, source = snr_threshold(mad, train, 0.001)
+    raw = _Unwhitened().fit(train)
+    tau, source = snr_threshold(raw, train, 0.001)
     assert source == "empirical" and tau > 1.5 * gaussian_threshold(0.001)  # 上班時段整段離中位數很遠，門檻被撐大
     noise_only = pd.DataFrame({"ts": train["ts"], "value": np.random.default_rng(4).normal(100, 9, len(train))})
-    flat_mad = OperatorRegistry.create("detector.mad").fit(noise_only)
-    tau_flat, _ = snr_threshold(flat_mad, noise_only, 0.001)
+    flat = _Unwhitened().fit(noise_only)
+    tau_flat, _ = snr_threshold(flat, noise_only, 0.001)
     assert tau_flat == pytest.approx(gaussian_threshold(0.001), rel=0.15)  # 沒有季節訊號：跟常態分位數差不多
 
 
@@ -128,8 +162,7 @@ def test_old_baseline_without_snr_stats_falls_back_to_the_configured_threshold(t
     assert ev.threshold_source == "fallback" and ev.threshold == 3.0 and ev.series_snr_db is None
 
 
-@pytest.mark.parametrize("name,params", [("detector.mad", {}), ("detector.quantile_drift", {}),
-                                         ("detector.hourly_baseline", {"tz": TZ, "min_weeks": 1}),
+@pytest.mark.parametrize("name,params", [("detector.hourly_baseline", {"tz": TZ, "min_weeks": 1}),
                                          ("detector.residual_shift", {"tz": TZ})])
 def test_without_snr_nothing_changes(train, name, params):
     """沒開 snr：沒有證據、state 沒有 "_snr"、事件跟以前一樣（開了 snr 也不會改到沒開的節點）。"""
@@ -147,23 +180,28 @@ def test_without_snr_nothing_changes(train, name, params):
 
 
 @pytest.mark.parametrize("name,params,error", [
-    ("detector.mad", {"snr": {"p_fa": 0}}, WorkflowParamError),
-    ("detector.mad", {"snr": {"p_fa": 0.6}}, WorkflowParamError),
-    ("detector.mad", {"snr": {"tz": TZ}}, WorkflowParamError),  # 沒給 p_fa
-    ("detector.mad", {"snr": {"p_fa": 0.001, "pfa": 1}}, WorkflowError),
-    ("detector.mad", {"snr": 0.001}, WorkflowError),
-    ("detector.mad", {"snr": {"p_fa": 0.001, "tz": "Mars/Olympus"}}, WorkflowError),
-    ("detector.mad", {"snr": {"p_fa": 0.001, "min_slot_points": 1}}, WorkflowError),
-    ("detector.hard_limit", {"fatal_ceiling": 1, "snr": {"p_fa": 0.001}}, WorkflowError),  # 沒有 threshold
+    ("detector.hourly_baseline", {"snr": {"p_fa": 0}}, WorkflowParamError),
+    ("detector.hourly_baseline", {"snr": {"p_fa": 0.6}}, WorkflowParamError),
+    ("detector.hourly_baseline", {"snr": {"tz": TZ}}, WorkflowParamError),  # 沒給 p_fa
+    ("detector.hourly_baseline", {"snr": {"p_fa": 0.001, "pfa": 1}}, WorkflowError),
+    ("detector.hourly_baseline", {"snr": 0.001}, WorkflowError),
+    ("detector.hourly_baseline", {"snr": {"p_fa": 0.001, "tz": "Mars/Olympus"}}, WorkflowError),
+    ("detector.hourly_baseline", {"snr": {"p_fa": 0.001, "min_slot_points": 1}}, WorkflowError),
 ])
 def test_bad_snr_params_fail_at_load_time(name, params, error):
     with pytest.raises(error):
         OperatorRegistry.create(name, params)
 
 
+def test_snr_needs_a_threshold_to_replace():
+    _NoThreshold()  # 不開 snr：合法
+    with pytest.raises(TypeError, match="沒有 threshold，不能用 snr 換算門檻"):
+        _NoThreshold(snr={"p_fa": 0.001})
+
+
 def test_snr_cannot_be_set_per_target():
     with pytest.raises(TypeError):
-        OperatorRegistry.create("detector.mad").check_override({"snr": SNR})
+        OperatorRegistry.create("detector.hourly_baseline").check_override({"snr": SNR})
 
 
 # ── 軟投票 ──
@@ -206,31 +244,30 @@ def test_soft_vote_keeps_bypass_events_and_needs_snr_on_every_voter():
         return Workflow(name="sv", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
             NodeSpec(name="fetch", operator="ingestion.fetch"), *nodes])
 
-    Pipeline(workflow([NodeSpec(name="m", operator="detector.mad", params={"snr": SNR}),
+    Pipeline(workflow([NodeSpec(name="m", operator="detector.hourly_baseline", params={"snr": SNR}),
                        NodeSpec(name="vote", operator="detector.soft_vote")]))
     with pytest.raises(WorkflowError, match="沒有開 snr"):
-        Pipeline(workflow([NodeSpec(name="m", operator="detector.mad"),
+        Pipeline(workflow([NodeSpec(name="m", operator="detector.hourly_baseline"),
                            NodeSpec(name="vote", operator="detector.soft_vote")]))
-    with pytest.raises(WorkflowError, match="bypass"):
-        Pipeline(workflow([NodeSpec(name="f", operator="detector.hard_limit", params={"fatal_ceiling": 1}),
+    with pytest.raises(WorkflowError, match="bypass"):  # 不投票的節點（votes = False）沒列進 bypass
+        Pipeline(workflow([NodeSpec(name="f", operator="detector.sparse_count"),
                            NodeSpec(name="vote", operator="detector.soft_vote")]))
     with pytest.raises(WorkflowParamError):
         OperatorRegistry.create("detector.soft_vote", {"votes": 0})
 
 
-@pytest.mark.parametrize("variant", ["R+SNR", "A+SNR"])
-def test_snr_variants_load(variant):
-    """R+SNR 是 it_otel 原樣；A+SNR 是對照變體（67a29a1 的 it_otel_snr，YAML 已刪）。"""
+def test_snr_variant_loads():
+    """R+SNR 是 sample_it_otel 原樣（對照變體 A+SNR 用的 mad／quantile_drift 已移除）。"""
     wf = Workflow(name="sv", targets=[TargetSpec(source_type="mock", query="q", entity="svc")],
-                  nodes=detection_nodes("snr_test.frame", variant))
+                  nodes=detection_nodes("snr_test.frame", "R+SNR"))
     pipe = Pipeline(wf)
     vote = next(op for n, op in pipe.target_nodes if n.operator == "detector.soft_vote")
     voters = [op for n, op in pipe.target_nodes if getattr(op, "has_baseline", False) and n.name not in vote.bypass]
     assert len(voters) == 3 and all(op.snr["p_fa"] == 0.001 for op in voters)
-    assert "fatal" in vote.bypass
+    assert vote.bypass == {"detect_drift_solo"}  # 旁路漂移票不投票
 
 
-# ── 四組裡的漏報死區（ES 回放：A 與 A+SNR 的 report-svc mild 都是 0/60） ──
+# ── 低流量序列的輕微下降（ES 回放的 report-svc mild） ──
 
 
 class _Frames:
@@ -262,7 +299,7 @@ def _low_traffic_mild():
 
 
 def _alerts(variant: str, train, window) -> int:
-    """跑變體的偵測段一輪：裁決（ensemble／soft_vote）∪ bypass 節點的告警分鐘數。"""
+    """跑變體的偵測段一輪：裁決（soft_vote）∪ bypass 節點的告警分鐘數。"""
     _Frames.raw, _Frames.train = window, train
     wf = Workflow(name="snr_test", targets=[TargetSpec(source_type="mock", query="rpm", entity="svc")],
                   nodes=detection_nodes("snr_test.frame", variant))
@@ -273,11 +310,3 @@ def _alerts(variant: str, train, window) -> int:
 def test_residual_snr_catches_the_low_traffic_mild_drop():
     train, window = _low_traffic_mild()
     assert _alerts("R+SNR", train, window) >= 10
-
-
-@pytest.mark.xfail(strict=True, reason="漏報死區（ES 回放 A 與 A+SNR 的 report-svc mild 都是 0/60）：低流量序列持續低兩成約 1.3 個"
-                                        "雜訊單位，mad／quantile_drift 的門檻被沒扣掉的日夜訊號撐大（經驗分位數 3.8／4.7），"
-                                        "hourly 也不到門檻，軟投票湊不到 2 票等值。要抓到得放寬到 votes 1.5（每週約 1618 分鐘誤報）。")
-def test_current_detectors_with_snr_catch_the_low_traffic_mild_drop():
-    train, window = _low_traffic_mild()
-    assert _alerts("A+SNR", train, window) >= 1

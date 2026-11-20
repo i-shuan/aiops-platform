@@ -39,27 +39,28 @@ def _ctx(raw, train=None, exclusions=(), entity="svc"):
 def test_training_skips_incident_window_so_baseline_is_not_polluted():
     dirty = _series(spike_at=100, spike=500.0)
     window = TrainingExclusion(T0 + timedelta(minutes=95), T0 + timedelta(minutes=165), "incident x")
-    clean_ctx = OperatorRegistry.create("detector.zscore").execute(_ctx(_series(30), dirty, [window]))
-    polluted = OperatorRegistry.create("detector.zscore").execute(_ctx(_series(30), dirty))
-    clean = clean_ctx.new_detector_states["detector.zscore"]
-    assert clean.points == 300 - 71 and polluted.new_detector_states["detector.zscore"].points == 300
+    clean_ctx = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_series(30), dirty, [window]))
+    polluted = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_series(30), dirty))
+    clean = clean_ctx.new_detector_states["detector.hourly_baseline"]
+    assert clean.points == 300 - 71 and polluted.new_detector_states["detector.hourly_baseline"].points == 300
     assert any("excluded:71pts" in a for a in clean_ctx.audit)
-    assert clean.state["std"] < polluted.new_detector_states["detector.zscore"].state["std"] / 10
+    # hourly_baseline 的 state["global"] = (全段平均, 全段標準差)
+    assert clean.state["global"][1] < polluted.new_detector_states["detector.hourly_baseline"].state["global"][1] / 10
 
 
 def test_exclusion_falls_back_to_all_data_when_too_little_is_left():
     train = _series(100)
     window = TrainingExclusion(T0, T0 + timedelta(minutes=80), "incident x")
-    ctx = OperatorRegistry.create("detector.zscore").execute(_ctx(_series(30), train, [window]))
-    assert ctx.new_detector_states["detector.zscore"].points == 100
+    ctx = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_series(30), train, [window]))
+    assert ctx.new_detector_states["detector.hourly_baseline"].points == 100
     assert any("exclusion-skipped" in a for a in ctx.audit)
 
 
 def test_exclude_incidents_false_keeps_everything_and_cannot_be_a_target_override():
     window = TrainingExclusion(T0 + timedelta(minutes=95), T0 + timedelta(minutes=165), "x")
-    op = OperatorRegistry.create("detector.zscore", {"exclude_incidents": False})
+    op = OperatorRegistry.create("detector.hourly_baseline", {"exclude_incidents": False})
     assert op.execute(_ctx(_series(30), _series(spike_at=100, spike=500.0), [window])).new_detector_states[
-        "detector.zscore"].points == 300
+        "detector.hourly_baseline"].points == 300
     with pytest.raises(TypeError, match="行為參數"):
         op.check_override({"exclude_incidents": True})
 
@@ -109,37 +110,19 @@ def test_reused_hooks_reload_the_exclusion_pool_every_round():
 def test_warning_ratio_marks_near_threshold_points():
     raw = _series(30)
     train = _series(300)
-    mean, std = train["value"].mean(), train["value"].std()
+    mean, std = train["value"].mean(), train["value"].std(ddof=0)  # hourly_baseline 的全段標準差是母體標準差
     raw.loc[10, "value"], raw.loc[20, "value"] = mean + 10 * std, mean + 2.5 * std  # 一個越線、一個接近門檻
-    ctx = OperatorRegistry.create("detector.zscore", {"threshold": 3.0, "warning_ratio": 0.6}).execute(_ctx(raw, train))
+    ctx = OperatorRegistry.create("detector.hourly_baseline", {"threshold": 3.0, "warning_ratio": 0.6}).execute(_ctx(raw, train))
     levels = {e.ts: e.level for e in ctx.anomalies}
     assert levels[raw.loc[10, "ts"].to_pydatetime()] == ANOMALY
     assert levels[raw.loc[20, "ts"].to_pydatetime()] == WARNING
-    plain = OperatorRegistry.create("detector.zscore", {"threshold": 3.0}).execute(_ctx(raw, train))
+    plain = OperatorRegistry.create("detector.hourly_baseline", {"threshold": 3.0}).execute(_ctx(raw, train))
     assert {e.level for e in plain.anomalies} == {ANOMALY}
 
 
 def test_warning_ratio_is_validated():
     with pytest.raises(WorkflowError, match="0 到 1"):
-        OperatorRegistry.create("detector.zscore", {"warning_ratio": 1.2})
-    with pytest.raises(WorkflowError, match="threshold"):
-        OperatorRegistry.create("detector.rules", {"upper": 80, "warning_ratio": 0.8})
-
-
-def _vote(*events, runs=("a", "b")):
-    ctx = PipelineContext(pipeline="p", now=T0)
-    ctx.anomalies, ctx.detector_runs = list(events), list(runs)
-    return OperatorRegistry.create("detector.ensemble", {"strategy": "majority"}).execute(ctx).anomalies
-
-
-def _e(node, level):
-    return AnomalyEvent("svc", "q", T0, 4.0, detector_node=node, level=level)
-
-
-def test_ensemble_two_levels():
-    assert [e.level for e in _vote(_e("a", ANOMALY), _e("b", ANOMALY))] == [ANOMALY]
-    assert [e.level for e in _vote(_e("a", ANOMALY), _e("b", WARNING))] == [WARNING]
-    assert _vote(_e("a", ANOMALY)) == []
+        OperatorRegistry.create("detector.hourly_baseline", {"warning_ratio": 1.2})
 
 
 def _incident(level):

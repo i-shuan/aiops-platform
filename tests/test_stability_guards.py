@@ -216,36 +216,34 @@ def _frame(n, spike=None):
 
 
 def test_too_few_training_points_means_no_training_no_votes_no_alerts():
-    ctx = OperatorRegistry.create("detector.zscore").execute(_ctx(_frame(20, spike=500.0)))
+    ctx = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_frame(20, spike=500.0)))
     assert ctx.detector_runs == [] and ctx.new_detector_states == {} and ctx.anomalies == []
     assert any("too-few-points:20<60" in a for a in ctx.audit)
-    ctx = OperatorRegistry.create("detector.zscore").execute(_ctx(_frame(20, spike=500.0), train=_frame(45)))
+    ctx = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_frame(20, spike=500.0), train=_frame(45)))
     assert ctx.detector_runs == [] and any("too-few-points:45<60" in a for a in ctx.audit)
 
 
 def test_min_train_points_is_a_node_param_with_default_60():
-    ok = OperatorRegistry.create("detector.zscore", {"min_train_points": 10}).execute(_ctx(_frame(20, spike=500.0)))
-    assert ok.detector_runs == ["detector.zscore"] and ok.anomalies
-    assert OperatorRegistry.create("detector.zscore").execute(_ctx(_frame(60, spike=500.0))).detector_runs
+    ok = OperatorRegistry.create("detector.hourly_baseline", {"min_train_points": 10}).execute(_ctx(_frame(20, spike=500.0)))
+    assert ok.detector_runs == ["detector.hourly_baseline"] and ok.anomalies
+    assert OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_frame(60, spike=500.0))).detector_runs
     with pytest.raises(TypeError, match="行為參數"):
-        OperatorRegistry.create("detector.zscore").check_override({"min_train_points": 5})
-
-
-def test_static_rules_do_not_need_training_and_still_fire_on_one_point():
-    ctx = OperatorRegistry.create("detector.rules", {"upper": 80}).execute(_ctx(_frame(1, spike=500.0)))
-    assert ctx.detector_runs == ["detector.rules"] and len(ctx.anomalies) == 1
+        OperatorRegistry.create("detector.hourly_baseline").check_override({"min_train_points": 5})
 
 
 def test_abstaining_detector_is_not_counted_by_the_ensemble():
-    ctx = _ctx(_frame(20, spike=500.0))
-    for node, op, params in (("z_cold", "detector.zscore", {}), ("rules", "detector.rules", {"upper": 80})):
-        o = OperatorRegistry.create(op, params)
+    """冷啟動棄權的節點（45 點 < 預設 60）不進 detector_runs、也沒有證據；裁決（detector.soft_vote）只看真的評估過的那一票。
+    原本的另一票是 detector.rules（不需要訓練），它已移除；改成同一個演算法、min_train_points 調低的節點。"""
+    ctx = _ctx(_frame(20, spike=500.0), train=_frame(45))
+    snr = {"p_fa": 0.001}
+    for node, params in (("cold", {"snr": snr}), ("warm", {"snr": snr, "min_train_points": 10})):
+        o = OperatorRegistry.create("detector.hourly_baseline", params)
         o.node_name = node
         ctx = o.execute(ctx)
-    vote = OperatorRegistry.create("detector.ensemble", {"strategy": "majority"})
+    vote = OperatorRegistry.create("detector.soft_vote")
     vote.node_name = "vote"
     out = vote.execute(ctx)
-    assert ctx.detector_runs == ["rules"] and [e.voted_by for e in out.anomalies] == [("rules",)]  # 1 個參與者就它說了算
+    assert ctx.detector_runs == ["warm"] and [e.voted_by for e in out.anomalies] == [("warm",)]  # 1 個參與者就它說了算
 
 
 # ── 稽核補強（docs/ARCH_AUDIT.md Q8、Q10、Q11）──

@@ -255,7 +255,7 @@ class Pipeline:
             raise WorkflowError(f"Workflow {workflow.name}：未知的節點 scope {unknown}")
         if [order[s] for s in scopes] != sorted(order[s] for s in scopes):
             raise WorkflowError(f"Workflow {workflow.name}：節點順序必須是 scope=target → batch → after_persist → after_finalize")
-        # 跨節點的設定（裁決的 bypass、致命地板要認哪些節點…）由算子自己檢查，引擎只負責把整條 workflow 交給它
+        # 跨節點的設定（裁決的 bypass 要認哪些節點…）由算子自己檢查，引擎只負責把整條 workflow 交給它
         infos = [NodeInfo(n.name, n.operator, dict(n.params), op) for n, op in self.nodes]
         for n, op in self.nodes:
             check = getattr(op, "check_workflow", None)

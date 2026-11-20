@@ -43,10 +43,13 @@ class _Frame(BaseOperator):
         return ctx
 
 
-def _vote(nodes, strategy="majority"):
+_SNR = {"snr": {"p_fa": 0.001}}  # detector.soft_vote 的參與節點都要開 snr（載入期檢查）
+
+
+def _vote(nodes):
     wf = Workflow(name="gap", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
         NodeSpec(name="fetch", operator="audit_gap.frame"), *nodes,
-        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": strategy})])
+        NodeSpec(name="vote", operator="detector.soft_vote")])
     return Pipeline(wf).run(now=T0)
 
 
@@ -99,13 +102,16 @@ def test_import_guards_catch_indirect_imports(tmp_path, monkeypatch, rel, body, 
 # ── Q4：資料血緣 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q4 缺口：anomalies 表沒有 voted_by 欄位；detector.ensemble 的裁決事件落地後，"
+@pytest.mark.xfail(strict=True, reason="Q4 缺口：anomalies 表沒有 voted_by 欄位；detector.soft_vote 的裁決事件落地後，"
                    "只剩事件群快照記得是哪些節點投的票（keep_members=false 時成員事件也不寫）")
 def test_anomalies_table_keeps_who_voted():
+    # m 的 min_slot_points 61：這 120 點每個時段只有 60 點，時段基準不成立、退回全段平均，殘差的跳變只剩最後那個尖峰。
+    # （用預設 30 的話，含尖峰的那個小時平均被拉高，整點交界多一筆只有 m 投的裁決，這個測試修好欄位後也不會轉綠）
     wf = Workflow(name="gap_q4", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
         NodeSpec(name="fetch", operator="audit_gap.frame"),
-        NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="m", operator="detector.mad"),
-        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": "union"}),
+        NodeSpec(name="z", operator="detector.hourly_baseline", params=_SNR),
+        NodeSpec(name="m", operator="detector.residual_shift", params={"min_slot_points": 61, **_SNR}),
+        NodeSpec(name="vote", operator="detector.soft_vote"),
         NodeSpec(name="group", operator="alert.same_entity")])
     Pipeline(wf, StorageHooks()).run(now=T0)
     with db.read_session() as s:
@@ -115,7 +121,7 @@ def test_anomalies_table_keeps_who_voted():
 
 @pytest.mark.xfail(strict=True, reason="Q4 缺口：AnomalyEvent 是 frozen，但 attrs 是普通 dict，下游可以原地改（淺層凍結）")
 def test_anomaly_event_attrs_cannot_be_mutated_in_place():
-    e = AnomalyEvent("svc", "q", T0, 9.0, {"dept": "it"}, detector="detector.zscore", detector_node="z")
+    e = AnomalyEvent("svc", "q", T0, 9.0, {"dept": "it"}, detector="detector.hourly_baseline", detector_node="z")
     with pytest.raises(TypeError):
         e.attrs["dept"] = "changed"
 
@@ -123,18 +129,16 @@ def test_anomaly_event_attrs_cannot_be_mutated_in_place():
 # ── Q5：裁決分母 ──
 
 
-def test_rules_without_a_rule_abstains_instead_of_vetoing():
-    """G6（已修）：detector.rules 沒有規則時 can_evaluate=False -> 棄權，不進 detector_runs、不投反對票。"""
-    ctx = _vote([NodeSpec(name="z", operator="detector.zscore"),
-                 NodeSpec(name="r", operator="detector.rules", params={"require_rule": False})])
-    assert [a.voted_by for a in ctx.anomalies] == [("z",)]
-
-
-@pytest.mark.parametrize("op", ["detector.quantile_drift", "detector.residual_chronic"])
+@pytest.mark.parametrize("op", ["detector.residual_chronic"])
 def test_window_longer_than_the_data_abstains(op):
-    """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權。"""
-    ctx = _vote([NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="w", operator=op, params={"window": 600})])
+    """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權（不進 detector_runs，裁決的參與者只有 z）。
+    裁決節點原本是布林多數決（detector.ensemble，已移除）：那時棄權沒算好的話分母多一票、裁決事件會消失。
+    軟投票沒有分母，所以除了裁決結果，還直接看基底留下的棄權紀錄與參與者數。"""
+    ctx = _vote([NodeSpec(name="z", operator="detector.hourly_baseline", params=_SNR),
+                 NodeSpec(name="w", operator=op, params={"window": 600, **_SNR})])
     assert [a.voted_by for a in ctx.anomalies] == [("z",)]
+    assert "detect:w:cannot-evaluate:abstain" in ctx.audit and "detect:z:cannot-evaluate:abstain" not in ctx.audit
+    assert any(line.startswith("soft_vote:vote:voters=1:") for line in ctx.audit)
 
 
 # ── Q6：入口 span 的定義 ──
@@ -248,9 +252,9 @@ def test_cold_start_gate_counts_usable_points_for_peer_detectors():
 
 def test_retrain_with_too_few_points_keeps_using_the_old_baseline():
     """G12（已修）：到期重訓但訓練窗資料不足時，沿用資料庫裡的舊基準線照判，不留偵測盲區。"""
-    old = DetectorState({"mean": 50.0, "std": 1.0}, T0 - timedelta(days=2), points=1440, version=3,
-                        detector="detector.zscore")
-    op = OperatorRegistry.create("detector.zscore")
+    old = DetectorState({"buckets": {}, "global": [50.0, 1.0]}, T0 - timedelta(days=2), points=1440, version=3,
+                        detector="detector.hourly_baseline")  # 沒有時段資料：每個點都用全段的 (平均 50, 標準差 1)
+    op = OperatorRegistry.create("detector.hourly_baseline")
     op.node_name = "n"
     ctx = op.execute(_ctx(_frame(30, 500.0), train=_frame(20), state=old))
     assert ctx.detector_runs == ["n"] and ctx.anomalies
@@ -305,7 +309,7 @@ def test_target_whose_detectors_are_all_skipped_does_not_fetch_training_data(mon
     p = Pipeline(Workflow(name="gap_q13", targets=targets, nodes=[
         NodeSpec(name="fetch", operator="ingestion.fetch",
                  params={"lookback_minutes": 60, "train_lookback_minutes": 1440, "retrain_minutes": 1440}),
-        NodeSpec(name="z", operator="detector.zscore", params={"include_entities": ["a"]})]), StorageHooks())
+        NodeSpec(name="z", operator="detector.hourly_baseline", params={"include_entities": ["a"]})]), StorageHooks())
     p.run(now=T0, targets=[targets[1]])
     assert len(calls) == 1  # 只抓偵測窗
 
@@ -322,10 +326,10 @@ def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monke
     shutil.copytree(runner.WORKFLOW_DIR, tmp_path, dirs_exist_ok=True)  # 內建的 admin_* 也要找得到
     (tmp_path / "detection" / "locked.yaml").write_text(
         "name: locked\nnodes:\n  - {name: fetch, operator: ingestion.fetch}\n"
-        "  - {name: detect, operator: detector.zscore, params: {threshold: 9.0}}\n", encoding="utf-8")
+        "  - {name: detect, operator: detector.hourly_baseline, params: {threshold: 9.0}}\n", encoding="utf-8")
     monkeypatch.setattr(runner, "WORKFLOW_DIR", tmp_path)
     pid = runner.run("admin_proposal_create", request=ProposalCreate(
-        source="manual", detector="detector.zscore", params={"threshold": 1.5}, proposer="amy",
+        source="manual", detector="detector.hourly_baseline", params={"threshold": 1.5}, proposer="amy",
         pipeline="locked"))["proposal"]["id"]
     req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, train_ratio=0.3,
                            time_range={"start": now.replace(hour=0), "end": now, "step_seconds": 60})

@@ -1,6 +1,6 @@
-"""軟投票：每一票換算成「門檻的幾倍」，加總達到 votes 票等值（預設 2）就成立，取代 detector.ensemble 的布林「三票過二」。
+"""軟投票：每一票換算成「門檻的幾倍」，加總達到 votes 票等值（預設 2）就成立（以前的布林「三票過二」detector.ensemble 已移除）。
 
-  - {name: vote, operator: detector.soft_vote, params: {votes: 2, bypass: [fatal]}}
+  - {name: vote, operator: detector.soft_vote, params: {votes: 2, bypass: [detect_drift_solo]}}
 
 每個參與節點在每個點的權重 w = snr(t) / threshold（逐點 SNR 證據 / 由 p_fa 換算的門檻，都來自 ctx.detector_evidence），
 Σw >= votes 就產生一筆裁決事件。所以：
@@ -9,7 +9,7 @@
   - 三票都在門檻的七成（0.7 × 3 = 2.1）也成立——布林多數決會一票都不算。
 參與者 = 這條序列真的評估過資料的偵測節點（ctx.detector_runs）扣掉 bypass；權重只看證據，所以參與節點都必須開 snr
 （節點參數 snr: {p_fa: ...}），載入期檢查。滾動窗還沒湊滿的點分數是 0，權重 0（等於沒投）。
-bypass（雙軌制、旁路漂移票）跟 detector.ensemble 一樣：不進權重、事件原樣留下。不投票的節點（votes = False）沒列進 bypass 就報錯。
+bypass（旁路漂移票這類單獨成立的節點）：不進權重、事件原樣留下。不投票的節點（votes = False）沒列進 bypass 就報錯。
 沒有 warning 級：權重加總只分成立／不成立。
 """
 from __future__ import annotations

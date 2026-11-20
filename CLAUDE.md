@@ -3,7 +3,7 @@
 ## 0. 核心設計哲學 (Core Philosophy)
 本平台採用 **「Pipeline 管線調度 + 可插拔算子 (Operator / Plugin)」** 架構：
 - **Pipeline 是固定骨架**：資料由記憶體內的 `PipelineContext` 順序流動（Pull -> Detect -> Group/Suppress -> RCA -> Notify -> Persist）。
-- **Operator 是可抽換零件**：演算法（MAD、Z-Score、Isolation Forest）與 LLM 供應商均為純算子，透過 `@OperatorRegistry.register` 登記，由 YAML 設定檔動態選用。
+- **Operator 是可抽換零件**：演算法（時段基準線、殘差突變、殘差漂移、稀疏計數）與 LLM 供應商均為純算子，透過 `@OperatorRegistry.register` 登記，由 YAML 設定檔動態選用。
 - **資料庫只記最終結果**：節點之間嚴禁透過資料庫傳遞資料（徹底廢除 `*ReadDAO` 模式），DB 只負責寫入最終生成的 Incident、Audit Log 與模型持久化狀態。
 
 ---
@@ -77,17 +77,17 @@ class BaseOperator(ABC):
    * 基準線與異常血緣以 **Workflow 節點名稱**（`self.state_key`）為準，同一個演算法可以在同一條管線掛多次。後台核准的調參目前只分 (演算法, 管線, 實體)、沒有節點這一層：`ctx.detector_params` 雖然以節點名稱為 key，同一條管線裡同一個演算法的多個節點拿到的是同一份調參（要各自不同就寫在節點 YAML `params` 或 target `overrides`）。
    * 需要「往前 N 分鐘的自己」（同比、環比）時覆寫 `required_lags() -> list[int]`；fetch 要在 YAML 設對應的 `lags_minutes`，df 會多 `lag_<分鐘>` 欄位，回測也照這個抓。
    * 模型有非 JSON 的本體時覆寫 `get_artifact() -> (格式, bytes)` 與 `load_artifact(格式, bytes)`，格式只能是 `npz`。
-   * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only`、`detector.ensemble` 這類不學習的算子不繼承它。
-   * `AnomalyEvent` 是 frozen：建立後不准改分數或偵測器名稱。要合併多個偵測器的判斷，用 `detector.ensemble` 產生新的裁決事件。
+   * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only`、`detector.soft_vote` 這類不學習的算子不繼承它。
+   * `AnomalyEvent` 是 frozen：建立後不准改分數或偵測器名稱。要合併多個偵測器的判斷，用 `detector.soft_vote` 產生新的裁決事件。
    * **每條 target 跑哪些偵測節點由引擎決定**（`engine/pipeline.py`），順序：節點 `params.exclude_entities` → `params.include_entities` → target 的 `detectors`（節點名稱或算子名稱，不寫 = 全部）。被跳過的節點不載基準線與調參、不進 `ctx.detector_runs`。引擎把真的會跑、會存基準線的節點名稱放進 `ctx.baseline_nodes`，`ingestion.fetch` 只在其中有節點還沒有基準線或到期時才抓訓練窗（全被跳過的序列不抓）。演算法裡不准自己判斷「這個實體要不要跑」。
    * `include_entities`／`exclude_entities` 是基底層的路由參數（`ROUTING_PARAMS`）：不進 `self.params`、不傳給演算法、調參提案帶它們會被拒絕。
    * 參數優先序：演算法預設值 ← 後台核准調參（`ctx.detector_params`）← 節點 YAML `params` ← target `overrides[節點名稱]`（`effective_params`，逐鍵 `deep_merge`）。overrides 在載入期用 `check_override` 檢查參數名與範圍。合併邏輯只有一份：`stages/detectors/base.layer_params`，偵測與回測（`admin.proposal_backtest`）都用它——回測會讀提案所屬管線的 YAML 疊上節點 `params` 與該實體 target 的 `overrides`，YAML 鎖住的鍵提案改了也不會生效，結果的 `workflow.locked` 會列出來。
-   * `ctx.detector_runs` 只記「真的評估過資料」的節點（沒資料就 return 的不算）。`detector.ensemble` 的分母 = 參與者數；棄權不是反對票。`hourly_baseline` 資料不足時退回全段統計，仍算參與者——新偵測器若「這一輪算不出分數就不判」，覆寫 `can_evaluate(df) -> bool` 回 False（基底在加入 `detector_runs` 之前棄權；`rules` 沒規則、`quantile_drift`／`chronic` 滾動窗比資料長都這樣做），不要在 `detect` 裡回全 0。`requires_peers` 的算子在 `raw_df` 沒有 `peer_*` 欄位時（`peer_group` 只撈到自己）由基底棄權，`ingestion.fetch` 把它記成那條序列的錯誤。
+   * `ctx.detector_runs` 只記「真的評估過資料」的節點（沒資料就 return 的不算）。`detector.soft_vote` 只加總參與者的證據；棄權不是反對票。`hourly_baseline` 資料不足時退回全段統計，仍算參與者——新偵測器若「這一輪算不出分數就不判」，覆寫 `can_evaluate(df) -> bool` 回 False（基底在加入 `detector_runs` 之前棄權；`residual_chronic` 滾動窗比資料長、`sparse_count` 湊不滿一個窗口都這樣做），不要在 `detect` 裡回全 0。`requires_peers` 的算子在 `raw_df` 沒有 `peer_*` 欄位時（`peer_group` 只撈到自己）由基底棄權，`ingestion.fetch` 把它記成那條序列的錯誤。
    * 冷啟動門檻數的是 `training_points(train) -> int`（預設列數；`dod`／`wow` 只算 lag 欄位有值的列、`peer` 只算同儕有值的列），`DetectorState.points` 也記這個數。基準線到期重訓但訓練窗點數不足時，沿用資料庫裡的舊基準線照判（log `keep-old-baseline`），不留偵測盲區；完全沒有舊基準線才不判。
    * target 的 `detectors`／`overrides` 寫錯、節點的 include／exclude 寫了 workflow targets 裡沒有的實體，都在 `Pipeline.__init__`（API 傳入的 targets 在 `run()` 開頭）丟 `WorkflowError`，不准延到執行期。
-   * `exclude_incidents`（預設 true）、`warning_ratio`（預設關）、`min_train_points`（預設 60）是基底層的節點行為參數（`NODE_PARAMS`）：同樣不進 `self.params`、target `overrides` 不能寫。訓練點數不到 `min_train_points` 的節點不學、不判、不進 `detector_runs`（冷啟動時幾十個點學到的基準線不可信）；不需要歷史資料的算子（`detector.rules`）設 `requires_training = False` 不受此限，剛上線的服務靠它兜底。訓練排除窗由 `StorageHooks` 放進 `ctx.training_exclusions`，基底 `_training_frame` 統一套用——演算法的 `fit` 不准自己去查事故或維護窗。
+   * `exclude_incidents`（預設 true）、`warning_ratio`（預設關）、`min_train_points`（預設 60）是基底層的節點行為參數（`NODE_PARAMS`）：同樣不進 `self.params`、target `overrides` 不能寫。訓練點數不到 `min_train_points` 的節點不學、不判、不進 `detector_runs`（冷啟動時幾十個點學到的基準線不可信）；不需要歷史資料的算子設 `requires_training = False` 不受此限。訓練排除窗由 `StorageHooks` 放進 `ctx.training_exclusions`，基底 `_training_frame` 統一套用——演算法的 `fit` 不准自己去查事故或維護窗。
    * 事件等級只有 `ANOMALY`／`WARNING`（`engine/types.py`）。warning 由基底依 `threshold × warning_ratio` 產生，演算法只管回傳分數與越線旗標。
-   * **雙軌制**（`docs/DUAL_TRACK_DESIGN.md`）：統計軌是 `detector.ensemble` 多數決；致命軌是 `detector.hard_limit`（`votes = False`、`accepts_tuning = False`、`requires_training = False`），單點踩線就成立。不投票的偵測節點必須列進 ensemble 的 `bypass`（事件原樣留下、不進分母），由 `alert.fatal_floor` 把分數拉到 payload 的 P0 門檻並打上 `fatal:<節點>` 標籤。致命界線只認 YAML（節點 `params` 或 target `overrides`）：後台調參、規則升級器的提案一律拒絕。新增「不交給多數決」的偵測器照這個做，不准在 ensemble 或引擎裡寫死算子名稱。
+   * **人訂的靜態門檻不做在平台**：上下限、致命界線這類「踩到就是出事」的規則一律是 Grafana 告警規則，經 webhook 推進來（`docs/EXTERNAL_ALERTS.md`）；平台沒有靜態規則偵測器，也不准加回來。平台只留需要統計的演算法：`hourly_baseline`、`residual_shift`、`residual_chronic`（三票交給 `detector.soft_vote`）、`sparse_count`、`new_only`。不投票的偵測節點（`votes = False`，或單獨成立的旁路節點）必須列進 `detector.soft_vote` 的 `bypass`（事件原樣留下、不進加總），不准在 soft_vote 或引擎裡寫死算子名稱。
    * 需要看整條 workflow 才能驗的接線（引用的節點存不存在、前後順序）寫在算子的 `check_workflow(nodes: list[NodeInfo])`，引擎在 `Pipeline.__init__` 逐一呼叫，`TypeError`／`ValueError` 轉成 `WorkflowError`；不准延到 `execute` 才發現。
  * **節點 scope**：`target`（逐序列）→ `batch`（所有序列合併後）→ `after_persist`（資料庫寫入成功後才跑：所有 `notifier.*`）→ `after_finalize`（「已通知」與結案也寫成功後才跑：只有 `notifier.watchdog` 心跳，這一輪每一步都成功才續命）。順序錯在 `Pipeline.__init__` 報錯。
    * 寫入順序鐵律：異常點、事件群在 `hooks.persist_batch` 的**單一交易**落地（資料庫短暫斷線整筆回復後重試，`storage/db.run_in_transaction`），然後才送通知；通知都送出去了，引擎才呼叫 `hooks.finalize_batch` 記「已通知」與結案。推送失敗時事件群留在進行中，下一輪 `alert.heartbeat` 用同一組標籤補送（含 `endsAt`）。任何算子都不准在寫入前送出外部通知。
@@ -104,7 +104,7 @@ class BaseOperator(ABC):
  * **Grouper（事件收斂）**：
    * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
    * 進行中事件群（`ctx.open_incidents`）由 `alert.absorb_open` 吸收新異常：一場事故從初發到結案只有一個 `incident_uid`。`ensure_incidents` 只建一次（`ctx.incidents_built`），清單被吸收光之後不准重建。
-   * 順序鐵律：收斂 → 計分（`alert.fatal_floor` 在這一段，必須在 `absorb_open` 之前）→ `absorb_open` → 抑制 → `notify_payload` → `heartbeat` → `notifier.*`。升級（嚴重度只升不降）改了 labels 時，`heartbeat` 負責對舊 labels 送 `endsAt` 再送新的；Alertmanager 用整組 labels 辨識告警。
+   * 順序鐵律：收斂 → 計分（必須在 `absorb_open` 之前）→ `absorb_open` → 抑制 → `notify_payload` → `heartbeat` → `notifier.*`。升級（嚴重度只升不降）改了 labels 時，`heartbeat` 負責對舊 labels 送 `endsAt` 再送新的；Alertmanager 用整組 labels 辨識告警。
  * **Suppressor（告警抑制）**：
    * 檢查靜音窗口（維護期）、冷卻時間（Dedup）、同根因；被抑制事件必須打上 `ctx.is_suppressed = True` 與具體原因。
  * **LLM Provider（智慧診斷）**：
@@ -115,57 +115,87 @@ class BaseOperator(ABC):
 
 ## 3. 標準算子實作範例
 
-兩個範例都是可以直接執行的真實程式碼；`tests/test_claude_md_examples.py` 會檢查範例一跟 `aiops/stages/detectors/mad.py` 逐字相同、範例二能在乾淨的行程裡跑起來，範例過期測試就會紅。
+兩個範例都是可以直接執行的真實程式碼；`tests/test_claude_md_examples.py` 會檢查範例一跟 `aiops/stages/detectors/residual_shift.py` 逐字相同、範例二能在乾淨的行程裡跑起來，範例過期測試就會紅。
 
-### 範例一：偵測器（`stages/detectors/mad.py`，原檔全文）
+### 範例一：偵測器（`stages/detectors/residual_shift.py`，原檔全文）
 
 偵測器繼承 `DetectorOperator`，只寫演算法的四個方法；`execute`（載入或訓練基準線、套用調參與 overrides、產生 `AnomalyEvent`、warning 兩級、訓練排除事故窗）全部由基底處理，演算法不要自己寫 `execute`。
 
 ```python
+"""殘差突變票：看「扣掉週期基準後的殘差」的相鄰差。
+
+原始值的相鄰差（已移除的 detector.shift）每天 09:00／19:00 的流量階梯切換都會舉牌；這裡先白化（base.fit_seasonal_profile：
+原值 − 該 週幾×小時 的訓練平均），每天固定的切換在殘差裡相鄰差接近 0，只有「這個時段不該有的斷崖」才會跳。
+門檻依序列自己的殘差雜訊伸縮（base.noise_stats／calibrated_scale）：分數 = |Δe| / σ*，σ* 由訓練期 |Δe| 的
+MAD 與 1−fpr 分位數決定，threshold 的意義不變。跳上去之後是新水位，不再報（持續偏離交給 residual_chronic）。
+"""
+from __future__ import annotations
+
+from typing import Any
+
 import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, DetectorOperator, is_integer_series, scale_floor
+from aiops.stages.detectors.base import (RESIDUAL_TUNABLE, SCALE_FLOOR_TUNABLE, DetectorOperator, calibrated_scale,
+                                         fit_seasonal_profile, is_integer_series, noise_stats, parse_tz,
+                                         seasonal_residual)
 
-_CONSISTENCY = 0.6745  # 讓 MAD 在常態分布下跟標準差同尺度的常數
 
+@OperatorRegistry.register("detector.residual_shift")
+class ResidualShiftDetector(DetectorOperator):
+    """params: threshold（預設 4）、fpr、max_tail_factor、min_scale／min_scale_ratio（tunable）；
+    tz（時段用的時區，比照 hourly_baseline，預設 UTC）、min_slot_points（時段至少幾個訓練點才用它，預設 30）。"""
 
-@OperatorRegistry.register("detector.mad")
-class MADDetector(DetectorOperator):
-    """Modified Z-Score（中位數與 MAD）：離群值不會把基準線拉歪，比 zscore 耐尖峰。
-    params: threshold、min_scale／min_scale_ratio（分母底噪，見 base.scale_floor）。
+    algorithm = "residual_shift"
+    whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
+    tunable = {"threshold": (4.0, 1.0, 20.0), **RESIDUAL_TUNABLE, **SCALE_FLOOR_TUNABLE}
+    other_params = frozenset({"tz", "min_slot_points", "ref_points"})
 
-    跟 zscore 一樣先 fit 再 detect：基準線來自訓練期，而不是這一輪資料自己（否則異常本身會被當成常態）。
-    基準線存原始 MAD，底噪在 detect 時才套：後台調了 min_scale 不用等重訓就生效。
-    """
+    def __init__(self, **params: Any):
+        super().__init__(**params)
+        self.tz = parse_tz(params.get("tz", "UTC"), "detector.residual_shift")
+        self.min_slot_points = int(params.get("min_slot_points", 30))
+        if self.min_slot_points < 2:
+            raise TypeError("detector.residual_shift 的 min_slot_points 至少要 2")
+        self.ref_points = int(params.get("ref_points", 1))
+        if not 1 <= self.ref_points <= 60:
+            raise TypeError("detector.residual_shift 的 ref_points 要在 1 到 60 之間（1 = 只跟前一分鐘比）")
 
-    algorithm = "mad"
-    tunable = {"threshold": (3.5, 1.0, 20.0), **SCALE_FLOOR_TUNABLE}
+    def _jump(self, resid) -> pd.Series:
+        """殘差減「前 ref_points 點殘差的中位數」。ref_points=1 就是相鄰差；用中位數當參考水位，
+        前面有一個雜訊點不會讓下一點看起來像跳變，斷崖後前幾分鐘（參考窗還沒被新水位佔過半）都會舉牌。"""
+        e = pd.Series(resid, dtype=float)
+        ref = e.shift(1).rolling(self.ref_points, min_periods=1).median()
+        return (e - ref).fillna(0.0)
 
-    def fit(self, df: pd.DataFrame) -> "MADDetector":
+    def fit(self, df: pd.DataFrame) -> ResidualShiftDetector:
+        self.profile_, resid = fit_seasonal_profile(df, self.tz, self.min_slot_points)
+        self.noise_ = noise_stats(self._jump(resid).to_numpy()[1:], self.param("fpr"))
         values = df["value"]
-        self.median_ = float(values.median())
-        self.mad_ = float((values - self.median_).abs().median())
-        self.integer_ = is_integer_series(values)  # 失敗數這類計數序列：分母至少 1 筆
+        self.level_ = float(values.median())
+        self.integer_ = is_integer_series(values)
         self.fitted = True
         return self
 
     def get_state(self) -> dict:
         self._require_fitted()
-        return {"median": self.median_, "mad": self.mad_, "integer": self.integer_}
+        return {"profile": self.profile_, "noise": self.noise_, "level": self.level_, "integer": self.integer_}
 
-    def load_state(self, state: dict) -> "MADDetector":
-        self.median_, self.mad_ = float(state["median"]), float(state["mad"])
-        self.integer_ = bool(state.get("integer", False))  # 舊版基準線沒記：只套絕對與相對下限
+    def load_state(self, state: dict) -> ResidualShiftDetector:
+        self.profile_, self.noise_ = dict(state["profile"]), dict(state["noise"])
+        self.level_, self.integer_ = float(state["level"]), bool(state.get("integer", False))
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
-        scale = scale_floor(self.mad_, None, self.param("min_scale"), self.param("min_scale_ratio"),
-                            center=self.median_, integer=self.integer_)
-        scores = _CONSISTENCY * (df["value"] - self.median_).abs() / scale
+        scale = calibrated_scale(self.noise_, self.param("threshold"), self.param("max_tail_factor"),
+                                 min_scale=self.param("min_scale"), min_scale_ratio=self.param("min_scale_ratio"),
+                                 level=self.level_, integer=self.integer_)
+        jump = self._jump(seasonal_residual(df, self.profile_))
+        jump.index = df.index
+        scores = jump.abs() / scale
         return self._result(df, scores, scores > self.param("threshold"))
 ```
 
@@ -208,7 +238,7 @@ assert build("noop", "", "", None) is None  # noop 完全不連外
 
 ```yaml
 name: factory_lot_detection_pipeline
-description: "工廠履歷時序檢測流程 (自由抽換 MAD 與關閉 LLM)"
+description: "工廠履歷時序檢測流程 (自由抽換偵測器與關閉 LLM)"
 nodes:
   # 1. 抓取指標
   - name: fetch_step
@@ -216,11 +246,11 @@ nodes:
     params:
       index: "factory-metrics-*"
 
-  # 2. 異常檢測 (隨時切換 detector.zscore / detector.mad / detector.isolation_forest)
+  # 2. 異常檢測 (隨時切換 detector.residual_shift / detector.residual_chronic / detector.sparse_count)
   - name: detect_step
-    operator: detector.mad
+    operator: detector.residual_shift
     params:
-      threshold: 3.5
+      threshold: 4
 
   # 3. 告警收斂
   - name: group_step
@@ -256,7 +286,7 @@ nodes:
 
 **寫錯就在載入期報錯**（`tests/test_load_time_validation.py`）：
  * 值不合理（`threshold: -3`、`window_minutes: 0`、`cooldown_minutes: -5`）由算子的 `__init__` 檢查，用 `engine/params` 的 `number`／`positive`／`whole` 丟 `ValueError`；`OperatorRegistry.create` 轉成 `WorkflowParamError`（是 `WorkflowError` 也是 `ValueError`）。新算子的窗口、冷卻、門檻、權重參數一律在 `__init__` 檢查，不准拖到 `execute`。
- * 偵測器的 `tunable` 範圍由基底 `DetectorOperator.__init__` 的 `check_ranges()` 檢查（節點 YAML、target `overrides`、執行期合併後的參數都會經過）；需要額外檢查就覆寫 `check_ranges`，「合併後才知道齊不齊」的檢查（`detector.rules` 至少要有一條規則）才放 `validate_params`。
+ * 偵測器的 `tunable` 範圍由基底 `DetectorOperator.__init__` 的 `check_ranges()` 檢查（節點 YAML、target `overrides`、執行期合併後的參數都會經過）；需要額外檢查就覆寫 `check_ranges`，「合併後才知道齊不齊」的檢查（參數要等調參與 overrides 都疊完才齊的那種）才放 `validate_params`。
  * 欄位打錯（`param:`、`optionl:`、`windw_days:`、ES 查詢的 `fliter`）：`aiops/engine`、`aiops/sources` 的 Pydantic 模型一律繼承 `engine/pipeline.StrictModel`（或自己設 `extra="forbid"`），測試會掃。
 
 **並發安全**：偵測器基準線（`detector_models`）與現行參數（`active_detector_configs`）用 `version` 欄位做樂觀鎖，寫入必須帶讀取當時的版本；版本已被別人推進就不覆蓋（基準線記在 audit，調參核准回 409 並把提案標成 stale）。

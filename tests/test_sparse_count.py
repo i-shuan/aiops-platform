@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from aiops.engine.pipeline import Pipeline, Workflow, WorkflowError
-from aiops.stages.detectors.mad import MADDetector
+from aiops.stages.detectors.hourly_baseline import HourlyBaselineDetector
 from aiops.stages.detectors.sparse_count import SparseCountDetector, dispersion, tail_probability
 
 WEEK = 7 * 1440
@@ -49,8 +49,10 @@ def test_sustained_one_per_minute_on_a_sparse_series_is_caught_and_pointwise_mis
     hit = flagged(det, now)
     assert hit.any()
     assert int(np.argmax(hit)) - 40 <= 5  # 開始後幾分鐘內：累積到第 4 筆就越線
-    mad = MADDetector().fit(frame(train))
-    assert not any(mad.detect(frame(now, "2027-01-11")).is_anomaly)  # 逐點看每分鐘都只是「1」
+    # 逐點的偵測器（hourly_baseline；訓練只有一週，整條退回全段平均與標準差）看每分鐘都只是「1」：約 1 分，門檻 3
+    pointwise = HourlyBaselineDetector().fit(frame(train))
+    assert pointwise.buckets_ready == 0
+    assert not any(pointwise.detect(frame(now, "2027-01-11")).is_anomaly)
 
 
 def test_fresh_data_at_the_training_rate_rarely_alarms():
@@ -138,16 +140,16 @@ def test_bad_params_fail_at_construction():
 def _workflow(bypass: list[str]) -> Workflow:
     return Workflow.model_validate({"name": "t", "nodes": [
         {"name": "fetch", "operator": "ingestion.fetch"},
-        {"name": "detect", "operator": "detector.mad"},
+        {"name": "detect", "operator": "detector.hourly_baseline", "params": {"snr": {"p_fa": 0.001}}},
         {"name": "sparse", "operator": "detector.sparse_count"},
-        {"name": "vote", "operator": "detector.ensemble", "params": {"bypass": bypass}},
+        {"name": "vote", "operator": "detector.soft_vote", "params": {"bypass": bypass}},
     ], "targets": [{"source_type": "mock", "query": "errors", "entity": "a"}]})
 
 
 def test_it_does_not_vote_and_must_be_listed_in_bypass():
     assert SparseCountDetector.votes is False
     Pipeline(_workflow(["sparse"]))
-    with pytest.raises(WorkflowError):
+    with pytest.raises(WorkflowError, match="sparse（detector.sparse_count）不參與表決，必須列進 bypass"):
         Pipeline(_workflow([]))
 
 

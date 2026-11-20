@@ -1,4 +1,4 @@
-"""路線 A：168 時段基準線、動態同儕、lag 欄位、分位數漂移、多偵測器裁決、模型檔（artifact）存儲。"""
+"""路線 A：168 時段基準線、動態同儕、lag 欄位、多偵測器裁決的血緣、模型檔（artifact）存儲。"""
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -8,7 +8,7 @@ import pytest
 
 import peer_probe  # 測試專用的 requires_peers 偵測器（tests/ 在 sys.path 上）
 from aiops.engine.context import PeerGroup, PipelineContext, Target
-from aiops.engine.errors import BadRequest, WorkflowError
+from aiops.engine.errors import BadRequest
 from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import Pipeline, load_workflow
 from aiops.engine.registry import OperatorRegistry
@@ -18,7 +18,6 @@ from aiops.sources.elasticsearch import ElasticsearchSpec
 from aiops.sources.mock import _seasonal
 from aiops.sources.prometheus import PrometheusSpec
 from aiops.stages.detectors.base import DetectorOperator, pack_arrays, unpack_arrays
-from aiops.stages.ensemble.ensemble import EnsembleOperator
 from aiops.stages.ingestion.fetch import FetchOperator, fetch_target_frame
 from aiops.interfaces.runner import run_context
 from aiops.storage import crud
@@ -30,6 +29,12 @@ SUNDAY = datetime(2026, 11, 1, tzinfo=timezone.utc)  # 2026-11-01 是星期日
 def _seasonal_frame(start, minutes, query="seasonal:x"):
     ts = pd.date_range(start, periods=minutes, freq="60s")
     return pd.DataFrame({"ts": ts, "value": _seasonal(query, ts)})
+
+
+def _global_zscore_flags(train, test, threshold=3.0):
+    """對照組：整段訓練資料只有一組平均與標準差（以前的 detector.zscore），偏離超過 threshold 個標準差就算。"""
+    scores = ((test["value"] - train["value"].mean()) / train["value"].std(ddof=0)).abs()
+    return (scores > threshold).tolist()
 
 
 def _run_yaml(tmp_path, text, now, name="wf"):
@@ -47,9 +52,8 @@ def test_hourly_baseline_falls_back_to_the_global_baseline_with_less_than_two_we
     test = _seasonal_frame(SUNDAY + timedelta(days=7), 1440)
     test.loc[3 * 60, "value"] = 52.0
     hourly = OperatorRegistry.get("detector.hourly_baseline")().fit(train)
-    zscore = OperatorRegistry.get("detector.zscore")().fit(train)
     assert hourly.buckets_ready == 0 and hourly.get_state()["buckets_ready"] == 0
-    assert hourly.detect(test).is_anomaly == zscore.detect(test).is_anomaly  # 逐點跟 zscore 一模一樣
+    assert hourly.detect(test).is_anomaly == _global_zscore_flags(train, test)  # 逐點跟全段 zscore 一模一樣
     # 想強制用 7 天資料就明說：min_weeks=1（變異會被低估，真實資料回放時流量指標因此很吵）
     forced = OperatorRegistry.get("detector.hourly_baseline")(min_weeks=1).fit(train)
     assert forced.buckets_ready == 168 and forced.detect(test).is_anomaly[3 * 60]
@@ -80,8 +84,7 @@ def test_hourly_baseline_catches_what_a_single_global_baseline_misses():
     i = 3 * 60  # 星期日凌晨三點：平常是一天裡最低的時候
     test.loc[i, "value"] = 52.0  # 這個值放在下午很正常，放在凌晨三點就是異常
     hourly = OperatorRegistry.get("detector.hourly_baseline")().fit(train).detect(test)
-    zscore = OperatorRegistry.get("detector.zscore")().fit(train).detect(test)
-    assert hourly.is_anomaly[i] and not zscore.is_anomaly[i]
+    assert hourly.is_anomaly[i] and not _global_zscore_flags(train, test)[i]
     normal_flags = sum(hourly.is_anomaly) - 1
     assert normal_flags / len(test) < 0.02  # 平常的點幾乎不誤報
 
@@ -117,27 +120,25 @@ def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
     assert nodes["fetch"].params["train_lookback_minutes"] >= 10080
 
 
-@pytest.mark.parametrize("name", ["sample_factory"])
-def test_default_detection_is_a_majority_vote_of_three_detectors(name):
-    """真實資料回放：多數決比聯集少 88% 的警報分鐘數。factory 預設是這個組合（it_otel 改成 R+SNR，
-    見 tests/test_residual_ensemble.py::test_it_otel_detects_with_three_complementary_votes_and_two_bypass_tracks）。
-    雙軌制之後多了一個不投票的致命硬上限節點（fatal）：排在裁決前、列在 bypass，統計三票的組成不變。"""
+def test_factory_sample_detection_is_a_soft_vote_of_three_detectors():
+    """factory 樣本的偵測組合：殘差組三票（週期、突變、漂移）都開 snr，由 detector.soft_vote 加總（votes: 2）。"""
     from aiops.interfaces.runner import workflow_path
 
-    wf = load_workflow(workflow_path(name))
+    wf = load_workflow(workflow_path("sample_factory"))
     ops = [n.operator for n in wf.nodes]
     assert ops[ops.index("detector.hourly_baseline"):ops.index("detector.new_only") + 1] == [
-        "detector.hourly_baseline", "detector.mad", "detector.quantile_drift", "detector.hard_limit",
-        "detector.ensemble", "detector.new_only"]
-    vote = next(n for n in wf.nodes if n.operator == "detector.ensemble")
-    assert vote.params == {"strategy": "majority", "bypass": ["fatal"]}
-    # it_otel 刻意用 min_weeks: 1（多數決下誤報較少）；factory 保留預設的安全退回
+        "detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic",
+        "detector.soft_vote", "detector.new_only"]
+    vote = next(n for n in wf.nodes if n.operator == "detector.soft_vote")
+    assert vote.params == {"votes": 2}
+    # factory 保留預設的安全退回（不寫 min_weeks）
     hourly = next(n for n in wf.nodes if n.operator == "detector.hourly_baseline")
-    assert hourly.params.get("min_weeks") == (1 if name == "sample_it_otel" else None)
+    assert hourly.params.get("min_weeks") is None
     pipeline = Pipeline(wf)
-    assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_mad", "detect_qdrift", "fatal"]  # 投票節點不載基準線
+    assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_rshift", "detect_rchronic"]  # 投票節點不載基準線
     voters = [n for n, op in pipeline.nodes if getattr(op, "has_baseline", False) and op.votes]
-    assert [n.name for n in voters] == ["detect", "detect_mad", "detect_qdrift"]  # 表決的仍然只有這三個
+    assert [n.name for n in voters] == ["detect", "detect_rshift", "detect_rchronic"]
+    assert all(op.snr is not None for _, op in pipeline.nodes if getattr(op, "has_baseline", False))  # 軟投票的每一票都要有逐點證據
 
 
 # ── A.2 動態同儕 ──
@@ -195,7 +196,7 @@ def test_sources_without_group_support_say_so():
         ElasticsearchSpec("http://es").fetch_group('{"index": "m", "agg": "count"}', SUNDAY, SUNDAY, 60, "host")
 
 
-# ── A.3 同比／環比、分位數漂移 ──
+# ── A.3 同比／環比 ──
 
 
 def test_fetch_lags_line_up_with_the_past():
@@ -240,87 +241,33 @@ def test_lag_detectors_need_the_lag_column(now):
         OperatorRegistry.get("test.lag_probe")().execute(ctx)
 
 
-def test_quantile_drift_sees_a_fatter_tail_with_the_same_average():
-    rng = np.random.default_rng(1)
-    base = rng.normal(100, 5, 2000)
-    train = pd.DataFrame({"ts": pd.date_range(SUNDAY, periods=2000, freq="60s"), "value": base})
-    tail = rng.normal(100, 5, 300)
-    tail[::5] += 30  # 每 5 個點有一個很慢的請求
-    tail -= tail.mean() - 100  # 平均拉回 100
-    test = pd.DataFrame({"ts": pd.date_range(SUNDAY + timedelta(days=3), periods=300, freq="60s"), "value": tail})
-    drift = OperatorRegistry.get("detector.quantile_drift")().fit(train).detect(test)
-    # 對照：只看平均的統計（滾動 30 點平均 vs 訓練平均，尺度 std/√30，門檻 3）一點都看不出來，因為平均沒變
-    rolling = test["value"].rolling(30, min_periods=30).mean()
-    mean_score = ((rolling - base.mean()).abs() / (base.std() / np.sqrt(30))).fillna(0.0)
-    assert sum(drift.is_anomaly) > 100 and int((mean_score > 3).sum()) == 0
-
-
 # ── A.4 多偵測器裁決 ──
 
 
 def _event(node, minute, score=1.0):
-    return AnomalyEvent("e", "m", SUNDAY + timedelta(minutes=minute), score, {"dept": "d"}, 1.0, "detector.zscore", node)
+    return AnomalyEvent("e", "m", SUNDAY + timedelta(minutes=minute), score, {"dept": "d"}, 1.0, "detector.hourly_baseline", node)
 
 
-def _vote(events, runs=("a", "b", "c"), **params):
-    ctx = PipelineContext(pipeline="p", now=SUNDAY, target=Target("mock", "m", "e"))
-    ctx.anomalies, ctx.detector_runs = list(events), list(runs)
-    op = EnsembleOperator(**params)
-    op.node_name = "vote"
-    return op.execute(ctx).anomalies
-
-
-EVENTS = [_event("a", 1, 2), _event("b", 1, 5), _event("a", 2), _event("a", 3), _event("b", 3), _event("c", 3)]
-
-
-def test_ensemble_strategies():
-    def minutes(evts):
-        return sorted(int((e.ts - SUNDAY).total_seconds() // 60) for e in evts)
-
-    assert minutes(_vote(EVENTS, strategy="intersection")) == [3]
-    assert minutes(_vote(EVENTS, strategy="majority")) == [1, 3]
-    assert minutes(_vote(EVENTS, strategy="union")) == [1, 2, 3]
-    assert minutes(_vote(EVENTS, strategy="at_least", min_votes=3)) == [3]
-    first = next(e for e in _vote(EVENTS, strategy="majority") if e.ts == SUNDAY + timedelta(minutes=1))
-    assert first.voted_by == ("a", "b") and first.score == 5 and first.detector == "detector.ensemble"
-    assert first.detector_node == "vote"
-
-
-def test_ensemble_keeps_non_participants_and_can_keep_members():
-    external = AnomalyEvent("e", "m", SUNDAY, 9.0)  # 外部匯入：不屬於任何偵測節點
-    out = _vote([*EVENTS, external], strategy="intersection", nodes=["a", "b"])
-    assert external in out and len([e for e in out if e.detector == "detector.ensemble"]) == 2
-    kept = _vote(EVENTS, strategy="intersection", keep_members=True)
-    assert len(kept) == len(EVENTS) + 1
-
-
-def test_ensemble_rejects_bad_params_at_load_time():
-    with pytest.raises(WorkflowError):
-        OperatorRegistry.create("detector.ensemble", {"strategy": "vibes"})
-    with pytest.raises(WorkflowError, match="min_votes"):
-        OperatorRegistry.create("detector.ensemble", {"strategy": "at_least"})
-
-
-def test_ensemble_in_a_pipeline_records_the_decision_with_lineage(tmp_path, now):
+def test_vote_in_a_pipeline_records_the_decision_with_lineage(tmp_path, now):
     _run_yaml(tmp_path, """name: voted
 nodes:
   - {name: fetch, operator: ingestion.fetch, params: {lookback_minutes: 60, train_lookback_minutes: 1440}}
-  - {name: z_sensitive, operator: detector.zscore, params: {threshold: 1.5}}
-  - {name: z_strict, operator: detector.zscore, params: {threshold: 6.0}}
-  - {name: vote, operator: detector.ensemble, params: {strategy: intersection}}
+  - {name: z_sensitive, operator: detector.hourly_baseline, params: {snr: {p_fa: 0.01}}}
+  - {name: z_strict, operator: detector.hourly_baseline, params: {snr: {p_fa: 0.0001}}}
+  - {name: vote, operator: detector.soft_vote}
   - {name: new_only, operator: detector.new_only}
 targets:
   - {source_type: mock, query: 'cpu{service="cart"}', entity: cart}
 """, now, name="voted")
     rows = [r for r in crud.find(AnomalyRow) if r["pipeline"] == "voted"]
-    assert rows and {(r["detector_name"], r["detector_node"]) for r in rows} == {("detector.ensemble", "vote")}
+    assert rows and {(r["detector_name"], r["detector_node"]) for r in rows} == {("detector.soft_vote", "vote")}
     wf = load_workflow(tmp_path / "voted.yaml")
     assert [n for n, _ in Pipeline(wf).detector_nodes] == ["z_sensitive", "z_strict"]  # 裁決節點不載基準線
 
 
 @OperatorRegistry.register("test.lineage_frame")
 class _LineageFrame(BaseOperator):
-    """固定資料：訓練段 ±1 交錯（mean 0、std 1、MAD 1），偵測段最後一點 50 -> zscore 與 mad 都會抓到。"""
+    """固定資料：訓練段 ±1 交錯（mean 0、std 1），偵測段最後一點 50 -> 兩個偵測節點都會抓到。"""
 
     scope = "target"
 
@@ -333,8 +280,8 @@ class _LineageFrame(BaseOperator):
 
 
 def test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_snapshot(now):
-    """稽核 Q4：兩個偵測節點 + union 裁決 + 一筆外部匯入異常，走 StorageHooks 落地。
-    anomalies 表只記裁決事件（detector.ensemble／vote）；事件群快照帶著每個事件自己的 detector、detector_node、voted_by；
+    """稽核 Q4：兩個偵測節點 + 軟投票裁決 + 一筆外部匯入異常，走 StorageHooks 落地。
+    anomalies 表只記裁決事件（detector.soft_vote／vote）；事件群快照帶著每個事件自己的 detector、detector_node、voted_by；
     外部匯入的不寫 anomalies 表，快照裡是 external:<source>、節點空字串。"""
     from aiops.engine.pipeline import NodeSpec, TargetSpec, Workflow
     from aiops.storage.hooks import StorageHooks
@@ -346,9 +293,9 @@ def test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_
                                     "value": 99.0, "score": 7.0, "attrs": {}}])
     wf = Workflow(name="lineage", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
         NodeSpec(name="fetch", operator="test.lineage_frame"),
-        NodeSpec(name="z", operator="detector.zscore"),
-        NodeSpec(name="m", operator="detector.mad"),
-        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": "union"}),
+        NodeSpec(name="z", operator="detector.hourly_baseline", params={"snr": {"p_fa": 0.001}}),
+        NodeSpec(name="m", operator="detector.hourly_baseline", params={"snr": {"p_fa": 0.001}}),
+        NodeSpec(name="vote", operator="detector.soft_vote"),
         NodeSpec(name="new_only", operator="detector.new_only"),
         NodeSpec(name="group", operator="alert.same_entity"),
         NodeSpec(name="absorb", operator="alert.absorb_open"),
@@ -357,12 +304,12 @@ def test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_
         NodeSpec(name="notify", operator="notifier.log")])
     ctx = Pipeline(wf, StorageHooks()).run(now=now)
     assert {(e.detector, e.detector_node, e.voted_by) for e in ctx.detected_anomalies} == \
-        {("detector.ensemble", "vote", ("m", "z"))}
+        {("detector.soft_vote", "vote", ("m", "z"))}
     rows = [r for r in crud.find(AnomalyRow) if r["pipeline"] == "lineage"]
-    assert rows and {(r["entity"], r["detector_name"], r["detector_node"]) for r in rows} == {("svc", "detector.ensemble", "vote")}
+    assert rows and {(r["entity"], r["detector_name"], r["detector_node"]) for r in rows} == {("svc", "detector.soft_vote", "vote")}
     snapshot = {tuple(i["incident"]["entities"]): [(ev["detector"], ev["detector_node"], list(ev["voted_by"]))
                                                    for ev in i["incident"]["events"]] for i in crud.find(IncidentRow)}
-    assert snapshot == {("svc",): [("detector.ensemble", "vote", ["m", "z"])],
+    assert snapshot == {("svc",): [("detector.soft_vote", "vote", ["m", "z"])],
                         ("tool-9",): [("external:fdc", "", [])]}
 
 

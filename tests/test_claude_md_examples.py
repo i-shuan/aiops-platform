@@ -1,6 +1,6 @@
 """CLAUDE.md 第 3 節的範例必須是真的、跑得起來的程式碼（以前的範例用了不存在的欄位，照抄會直接失敗）。
 
-- 範例一必須跟 aiops/stages/detectors/mad.py 逐字相同：改了偵測器沒改文件、或改了文件沒改程式，這裡就會紅。
+- 範例一必須跟 aiops/stages/detectors/residual_shift.py 逐字相同：改了偵測器沒改文件、或改了文件沒改程式，這裡就會紅。
 - 範例二在乾淨的子行程裡執行：它會往 LLM 供應商註冊表登記 echo，放在子行程才不會污染這個測試行程的註冊表。
 """
 import re
@@ -21,8 +21,8 @@ def test_section3_has_exactly_the_two_examples():
     assert len(_section3_blocks()) == 2
 
 
-def test_example_one_is_the_real_mad_detector_verbatim():
-    real = (ROOT / "aiops" / "stages" / "detectors" / "mad.py").read_text(encoding="utf-8")
+def test_example_one_is_the_real_residual_shift_detector_verbatim():
+    real = (ROOT / "aiops" / "stages" / "detectors" / "residual_shift.py").read_text(encoding="utf-8")
     assert _section3_blocks()[0].strip() == real.strip()
 
 
