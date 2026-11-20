@@ -16,7 +16,9 @@
   p.sub { margin:0 0 18px; color:var(--mute); font-size:14px; }
   label, legend { display:block; font-weight:600; margin:16px 0 6px; padding:0; }
   .hint { font-weight:400; color:var(--mute); font-size:13px; }
-  input[type=text], input[type=password], textarea { width:100%; padding:9px 10px; font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; }
+  details { margin-top:18px; border:1px solid var(--line); border-radius:6px; padding:8px 12px 12px; }
+  summary { font-weight:600; cursor:pointer; }
+  input[type=text], input[type=password], textarea, select { width:100%; padding:9px 10px; font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; }
   textarea { min-height:84px; resize:vertical; }
   fieldset { border:0; margin:0; padding:0; }
   .choice { display:flex; gap:8px; align-items:flex-start; padding:8px 10px; border:1px solid var(--line); border-radius:6px; margin-bottom:6px; font-weight:400; cursor:pointer; }
@@ -55,6 +57,45 @@
       <input type="text" id="root_cause" name="root_cause" maxlength="1000" autocomplete="off">
     </div>
 
+    <details id="review">
+      <summary>分項覆核 <span class="hint">（選填：平台做的四件事各自對不對；沒看的留「沒看」）</span></summary>
+      <label for="rv_grouping">收斂 <span class="hint">— 這張卡裡的告警該不該在一起</span></label>
+      <select id="rv_grouping" data-aspect="grouping">
+        <option value="">沒看</option><option value="ok">對</option>
+        <option value="merged_wrong">併錯了：有不相干的告警被併進來</option>
+        <option value="split_wrong">拆錯了：同一件事被開成好幾張卡</option>
+      </select>
+      <div id="rv_unrelated_box" hidden>
+        <label for="rv_unrelated">哪些不該併進來 <span class="hint">（選填；實體名稱，用逗號分隔）</span></label>
+        <input type="text" id="rv_unrelated" autocomplete="off">
+      </div>
+      <div id="rv_same_as_box" hidden>
+        <label for="rv_same_as">其實是同一件事的其他事件群 <span class="hint">（選填；事件群編號 inc-…，用逗號分隔）</span></label>
+        <input type="text" id="rv_same_as" autocomplete="off">
+      </div>
+      <label for="rv_rca">根因分析 <span class="hint">— RCA 報告指的根因</span></label>
+      <select id="rv_rca" data-aspect="rca">
+        <option value="">沒看</option><option value="ok">對</option>
+        <option value="wrong_root">指錯了</option>
+        <option value="missed_root">平台說無法判定，但其實找得到</option>
+      </select>
+      <div id="rv_root_box" hidden>
+        <label for="rv_root">實際的根因是哪個服務或設備 <span class="hint">（選填）</span></label>
+        <input type="text" id="rv_root" maxlength="256" autocomplete="off">
+      </div>
+      <label for="rv_resolve">結案時間</label>
+      <select id="rv_resolve" data-aspect="resolve">
+        <option value="">沒看</option><option value="ok">對</option>
+        <option value="early">太早：故障還在，卡就結案了</option>
+      </select>
+      <label for="rv_severity">嚴重度</label>
+      <select id="rv_severity" data-aspect="severity">
+        <option value="">沒看</option><option value="ok">對</option>
+        <option value="too_high">給太高</option>
+        <option value="too_low">給太低</option>
+      </select>
+    </details>
+
     <label for="author">你的名字或帳號</label>
     <input type="text" id="author" name="author" autocomplete="username" required>
 
@@ -84,7 +125,28 @@
   form.addEventListener("change", function () {
     var v = form.elements.verdict.value;
     tp.hidden = v !== "true_positive";
+    field("rv_unrelated_box").hidden = field("rv_grouping").value !== "merged_wrong";
+    field("rv_same_as_box").hidden = field("rv_grouping").value !== "split_wrong";
+    field("rv_root_box").hidden = ["wrong_root", "missed_root"].indexOf(field("rv_rca").value) < 0;
   });
+
+  function names(id) {
+    return field(id).value.split(/[,，、\s]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+
+  // 分項覆核：只送有選的項目；細節只在對應的判定下才送（跟 API 的檢查一致）
+  function review() {
+    var out = {};
+    Array.prototype.forEach.call(document.querySelectorAll("select[data-aspect]"), function (el) {
+      if (el.value) { out[el.dataset.aspect] = el.value; }
+    });
+    if (!Object.keys(out).length) { return null; }
+    if (out.grouping === "merged_wrong" && names("rv_unrelated").length) { out.unrelated_entities = names("rv_unrelated"); }
+    if (out.grouping === "split_wrong" && names("rv_same_as").length) { out.same_as = names("rv_same_as"); }
+    var root = field("rv_root").value.trim();
+    if ((out.rca === "wrong_root" || out.rca === "missed_root") && root) { out.actual_root_entity = root; }
+    return out;
+  }
 
   function show(ok, message) {
     result.className = ok ? "ok" : "bad";
@@ -119,6 +181,8 @@
       if (resolution) { payload.resolution = resolution; }
       if (rootCause) { payload.root_cause = rootCause; }
     }
+    var reviewed = review();
+    if (reviewed) { payload.review = reviewed; }
     try {
       sessionStorage.setItem("aiops_token", token);
       sessionStorage.setItem("aiops_author", payload.author);

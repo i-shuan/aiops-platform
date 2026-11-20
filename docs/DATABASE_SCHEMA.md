@@ -148,8 +148,9 @@
 | author | VARCHAR(128) | 否 | |
 | proposal_id | INTEGER | 是 | 由這筆回饋產生的提案 |
 | created_at | DateTime | 否 | |
+| review | JSON（PostgreSQL 跑過 0013 是 JSONB） | 否 | 分項覆核，預設 `{}`。有填的項目：`grouping`（`ok`／`merged_wrong`／`split_wrong`）、`rca`（`ok`／`wrong_root`／`missed_root`）、`resolve`（`ok`／`early`）、`severity`（`ok`／`too_high`／`too_low`），細節 `unrelated_entities`、`same_as`、`actual_root_entity`；另有 `platform`：送出當下平台對這張卡的說法（`severity`、`status`、`entities`、`rca_conclusion_type`、`rca_root_entity`）。沒看的項目不存鍵 |
 
-寫入規則（`FeedbackSubmit` 驗證）：沒有 `incident_uid` 時只能是 `missed`，且要給 `pipeline`、`entity`、`time_range`；`resolution` 只能寫在 `true_positive`；寫了 `root_cause` 就要寫 `resolution`；`context` 只能寫在針對事件群、確認為真的回饋上。
+寫入規則（`FeedbackSubmit` 驗證）：沒有 `incident_uid` 時只能是 `missed`，且要給 `pipeline`、`entity`、`time_range`；`resolution` 只能寫在 `true_positive`；寫了 `root_cause` 就要寫 `resolution`；`context` 只能寫在針對事件群、確認為真的回饋上；`review` 只能寫在針對事件群的回饋上，至少填一項，細節欄位只能跟對應的判定一起給（`ReviewIn`）。`incidents.rca_root_entity`（VARCHAR(256)，預設 `''`）記最近一次 RCA 的第一候選，覆核時抄進 `review.platform`。
 
 ## 9. `incident_knowledge`：歷史事故經驗庫（黃金事故）
 
