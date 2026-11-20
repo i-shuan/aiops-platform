@@ -82,7 +82,7 @@ RCA 管線
 **各算子簡介**
 
 第 1 層　抓資料
-- `ingestion.fetch`：從 Elasticsearch／Prometheus 抓每條序列這一輪的時序；基準線還沒有或到期時才多抓訓練窗。
+- `ingestion.fetch`：從 Prometheus／VictoriaMetrics 抓每條序列這一輪的時序（2026-11-20 起平台不直連 Elasticsearch，ES 指標查詢已移除）；基準線還沒有或到期時才多抓訓練窗。
 
 第 2 層　偵測（每個算子各自給分數，不互相依賴）
 - `detector.hourly_baseline`：週期票。拿「週幾 × 幾點」的歷史平均與標準差當基準，看現在偏離多少。
@@ -159,7 +159,7 @@ RCA 管線
 - 圖可以有環，不是 DAG。
 - **圖分環境**（`feat/environment-scope`）：workflow YAML 選填 `environment`（`[A-Za-z0-9_.-]`，最長 64；預設空字串 = 不分環境，跟以前一模一樣）。`service_edges`、`service_async_edges`、`lot_paths` 都有 `environment` 欄位，唯一鍵含它（`uq_service_edges_env_pair`、`uq_service_async_edges_env_pair`、`uq_lot_paths_env_lot`，`migrations/postgres/0009`）。偵測時 `storage/hooks` 只載入這條管線環境的邊；事件群快照記下 `environment`，RCA 照事件群的環境載圖（快照沒存拓撲時才從表載；舊快照沒有這個鍵就沿用 RCA 管線自己的，等於舊行為）。`admin.topology_refresh`、`admin.merge_traces`、`admin.merge_lot_paths` 的請求都接受 `environment`，寫入與 prune 只碰那個環境。`''` 是「不分環境」的那一份，**不是**「全部環境」。
 - **實體命名規則**：實體維持 `service.name`（工廠是機台編號），**不把環境或命名空間塞進名稱**。塞進去的話改環境名就斷基準線（基準線、調參、異常血緣都以實體名稱為鍵），跨環境比較也對不起來。環境只寫在管線的 `environment`；一個環境開一條管線（異常點、基準線、事件群、調參本來就以管線名稱分開）。載入期檢查：管線設了 `environment` 時，target 的 `entity` 以非英數字元切段後有一段等於環境名（`cart-prod`、`prod.cart`）就 `WorkflowError`；沒寫 `entity` 的 target 名稱是查詢字串（本來就可能含 `env="prod"`），不檢查。
-- **撈 span／日誌依環境過濾**：管線設了 `environment` 時，`admin.topology_refresh` 與 RCA 現抓（`ingestion.incident_traces`／`incident_logs`，用事件群自己的環境）只撈那個環境的資料：ES 查詢帶 term 過濾（Elastic APM 是 `service.environment`，OTel 是 `resource.attributes.deployment.environment.name`，舊版 `deployment.environment` 也認），回來再用 `sources/base.in_environment` 濾一次。沒標環境的資料不算進任何有名字的環境；資料源完全不提供環境資訊（回傳沒有 `environment` 鍵）時不過濾。訊息佇列跨時窗補撈（`fetch_linked_spans`）依 trace ID 撈，不另外過濾。
+- **撈 span／日誌依環境過濾**：管線設了 `environment` 時，`admin.topology_refresh` 與 RCA 現抓（`ingestion.incident_traces`／`incident_logs`，用事件群自己的環境）只撈那個環境的資料：送給 Grafana 資料源的 ES 查詢帶 term 過濾（Elastic APM 是 `service.environment`，OTel 是 `resource.attributes.deployment.environment.name`，舊版 `deployment.environment` 也認），回來再用 `sources/base.in_environment` 濾一次。沒標環境的資料不算進任何有名字的環境；資料源完全不提供環境資訊（回傳沒有 `environment` 鍵）時不過濾。訊息佇列跨時窗補撈（`fetch_linked_spans`）依 trace ID 撈，不另外過濾。
 - **還沒做的（都是行為變更，要等混沌回歸）**：佇列邊進傳播圖、`SUPPLY`（物理供應）與 `HOSTED_ON`（服務部署在哪台主機）兩種邊、`lot_paths` 的清理。
 
 ### 1.2 各階段功能與新舊差異
@@ -224,6 +224,8 @@ ctx.rca_facts / rca_evidence / rca_status("ok"|"undetermined") / rca_undetermine
 
 ### 2.2 混沌場景（`scripts/chaos/`，世界模擬器＋記憶體 ES 替身＋真實 PostgreSQL 16＋平台真實管線）
 
+> 2026-11-20 註：平台改成只經 Grafana 讀 trace／日誌、不直連 Elasticsearch。場景的接線已改（trace／日誌：假 Grafana 包在 ES 替身外面，平台送真的 `_msearch`；指標：模擬器自己的資料源 `chaos_metrics`），**改完之後沒有重跑任何場景**，以下數字都是改之前量的。場景 9 的「sum 聚合補零的空桶」斷言因為 `doc_counts` 移除，已標成已知死區。
+
 以下逐場景數字是 **main（偵測還是 hourly＋mad＋quantile_drift 多數決）** 量的：**1–13 共 21 列，199／200 斷言**（20 列全過；12e 為已知死區）。
 it_otel 改成 R+SNR 之後，在 `e0ccc5e` 上實跑過一次 1–13＋24：**1–12 不變、13c 從 7／7 掉到 0／2**——ingress-gw 的延遲序列
 在 11:43（注入 12:00 前）軟投票三票各自部分越線而告警，拓撲收斂把 payment-svc 併進這張提早開的卡，注入的突波被吸收進去，
@@ -281,8 +283,8 @@ aiops/
 │  └─ types.py／topology.py／mq.py／requests.py／signature.py   # 事件、拓撲、訊息佇列、請求與簽章型別
 │
 ├─ sources/                          外部資料源適配（只輸出 DataFrame）
-│  ├─ elasticsearch.py／prometheus.py／mock.py   # 各資料源；base.py 為共同介面，_http.py 重試 2 次
-│  └─ query/                         # 查詢語法解析：elasticsearch.py（含 divide_by）、promql.py、trace.py、window.py
+│  ├─ grafana.py／prometheus.py／mock.py   # 各資料源；base.py 為共同介面，_http.py 重試 2 次。grafana.py：trace／日誌經 Grafana 資料源 proxy 讀 ES（es_models.py 是文件形狀）
+│  └─ query/                         # 查詢語法解析：promql.py、trace.py、window.py
 │
 ├─ stages/                           管線算子，依執行順序分段
 │  ├─ ingestion/fetch.py             # ingestion.fetch／incident_series／incident_traces／incident_logs
@@ -333,13 +335,14 @@ aiops/
 
 scripts/chaos/                       # 混沌驗收（只讀平台、不改平台）
 ├─ run.py                            # 跑場景：`run.py 1 2 3 --out f.md`；`--rca {legacy,llm}`、`--compare`、`--llm <模式>`
-├─ world.py／es.py／harness.py       # 世界模擬器、ES 替身、PG 與斷言 harness（`CHAOS_PG_URL` 可換資料庫）
+├─ world.py／es.py／harness.py       # 世界模擬器、ES 替身（外面包假 Grafana）、PG 與斷言 harness（`CHAOS_PG_URL` 可換資料庫）
+├─ metric_query.py                   # 模擬器自己的指標查詢語法（原本平台的 ES 指標查詢，含 divide_by；平台已不使用）
 ├─ scen_detect_rca.py／scen_learning.py／scen_mq.py／scen_traffic_amp.py   # 場景 2–5,11／6–10／12／13
 ├─ scen_llm_outage.py                # 場景 24：LLM 全掛（對 rca_report_llm）
 └─ scripted_llm.py                   # 假 LLM：faithful／down／slow／garbage／hallucinate＋判斷節點 judge_faithful／judge_hallucinate
 
-scripts/backtest/                    # 偵測回測（ES 唯讀或離線合成）
-└─ residual_ensemble.py／variants.py／es_series.py   # 偵測回放（任何節點越線就算告警；移除軟投票後還沒對 ES 重跑）
+scripts/backtest/                    # 偵測回測（既有的 CSV 快取或離線合成；直接從 ES 撈序列的 es_series.py 已刪除）
+└─ residual_ensemble.py／variants.py   # 偵測回放（任何節點越線就算告警；移除軟投票後還沒對 ES 重跑）
 
 tests/                               # 驗證
 ├─ test_architecture.py              # 24 條架構防線；【新】+2 條：告警路徑不依賴 LLM、RCA 路徑 LLM 失敗降級

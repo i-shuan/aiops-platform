@@ -249,7 +249,8 @@ def test_silence_window_must_be_ordered(now):
 
 
 def test_sources_check_without_any_configured_source_is_ok(monkeypatch):
-    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_ES_URL"):
+    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_GRAFANA_URL"):
         monkeypatch.delenv(var, raising=False)
     out = run("admin_sources_check")
-    assert out["ok"] is True and {s["source_type"] for s in out["sources"]} >= {"mock", "prometheus", "elasticsearch"}
+    assert out["ok"] is True and {s["source_type"] for s in out["sources"]} >= {"mock", "prometheus", "grafana"}
+    assert "elasticsearch" not in {s["source_type"] for s in out["sources"]}  # 平台不再直連 Elasticsearch

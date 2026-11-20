@@ -14,11 +14,12 @@ from aiops.engine.errors import BadRequest, InfrastructureError
 from aiops.engine.requests import SpanIn, TopologyRefresh, TraceMerge
 from aiops.interfaces.runner import build_pipeline, run, run_context
 from aiops.sources.base import BaseDataSourceSpec
-from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.grafana import GrafanaSpec
 from aiops.sources.mock import MOCK_TRACE_CHAIN
 from aiops.storage import crud
 from aiops.storage.models import ServiceEdgeRow
 from aiops.storage.repository import ServiceEdges
+from grafana_fake import clear_grafana_env
 
 NOW = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
 
@@ -141,17 +142,17 @@ def test_mock_source_truncates_at_max_spans():
 
 
 def test_unconfigured_source_is_skipped_without_touching_edges(monkeypatch):
-    monkeypatch.delenv("AIOPS_ES_URL", raising=False)
+    clear_grafana_env(monkeypatch)
     ServiceEdges.add_calls({("a", "b"): 1}, seen_at=NOW - timedelta(days=30))
-    out = run("admin_topology_refresh", request=TopologyRefresh(), now=NOW)  # 預設 elasticsearch
+    out = run("admin_topology_refresh", request=TopologyRefresh(), now=NOW)  # 預設 grafana
     assert "沒有設定" in out["skipped"] and out["edges_seen"] == 0 and out["edges_pruned"] == 0
     assert set(_edges()) == {("a", "b")}  # 沒撈就不 prune
 
 
 def test_no_request_uses_defaults_for_scheduled_run_once(monkeypatch):
-    monkeypatch.delenv("AIOPS_ES_URL", raising=False)
+    clear_grafana_env(monkeypatch)
     ctx = run_context("admin_topology_refresh", now=NOW, strict=False)
-    assert ctx.result["source_type"] == "elasticsearch" and "skipped" in ctx.result
+    assert ctx.result["source_type"] == "grafana" and "skipped" in ctx.result
     assert ctx.result["window"]["start"] == (NOW - timedelta(minutes=60)).isoformat()
 
 
@@ -166,16 +167,16 @@ def test_unreachable_source_raises_infrastructure_error(monkeypatch):
 
     client = httpx.Client(transport=httpx.MockTransport(refuse))
 
-    class _Down(ElasticsearchSpec):
+    class _Down(GrafanaSpec):
         @classmethod
         def from_env(cls):
-            return cls("http://es-down", api_key="k", client=client)
+            return cls("http://grafana-down", "token", {"traces": "traces-uid"}, client=client)
 
         @classmethod
         def configured(cls):
             return True
 
-    monkeypatch.setitem(sources._SPECS, "elasticsearch", _Down)
+    monkeypatch.setitem(sources._SPECS, "grafana", _Down)
     ServiceEdges.add_calls({("a", "b"): 1}, seen_at=NOW - timedelta(days=30))
     with pytest.raises(InfrastructureError):
         run("admin_topology_refresh", request=TopologyRefresh(), now=NOW)

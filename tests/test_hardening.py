@@ -11,7 +11,7 @@ from aiops.engine.pipeline import NodeSpec, Pipeline, Workflow, load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, Incident
 from aiops.interfaces.runner import workflow_path
-from aiops.sources.elasticsearch import _log
+from aiops.sources.grafana import _log
 from aiops.stages.rca.sections.log_patterns import rank_patterns, template_of
 from aiops.storage.hooks import StorageHooks
 from aiops.storage.repository import Feedbacks, Incidents, Silences

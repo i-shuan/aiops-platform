@@ -11,7 +11,8 @@ import pytest
 from aiops.engine.context import PipelineContext, SpanRecord
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import AnomalyEvent, Incident
-from aiops.sources.elasticsearch import ElasticsearchSpec, _span
+from aiops.sources.grafana import _span
+from grafana_fake import grafana_spec
 from aiops.stages.ingestion import fetch
 from aiops.stages.rca.spans import is_resource_leaf, resource_kinds, sample_trace, sample_trace_reason, window_stats
 
@@ -191,7 +192,7 @@ class _SparseES:
 
 
 def _use(monkeypatch, fake):
-    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spec = grafana_spec(fake.handler)[0]
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
     monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
 

@@ -1,4 +1,4 @@
-"""Elasticsearch 裡 trace／日誌的「資料模型設定檔（profile）」：同一套 RCA，接 Elastic APM 或 OTel Collector 寫進來的文件。
+"""Elasticsearch 裡 trace／日誌的「資料模型設定檔（profile）」（平台經 Grafana 資料源 proxy 讀，sources/grafana.py；不直連 ES）：同一套 RCA，接 Elastic APM 或 OTel Collector 寫進來的文件。
 
 每個 profile 決定四件事：預設索引、查詢要用的欄位（服務過濾、trace.id、排序、_source）、怎麼把一筆文件解析成
 fetch_spans／fetch_logs 的標準 dict（下游 SpanRecord／LogRecord 不變），以及日誌要加的過濾（OTel 的日誌所有等級混在一起）。
@@ -8,7 +8,7 @@ fetch_spans／fetch_logs 的標準 dict（下游 SpanRecord／LogRecord 不變�
 欄位覆蓋：已核准的欄位對照（ctx.field_maps[source_type]，來源欄 -> 標準欄）裡，標準欄是 span.*／log.* 的那幾條
 會蓋過 profile 的預設來源欄（STANDARD_FIELDS 是可以蓋的清單）。例如舊版 semconv 的 HTTP 狀態碼：
   {"attributes.http.status_code": "span.status_code"}
-指標用的標準欄（ts、value、entity）不受影響，兩者共用同一份對照。
+指標用的標準欄（ts、value、entity）跟它共用同一份對照，但目前沒有資料源會讀（ES 指標查詢已移除）。
 
 文件形狀的依據是 tests/fixtures/otel_es/（OTel Collector 0.165.0 + ES 8.19.23 實際寫出的文件，README 有實測結論）。
 """

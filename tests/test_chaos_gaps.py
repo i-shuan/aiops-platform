@@ -172,29 +172,15 @@ def test_series_profile_marks_low_coverage_as_insufficient_and_makes_no_proposal
     from aiops.engine.requests import MetricIn, SeriesProfile
     from aiops.storage.repository import Proposals
 
-    df, docs = _series(14, flat_zero_last_days=8)
+    # 以前：Elasticsearch 的 sum 聚合把沒資料的桶補成 0.0，靠另一個文件數查詢（doc_counts）認出空桶，測的是「後 8 天是補零的空桶」。
+    # 平台不再直連 Elasticsearch、doc_counts 已刪除；現在的資料源（Prometheus 系列）沒資料就沒有點，所以改成「中間 8 天沒有點」
+    # （頭 3 天、尾 3 天有資料，覆蓋率一樣是 6／14）。尾端整段沒有點的序列不會走到這個門檻：格子只排到最後一個點，
+    # 那種情況由配對數不足擋下（advice 是「資料不足以算 r(168h)」）
+    df, _ = _series(14)
+    day = (df["ts"] - df["ts"].iloc[0]).dt.days
+    df = df[(day < 3) | (day >= 11)]
     monkeypatch.setattr(P, "fetch_span", lambda ctx, start, end, step, lags=(): df)
-    monkeypatch.setattr(P, "doc_counts", lambda ctx, start, end, step: docs)
-    q = json.dumps({"index": "metrics-apm.transaction.1m-*", "agg": "sum", "value_field": "transaction.duration.summary.value_count",
-                    "filter": {"term": {"service.name": "bill-svc"}}})
-    req = SeriesProfile(metric=MetricIn(source_type="elasticsearch", query=q), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=now)
+    req = SeriesProfile(metric=MetricIn(source_type="prometheus", query="sum(rate(http_requests_total[5m]))"), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=now)
     out = run("admin_series_profile", request=req, targets=req.to_targets(), now=now)
     assert out["proposal"] is None and "資料不足" in out["advice"] and "43%" in out["advice"]
     assert out["profile"]["coverage"] == pytest.approx(6 / 14, abs=1e-3) and not Proposals.with_status("detector.hourly_baseline", "sample_it_otel", "bill-svc", ["advisory"])
-
-
-def test_doc_counts_query_is_the_same_filter_with_count_aggregation(monkeypatch):
-    from aiops.control_plane.learning import profile as P
-
-    seen = {}
-
-    def fake_fetch_span(ctx, start, end, step, lags=()):
-        seen["query"] = json.loads(ctx.target.query)
-        return pd.DataFrame({"ts": pd.date_range(start, end, freq=f"{step}s", tz="UTC"), "value": 1.0})
-
-    monkeypatch.setattr(P, "fetch_span", fake_fetch_span)
-    q = {"index": "metrics-apm.transaction.1m-*", "agg": "sum", "value_field": "x", "filter": {"term": {"service.name": "bill-svc"}}}
-    ctx = PipelineContext(pipeline="sample_it_otel", now=datetime(2026, 11, 8, tzinfo=timezone.utc), target=Target("elasticsearch", json.dumps(q), "bill-svc"))
-    s = P.doc_counts(ctx, datetime(2026, 11, 7, tzinfo=timezone.utc), datetime(2026, 11, 8, tzinfo=timezone.utc), 300)
-    assert seen["query"] == {"index": q["index"], "agg": "count", "filter": q["filter"]} and s is not None and len(s) > 0
-    assert P.doc_counts(PipelineContext(pipeline="p", now=ctx.now, target=Target("mock", "cpu", "e")), ctx.now, ctx.now, 60) is None

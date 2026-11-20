@@ -2,7 +2,7 @@
 
 純函式（engine/mq.py）、根因排序、Runbook 與摘要在 tests/test_rca_messaging.py；這裡測的是「接線」：
 - ingestion.incident_traces 的 follow_messaging：什麼時候補撈、補撈哪一段、補撈失敗怎麼退回
-- ElasticsearchSpec：messaging transaction 文件怎麼讀、fetch_linked_spans 送出什麼查詢
+- GrafanaSpec（後面是 Elasticsearch）：messaging transaction 文件怎麼讀、fetch_linked_spans 送出什麼查詢
 - alert.messaging_link：有方向、時間窗跟著延遲走；跟 alert.absorb_open 的邊界（已知做不到的用 xfail 留著）
 - service_async_edges：admin.topology_refresh 寫入與汰除、StorageHooks 載入、內建 YAML 的節點位置
 """
@@ -23,9 +23,9 @@ from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies, TopologyRe
 from aiops.engine.types import AnomalyEvent, Incident
 from aiops.interfaces.runner import run, workflow_path
 from aiops.sources.base import BaseDataSourceSpec, InvalidQueryError
-from aiops.sources.elasticsearch import ElasticsearchSpec
-from aiops.sources.elasticsearch import _links as es_links
-from aiops.sources.elasticsearch import _span as es_span
+from grafana_fake import grafana_spec
+from aiops.sources.grafana import _links as es_links
+from aiops.sources.grafana import _span as es_span
 from aiops.storage.hooks import StorageHooks
 from aiops.storage.repository import AsyncEdges, ServiceEdges
 
@@ -42,7 +42,7 @@ def at(minutes: float = 0, seconds: float = 0) -> datetime:
 
 
 def sd(trace, sid, parent, svc, ts, **kw) -> dict:
-    """資料源回傳的 span（dict，跟 ElasticsearchSpec._span 同一組鍵）。"""
+    """資料源回傳的 span（dict，跟 sources/grafana._span 同一組鍵）。"""
     return {"trace_id": trace, "span_id": sid, "parent_id": parent, "service": svc, "ts": ts, "duration_ms": 5.0,
             "error": False, **kw}
 
@@ -251,7 +251,7 @@ def test_follow_messaging_params_are_checked_when_the_workflow_loads(params, mes
         OperatorRegistry.create("ingestion.incident_traces", params)
 
 
-# ── ElasticsearchSpec：messaging 文件與 fetch_linked_spans ──
+# ── GrafanaSpec（後面是 Elasticsearch）：messaging 文件與 fetch_linked_spans ──
 
 
 def _txn_doc(**txn) -> dict:
@@ -322,8 +322,12 @@ def _es(pages, status=200):
         hits = [{"_source": d, "sort": [page, i]} for i, d in enumerate(docs)]
         return httpx.Response(200, json={"hits": {"hits": hits}})
 
-    spec = ElasticsearchSpec("http://es", api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    spec, grafana = grafana_spec(handler)
+    seen_grafana.append(grafana)
     return spec, seen
+
+
+seen_grafana: list = []  # 最近一次 _es() 接的假 Grafana（只讀檢查用）；每次 _es() 都往後加，取最後一個
 
 
 def _send_doc(i: int) -> dict:
@@ -338,6 +342,9 @@ def test_es_fetch_linked_spans_queries_by_trace_id_inside_the_window_and_only_re
     spans, truncated = spec.fetch_linked_spans(["t2", "t1", "t1", ""], at(-120), at(5))
     assert [s["span_id"] for s in spans] == ["s1", "s2"] and truncated is False
     assert [(m, p) for m, p, _ in seen] == [("POST", "/traces-apm-*/_search")] * 2  # 第二次是空頁，確認撈完
+    # 只讀：對 Grafana 只送 trace 資料源的 proxy _msearch（以前是直連 ES 的 _search）
+    grafana = seen_grafana[-1]
+    assert grafana.calls == [("POST", "/api/datasources/proxy/uid/traces-uid/_msearch")] * 2 and not grafana.rejected
     first, second = (body for _, _, body in seen)
     assert first["query"] == {"bool": {"filter": [
         {"range": {"@timestamp": {"gte": at(-120).isoformat(), "lte": at(5).isoformat()}}},

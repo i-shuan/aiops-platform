@@ -118,7 +118,7 @@ class TraceMerge(StrictModel):
 class TopologyRefresh(StrictModel):
     """admin.topology_refresh：從 trace 來源撈 [end − lookback_minutes, end] 的 span，把服務呼叫邊沉澱進 service_edges。"""
 
-    source_type: SourceType = "elasticsearch"
+    source_type: SourceType = "grafana"
     lookback_minutes: int = Field(60, gt=0, le=24 * 60)
     max_spans: int = Field(20000, gt=0, le=200000)
     prune_days: int = Field(7, gt=0)  # last_seen 早於「現在 − prune_days」的邊移除

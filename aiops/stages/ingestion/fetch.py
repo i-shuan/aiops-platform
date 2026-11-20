@@ -264,7 +264,7 @@ class IncidentTracesFetch(BaseOperator):
 
     只在跑 RCA 報告時執行，日常偵測不碰 trace。這是旁路佐證，撈不到不該讓整份報告失敗：
     資料源沒設定 -> 略過（記在 audit）；連不上、查詢錯 -> 記進 errors 並略過，報告照出（拓撲就只用既有的）。
-    params: source_type（預設 elasticsearch）、before_minutes（預設 15）、after_minutes（預設 0）、
+    params: source_type（預設 grafana）、before_minutes（預設 15）、after_minutes（預設 0）、
             max_spans（上限，預設 20000，超過就截斷並註記）、only_incident_services（預設 false：撈這段時間所有服務，
             才看得到事件實體跟沒出事的服務之間的關係；true 只撈事件裡的服務，量小但可能漏掉中間的服務）、
             max_before_minutes（預設 0 = 不擴展；設了就是基準窗自適應回溯的上限）、
@@ -293,7 +293,7 @@ class IncidentTracesFetch(BaseOperator):
 
     scope = "batch"
 
-    def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 15, after_minutes: int = 0,
+    def __init__(self, source_type: str = "grafana", before_minutes: int = 15, after_minutes: int = 0,
                  max_spans: int = 20000, only_incident_services: bool = False, max_before_minutes: int = 0,
                  min_entry_spans: int = 20, follow_messaging: bool = False, max_lag_minutes: int = 120,
                  max_linked_traces: int = 200, min_consumer_spans: int = 5, mq_pad_minutes: int = 2):
@@ -481,13 +481,13 @@ class IncidentLogsFetch(BaseOperator):
     事件期間 = [事件開始 - before, 事件結束 + after]；正常期間 = 事件期間開始前 baseline_minutes 分鐘（不重疊）。
     只撈事件裡的服務（日誌量大，撈全部沒意義）。跟 incident_traces 一樣是旁路佐證：
     資料源沒設定 -> 略過；連不上、查詢錯 -> 記進 errors 並略過，報告照出。
-    params: source_type（預設 elasticsearch）、before_minutes（預設 5）、after_minutes（預設 5）、
+    params: source_type（預設 grafana）、before_minutes（預設 5）、after_minutes（預設 5）、
             baseline_minutes（預設 60）、max_logs（每段上限，預設 5000）。
     """
 
     scope = "batch"
 
-    def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 5, after_minutes: int = 5,
+    def __init__(self, source_type: str = "grafana", before_minutes: int = 5, after_minutes: int = 5,
                  baseline_minutes: int = 60, max_logs: int = 5000):
         if min(before_minutes, after_minutes) < 0 or baseline_minutes <= 0 or max_logs <= 0:
             raise ValueError("before／after_minutes 不能小於 0；baseline_minutes、max_logs 必須大於 0")

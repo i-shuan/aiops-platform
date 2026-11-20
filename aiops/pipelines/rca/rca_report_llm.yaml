@@ -4,14 +4,14 @@ nodes:
   # 撈取三段與證據層：跟 rca_report.yaml 吃同一份原始資料（trace、日誌）
   - name: fetch_traces
     operator: ingestion.incident_traces
-    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
+    params: {source_type: grafana, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
              follow_messaging: true, max_lag_minutes: 120}
   - name: build_topology
     operator: rca.build_dynamic_topology
     params: {mode: merge, min_calls: 1}
   - name: fetch_logs
     operator: ingestion.incident_logs
-    params: {source_type: elasticsearch, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
+    params: {source_type: grafana, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
   - name: facts
     operator: rca.facts
   - name: extract_evidence

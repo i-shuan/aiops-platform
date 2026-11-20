@@ -1,5 +1,9 @@
 # OTel 端到端驗證結果（2026-11-12）
 
+> **2026-11-20 註**：歷史紀錄。當時平台直連拋棄式 Elasticsearch（`AIOPS_ES_URL`）。平台之後改成只經 Grafana 讀 trace／日誌，
+> ES 指標查詢已移除，所以跑這份驗證的 `run_e2e.py` 與 `otel_detect.yaml`（ES 指標 target）已刪除，下面的結果無法照原樣重現。
+> `gen_incident.py`（經 Collector 灌資料）還在。
+
 環境：本機拋棄式 Elasticsearch 8.19.23 ＋ otel-collector-contrib 0.165.0（elasticsearch exporter 預設設定＝otel mapping），
 `AIOPS_ES_DATA_MODEL=otel`、暫存 SQLite、`AIOPS_NOTIFIER=log`、LLM `noop`。沒有碰叢集的 es-test。
 

@@ -17,7 +17,7 @@
 | **算子註冊** | `engine/registry.py` | 算子註冊中心 (`OperatorRegistry`)，負責動態發現與驗證 | — |
 | **管線算子** | `stages/*` | 依執行順序分段：ingestion → detectors → grouping → scoring → suppression → rca → enrichment（LLM）→ notification | 嚴禁 import 具體資料表 ORM 與 `storage`；嚴禁碰外網（`enrichment/`、`notification/notifiers.py`、`notification/transport.py` 除外；只有 `ingestion/fetch.py` 能用 `sources`） |
 | **控制面** | `control_plane/*` | 手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） | 唯一可以 import `storage` 的算子（目前都只透過 `storage/repository.py`）；也可以連外 |
-| **外部源適配** | `sources/*`（查詢語法解析在 `sources/query/`） | 外部資料庫語法轉換與連線（Prometheus, ES, OTel），輸出 DataFrame | 嚴禁 import `models`、`stages`、`control_plane` |
+| **外部源適配** | `sources/*`（查詢語法解析在 `sources/query/`） | 外部資料源的語法轉換與連線（Prometheus／VictoriaMetrics；trace 與日誌經 Grafana：`sources/grafana.py`），輸出 DataFrame | 嚴禁 import `models`、`stages`、`control_plane`；**嚴禁直連 Elasticsearch**（平台只持有 Grafana 的網址與 token，經資料源 proxy 的 `_msearch` 只讀；ES 文件形狀在 `sources/es_models.py`） |
 | **持久化層** | `storage/*` | 資料庫模型定義（SQLAlchemy）與 Repository | 嚴禁業務判斷邏輯 |
 | **管線 YAML** | `pipelines/*` | `detection/`（偵測告警）、`rca/`（RCA 診斷）、`control/`（`admin_*` 手動動作）；以名稱載入，名稱全域唯一 | 嚴禁在 YAML 以外的地方寫死流程 |
 | **排程入口** | `interfaces/cli/*` | 呼叫 Pipeline 執行（支援 K8s CronJob 或定時 Loop） | 嚴禁直接在排程中操作底層運算 |
@@ -237,9 +237,9 @@ description: "工廠履歷時序檢測流程 (自由抽換偵測器與關閉 LLM
 nodes:
   # 1. 抓取指標
   - name: fetch_step
-    operator: ingestion.elasticsearch
+    operator: ingestion.fetch
     params:
-      index: "factory-metrics-*"
+      lookback_minutes: 60
 
   # 2. 異常檢測 (隨時切換 detector.residual_shift / detector.residual_chronic / detector.sparse_count)
   - name: detect_step
@@ -282,7 +282,7 @@ nodes:
 **寫錯就在載入期報錯**（`tests/test_load_time_validation.py`）：
  * 值不合理（`threshold: -3`、`window_minutes: 0`、`cooldown_minutes: -5`）由算子的 `__init__` 檢查，用 `engine/params` 的 `number`／`positive`／`whole` 丟 `ValueError`；`OperatorRegistry.create` 轉成 `WorkflowParamError`（是 `WorkflowError` 也是 `ValueError`）。新算子的窗口、冷卻、門檻、權重參數一律在 `__init__` 檢查，不准拖到 `execute`。
  * 偵測器的 `tunable` 範圍由基底 `DetectorOperator.__init__` 的 `check_ranges()` 檢查（節點 YAML、target `overrides`、執行期合併後的參數都會經過）；需要額外檢查就覆寫 `check_ranges`，「合併後才知道齊不齊」的檢查（參數要等調參與 overrides 都疊完才齊的那種）才放 `validate_params`。
- * 欄位打錯（`param:`、`optionl:`、`windw_days:`、ES 查詢的 `fliter`）：`aiops/engine`、`aiops/sources` 的 Pydantic 模型一律繼承 `engine/pipeline.StrictModel`（或自己設 `extra="forbid"`），測試會掃。
+ * 欄位打錯（`param:`、`optionl:`、`windw_days:`）：`aiops/engine`、`aiops/sources` 的 Pydantic 模型一律繼承 `engine/pipeline.StrictModel`（或自己設 `extra="forbid"`），測試會掃。
 
 **並發安全**：偵測器基準線（`detector_models`）與現行參數（`active_detector_configs`）用 `version` 欄位做樂觀鎖，寫入必須帶讀取當時的版本；版本已被別人推進就不覆蓋（基準線記在 audit，調參核准回 409 並把提案標成 stale）。
 
@@ -332,7 +332,7 @@ nodes:
 | **自研平台**（`aiops/`，映像檔 `aiops-platform`） | 程式碼、映像檔、`deploy/helm/aiops-platform` | — |
 | **Grafana**（`deploy/helm/aiops-grafana`） | chart 的 `files/`、templates、values | 嚴禁改官方映像檔、自製或 fork 外掛、進 pod 手動改設定；嚴禁放告警規則、Contact Point、業務邏輯（只顯示） |
 | **Alertmanager**（`deploy/helm/aiops-alertmanager`） | chart 的 values（路由、receiver） | 嚴禁改官方映像檔 |
-| **Elasticsearch**（開發叢集 `es-test`） | 這個 repo 沒有它的 chart；要調整就先把 chart 找回來或整理進 `deploy/helm/` 再改 | 嚴禁改映像檔；平台與 Grafana 對它**只讀**（`tests/test_architecture.py`），寫入合成資料只能由人跑 `scripts/synth_generator/es_writer` |
+| **Elasticsearch**（開發叢集 `es-test`） | 這個 repo 沒有它的 chart；要調整就先把 chart 找回來或整理進 `deploy/helm/` 再改 | 嚴禁改映像檔；**平台完全不連它**（不准出現 ES 的網址、金鑰或直連的程式），要讀就經 Grafana 的資料源 proxy、只讀（`aiops/sources/grafana.py`，`tests/test_grafana_source.py`）；Grafana 對它只讀；repo 裡沒有任何寫入 ES 的程式 |
 
  1. **需求先問「chart 做不做得到」**：做得到就只改 chart；做不到（要新頁面、新 API、新資料）就做在自研平台，周邊元件只加設定或連結。不准為了一個功能去換周邊元件的映像檔。
  2. **所有改動都要回到 repo**：不准只在叢集上 `kubectl edit`／在 Grafana UI 手改而沒有對應的 chart 變更；部署一律 `helm upgrade`。
@@ -365,7 +365,7 @@ nodes:
 
 2. **驗證優先於單元測試 (Real Data Over Unit Tests)**：
    - 「合成資料測試全過」不等於演算法完成。
-   - 任何演算法（基準線、RCA、同儕）實作完成後，**必須拿現存的真實資料（ES/Prometheus）進行回放對比驗收**。
+   - 任何演算法（基準線、RCA、同儕）實作完成後，**必須拿現存的真實資料（Prometheus／VictoriaMetrics，trace 與日誌經 Grafana）進行回放對比驗收**。
    - 提交報告時，**禁止只回報「通過 N 個測試」**，必須直接貼出「真實指標回放數據、誤報數、檢出率、根因判斷結果」。
 
 3. **禁止防衛性推拖 (Direct Action Only)**：

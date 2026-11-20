@@ -15,7 +15,6 @@ from aiops.engine.errors import BadRequest, WorkflowError
 from aiops.engine.pipeline import NodeSpec, PeerGroupSpec, PeerSpec, Pipeline, TargetSpec, Workflow, load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.interfaces.runner import WORKFLOW_DIR, build_pipeline
-from aiops.sources.query.elasticsearch import EsMetricQuery, parse_es_query
 from aiops.stages.detectors.base import DetectorOperator
 
 
@@ -177,7 +176,7 @@ def test_unknown_fields_in_workflow_yaml_fail_at_load(tmp_path, body, field):
         load_workflow(_yaml(tmp_path, body))
 
 
-@pytest.mark.parametrize("model", [Workflow, NodeSpec, TargetSpec, PeerSpec, PeerGroupSpec, EsMetricQuery])
+@pytest.mark.parametrize("model", [Workflow, NodeSpec, TargetSpec, PeerSpec, PeerGroupSpec])
 def test_workflow_and_query_models_forbid_unknown_fields(model):
     assert model.model_config.get("extra") == "forbid"
 
@@ -229,11 +228,7 @@ def test_api_rejects_a_bad_override_value_with_400_not_500(client):
     assert "threshold=-3" in res.text
 
 
-def test_typo_in_elasticsearch_query_is_an_error_not_a_silently_wider_query():
-    """`fliter` 被丟掉 = 沒有過濾條件 = 整個 index 的平均：數字照出、沒人發現。"""
-    with pytest.raises(ValueError, match="fliter"):
-        parse_es_query('{"index": "metrics-*", "value_field": "v", "fliter": {"term": {"service.name": "cart-api"}}}')
-    assert parse_es_query('{"index": "metrics-*", "value_field": "v", "filter": {"term": {"a": "b"}}}').filter
+
 
 
 # ── 啟動期：出貨的 workflow 全部建得起來；直接 create 的錯誤型別 ───────────────────────────
@@ -252,4 +247,3 @@ def test_param_errors_are_workflow_errors_and_still_value_errors():
         OperatorRegistry.create("alert.suppress_dedup", {"cooldown_minutes": -30})
     assert isinstance(e.value, ValueError) and isinstance(e.value, BadRequest)
     assert e.value.status_code == 400
-

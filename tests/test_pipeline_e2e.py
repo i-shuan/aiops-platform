@@ -12,7 +12,7 @@ from aiops.engine.requests import (
     SilenceCreate,
     TraceMerge,
 )
-from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.grafana import GrafanaSpec
 from aiops.interfaces.runner import run, run_context
 from aiops.storage.repository import Anomalies, DetectorModels, Incidents, Notifications
 
@@ -157,61 +157,68 @@ def test_external_anomalies_record_which_source_judged_them(now, sent):
 
 
 # ── 接線 1：欄位對照 ──
+# 以前這三個測試驗的是指標查詢的 ts／value／entity 對照（Elasticsearch 的 date_histogram 查詢）。平台不再直連 Elasticsearch、
+# 那個查詢已刪除，ts／value／entity 目前沒有任何資料源會讀；改驗還有人讀的那一半：span.*／log.* 對照經 RCA 送到 Grafana 資料源的查詢。
 
 
 @pytest.fixture
-def es_bodies(monkeypatch, now):
-    seen: list[dict] = []
+def grafana_bodies(monkeypatch):
+    """rca_report 的 incident_traces／incident_logs 接到假 Grafana；回傳 {索引: [查詢 body, ...]}（後面的假 ES 一律回空）。"""
+    from grafana_fake import grafana_spec
+
+    seen: dict[str, list[dict]] = {}
 
     def handler(req):
-        seen.append(json.loads(req.content))
-        buckets = [{"key": int((now - timedelta(minutes=59 - i)).timestamp() * 1000), "doc_count": 1,
-                    "v": {"values": {"95.0": 900.0 if i == 30 else 100.0 + i % 3}}} for i in range(60)]
-        return httpx.Response(200, json={"aggregations": {"series": {"buckets": buckets}}})
+        seen.setdefault(req.url.path.split("/")[1], []).append(json.loads(req.content))
+        return httpx.Response(200, json={"hits": {"total": {"value": 0}, "hits": []}})
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(ElasticsearchSpec, "from_env", classmethod(lambda cls: cls("http://es", client=client)))
+    spec, _ = grafana_spec(handler)
+    monkeypatch.setattr(GrafanaSpec, "from_env", classmethod(lambda cls: spec))
+    monkeypatch.setattr(GrafanaSpec, "configured", classmethod(lambda cls: True))
     return seen
 
 
-ES_TARGET = {"source_type": "elasticsearch", "query": json.dumps({"index": "traces-apm-*", "agg": "p95", "entity": "cart"}),
-             "entity": "cart"}
-
-
 def _approve(fields):
-    mid = run("admin_mapping_submit", request=MappingSubmit(source_type="elasticsearch", fields=fields,
+    mid = run("admin_mapping_submit", request=MappingSubmit(source_type="grafana", fields=fields,
                                                             submitter="amy"))["mapping"]["id"]
     run("admin_mapping_approve", request=MappingApprove(mapping_id=mid, approver="bob"))
 
 
-def test_approved_mapping_reaches_the_es_query(now, es_bodies):
-    from aiops.engine.pipeline import TargetSpec
+def _rca_of_an_external_incident(now):
+    """使用者自己的告警推進來的事件群（異常事件沒有資料源）-> rca_report。"""
+    from aiops.engine.types import AnomalyEvent, Incident
 
-    _approve({"@timestamp": "ts", "transaction.duration.us": "value", "service.name": "entity"})
-    ctx = _go(now, targets=[TargetSpec(**ES_TARGET)])
-    assert ctx.errors == [] and ctx.anomalies and ctx.anomalies[0].entity == "cart"
-    body = es_bodies[-1]
-    assert body["aggs"]["series"]["date_histogram"]["field"] == "@timestamp"
-    assert body["aggs"]["series"]["aggs"]["v"]["percentiles"]["field"] == "transaction.duration.us"
-    assert {"term": {"service.name": "cart"}} in body["query"]["bool"]["filter"]
+    inc = Incident([AnomalyEvent("cart", "latency", now - timedelta(minutes=m), 5.0) for m in range(3)])
+    row = Incidents.create(inc.uid, "it_otel", inc.to_dict(), "P1", None, "it_otel", {})
+    return run("rca_report", incident_id=row["id"], now=now)
 
 
-def test_without_a_mapping_the_short_query_is_a_target_error_and_nothing_is_sent(now, es_bodies):
-    from aiops.engine.pipeline import TargetSpec
-
-    ctx = _go(now, targets=[TargetSpec(**ES_TARGET)])
-    assert [e.entity for e in ctx.errors] == ["cart"] and es_bodies == []
+def _service_fields(body):
+    return [next(iter(c["term"])) for f in body["query"]["bool"]["filter"] if "bool" in f
+            for c in f["bool"].get("should", []) if "term" in c and "case_insensitive" in next(iter(c["term"].values()))]
 
 
-def test_a_newer_approved_mapping_replaces_the_old_one(now, es_bodies):
-    from aiops.engine.pipeline import TargetSpec
+def test_approved_mapping_reaches_the_grafana_span_and_log_queries(now, grafana_bodies):
+    _approve({"labels.svc": "span.service", "app.name": "log.service"})
+    _rca_of_an_external_incident(now)
+    # trace 預設撈所有服務（不帶服務過濾），對照出現在要取回的欄位；日誌只撈事件實體，對照出現在服務過濾
+    trace_source = grafana_bodies["traces-apm-*"][0]["_source"]
+    assert "labels.svc" in trace_source
+    assert _service_fields(grafana_bodies["logs-apm.*"][0]) == ["app.name"]
 
-    _approve({"@timestamp": "ts", "transaction.duration.us": "value", "service.name": "entity"})
-    _approve({"event.ingested": "ts", "span.duration.us": "value", "labels.svc": "entity"})
-    _go(now, targets=[TargetSpec(**ES_TARGET)])
-    body = es_bodies[-1]
-    assert body["aggs"]["series"]["date_histogram"]["field"] == "event.ingested"
-    assert {"term": {"labels.svc": "cart"}} in body["query"]["bool"]["filter"]
+
+def test_without_a_mapping_the_data_models_own_fields_are_queried(now, grafana_bodies):
+    _rca_of_an_external_incident(now)
+    assert "service.name" in grafana_bodies["traces-apm-*"][0]["_source"]
+    assert _service_fields(grafana_bodies["logs-apm.*"][0]) == ["service.name"]
+
+
+def test_a_newer_approved_mapping_replaces_the_old_one(now, grafana_bodies):
+    _approve({"labels.svc": "span.service"})
+    _approve({"k8s.deployment": "span.service"})
+    _rca_of_an_external_incident(now)
+    trace_source = grafana_bodies["traces-apm-*"][0]["_source"]
+    assert "k8s.deployment" in trace_source and "labels.svc" not in trace_source
 
 
 # ── 接線 2：trace 合成 -> 偵測 -> 服務拓撲 ──

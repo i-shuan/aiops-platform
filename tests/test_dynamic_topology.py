@@ -13,11 +13,11 @@ from aiops.engine.requests import ExternalAnomalyIn, IngestAnomalies
 from aiops.engine.topology import service_edges
 from aiops.engine.types import AnomalyEvent, Incident
 from aiops.interfaces.runner import run, workflow_path
-from aiops.sources.elasticsearch import ElasticsearchSpec
-from aiops.sources.elasticsearch import _log as es_log
-from aiops.sources.elasticsearch import _span as es_span
+from aiops.sources.grafana import _log as es_log
+from aiops.sources.grafana import _span as es_span
 from aiops.sources.mock import MockSpec
 from aiops.storage.hooks import StorageHooks
+from grafana_fake import clear_grafana_env, grafana_spec, set_grafana_env
 
 T = datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc)
 
@@ -45,7 +45,7 @@ def test_mock_traces_form_a_call_chain():
         MockSpec().fetch_spans(T, T + timedelta(minutes=2), ["a", "b"])[0][:5], True)
 
 
-# ── Elasticsearch：欄位對應、分頁、截斷、只讀 ──
+# ── Grafana 資料源（後面是 Elasticsearch）：欄位對應、分頁、截斷、只讀 ──
 
 
 def _es_docs():
@@ -62,7 +62,7 @@ def _es_docs():
 def _es(pages):
     seen = []
 
-    def handler(req):  # 像真的 ES：依請求順序回下一頁，並遵守 size
+    def handler(req):  # 像真的 ES：依請求順序回下一頁，並遵守 size（假 Grafana 解開 _msearch 後以 /<索引>/_search 的樣子交過來）
         body = json.loads(req.content)
         seen.append((req.method, req.url.path, body))
         page = len(seen) - 1
@@ -70,24 +70,28 @@ def _es(pages):
         hits = [{"_source": d, "sort": [page, i]} for i, d in enumerate(docs)]
         return httpx.Response(200, json={"hits": {"hits": hits}})
 
-    return ElasticsearchSpec("http://es", api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler))), seen
+    spec, grafana = grafana_spec(handler)
+    return spec, seen, grafana
 
 
 def test_es_fetch_spans_maps_apm_fields_and_pages():
     docs = _es_docs()
-    spec, seen = _es([docs[:2], docs[2:]])
+    spec, seen, grafana = _es([docs[:2], docs[2:]])
     spans, truncated = spec.fetch_spans(T, T + timedelta(minutes=5), ["cart-api", "ord-svc"])
     assert not truncated and [s["span_id"] for s in spans] == ["tx1", "sp1", "tx2"]
     assert spans[2]["parent_id"] == "sp1" and spans[2]["error"] is True and spans[0]["duration_ms"] == 25.0
     assert service_edges(SpanRecord(**s) for s in spans) == {("cart-api", "ord-svc"): 1}
-    assert all(m == "POST" and p == "/traces-apm-*/_search" for m, p, _ in seen)  # 只讀：只打 _search
+    # 只讀：對 Grafana 只送資料源 proxy 的 _msearch（以前是直連 ES 的 _search），每一筆都查 trace 資料源的 traces-apm-*
+    assert grafana.calls == [("POST", "/api/datasources/proxy/uid/traces-uid/_msearch")] * len(seen) and not grafana.rejected
+    assert grafana.searches == [("traces-uid", "traces-apm-*")] * len(seen)
+    assert all(m == "POST" and p == "/traces-apm-*/_search" for m, p, _ in seen)
     names = [c["term"]["service.name"] for c in seen[0][2]["query"]["bool"]["filter"][1]["bool"]["should"]]
     assert names == [{"value": "cart-api", "case_insensitive": True}, {"value": "ord-svc", "case_insensitive": True}]
 
 
 def test_es_fetch_spans_stops_at_max_spans(monkeypatch):
     monkeypatch.setenv("AIOPS_ES_TRACE_INDEX", "traces-otel-*")
-    spec, seen = _es([_es_docs(), _es_docs()])
+    spec, seen, _ = _es([_es_docs(), _es_docs()])
     spans, truncated = spec.fetch_spans(T, T, None, max_spans=2)
     assert truncated and len(spans) == 2 and seen[0][1] == "/traces-otel-*/_search" and seen[0][2]["size"] == 2
 
@@ -101,7 +105,7 @@ def test_es_fetch_logs_samples_evenly_and_weights_by_bucket_total_when_over_the_
             docs.append({"@timestamp": (T + timedelta(minutes=m, seconds=k)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                          "service": {"name": "cart-api"}, "error": {"exception": [{"message": f"pool timeout {k}", "type": "E"}]}})
     fake = _FakeES(docs)
-    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spec = grafana_spec(fake.handler)[0]
     logs, truncated = spec.fetch_logs(T, T + timedelta(minutes=60), None, max_logs=300)
     assert truncated and len(logs) <= 300
     assert sum(r["weight"] for r in logs) == pytest.approx(len(docs))  # 加權後的總數還原真實筆數
@@ -188,7 +192,7 @@ def _minutes_covered(spans):
 
 def test_es_fetch_spans_samples_whole_traces_evenly_when_over_the_cap():
     fake = _FakeES(_traffic())  # 15 分鐘 × 200 條 × 4 = 12000 span
-    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spec = grafana_spec(fake.handler)[0]
     spans, truncated = spec.fetch_spans(T, T + timedelta(minutes=15), None, max_spans=2000)
     assert truncated and 1900 <= len(spans) <= 2000
     by_trace = {}
@@ -215,7 +219,7 @@ def test_es_fetch_spans_head_fetch_would_have_covered_only_the_start():
 
 def test_es_fetch_spans_is_complete_when_under_the_cap():
     fake = _FakeES(_traffic(minutes=2, traces_per_minute=10))
-    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spec = grafana_spec(fake.handler)[0]
     spans, truncated = spec.fetch_spans(T, T + timedelta(minutes=2), None, max_spans=2000)
     assert not truncated and len(spans) == 80
     assert all("function_score" not in b["query"] for b in fake.bodies)  # 沒超過上限就不抽樣
@@ -263,13 +267,13 @@ def test_service_filter_ignores_case_and_whitespace_of_the_incident_entity():
            "transaction": {"id": "x", "duration": {"us": 1}}}
     other = {**doc, "service": {"name": "ord-svc"}, "transaction": {"id": "y"}}
     fake = _FakeES([doc, other])
-    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
+    spec = grafana_spec(fake.handler)[0]
     spans, _ = spec.fetch_spans(T, T + timedelta(days=30), ["  CART-api "])
     assert [s["service"] for s in spans] == ["cart-api"]
     # 日誌走另一個方法，過濾條件也要一樣（真實 ES 驗證時 fetch_logs 曾經漏掉，CART-API 撈到 0 筆）
     log_doc = {"@timestamp": "2026-11-03T15:00:00Z", "service": {"name": "Cart-API"}, "message": "boom"}
     log_fake = _FakeES([log_doc, {**log_doc, "service": {"name": "ord-svc"}}])
-    log_spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(log_fake.handler)))
+    log_spec = grafana_spec(log_fake.handler)[0]
     logs, _ = log_spec.fetch_logs(T, T + timedelta(days=30), ["  CART-api "])
     assert [r["service"] for r in logs] == ["cart-api"]
 
@@ -341,13 +345,13 @@ def _ctx(entities=("cart-api", "ord-svc")):
 
 
 def test_incident_traces_skips_quietly_when_the_source_is_not_configured(monkeypatch):
-    monkeypatch.delenv("AIOPS_ES_URL", raising=False)
+    clear_grafana_env(monkeypatch)
     ctx = OperatorRegistry.create("ingestion.incident_traces", {}).execute(_ctx())
     assert ctx.rca_spans == [] and not ctx.errors and "沒有設定" in ctx.result["trace_fetch"]["skipped"]
 
 
-def test_incident_traces_records_an_error_but_does_not_raise_when_es_is_down(monkeypatch):
-    monkeypatch.setenv("AIOPS_ES_URL", "http://127.0.0.1:1")  # 沒人在聽
+def test_incident_traces_records_an_error_but_does_not_raise_when_grafana_is_down(monkeypatch):
+    set_grafana_env(monkeypatch, "http://127.0.0.1:1")  # 沒人在聽
     op = OperatorRegistry.create("ingestion.incident_traces", {})
     op.node_name = "fetch_traces"
     ctx = op.execute(_ctx())
@@ -439,12 +443,12 @@ def test_rca_ranks_root_causes_from_traces_fetched_on_demand(now, monkeypatch):
     from aiops.storage import crud
     from aiops.storage.models import IncidentRow
 
-    monkeypatch.delenv("AIOPS_ES_URL", raising=False)
+    clear_grafana_env(monkeypatch)
     inc_id = _incident_without_topology(now)
     # 事件快照會存收斂當下用到的邊；清掉它，模擬「平台事先不知道任何拓撲」
     crud.update(IncidentRow, inc_id, context={})
 
-    without = _rca(inc_id, now, "elasticsearch")  # 測試環境沒有 ES：略過，跟以前一樣排不出根因
+    without = _rca(inc_id, now, "grafana")  # 測試環境沒有設定 Grafana：略過，跟以前一樣排不出根因
     # 排不出根因時「可能的源頭」段落不再整段消失，而是寫明證據不足（以前是放進 skipped）
     assert without["root_cause"]["candidates"] == [] and without["trace_fetch"]["spans"] == 0
     candidates = {s["key"]: s["body"] for s in without["sections"]}["root_cause_candidates"]

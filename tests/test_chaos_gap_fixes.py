@@ -2,7 +2,9 @@
 
 - 缺口 6（場景 3）：兩個下游資源各佔一半時，attribution 結構體只有等待增量最大的那一個 -> 其他有份的資源列在 others。
 - 缺口 7（場景 5）：事件前有呼叫資源、事件期間程式在入口就崩潰（一次都沒呼叫到）-> attribution 不該掛一個無關的資源。
-- 缺口 9（場景 2）：avg(summary.sum) 是當分鐘總耗時，低流量服務多來幾筆就像延遲暴增 -> ES 查詢 divide_by 算每筆平均。
+- 缺口 9（場景 2）：avg(summary.sum) 是當分鐘總耗時，低流量服務多來幾筆就像延遲暴增 -> 查詢要算每筆平均（Σ總耗時 ÷ Σ筆數）。
+  平台不再直連 Elasticsearch（2026-11-20）：divide_by 的查詢組裝搬到混沌模擬器自己的 scripts/chaos/metric_query.py，
+  這裡只留純函式的測試；ElasticsearchSpec.fetch_data 的測試隨它一起刪除。
 """
 import json
 from datetime import datetime, timedelta, timezone
@@ -13,14 +15,12 @@ import pandas as pd
 import pytest
 
 from aiops.engine.context import PipelineContext, SpanRecord
-from aiops.engine.errors import NoDataError
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import AnomalyEvent, Incident
-from aiops.sources.elasticsearch import ElasticsearchSpec
-from aiops.sources.query.elasticsearch import build_search_body, bucket_value, parse_es_query
 from aiops.stages.detectors.hourly_baseline import HourlyBaselineDetector
 from aiops.stages.enrichment.narrative import briefing_whitelist
 from aiops.stages.rca.algorithms.evidence import OTHER_RESOURCE_SHARE
+from scripts.chaos.metric_query import build_search_body, bucket_value, parse_es_query
 
 T0 = datetime(2026, 11, 3, 14, 50, tzinfo=timezone.utc)
 MIN = timedelta(minutes=1)
@@ -157,25 +157,6 @@ def test_divide_by_misuse_is_rejected_at_parse_time(raw):
         parse_es_query(json.dumps(raw))
 
 
-def _es(buckets):
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"aggregations": {"series": {"buckets": buckets}}})
-    spec = ElasticsearchSpec.__new__(ElasticsearchSpec)
-    spec.base_url, spec.headers = "http://es", {}
-    spec.client = httpx.Client(transport=httpx.MockTransport(handler))
-    return spec
-
-
-def test_fetch_data_with_divide_by_drops_empty_minutes_instead_of_reporting_zero():
-    ms = int(T0.timestamp() * 1000)
-    df = _es([{"key": ms, "doc_count": 1, "v": {"value": 38000.0}, "d": {"value": 1.0}},
-              {"key": ms + 60000, "doc_count": 0, "v": {"value": 0.0}, "d": {"value": 0.0}},
-              {"key": ms + 120000, "doc_count": 1, "v": {"value": 114000.0}, "d": {"value": 3.0}}]).fetch_data(MEAN_Q, T0, T0 + 3 * MIN, 60)
-    assert list(df["value"]) == [38000.0, 38000.0] and len(df) == 2
-    with pytest.raises(NoDataError):
-        _es([{"key": ms, "doc_count": 0, "v": {"value": 0.0}, "d": {"value": 0.0}}]).fetch_data(MEAN_Q, T0, T0 + MIN, 60)
-
-
 def _sparse_minutes(seed=7, minutes=4000, rate=0.5, latency_us=38000.0):
     """每分鐘 0～數筆請求的低流量服務（Poisson 0.5）；每筆約 38 ms ± 5%。回 (有請求的分鐘的筆數, 當分鐘總耗時)。"""
     r = np.random.default_rng(seed)
@@ -201,7 +182,7 @@ def test_mean_latency_of_a_sparse_service_does_not_alarm_on_a_three_request_minu
 
 
 @pytest.mark.xfail(strict=True, reason="死區：avg(summary.sum) 是當分鐘總耗時，低流量服務 3 筆的那一分鐘 = 平常 3 倍，逐點偵測器一定判異常。"
-                                       "偵測器分不出『請求變多』與『變慢』，只能從查詢下手（divide_by）")
+                                       "偵測器分不出『請求變多』與『變慢』，只能從查詢下手（改查每筆平均）")
 def test_total_duration_of_a_sparse_service_does_not_alarm_on_a_three_request_minute():
     n, total = _sparse_minutes()
     det = HourlyBaselineDetector().fit(_frame(total))

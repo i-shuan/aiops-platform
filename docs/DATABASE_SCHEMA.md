@@ -42,7 +42,7 @@
 | id | INTEGER | 否 | 自增 | |
 | pipeline | VARCHAR(128) | 否 | | |
 | entity | VARCHAR(256) | 否 | | 實體（服務、機台）名稱 |
-| metric | VARCHAR(512) | 否 | | 指標查詢字串。ES 的指標是整段查詢 JSON 文字，所以這欄可能很長 |
+| metric | VARCHAR(512) | 否 | | 指標查詢字串。以前 ES 的指標是整段查詢 JSON 文字（2026-11-20 起平台不直連 Elasticsearch，舊資料列還是這種形狀），所以這欄可能很長 |
 | ts | DateTime | 否 | | 異常點的時間（UTC） |
 | value | FLOAT | 否 | | 當時的值 |
 | score | FLOAT | 否 | | 異常分數 |
@@ -180,7 +180,7 @@
 | 欄位 | 型別 | 可空 | 說明 |
 |---|---|---|---|
 | id | INTEGER | 否 | |
-| source_type | VARCHAR(64) | 否 | 資料源類型；有索引 |
+| source_type | VARCHAR(64) | 否 | 資料源類型；有索引。trace／日誌的對照（`span.*`／`log.*`）要掛在 `grafana`；2026-11-20 之前掛在 `elasticsearch` 的已核准對照不會再被讀到，要重新提交 |
 | fields | JSON | 否 | 物件，**來源欄位名 → 標準欄位名**（字串對字串），至少一組 |
 | submitter | VARCHAR(128) | 否 | |
 | status | VARCHAR(16) | 否 | `pending`、`approved`；每個 `source_type` 取 `approved` 的那筆 |
@@ -272,7 +272,7 @@
   "events": [
     {"entity": "ingress-gw", "metric": "<指標查詢字串>", "ts": "2026-11-09T12:00:00+00:00",
      "score": 133.75, "value": 8962000.0, "attrs": {"dept": "payments", "signal": "latency"},
-     "detector": "detector.hourly_baseline", "detector_node": "detect", "source_type": "elasticsearch",
+     "detector": "detector.hourly_baseline", "detector_node": "detect", "source_type": "prometheus",
      "voted_by": [], "level": "anomaly"}
   ]
 }

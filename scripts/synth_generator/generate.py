@@ -1,6 +1,6 @@
 """第 4 層的前半：把三種訊號寫成本機 bulk NDJSON（_bulk 的 create 格式），外加 ground_truth.json 與 manifest.json。
 
-不連任何網路。要載進 ES 由使用者自己跑 es_writer.py（預設 dry-run）。
+不連任何網路。載進 ES 的 es_writer.py 已刪除（repo 不再有直連 ES 的程式）。
 ground_truth.json 只給離線驗證用，**不寫進 ES 文件**。
 """
 from __future__ import annotations

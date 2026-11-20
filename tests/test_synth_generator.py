@@ -1,4 +1,4 @@
-"""scripts/synth_generator：拓撲邊、確定性、雙速密度、文件欄位符合平台的讀取程式（aiops/sources/elasticsearch.py 的 _span）。
+"""scripts/synth_generator：拓撲邊、確定性、雙速密度、文件欄位符合平台的讀取程式（aiops/sources/grafana.py 的 _span）。
 
 用 2 天的小劇本跑（完整 2 週的劇本由 validate_offline 驗）。
 """
@@ -13,8 +13,7 @@ import pytest
 
 from aiops.engine.context import SpanRecord
 from aiops.engine.topology import propagation_edges, service_edges
-from aiops.sources.elasticsearch import _span
-from scripts.synth_generator import es_writer
+from aiops.sources.grafana import _span
 from scripts.synth_generator.faults import Envelope, scenario_from_dict, validate
 from scripts.synth_generator.generate import generate
 from scripts.synth_generator.topology import DEFAULT_TOPOLOGY
@@ -198,20 +197,3 @@ def test_callee_slowdown_only_moves_the_root_itself():
     assert state.self_ms["ord-svc"][i] == pytest.approx(45.0, rel=0.15)        # ord-svc 自己沒變
     assert state.e2e_ms["ord-svc"][i] - state.e2e_ms["ord-svc"][100] > 350     # 但整段耗時包含 bill-svc 的 400ms
     assert state.mult["cart-api"][i] == 1.0
-
-
-def test_es_writer_dry_run_is_offline_and_refuses_foreign_index(out, tmp_path, monkeypatch, capsys):
-    def no_network(*a, **k):
-        raise AssertionError("dry-run 不准連網路")
-    monkeypatch.setattr(es_writer.httpx, "Client", no_network)
-    assert es_writer.main([str(out)]) == 0
-    assert "logs-apm.error-gentest" in capsys.readouterr().out
-
-    bad = tmp_path / "bad"
-    bad.mkdir()
-    for f in ("metrics.ndjson", "traces.ndjson", "logs.ndjson", "manifest.json"):
-        (bad / f).write_bytes((out / f).read_bytes())
-    text = (bad / "logs.ndjson").read_text(encoding="utf-8")
-    (bad / "logs.ndjson").write_text(text.replace("logs-apm.error-gentest", "logs-apm.error-scn", 1), encoding="utf-8")
-    with pytest.raises(SystemExit, match="logs-apm.error-scn"):
-        es_writer.main([str(bad)])

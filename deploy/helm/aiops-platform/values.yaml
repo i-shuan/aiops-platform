@@ -17,9 +17,16 @@ env:
   # 人從瀏覽器點得到的平台網址（例：https://aiops.example.internal）。有設，告警卡片才會多一條 feedback_url
   # 連到平台的回饋頁（/feedback）；空字串 = 不產生連結
   AIOPS_PUBLIC_URL: ""
+  # 平台不直連 Elasticsearch：RCA 的 trace／錯誤日誌經 Grafana 的資料源 proxy 讀（aiops/sources/grafana.py，只讀）。
+  # 要用就填下面三個（都不是機密），token 放 existingSecret；沒填 = RCA 不撈 trace／日誌，報告照出。
+  # AIOPS_GRAFANA_URL 同時是告警卡片深度連結的基底網址：平台連得到、維運也點得到的那一個。
+  # AIOPS_GRAFANA_URL: http://grafana.grafana-new.svc
+  # AIOPS_GRAFANA_TRACES_UID: apm-traces   # Grafana 裡 trace 的 Elasticsearch 資料源 UID
+  # AIOPS_GRAFANA_LOGS_UID: apm-logs       # Grafana 裡錯誤日誌的 Elasticsearch 資料源 UID
 
 # 放機密環境變數的 Secret（chart 不建）：AIOPS_API_TOKEN（必填）、AIOPS_DATABASE_URL（正式必填）、
-# AIOPS_ES_API_KEY、AIOPS_PROMETHEUS_TOKEN、AIOPS_ALERTMANAGER_TOKEN、AIOPS_LLM_API_KEY、AIOPS_FALLBACK_WEBHOOK…
+# AIOPS_GRAFANA_TOKEN（Grafana service account token；平台不再持有 Elasticsearch 的網址與金鑰）、
+# AIOPS_PROMETHEUS_TOKEN、AIOPS_ALERTMANAGER_TOKEN、AIOPS_LLM_API_KEY、AIOPS_FALLBACK_WEBHOOK…
 existingSecret: ""
 
 # 只限開發：直接在 values 裡給機密，chart 幫你建 Secret。正式環境不要用（會留在 helm release 紀錄裡）。

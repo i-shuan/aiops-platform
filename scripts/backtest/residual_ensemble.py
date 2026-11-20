@@ -1,4 +1,4 @@
-"""偵測回測，用 ES 的每分鐘請求數序列。偵測節點取自 sample_it_otel（scripts/backtest/variants.py）。
+"""偵測回測，用每分鐘請求數序列的 CSV 快取（當初從 ES 撈的）。偵測節點取自 sample_it_otel（scripts/backtest/variants.py）。
 2026-11-20 起沒有表決節點：任何一個偵測節點越線就算告警分鐘。這支腳本改完之後還沒有對 ES 重跑過，
 docs/RESIDUAL_SNR_ENSEMBLE.md 的數字是移除前量的。
 
@@ -11,7 +11,10 @@ fetch 換成回放用的 replay.window（每輪給最近 60 分鐘，同 it_otel
 訓練／測試切分：資料 >= 17 天用 14 天訓練，其餘 7 天。三種注入（測試期中段某個平日 11–13 點）：
   step  瞬間 ×0.3 持續 20 分    ramp  15 分鐘線性滑到 ×0.3 再維持 20 分    mild  ×0.8 持續 60 分
 
-  python scripts/backtest/residual_ensemble.py --secrets <secrets.local.yaml> --cache <快取目錄> --out <結果.json>
+  python scripts/backtest/residual_ensemble.py --cache <快取目錄> --out <結果.json>
+
+2026-11-20 起平台不再直連 Elasticsearch：直接從 ES 撈序列的 es_series.py 已刪除，這支腳本只讀既有的 CSV 快取
+（<快取目錄>/<服務>.csv，欄位 ts、value）。沒有快取就不能跑；指標改經 Grafana 取得之後再補撈取。
 """
 from __future__ import annotations
 
@@ -35,7 +38,6 @@ from aiops.engine.pipeline import Pipeline, TargetSpec, Workflow  # noqa: E402
 from aiops.engine.registry import OperatorRegistry  # noqa: E402
 from aiops.engine.types import ANOMALY  # noqa: E402
 from aiops.interfaces.runner import load_all  # noqa: E402
-from es_series import load_series  # noqa: E402
 from scripts.backtest.variants import detection_nodes  # noqa: E402
 
 warnings.filterwarnings("ignore")
@@ -188,17 +190,25 @@ def run_service(service: str, df: pd.DataFrame) -> dict:
     return out
 
 
+def load_series(service: str, cache: Path) -> pd.DataFrame:
+    path = cache / f"{service}.csv"
+    if not path.is_file():
+        raise SystemExit(f"{path} 沒有快取。直接從 ES 撈序列的功能已移除（平台不再直連 Elasticsearch），目前只能用既有的快取")
+    df = pd.read_csv(path)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    return df
+
+
 def main() -> None:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--secrets", type=Path, help="secrets.local.yaml（快取沒有時才連 ES，唯讀）")
     ap.add_argument("--cache", type=Path, required=True, help="序列 CSV 快取目錄（不要放在 repo 裡）")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--services", default=",".join(SERVICES))
     args = ap.parse_args()
     result = {}
     for service in args.services.split(","):
-        result[service] = run_service(service, load_series(service, args.cache, args.secrets))
+        result[service] = run_service(service, load_series(service, args.cache))
         print(service, json.dumps(result[service], ensure_ascii=False), flush=True)
         args.out.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
 

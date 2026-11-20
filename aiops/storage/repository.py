@@ -242,6 +242,11 @@ class Mappings:
         row = crud.find_one(FieldMappingRow, source_type=source_type, status="approved")
         return row["fields"] if row else None
 
+    @staticmethod
+    def all_approved() -> dict[str, dict[str, str]]:
+        """每個資料源現行（已核准）的欄位對照：source_type -> fields。"""
+        return {row["source_type"]: row["fields"] for row in reversed(crud.find(FieldMappingRow, status="approved"))}
+
 
 class Traces:
     @staticmethod

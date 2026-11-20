@@ -176,7 +176,7 @@ def _detection_round(now, topology=None):
 
 
 def test_end_to_end_alerts_from_related_services_become_one_incident_with_an_rca_report(client, sent, now, monkeypatch):
-    monkeypatch.delenv("AIOPS_ES_URL", raising=False)
+    monkeypatch.delenv("AIOPS_GRAFANA_URL", raising=False)  # 沒設定 Grafana 資料源：RCA 不撈 trace／日誌
     for service, fp in (("checkout", "fp-1"), ("payment", "fp-2"), ("cart", "fp-3")):
         assert _post(client, _with_labels({"service": service, "severity": "critical"}, fp)).json()["result"]["accepted"] == 1
     ctx = _detection_round(now, topology=[("cart", "checkout"), ("checkout", "payment")])

@@ -124,13 +124,13 @@ def scenario_3() -> H.Result:
 
 # ───────────────────────── 場景 4：跨服務連鎖雪崩 ─────────────────────────
 def topology_refresh(lo: datetime, hi: datetime) -> dict:
-    """不手動灌邊：跟生產排程同一條路（admin.topology_refresh），從世界的 trace 來源（平台的 elasticsearch 資料源）
+    """不手動灌邊：跟生產排程同一條路（admin.topology_refresh），從世界的 trace 來源（平台的 grafana 資料源）
     撈 [lo, hi] 的 span、算出服務呼叫邊、沉澱進 service_edges。偵測時 ctx.topology 預設就讀這張表。"""
     from aiops.engine.requests import TopologyRefresh
     from aiops.interfaces.runner import run
 
     return run("admin_topology_refresh",
-               request=TopologyRefresh(source_type="elasticsearch", end=hi, lookback_minutes=_mins(lo, hi)))
+               request=TopologyRefresh(source_type="grafana", end=hi, lookback_minutes=_mins(lo, hi)))
 
 
 def scenario_4() -> H.Result:

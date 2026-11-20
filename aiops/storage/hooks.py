@@ -138,11 +138,10 @@ class StorageHooks:
             for r in rows:
                 ctx.trace_rows.setdefault(r["service"], []).append(
                     TraceRow(r["service"], as_utc(r["ts"]), r["count"], r["error_rate"], r["p95_ms"]))
-            # RCA 重抓時序（ingestion.incident_series）要用的欄位對照
-            for source_type in sorted({e.source_type for e in incident.events if e.source_type}):
-                fields = Mappings.approved_fields(source_type)
-                if fields:
-                    ctx.field_maps[source_type] = fields
+            # RCA 要用的欄位對照：所有資料源現行已核准的那一份。重抓時序（ingestion.incident_series）用異常事件自己的資料源；
+            # 撈 trace／日誌（ingestion.incident_traces／incident_logs）用節點 params 的 source_type（預設 grafana），
+            # 那個資料源不一定出現在異常事件裡（外部推進來的告警沒有資料源），所以不能只載事件用到的
+            ctx.field_maps.update(Mappings.all_approved())
             # 歷史相似事故的比對池（排除自己）
             ctx.knowledge_cases = [
                 KnowledgeCase(k["incident_uid"], k["pipeline"], list(k["entities"]), list(k["metrics"]),

@@ -7,13 +7,13 @@ from typing import Any
 
 from aiops.engine.errors import BadRequest, InfrastructureError
 from aiops.sources.base import BaseDataSourceSpec
-from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.grafana import GrafanaSpec
 from aiops.sources.mock import MockSpec
 from aiops.sources.prometheus import PrometheusSpec, VictoriaMetricsSpec
 
 # 新增資料源 = 寫一個 Spec 並加進這裡
 _SPECS: dict[str, type[BaseDataSourceSpec]] = {
-    spec.source_type: spec for spec in (MockSpec, PrometheusSpec, VictoriaMetricsSpec, ElasticsearchSpec)
+    spec.source_type: spec for spec in (MockSpec, PrometheusSpec, VictoriaMetricsSpec, GrafanaSpec)
 }
 
 
@@ -22,7 +22,7 @@ def source_types() -> list[str]:
 
 
 def is_configured(source_type: str) -> bool:
-    """這個資料源有沒有設定（例如 AIOPS_ES_URL）。未知的資料源回 False。"""
+    """這個資料源有沒有設定（例如 AIOPS_GRAFANA_URL＋AIOPS_GRAFANA_TOKEN）。未知的資料源回 False。"""
     return source_type in _SPECS and _SPECS[source_type].configured()
 
 

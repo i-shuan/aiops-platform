@@ -1,6 +1,6 @@
 """python -m scripts.synth_generator --scenario scripts/synth_generator/scenarios/nov03_cascade.yaml --out synth-out/nov03_cascade
 
-只產生本機檔案（bulk NDJSON + ground_truth.json + manifest.json），不連網路。載入 ES 用 es_writer.py（使用者自己跑）。
+只產生本機檔案（bulk NDJSON + ground_truth.json + manifest.json），不連網路。
 """
 from __future__ import annotations
 

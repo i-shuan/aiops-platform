@@ -16,25 +16,17 @@ AIOps 平台：從監控指標抓異常、收斂成事件群、抑制與分送�
 |---|---|---|
 | `AIOPS_API_TOKEN` | 呼叫本平台 API 的 Bearer token | 產生隨機長字串（例如 `openssl rand -hex 32`）。可用逗號同時放新舊兩組，等呼叫端都換完再拿掉舊的 |
 | `AIOPS_DATABASE_URL` | 資料庫連線（含帳密） | 正式 PostgreSQL 開專用帳號與密碼，只給本平台的資料庫權限 |
-| `AIOPS_ES_API_KEY` | 讀 Elasticsearch 的 key | 在 ES 建**唯讀**的 API key，只給需要的索引 pattern 讀取權限。建法見下面「建立平台的唯讀 ES key」。**目前還沒建**，所以平台連不上叢集的 ES（回 401）；真實資料驗收（見「目前狀態」）卡在這裡 |
+| `AIOPS_GRAFANA_TOKEN` | 經 Grafana 讀 trace／日誌的 service account token | 在 Grafana 建一個 service account（只給讀那兩個資料源的權限）並發 token。平台不再持有 Elasticsearch 的網址與金鑰（2026-11-20）：連 Elasticsearch 的帳密只存在 Grafana 的資料源設定裡。開發時也可以用 `AIOPS_GRAFANA_USER`＋`AIOPS_GRAFANA_PASSWORD`（HTTP basic），上正式環境一律用 token |
 | `AIOPS_PROMETHEUS_TOKEN` | 讀 Prometheus 的 token（選填） | 依公司 Prometheus 的驗證方式核發 |
 | `AIOPS_VICTORIAMETRICS_TOKEN` | 讀 VictoriaMetrics 的 token（選填） | 同上 |
 | `AIOPS_ALERTMANAGER_TOKEN` | 推送通知到 Alertmanager 的 token（選填） | Alertmanager 前面有加驗證才需要 |
 | `AIOPS_FALLBACK_WEBHOOK` | 資料庫掛掉時直接打的備援 webhook | webhook URL 本身就是憑證，正式值放 Secret |
 
-#### 建立平台的唯讀 ES key
+#### 本機開發的金鑰
 
 **本機開發的金鑰統一放在 `secrets.local.yaml`**（repo 根目錄，已被 `.gitignore` 擋住，不會進 git）。格式見 [secrets.local.example.yaml](secrets.local.example.yaml)，複製一份改名填值即可。換電腦要自己把這個檔搬過去；repo 裡永遠看不到值。這個檔不給 Helm 用，部署到叢集仍然走 `existingSecret`。
 
-ES 的 `elastic` 超級帳號密碼存在叢集 Secret `es-test/es-elastic`，**不進 repo**。叢集上沒有 Kibana，所以用一支腳本直接呼叫 ES 的 API 建唯讀 key（只給 `metrics-apm.transaction.1m-*`、`traces-apm-*`、`logs-apm.*` 的 `read` 與 `view_index_metadata`）：
-
-```bash
-.venv\Scripts\python tests\dev_es_key.py
-```
-
-它會自己開 port-forward、讀 `es-elastic` 密碼、建 key，再把 key 寫進 `secrets.local.yaml` 的 `es.AIOPS_ES_API_KEY`（只換那一行，其他內容不動；`secrets.local.yaml` 沒被 `.gitignore` 擋住就拒絕寫）。畫面上只印 key 的 id，不印密碼或 key。**要建 key 得用管理員密碼，所以這支要由有叢集權限的人自己跑**；每跑一次多一把新 key，舊的不會自動撤銷。
-
-這把 key 是開發階段用的，跟上表其他憑證一樣，**上正式環境前要撤銷重發**。
+平台不再直連 Elasticsearch（2026-11-20）：以前建平台唯讀 ES key 的腳本 `tests/dev_es_key.py` 與 `AIOPS_ES_URL`／`AIOPS_ES_API_KEY` 都已移除。**以前發給平台的那把 ES key（`aiops-platform-readonly`）要在 ES 上撤銷**，舊的 `secrets.local.yaml` 裡的 `es:` 區段也可以刪掉。
 
 ### 本平台的部署設定
 
@@ -57,7 +49,7 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
   抓取(fetch) → 偵測(detector.*) → 只留新異常 → 心跳／恢復 → 收斂 → 計分 → 抑制 → 通知內容 → 通知(notifier.*) → 寫入
        ▲                                                                                              │
   sources                                                                    只有「最終結果」進資料庫（Incident、通知紀錄、模型狀態）
-  (Prometheus／VM／ES)                                    節點之間不透過資料庫傳資料；管線前後由 storage/hooks.py 一次載入／一次寫入
+  (Prometheus／VM／Grafana)                                   節點之間不透過資料庫傳資料；管線前後由 storage/hooks.py 一次載入／一次寫入
                                                                              通知 ──► aiops-alertmanager ──► Slack／Teams／PagerDuty
                                                                                   └──► Grafana（只顯示，不發通知）
 ```
@@ -68,17 +60,17 @@ Pipeline（固定骨架）：資料由記憶體內的 PipelineContext 依序流�
 | `aiops/pipelines/` | 管線 YAML，依業務主線分：`detection/`（`it_otel`、`it_apm`、`factory`、`metrics_only`：只吃各團隊推進來的外部告警、不跑偵測器，見 `docs/EXTERNAL_ALERTS.md`）、`watchdog/`（`platform_watchdog`：偵測演算法只用來監控平台自己，見 `docs/WATCHDOG.md`）、`rca/`（`rca_report` 等）、`control/`（各 `admin_*` 手動動作）。調整流程只改這裡；用名稱載入，名稱在整個 `pipelines/` 內唯一 |
 | `aiops/stages/` | 管線算子，依執行順序分段：`ingestion` → `detectors` → `ensemble` → `grouping` → `scoring` → `suppression` → `rca` → `enrichment`（LLM，含 `noop`）→ `notification` |
 | `aiops/control_plane/` | 控制面手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） |
-| `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`elasticsearch`；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
+| `aiops/sources/` | 外部資料源適配：`mock`、`prometheus`、`victoriametrics`、`grafana`（trace／日誌經 Grafana 的資料源 proxy 讀後面的 Elasticsearch，平台不直連 ES）；`sources/query/` 是查詢語法解析與時間窗對齊（不連線） |
 | `aiops/storage/` | SQLAlchemy 資料表、repository、`hooks.py`（管線前後的載入／寫入） |
 | `aiops/interfaces/` | 對外介面：`api/`（薄薄一層 HTTP）、`app.py`（FastAPI 入口）、`cli/`（排程，`python -m aiops.interfaces.cli`）、`bootstrap/`（啟動初始化、token 驗證、故障看守）、`runner.py`（唯一組裝點） |
 | `scripts/synth_generator/` | 合成資料產生器（不在 `aiops/` 裡，平台不 import）：由服務拓撲與故障劇本產生有因果關係的 metrics、traces、logs 與標準答案，見「合成資料產生器」 |
-| `tests/dev_es_key.py` | 開發輔助腳本（不是測試）：建本機用的唯讀 ES key 並寫進 `secrets.local.yaml`；檔名不是 `test_` 開頭，pytest 不會執行它 |
 | `secrets.local.example.yaml` | 本機開發金鑰範本；複製成 `secrets.local.yaml`（已被 `.gitignore` 擋住）再填值 |
 | `migrations/postgres/` | 既有 PostgreSQL 的手動升級 SQL（沒有 Alembic，可重複執行） |
 | `deploy/helm/aiops-alertmanager/` | 接收本平台通知的 Alertmanager chart |
 | `deploy/helm/aiops-grafana/` | 只顯示的 Grafana chart：APM（讀 ES）與平台告警（讀 Alertmanager），不發通知 |
 | `deploy/helm/aiops-platform/` | 平台本身：API（Deployment）與排程（CronJob） |
-| `deploy/elasticsearch/` | ES 說明與去機密的快照（chart 原始碼不在本機，見該資料夾 README） |
+| `deploy/elasticsearch/` | 開發叢集 ES 的說明與去機密的快照（chart 原始碼不在本機，見該資料夾 README）。平台不連它，只有 Grafana 連 |
+| `scripts/verify_grafana_source.py` | 對真的 Grafana 驗證 `aiops/sources/grafana.py`（只讀）：`check()`、撈一小段 span 與日誌、印原始回應與解析後筆數 |
 
 ### `aiops/` 每個檔案在做什麼
 
@@ -169,12 +161,12 @@ aiops/
 │   ├── __init__.py                  依名稱取得資料源、逐一自我檢查
 │   ├── base.py                      資料源介面 fetch_data／fetch_group／check，以及「查詢寫錯」「沒資料」兩種錯誤
 │   ├── prometheus.py                Prometheus 與 VictoriaMetrics（query_range；支援依標籤分組的動態同儕）
-│   ├── elasticsearch.py             ES 降採樣查詢（date_histogram）轉成標準序列
+│   ├── grafana.py                   經 Grafana 資料源 proxy（_msearch）讀 Elasticsearch 裡的 trace 與錯誤日誌；不支援指標時序
+│   ├── es_models.py                 ES 文件的資料模型（Elastic APM／OTel）：索引、欄位、怎麼解析成 span／日誌
 │   ├── mock.py                      開發用假資料（含 seasonal: 日週期資料與動態同儕群）
 │   ├── _http.py                     共用 HTTP：連線／認證／伺服器錯誤轉成 InfrastructureError
 │   └── query/                       查詢語法解析與時間窗對齊（不連線）
 │       ├── promql.py                PromQL 基本檢查（只擋明顯寫錯的）
-│       ├── elasticsearch.py         ES 查詢的 JSON 字串 → date_histogram search body
 │       ├── trace.py                 內部 trace 來源的「服務/欄位」語法
 │       └── window.py                時間窗對齊到 step 的整數倍（UTC）
 ├── storage/                         資料庫（節點之間不經過它，只在管線前後被 hooks.py 呼叫）
@@ -375,7 +367,7 @@ targets:
 
 > 混沌場景 4（`scripts/chaos/run.py 4`，gateway→order-api→inventory-svc→oracle）不再手動灌邊：偵測回放前對世界的 trace 跑一次 `admin.topology_refresh`（事故前 60 分鐘），9,228 個 span、未截斷，沉澱出 gateway→order-api 1,538 次、order-api→inventory-svc 1,538 次；三個服務收斂成同一個事件群、根因第 1 名 inventory-svc、下鑽 oracle／db。真實 ES 11/3 14:00–16:20Z：10,542 個 span、未截斷、`edges_seen = 0`（這批 trace 沒有跨服務呼叫），表裡 8 天前的邊被 prune、2 天前的保留。
 
-**拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才去 ES 撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`（`AIOPS_ES_DATA_MODEL=otel` 時是 `traces-*.otel-*`），用環境變數 `AIOPS_ES_TRACE_INDEX` 改；欄位依資料模型（Elastic APM 的 `trace.id`／`parent.id`／`span.duration.us`，或 OTel 的 `trace_id`／`parent_span_id`／`duration` 奈秒），已核准欄位對照裡 `span.*` 標準欄可以蓋掉個別欄位；上限 `max_spans`（預設 20000）。區間內不超過上限就全部撈；超過時**不是取最早的 N 筆**（尖峰時那只是窗口開頭幾秒），而是把窗口切成最多 30 個時間桶、每桶用固定 seed 隨機挑 trace，輪流把**整條 trace** 撈回來直到湊滿上限（抽 span 會把父子拆斷），結果的 `trace_fetch.truncated` 為 true。記憶體：100 萬個 span 約 266 MB、聚合邊 0.7 秒，上限 2 萬時約 5 MB。
+**拓撲從哪來（隨需計算）：**日常偵測完全不撈 trace（trace 量通常是指標的 10 倍以上）。只有跑 RCA 報告時，`ingestion.incident_traces` 才經 Grafana（資料源 `grafana`，後面是 Elasticsearch）撈事件開始前 15 分鐘到結束的 span，`rca.build_dynamic_topology` 用 `parent.id` → `span.id` 還原當下服務之間的呼叫邊，跟既有拓撲（事件快照、批次匯入的 trace）取聯集後交給根因演算法。ES 沒設定就略過、連不上就記進 `errors` 並略過，報告照出。trace 索引預設 `traces-apm-*`（`AIOPS_ES_DATA_MODEL=otel` 時是 `traces-*.otel-*`），用環境變數 `AIOPS_ES_TRACE_INDEX` 改；欄位依資料模型（Elastic APM 的 `trace.id`／`parent.id`／`span.duration.us`，或 OTel 的 `trace_id`／`parent_span_id`／`duration` 奈秒），已核准欄位對照裡 `span.*` 標準欄可以蓋掉個別欄位；上限 `max_spans`（預設 20000）。區間內不超過上限就全部撈；超過時**不是取最早的 N 筆**（尖峰時那只是窗口開頭幾秒），而是把窗口切成最多 30 個時間桶、每桶用固定 seed 隨機挑 trace，輪流把**整條 trace** 撈回來直到湊滿上限（抽 span 會把父子拆斷），結果的 `trace_fetch.truncated` 為 true。記憶體：100 萬個 span 約 266 MB、聚合邊 0.7 秒，上限 2 萬時約 5 MB。
 
 > 真實 ES（11/3 13:50–16:20Z，共 11,283 span／3,761 條 trace）：上限 2000 時舊做法只涵蓋 13:50–14:16（10 分鐘格 3／15），新做法涵蓋整段（15／15，每 10 分鐘 129–138 個 span），抽到的 666 條 trace 全部完整；上限 5000 時舊做法 7／15、新做法 15／15。抽樣多花 0.7–1.1 秒（多了每桶一次候選查詢）。這批 trace 沒有跨服務呼叫，所以兩種做法的邊都是 0，邊的準確度要等有串 trace context 的資料才量得到。
 
@@ -414,7 +406,7 @@ targets:
 
 `hybrid` 救回了高原事件的相關性，也排對了「誰比誰晚」（ord 晚 6 點、bill 晚 10–11 點），但**兩個標準答案的第一候選都錯**：同一分鐘一起變慢的服務（例如 api-gw 直接呼叫 cart-api，延遲當下就加進去）只差 ±1 點，它照樣挑一個當「領先者」。錯的根因比沒有根因更糟，所以預設維持 `diff`，`hybrid` 要自己在 YAML 開。沒有 `min_mask_points` 防線時，`hybrid` 在無事件對照組是 40／40 誤判（只有零星異常點的服務等於拿十來個雜訊點互比）。
 
-**`rca.root_cause.evidence` 驗收（產生器正式劇本，2 週資料、seed 42，走完整 `rca_report`；trace 與日誌經真的 `ElasticsearchSpec` 撈、含抽樣）：**
+**`rca.root_cause.evidence` 驗收（產生器正式劇本，2 週資料、seed 42，走完整 `rca_report`；trace 與日誌經當時的 `ElasticsearchSpec` 撈、含抽樣；2026-11-20 改走 Grafana 資料源後沒有重跑）：**
 
 | 特徵組合 | callee_slowdown（真兇 bill-svc）基準 15／60 分鐘 | load_amplification（真兇 cart-api）基準 15／60 分鐘 |
 |---|---|---|
@@ -456,7 +448,7 @@ targets:
 - 黃金事故：bill-svc（15:40–16:10，根因 tax-gw:443）送 true_positive 後進庫。提案 `detector.mad` threshold 15（it_otel × bill-svc）回測（`time_range` 刻意設 08:00–13:00，不含事故）：防護罩另外抓了事故前 7 天（10,070 個訓練點）重跑，現行 3.5 在事故 30 分鐘內標 27 點、提案 0 點（該窗 mad 最高分 12.69）→ `safety.passed: false`、`rejected`、核准 409。threshold 4.0：27 → 21 點，通過、核准成功。
 - 分位數反推（**歷史紀錄：這個機制已於 2026-11-20 移除**；cart-api 其實是真事故，這裡標成誤報只是為了驗流程）：mad 在 cart-api 誤報窗的 S_max = 7.05；過去 30 天實際只有 10 天有資料（ES 從 10/24 起），14,400 個分數的 99.9% 分位數 Q = 10.13；目標 max(7.40, 10.13) = 10.13，超過單次 +50%，這次提 3.5 → 5.25，reason 寫明還差 4.88。Q > S_max 代表 cart-api 的 mad 分數本身就重尾：單獨用 mad 3.5，日常每 1000 點就有不只 1 點越線，多數決才把它壓住。
 - 序列體檢：bill-svc r(24h) = 0.595、r(168h) = 0.789（ES 只有 10.1 天資料，168h 的配對只有 900 點 ≈ 3.1 天），有週期、不提案；其他四個服務 r(24h) 0.59–0.62、r(168h) 0.83–0.85，都不提案。這批資料沒有能觸發 advisory 的序列，advisory 路徑只有合成白噪音測試驗過。
-- 空桶 vs 真 0：`sum`／`count` 聚合對沒資料的桶會回 0.0（`avg` 回 null），序列體檢會把它誤當成「流量掉到 0」硬算週期。Elasticsearch 來源的體檢會多發一次同查詢的 `count` 聚合，文件數 0 的桶當成沒資料；`coverage`（有資料的時段比例）不到 `min_coverage`（預設 0.5）就一律寫「資料不足」、不算週期、不提案（破壞性驗收場景 9）。
+- 空桶 vs 真 0：`sum`／`count` 聚合對沒資料的桶會回 0.0（`avg` 回 null），序列體檢會把它誤當成「流量掉到 0」硬算週期。以前 Elasticsearch 來源的體檢會多發一次同查詢的 `count` 聚合、把文件數 0 的桶當成沒資料；**這個查詢已隨直連 Elasticsearch 一起移除（2026-11-20），目前沒有資料源提供文件數**，補零的空桶不會被認出來（現有的 Prometheus 系列資料源沒資料就沒有點，不受影響）。`coverage`（有資料的時段比例）不到 `min_coverage`（預設 0.5）就一律寫「資料不足」、不算週期、不提案（破壞性驗收場景 9）。
 - 學習閉環現抓現算的時窗（黃金事故防護罩；以前還有分位數反推）一律 `[start, end]` 含兩端：以前少抓 end 那一點，只有一分鐘的事件群會「時窗內沒有資料」（破壞性驗收場景 7）。
 
 ### 訓練排除、兩級告警、日誌比對、自我健康心跳
@@ -604,7 +596,7 @@ SQLite（本機、測試）刪掉舊的 `aiops-local.db` 重建即可。
 | 拓撲 | `topology.py` | 呼叫 DAG：`api-gw → [cart-api, auth-svc]`、`cart-api → [ord-svc 0.8, redis-cache]`、`ord-svc → [bill-svc, inventory-db]`、`bill-svc → [billing-db, tax-gw]`。redis、db、tax-gw 是外部依賴（只有 client span） |
 | 故障劇本 | `faults.py`、`scenarios/*.yaml` | 何時開始、根因是誰、哪種機制、各服務的 lag 與振幅；共用一條包絡線（緩升 10 分、高原 90 分、指數衰減 20 分） |
 | 系統狀態＋發射器 | `waveforms.py`、`metric_emitter.py`、`trace_emitter.py` | `waveforms.SystemState` 是**唯一**的故障狀態函數（每服務每分鐘的請求數、處理時間、錯誤率、重試倍數，以及往上游加總出來的整段耗時與失敗率）。metrics 是整段 2 週的解析模型；trace 只在事件前後 ±2 小時高密度（每分鐘 12 條），平常每小時 6 條健康樣本，逐筆走訪呼叫樹，取的是同一份陣列 |
-| 寫入 | `generate.py`（本機檔案）、`es_writer.py`（載入 ES） | 預設只輸出 bulk NDJSON；寫 ES 要使用者自己跑 |
+| 寫入 | `generate.py`（本機檔案） | 只輸出 bulk NDJSON。載入 ES 的 `es_writer.py` 已刪除（2026-11-20，repo 不再有任何直連 ES 的程式） |
 
 產生（只寫本機，不連網路；同一個 seed 輸出逐位元組相同）：
 
@@ -654,31 +646,9 @@ pagerank、cross_correlation 已移除，這兩欄數字保留作歷史對照。
 - **log**（`processor.event: error`）在 span 出錯（自己出錯，或呼叫下游失敗）或耗時超過平常 2.5 倍時寫，帶同一個 `trace.id`、`transaction.id`，`parent.id` 指向出事的 transaction 或 span。
 - **`error.exception` 刻意寫成單一物件 `{"type","message","handled"}`，不是 Elastic APM 真實格式的陣列。** Grafana 的 log 面板（`logMessageField: error.exception.message`）沿 `_source` 逐層走，走不進陣列，所以舊資料只顯示文件 id；ES 索引上物件跟單元素陣列等價。另外寫頂層 `message` 當保險。用程式模擬 Grafana 的取值方式，6,266 筆 log 全部取得到字串（同樣文件改成陣列則全部取不到）。**實際在 Grafana 畫面上能不能顯示，要等資料載入後才確認，還沒驗證。**
 
-#### 載入 ES（使用者自己跑）
+#### 載入 ES
 
-`es_writer.py` 要 ES 管理員密碼，平台程式與 AI 助理都不跑。預設 dry-run，只讀本機檔案、印出會建什麼，不連網路：
-
-```bash
-.venv/Scripts/python -m scripts.synth_generator.es_writer synth-out/nov03_cascade
-```
-
-建議先用唯讀 key 抄既有 `scn` 資料串流的 mapping（`schema/*.json` 目前是**手寫的備用 mapping，不是從叢集抓的**；這一步會覆蓋它，`summary.sum` 這類欄位的型別才會跟現有資料一樣）：
-
-```bash
-.venv/Scripts/python -m scripts.synth_generator.es_writer --fetch-schema
-```
-
-真的寫入（讀 `secrets.local.yaml` 的 `es.url` 與 `es.admin_password`；叢集上的 ES 要先 `kubectl --context rancher-desktop -n es-test port-forward svc/elasticsearch 19200:9200`）：
-
-```bash
-.venv/Scripts/python -m scripts.synth_generator.es_writer synth-out/nov03_cascade --apply
-```
-
-- 每個劇本寫進自己的 namespace（`nov03_cascade` → `gencascade`、`nov03_callee_slowdown` → `genslowdown`）：`metrics-apm.transaction.1m-<ns>`、`traces-apm-<ns>`、`logs-apm.error-<ns>`，都在平台唯讀 key 與 Grafana 讀得到的 pattern 底下。兩個劇本是同一批服務、同一段時間，所以分開放；Grafana 會兩份一起看到，看其中一份要在查詢加 `data_stream.namespace`。
-- namespace 只准 `gen` 開頭；檔案裡出現別的索引名稱就拒絕。**既有的 `scn`、`synth` 一筆都不碰**：不刪任何東西，只建／更新名為 `aiops-synth-<ns>-*` 的 index template（priority 500，只套用到那三個名稱）。
-- 資料串流已存在就拒絕寫（避免重跑寫兩份），確定要追加才加 `--append`。
-- 自己的 template 會蓋過 ES 內建的 APM template（只有 priority 最高的那個生效），所以內建的 APM ingest pipeline 不會跑，文件原樣寫入。
-- **`--apply` 與 `--fetch-schema` 都還沒有對真的 ES 跑過**（開發時不准用管理員密碼）。
+載入 ES 的 `es_writer.py`（含 `schema/*.json` 的索引 mapping）已於 2026-11-20 刪除：repo 裡不再有任何直連 Elasticsearch 的程式。產生器照樣輸出 `_bulk` 格式的 NDJSON；要把它放進某個 ES 給 Grafana 看，由管理那個 ES 的人用自己的工具載入（`es_writer.py` 在 git 歷史裡，當初 `--apply` 也沒有對真的 ES 跑過）。
 
 ## 設定（環境變數）
 
@@ -690,11 +660,13 @@ pagerank、cross_correlation 已移除，這兩欄數字保留作歷史對照。
 | `AIOPS_NOTIFIER` | `log` | `log`：只寫日誌；`alertmanager`：真的推送 |
 | `AIOPS_ALERTMANAGER_URL` | （無） | 例如 `http://aiops-alertmanager.aiops-platform.svc:9093` |
 | `AIOPS_ALERTMANAGER_TOKEN` | （無） | 選填，Bearer token |
-| `AIOPS_GRAFANA_URL` | （無） | 選填，維運點得到的 Grafana 網址（例如 `https://grafana.example.com`）。有設才產生告警卡片與 RCA 報告的深度連結；儀表板、變數、資料源 uid 寫在管線 YAML |
+| `AIOPS_GRAFANA_URL` | （無） | 選填，Grafana 網址（例如 `https://grafana.example.com`）。兩個用途：告警卡片與 RCA 報告的深度連結（維運要點得到），以及平台經它讀 trace／日誌（平台要連得到）。有設才產生深度連結；儀表板、變數、資料源 uid 寫在管線 YAML |
 | `AIOPS_PROMETHEUS_URL`／`AIOPS_PROMETHEUS_TOKEN` | （無） | Prometheus 位址與選填 token |
 | `AIOPS_VICTORIAMETRICS_URL`／`AIOPS_VICTORIAMETRICS_TOKEN` | （無） | VictoriaMetrics 位址與選填 token |
-| `AIOPS_ES_URL`／`AIOPS_ES_API_KEY` | （無） | Elasticsearch 位址與選填 API key |
-| `AIOPS_ES_DATA_MODEL` | `elastic_apm` | trace／錯誤日誌的資料模型：`elastic_apm`（Elastic APM）或 `otel`（OTel Collector 的 elasticsearch exporter、otel mapping）。欄位、耗時單位、錯誤判定、預設索引都跟著換，見 `aiops/sources/es_models.py` 與 `tests/fixtures/otel_es/README.md` |
+| `AIOPS_GRAFANA_TOKEN` | （無） | Grafana service account token（`Authorization: Bearer`）。有網址＋token（或下面的帳密）才算有設定 `grafana` 資料源；沒設時 RCA 不撈 trace／日誌、報告照出 |
+| `AIOPS_GRAFANA_USER`／`AIOPS_GRAFANA_PASSWORD` | （無） | 沒有 token 時改用 HTTP basic（開發驗證用；兩種都給時用 token） |
+| `AIOPS_GRAFANA_TRACES_UID`／`AIOPS_GRAFANA_LOGS_UID` | （無） | Grafana 裡放 trace／錯誤日誌的 **Elasticsearch 型別**資料源的 UID（不是機密）。缺哪一個，那一種撈取就記成錯誤（訊息會寫缺哪個變數），報告照出 |
+| `AIOPS_ES_DATA_MODEL` | `elastic_apm` | Grafana 後面那個 Elasticsearch 裡 trace／錯誤日誌的資料模型（變數名稱沿用，描述的是文件形狀，不是連線）：`elastic_apm`（Elastic APM）或 `otel`（OTel Collector 的 elasticsearch exporter、otel mapping）。欄位、耗時單位、錯誤判定、預設索引都跟著換，見 `aiops/sources/es_models.py` 與 `tests/fixtures/otel_es/README.md` |
 | `AIOPS_ES_TRACE_INDEX`／`AIOPS_ES_LOG_INDEX` | 依資料模型：`traces-apm-*`／`logs-apm.*`（elastic_apm）、`traces-*.otel-*`／`logs-*.otel-*`（otel） | RCA 隨需撈 trace／錯誤日誌的索引 |
 | `AIOPS_FALLBACK_LOG` | （無，寫 stderr） | 備援日誌檔路徑 |
 | `AIOPS_FALLBACK_WEBHOOK` | （無） | 資料庫或推送失敗時直接打的 webhook |
@@ -744,7 +716,7 @@ helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiop
 
 ## 目前狀態
 
-已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics／ES 資料源、Lot 履歷合成、外部異常接收、偵測算子（見上表：168 時段基準線、殘差突變／漂移、稀疏計數）、工廠 Lot 收斂、RCA（可抽換的根因演算法：證據融合、拓撲、LLM 判斷、貝氏；10 個段落含歷史相似案例與錯誤日誌樣式比對）、訓練排除歷史事故窗、warning／anomaly 兩級告警、自我健康心跳、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
+已完成並有測試：持久化、偵測到告警的管線、批次訓練、排程、API 認證、Prometheus／VictoriaMetrics 資料源、經 Grafana 讀 trace／日誌的資料源、Lot 履歷合成、外部異常接收、偵測算子（見上表：168 時段基準線、殘差突變／漂移、稀疏計數）、工廠 Lot 收斂、RCA（可抽換的根因演算法：證據融合、拓撲、LLM 判斷、貝氏；10 個段落含歷史相似案例與錯誤日誌樣式比對）、訓練排除歷史事故窗、warning／anomaly 兩級告警、自我健康心跳、LLM 敘述與回饋抽規則（含依據驗證與退回模板）、漏報補錄、調參成效報表、通知抑制、恢復通知（心跳與結案）、容器與 helm chart。
 
 **演算法還沒在真實資料上驗證過**，還沒有任何誤報率或根因準確度的數字；先別把「測試全過」當成「演算法有用」。計畫中的真實資料驗收有三項：
 
@@ -754,7 +726,7 @@ helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiop
 
 （2026-11-20 註：第 1、2 項的對照組 `zscore` 與布林多數決已移除，這兩項照原樣做不了；現行組合的回測見 `docs/RESIDUAL_SNR_ENSEMBLE.md`。）
 
-這三項卡在上面的唯讀 ES key 還沒建。ES 裡實際有哪些服務、多少筆資料、涵蓋哪幾天，也還沒有確認過，以查到的為準。
+這三項原本卡在平台的唯讀 ES key。2026-11-20 起平台不再直連 Elasticsearch：trace／日誌改經 Grafana 讀，指標經 Grafana 讀還沒做，所以需要 ES 指標的第 1、2 項目前沒有路可以跑；第 3 項要先用 `scripts/verify_grafana_source.py` 確認 Grafana 資料源撈得到資料。
 
 演算法的效果只用合成資料（mock）驗證過：`seasonal:` 開頭的 mock query 會產生依時間戳決定、有日週期與週末效應的資料，其他 mock query 是一段雜訊加一個尖峰。在真實指標上的誤報率、根因排得準不準，都還沒驗證。
 
@@ -762,7 +734,7 @@ helm upgrade --install aiops-alertmanager deploy/helm/aiops-alertmanager -n aiop
 
 還沒做或還沒驗證：
 
-- 資料源只用模擬伺服器測過；還沒對真的 Prometheus、VictoriaMetrics、Elasticsearch 取過數。
+- 資料源只用模擬伺服器測過；還沒對真的 Prometheus、VictoriaMetrics 取過數。Grafana 資料源的線上格式在 2026-11-20 對 Grafana 13.0.7 手動探測過（`aiops/sources/grafana.py` 檔頭列了哪些驗證過、哪些沒有），但 `fetch_spans`／`fetch_logs` 整條路要跑 `scripts/verify_grafana_source.py` 才算驗過。
 - LLM 只用假的模型回應測過，沒有呼叫過真的模型。
 - Slack／Teams 通道只驗過設定格式（`amtool check-config`），沒有真的送出訊息。
 - 資料表結構還沒改用 Alembic migration（`create_all` 只會新增表、不會改欄位）。

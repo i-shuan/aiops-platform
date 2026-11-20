@@ -144,7 +144,7 @@
 
 ## 回測
 
-工具：`scripts/backtest/residual_ensemble.py`（序列撈取在 `scripts/backtest/es_series.py`，唯讀 API key、只打 `_search`，
+工具：`scripts/backtest/residual_ensemble.py`（序列撈取當時在 `scripts/backtest/es_series.py`——2026-11-20 已隨平台不再直連 Elasticsearch 刪除，腳本現在只讀既有的 CSV 快取——唯讀 API key、只打 `_search`，
 CSV 快取在 repo 外）。
 
 ```bash
@@ -436,7 +436,7 @@ residual_shift ×1.29（176 -> 170）；第四輪沒有偵測器能再讓誤報�
 
 ## ES 資料源補桶 bug（`0a3379a` 已修）
 
-`aiops/sources/query/elasticsearch.py` 的 date_histogram：range 是 `[start, end)`，`extended_bounds.max` 卻是 `end`，最後補出來的那一桶
+`aiops/sources/query/elasticsearch.py`（2026-11-20 已移出平台，現為 `scripts/chaos/metric_query.py`）的 date_histogram：range 是 `[start, end)`，`extended_bounds.max` 卻是 `end`，最後補出來的那一桶
 一定在 range 外、一定是空的。avg 回 null 會被丟掉；**sum／count 回 0**——每分鐘請求數這類序列每一輪偵測的最後一點都是假的掉到 0，
 pay-api 線上每 5 分鐘一輪因此每輪一筆誤報（每週約 1951 分鐘）。修法：補桶只補到 `end − step`。離線回測工具直接查 ES、
 沒走平台的資料源，所以先前的回測數字不受影響；延遲（avg、sum÷筆數）序列不受影響。

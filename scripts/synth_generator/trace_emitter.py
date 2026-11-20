@@ -1,6 +1,6 @@
 """Traces 與 Error Logs：一次請求走訪一整棵呼叫樹，所有文件共用同一個 trace.id，父子 id 嚴格串接。
 
-照 Elastic APM 資料模型發兩種 trace 文件（平台 aiops/sources/elasticsearch.py 的 _span 就是這樣讀的）：
+照 Elastic APM 資料模型發兩種 trace 文件（平台 aiops/sources/grafana.py 的 _span 就是這樣讀的）：
 - processor.event: transaction —— transaction.id、transaction.duration.us；被別的服務呼叫時 parent.id = 上游那個 client span 的 span.id
 - processor.event: span —— span.id、span.duration.us、parent.id = 所屬 transaction 的 id、transaction.id、
   span.destination.service.resource（對外呼叫的目標）

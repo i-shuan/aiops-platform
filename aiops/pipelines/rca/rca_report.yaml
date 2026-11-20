@@ -8,7 +8,7 @@ nodes:
   - name: fetch_traces
     operator: ingestion.incident_traces
     # follow_messaging：事件實體是訊息消費者時，回到「這批訊息當初發布的時段」補撈生產者的 trace（最多往回 max_lag_minutes）
-    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
+    params: {source_type: grafana, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
              follow_messaging: true, max_lag_minutes: 120}
   # 用撈到的 span 現場還原服務呼叫關係，跟既有拓撲取聯集
   - name: build_topology
@@ -18,7 +18,7 @@ nodes:
   # 一樣是沒設定就略過、連不上就記進 errors，報告照出
   - name: fetch_logs
     operator: ingestion.incident_logs
-    params: {source_type: elasticsearch, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
+    params: {source_type: grafana, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
   # 根因演算法：預設 evidence（這一輪撈到的 span 的自身耗時增量＋流量放大歸因，證據不足就不指認）。
   # 產生器兩套標準答案（2 週正式劇本，基準 15／60 分鐘）2/2 命中；topological（與已移除的 pagerank）在 load_amplification 都排錯，
   # 但它們不需要 trace，沒有 trace 的環境可以換回 rca.root_cause.topological。數字見 README「RCA」一節

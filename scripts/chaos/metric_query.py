@@ -1,4 +1,7 @@
-"""Elasticsearch 指標查詢：JSON 字串 -> 降採樣（date_histogram）的 search body。
+"""混沌模擬器的指標查詢（資料源 chaos_metrics，scripts/chaos/es.py）：JSON 字串 -> 降採樣（date_histogram）的 search body。
+
+這原本是平台的 aiops/sources/query/elasticsearch.py。平台不再直連 Elasticsearch（2026-11-20）後平台裡沒有人用它，
+搬到這裡只給模擬器的假世界回答指標查詢；不是平台程式，aiops/ 不 import 它。
 
 query 範例（就是 MetricTarget.query 的內容）：
   {"index": "metrics-apm.transaction.1m-*", "value_field": "transaction.duration.histogram",

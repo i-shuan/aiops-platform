@@ -35,7 +35,9 @@ def fresh_db(monkeypatch):
 
     monkeypatch.setattr(LogTransport, "send", record)
     for var in ("AIOPS_ALERTMANAGER_URL", "AIOPS_ALERTMANAGER_TOKEN", "AIOPS_FALLBACK_WEBHOOK", "AIOPS_AUTH_DISABLED",
-                "AIOPS_LLM_PROVIDER", "AIOPS_LLM_MODEL", "AIOPS_LLM_API_KEY", "AIOPS_LLM_BASE_URL"):
+                "AIOPS_LLM_PROVIDER", "AIOPS_LLM_MODEL", "AIOPS_LLM_API_KEY", "AIOPS_LLM_BASE_URL",
+                "AIOPS_GRAFANA_TOKEN", "AIOPS_GRAFANA_USER", "AIOPS_GRAFANA_PASSWORD",
+                "AIOPS_GRAFANA_TRACES_UID", "AIOPS_GRAFANA_LOGS_UID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AIOPS_NOTIFIER", "log")
     monkeypatch.setenv("AIOPS_API_TOKEN", TEST_TOKEN)

@@ -152,7 +152,7 @@ def scenario_8() -> H.Result:
         rf = client.post("/api/v1/tuning/feedback", json={"incident_uid": inc["uid"], "verdict": "true_positive", "text": "確認為真事故（P0）",
                                                          "author": "chaos", "root_cause": "billing-db 變慢", "resolution": "擴充連線池"})
         r.check("確認為真事故，進黃金庫（HTTP 200）", "200", rf.status_code, rf.status_code == 200)
-        metric = {"source_type": "elasticsearch", "query": H.metric_query("bill-svc")}
+        metric = {"source_type": H.METRIC_SOURCE, "query": H.metric_query("bill-svc")}
         tr = {"start": (INC - timedelta(hours=6)).isoformat(), "end": (INC - timedelta(hours=1)).isoformat(), "step_seconds": 60}
 
         def create(threshold):
@@ -211,7 +211,7 @@ def scenario_9() -> H.Result:
     H.fresh_db()
 
     def profile(world, at: datetime, q: str | None = None):
-        req = SeriesProfile(metric=MetricIn(source_type="elasticsearch", query=q or qps_q), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=at)
+        req = SeriesProfile(metric=MetricIn(source_type=H.METRIC_SOURCE, query=q or qps_q), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=at)
         with H.es_for(world):
             return run("admin_series_profile", request=req, targets=req.to_targets(), now=at)
 
@@ -232,8 +232,11 @@ def scenario_9() -> H.Result:
     r.check("含連假窗口：仍有日夜週期，不得提議拔除 hourly_baseline", "proposal=None", f"proposal={with_h.get('proposal') is not None}；{with_h.get('advice', '')[:80]}", with_h.get("proposal") is None)
     r.check("168h 配對不足（avg 聚合）：明確標記資料不足、維持既有算子", "r168h=None、advice 說資料不足、proposal=None",
             f"r168h={c['r_168h']}；advice={short.get('advice', '')[:60]}；proposal={short.get('proposal')}", c["r_168h"] is None and "資料不足" in short.get("advice", "") and short.get("proposal") is None)
+    # 已知死區（2026-11-20 起）：這條以前靠 admin.series_profile 對 Elasticsearch 另外查文件數（doc_counts）認出補零的空桶。
+    # 平台不再直連 Elasticsearch、doc_counts 已刪除；會把空桶補成 0 的資料源（這裡的 chaos_metrics 模擬 ES 的 sum）沒有人替它遮罩
+    r.notes.append("sum 聚合補零的空桶：doc_counts 已隨直連 ES 移除，這一條標成已知死區（改接 Grafana 指標時要重新處理空桶）")
     r.check("同一份只有 7.5 天的資料改用 sum 聚合：同樣要標記資料不足", "r168h=None、advice 說資料不足", f"r168h={d['r_168h']}；advice={short_sum.get('advice', '')[:60]}",
-            d["r_168h"] is None and "資料不足" in short_sum.get("advice", ""))
+            d["r_168h"] is None and "資料不足" in short_sum.get("advice", ""), dead=True)
     advisory = Proposals.with_status("detector.hourly_baseline", "sample_it_otel", "bill-svc", ["advisory"])
     r.check("三次體檢後資料庫沒有任何 advisory 提案", "0 筆", f"{len(advisory)} 筆", not advisory)
     return r

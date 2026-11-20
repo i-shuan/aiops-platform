@@ -67,20 +67,21 @@ def test_non_transient_answers_are_not_retried(status, outcome, retry_waits):
 # ── RCA 撈時序／trace／日誌：資料源連不上時降級，不再整份失敗 ──
 
 T = datetime(2026, 11, 3, 14, 6, tzinfo=timezone.utc)
-ES_QUERY = '{"index": "metrics-apm.transaction.1m-*", "agg": "count"}'
+PROM_QUERY = "sum(rate(http_requests_total[1m]))"
 
 
 def _series_report_workflow() -> Workflow:
-    """原本 rca_report_correlation 的撈取節點＋報告（根因演算法已移除）：三個旁路撈取節點都連不上 ES。"""
+    """原本 rca_report_correlation 的撈取節點＋報告（根因演算法已移除）：三個旁路撈取節點都連不上
+    （時序走直連的 Prometheus、trace 與日誌走 Grafana；以前三個都是直連 Elasticsearch）。"""
     return Workflow(name="series_report", nodes=[
         NodeSpec(name="series", operator="ingestion.incident_series", optional=True,
                  params={"before_minutes": 30, "after_minutes": 10, "step_seconds": 60, "max_series": 20}),
         NodeSpec(name="fetch_traces", operator="ingestion.incident_traces",
-                 params={"source_type": "elasticsearch", "before_minutes": 15, "after_minutes": 0, "max_spans": 20000,
+                 params={"source_type": "grafana", "before_minutes": 15, "after_minutes": 0, "max_spans": 20000,
                          "max_before_minutes": 60, "follow_messaging": True, "max_lag_minutes": 120}),
         NodeSpec(name="build_topology", operator="rca.build_dynamic_topology", params={"mode": "merge", "min_calls": 1}),
         NodeSpec(name="fetch_logs", operator="ingestion.incident_logs",
-                 params={"source_type": "elasticsearch", "before_minutes": 5, "after_minutes": 5, "baseline_minutes": 60,
+                 params={"source_type": "grafana", "before_minutes": 5, "after_minutes": 5, "baseline_minutes": 60,
                          "max_logs": 5000}),
         NodeSpec(name="report", operator="rca.report",
                  params={"sections": ["summary", "timeline", "affected_entities", "propagation_path", "log_patterns"]}),
@@ -88,16 +89,18 @@ def _series_report_workflow() -> Workflow:
 
 
 def test_series_report_survives_an_unreachable_source(monkeypatch, retry_waits):
-    from aiops.sources import elasticsearch
+    from aiops.sources import grafana
+    from grafana_fake import set_grafana_env
 
-    monkeypatch.setenv("AIOPS_ES_URL", "http://es-down:9200")
+    set_grafana_env(monkeypatch, "http://grafana-down:3000")
+    monkeypatch.setenv("AIOPS_PROMETHEUS_URL", "http://prom-down:9090")
     real_client = httpx.Client
 
-    def refused(req):  # 每個請求都連線被拒（跟 ES 重啟中一樣），不真的去等網路逾時
+    def refused(req):  # 每個請求都連線被拒（跟資料源重啟中一樣），不真的去等網路逾時
         raise httpx.ConnectError("[WinError 10061] 目標電腦拒絕連線", request=req)
 
-    monkeypatch.setattr(elasticsearch.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(refused)))
-    events = [AnomalyEvent(e, ES_QUERY, T + timedelta(minutes=m + d), 6.0, source_type="elasticsearch")
+    monkeypatch.setattr(grafana.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(refused)))
+    events = [AnomalyEvent(e, PROM_QUERY, T + timedelta(minutes=m + d), 6.0, source_type="prometheus")
               for e, d in (("cart-api", 0), ("ord-svc", 6), ("bill-svc", 16)) for m in range(30)]
     inc = Incident(events)
     row = Incidents.create(inc.uid, "it_otel", inc.to_dict(), "P1", None, "it_otel",
@@ -108,7 +111,7 @@ def test_series_report_survives_an_unreachable_source(monkeypatch, retry_waits):
     assert fetch["fetched"] == 0 and len(fetch["skipped"]) == 3
     assert sum("同一資料源前面已失敗" in s["reason"] for s in fetch["skipped"]) == 2  # 第一條失敗後不再一條條等
     messages = [e["message"] for e in res["errors"]]
-    assert any(m.startswith("elasticsearch 連不上，RCA 不含用它的時序") for m in messages)
+    assert any(m.startswith("prometheus 連不上，RCA 不含用它的時序") for m in messages)
     assert any(m.startswith("撈 trace 失敗") for m in messages) and any(m.startswith("撈日誌失敗") for m in messages)
     assert "propagation_path" in [s["key"] for s in res["sections"]]  # 既有拓撲照樣畫傳播路徑
     # 三個撈取節點各自重試 2 次（時序只試第一條）：0.5、1.5 各三次

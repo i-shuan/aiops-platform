@@ -3,6 +3,10 @@
 演練中遇到的問題集中記在這裡，作為上線前微調的依據。只記事實與量到的數字；沒驗證的寫明沒驗證。
 環境是 Rancher Desktop 的單節點 k3s：部署與封包是真的，流量來自兩個模擬服務，不代表正式環境的負載。
 
+> **2026-11-20 註**：這份是歷史紀錄，當時平台用 `AIOPS_ES_URL`／`AIOPS_ES_API_KEY` 直連 Elasticsearch。之後平台改成只經 Grafana 讀
+> trace／日誌（`aiops/sources/grafana.py`，環境變數 `AIOPS_GRAFANA_URL`／`AIOPS_GRAFANA_TOKEN`／`AIOPS_GRAFANA_TRACES_UID`／`AIOPS_GRAFANA_LOGS_UID`），
+> 直連 ES 的資料源、ES 指標查詢、`values-drill.yaml` 裡的 ES 設定都不再適用。下面的內容沒有改寫，數字是直連時量的。
+
 ## 環境（2026-11-16）
 
 - 平台：`aiops-platform:drill`（分支 `chore/e2e-drill`，從 main `ff6e545` 開出），chart `deploy/helm/aiops-platform`

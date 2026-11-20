@@ -1,8 +1,9 @@
 """欄位對照的審核工作流：提交 -> 核准（同來源舊版自動作廢）-> 查詢現行版。
 
 資料源層只吃「已核准」的對照（引擎載入 ctx.field_maps），不管審核狀態。
-同一份對照兩種用途：標準欄 ts／value／entity 給指標查詢；span.*／log.* 給 Elasticsearch 的 trace 與日誌
-（蓋過資料模型 profile 的預設來源欄，見 sources/es_models.py）。
+同一份對照兩種標準欄：span.*／log.* 給 trace 與日誌（資料源 grafana 後面的 Elasticsearch 文件；蓋過資料模型 profile 的預設來源欄，
+見 sources/es_models.py）。ts／value／entity 原本給 Elasticsearch 的指標查詢，那個查詢已隨直連 ES 移除（2026-11-20）：
+目前還收、還存，但沒有任何資料源會讀。
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from aiops.engine.operator import BaseOperator
 from aiops.sources.es_models import STANDARD_FIELDS
 from aiops.storage.repository import Mappings
 
-# 指標查詢用的標準欄（sources/query/elasticsearch._apply_field_map）＋ trace／日誌的標準欄（sources/es_models.STANDARD_FIELDS）
+# 指標用的標準欄（目前沒有資料源讀，見檔頭）＋ trace／日誌的標準欄（sources/es_models.STANDARD_FIELDS）
 KNOWN_STANDARD_FIELDS = frozenset({"ts", "value", "entity", *STANDARD_FIELDS})
 
 

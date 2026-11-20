@@ -89,7 +89,7 @@ class BaseDataSourceSpec(ABC):
         field_map：已核准的欄位對照（標準欄 span.* 蓋過資料源預設的來源欄；只有真的有對照時呼叫端才會帶）。
         environment：只撈這個部署環境的（管線設了 Workflow.environment 時呼叫端才會帶）；每筆回傳的 dict 帶
         environment 鍵（該筆的環境，沒有就是空字串），呼叫端會用 in_environment 再濾一次。
-        預設不支援；存 trace 的資料源（Elasticsearch：Elastic APM 或 OTel，見 sources/es_models.py）覆寫它。"""
+        預設不支援；存 trace 的資料源（grafana：後面的 Elasticsearch 存 Elastic APM 或 OTel 文件，見 sources/es_models.py）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
 
     def fetch_linked_spans(self, trace_ids: list[str], start: datetime, end: datetime,

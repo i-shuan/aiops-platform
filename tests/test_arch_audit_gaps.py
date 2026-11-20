@@ -327,49 +327,19 @@ def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monke
 # ── Q8 追加：資料源回 HTTP 200 但內容是 NaN／Inf 或格式不對 ──
 
 
-def _es_client(buckets):
-    import json as _json
-
-    import httpx
-    body = _json.dumps({"aggregations": {"series": {"buckets": buckets}}}, allow_nan=True).encode()
-    return httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))
-
-
-_ES_QUERY = '{"index": "metrics-*", "value_field": "cpu.pct", "agg": "avg"}'
-
-
-def _ms(i):
-    return int((T0 - timedelta(minutes=60 - i)).timestamp() * 1000)
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
-def test_elasticsearch_all_nan_or_inf_is_no_data(value):
-    """G17（已修）：ES 每桶都是 NaN／Inf 跟 Prometheus 一樣算沒資料（NoDataError），不會學成 {'mean': nan}。"""
-    from aiops.sources.base import NoDataError
-    from aiops.sources.elasticsearch import ElasticsearchSpec
-    spec = ElasticsearchSpec("http://es", client=_es_client([{"key": _ms(i), "v": {"value": value}} for i in range(60)]))
-    with pytest.raises(NoDataError):
-        spec.fetch_data(_ES_QUERY, T0 - timedelta(minutes=60), T0, 60)
-
-
-@pytest.mark.parametrize("case", ["es-missing-key", "es-string-value", "prom-string-value"])
-def test_malformed_source_response_is_a_platform_error(case):
+def test_malformed_source_response_is_a_platform_error():
     """G18（已修）：資料源回 200 但格式不對 -> InvalidQueryError（PlatformError），記成那條序列的錯誤。"""
     import json as _json
 
     import httpx
 
     from aiops.engine.errors import PlatformError
-    from aiops.sources.elasticsearch import ElasticsearchSpec
     from aiops.sources.prometheus import PrometheusSpec
     start = T0 - timedelta(minutes=60)
-    if case == "es-missing-key":
-        spec, q = ElasticsearchSpec("http://es", client=_es_client([{"v": {"value": 1.0}}] * 3)), _ES_QUERY
-    elif case == "es-string-value":
-        spec, q = ElasticsearchSpec("http://es", client=_es_client([{"key": _ms(i), "v": {"value": "abc"}} for i in range(3)])), _ES_QUERY
-    else:
-        body = _json.dumps({"status": "success", "data": {"result": [{"metric": {}, "values": [[T0.timestamp(), "abc"]]}]}}).encode()
-        spec, q = PrometheusSpec("http://p", client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))), "up"
+    # Elasticsearch 指標查詢的兩個案例（桶沒有 key、value 是字串）隨 ElasticsearchSpec.fetch_data 一起刪除；
+    # Grafana 資料源回應格式不對的案例在 tests/test_grafana_source.py
+    body = _json.dumps({"status": "success", "data": {"result": [{"metric": {}, "values": [[T0.timestamp(), "abc"]]}]}}).encode()
+    spec, q = PrometheusSpec("http://p", client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))), "up"
     with pytest.raises(PlatformError):
         spec.fetch_data(q, start, T0, 60)
 

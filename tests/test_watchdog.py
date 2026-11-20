@@ -193,7 +193,7 @@ def test_runs_with_caller_series_only_work_on_the_watchdog_with_platform_records
         ("it_otel", "mock"): 403,                     # 使用者管線
         ("sample_metrics_only", "mock"): 403,         # 樣本不是出貨的看門狗資料夾
         ("platform_watchdog", "mock"): 403,           # 看門狗也不准跑外部序列
-        ("platform_watchdog", "elasticsearch"): 403,
+        ("platform_watchdog", "grafana"): 403,
         ("nope_pipeline", "platform"): 404,
     }
     for (workflow, source), status in cases.items():
@@ -220,7 +220,7 @@ def test_backtest_only_runs_on_watchdog_proposals_and_platform_records(client):
     window = {"start": (T - timedelta(days=2)).isoformat(), "end": T.isoformat(), "step_seconds": 300}
     blocked = [(_proposal(client, "it_otel"), "platform", "runs/metrics_only/failed"),   # 使用者管線的提案
                (_proposal(client, "platform_watchdog"), "mock", "cpu"),                 # 看門狗提案、外部序列
-               (_proposal(client, "*"), "elasticsearch", "{}")]                          # 不限管線的提案、外部序列
+               (_proposal(client, "*"), "prometheus", "up")]                          # 不限管線的提案、外部序列
     for pid, source, query in blocked:
         r = client.post("/api/v1/tuning/proposals/backtest",
                         json={"proposal_id": pid, "metric": {"source_type": source, "query": query}, "time_range": window})

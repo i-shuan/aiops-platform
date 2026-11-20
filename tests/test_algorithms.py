@@ -14,7 +14,7 @@ from aiops.engine.pipeline import Pipeline, load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import AnomalyEvent
 from aiops.sources.base import InvalidQueryError
-from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.grafana import GrafanaSpec
 from aiops.sources.mock import _seasonal
 from aiops.sources.prometheus import PrometheusSpec
 from aiops.stages.detectors.base import DetectorOperator, pack_arrays, unpack_arrays
@@ -188,7 +188,7 @@ def test_prometheus_fetch_group_splits_by_label():
 
 def test_sources_without_group_support_say_so():
     with pytest.raises(InvalidQueryError, match="不支援動態同儕"):
-        ElasticsearchSpec("http://es").fetch_group('{"index": "m", "agg": "count"}', SUNDAY, SUNDAY, 60, "host")
+        GrafanaSpec("http://grafana").fetch_group("anything", SUNDAY, SUNDAY, 60, "host")
 
 
 # ── A.3 同比／環比 ──
