@@ -4,13 +4,16 @@ import base64
 import html
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiops.engine.context import PipelineContext, TargetError
 from aiops.engine.errors import InfrastructureError
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.operator import BaseOperator
-from aiops.engine.types import Notification
+from aiops.engine.types import Notification, as_utc
 from aiops.stages.notification.transport import AlertmanagerTransport, GrafanaAnnotations, LogTransport, logger
 
 
@@ -125,15 +128,49 @@ def _grafana_annotations() -> GrafanaAnnotations | None:
     return None
 
 
-def _links(urls: str) -> str:
-    """連回 Grafana 告警規則的連結排成一行，連結文字是規則的 uid（網址 …/alerting/grafana/<uid>/view 裡的那一段）：
-    一張卡常常有好幾條規則，每條都寫同一句話分不出誰是誰。"""
-    links = []
-    for u in urls.split():
-        parts = u.rstrip("/").split("/")
-        name = parts[-2] if len(parts) >= 2 and parts[-1] == "view" else parts[-1]
-        links.append(f'<a href="{html.escape(u, quote=True)}">{html.escape(name)}</a>')
-    return ("<br>看規則、調整優先權：" + "、".join(links)) if links else ""
+DISPLAY_TZ_ENV = "AIOPS_DISPLAY_TZ"  # 註記文字裡的時間用哪個時區（IANA 名稱，例如 Asia/Taipei）；沒設 = UTC
+TZ_LABEL = {"Asia/Taipei": "台灣時間", "UTC": "UTC"}
+_ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})")
+
+
+def _display_tz() -> tuple[ZoneInfo, str]:
+    name = os.environ.get(DISPLAY_TZ_ENV, "").strip() or "UTC"
+    try:
+        return ZoneInfo(name), TZ_LABEL.get(name, name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("UTC"), "UTC"
+
+
+def _clock(ts: datetime, tz: ZoneInfo) -> str:
+    return ts.astimezone(tz).strftime("%H:%M")
+
+
+def _localize(text: str, tz: ZoneInfo) -> str:
+    """文字裡的 ISO 時間（演算法的理由常帶 2026-11-20T13:43:00+00:00）換成顯示時區的 HH:MM，跟 Grafana 圖表的 X 軸對得起來。"""
+    return _ISO_TIME.sub(lambda m: _clock(datetime.fromisoformat(m.group(0).replace("Z", "+00:00")), tz), text)
+
+
+def _headline(severity: str, entities: list[str], count: int | str) -> str:
+    """第一行：幾個實體、累計幾筆異常。多個實體併成一件時寫出來——這是收斂做的事。"""
+    names = html.escape(" / ".join(entities))
+    if len(entities) > 1:
+        return f"[{html.escape(severity)} 跨系統異常收斂] {names} 累計 {count} 筆異常 → 自動合併為 1 件"
+    return f"[{html.escape(severity)} 異常] {names} 累計 {count} 筆異常"
+
+
+def _priority_link(rule_urls: str, pipeline: str) -> str:
+    """回 Grafana 調整優先權的連結：一條，指到告警規則清單、篩出交給這條管線的規則（aiops_detect 標籤）。
+    網址的前半段取自規則連結（…/alerting/grafana/<uid>/view），沒有規則連結（外部告警的事件群）就沒有這條。"""
+    first = next(iter(rule_urls.split()), "")
+    if "/alerting/" not in first or not pipeline:
+        return ""
+    url = first.split("/alerting/")[0] + "/alerting/list?search=" + quote(f"label:aiops_detect={pipeline}")
+    return f'｜<a href="{html.escape(url, quote=True)}">點此調整告警優先權</a>'
+
+
+def _footer(start: datetime, end: datetime, rule_urls: str, pipeline: str) -> str:
+    tz, label = _display_tz()
+    return f"異常起訖：{_clock(start, tz)} ~ {_clock(end, tz)}（{label}）" + _priority_link(rule_urls, pipeline)
 
 
 # 註記上的結論等級用短的說法（完整的說明在 RCA 報告的「可能的源頭」段落）
@@ -145,11 +182,15 @@ CONCLUSION_SHORT = {"confirmed": "有直接證據", "symptom_location": "僅症�
 class GrafanaAnnotationNotifier(BaseOperator):
     """把事件群標在 Grafana 圖表的時間軸上（Annotations API），使用者不用離開 Grafana 就看得到平台判了什麼。
 
+    註記是三行給人看的摘要（GrafanaAnnotations）：
+      [P0 跨系統異常收斂] mq-broker / cim-eap / amhs-mcs 累計 161 筆異常 → 自動合併為 1 件
+      RCA 根因（依關係圖推測）：mq-broker（首次異常 21:43（事件群中最早）…；連帶影響 cim-eap、amhs-mcs）
+      異常起訖：21:43 ~ 22:00（台灣時間）｜點此調整告警優先權
+    時間用 AIOPS_DISPLAY_TZ 的時區（沒設 = UTC），跟 Grafana 圖表的 X 軸對齊。結論等級照實寫（推測就寫推測）。
     放在兩種管線：
-      - 偵測管線（notify 之後）：這一輪送出通知的每個事件群一筆註記——嚴重度、摘要、連回 Grafana 規則的連結；
-        事件群持續中每一輪更新結束時間與文字，不會越標越多。
-      - RCA 管線（最後一個節點）：把結論等級與第一名候選補進同一筆註記。
-    標籤：aiops、incident:<uid>、severity:<P0～P3>、entity:<實體>——儀表板用標籤篩（deploy/helm/aiops-grafana 的 aiops-incidents）。
+      - 偵測管線（notify 之後）：這一輪送出通知的每個事件群更新第一、三行；事件群持續中不會越標越多。
+      - RCA 管線（最後一個節點）：更新第二行。
+    標籤：aiops、inc:<uid 前 8 碼>、severity:<P0～P3>、entity:<實體>——儀表板用標籤篩（deploy/helm/aiops-grafana 的 aiops-incidents）。
 
     這是旁路：Grafana 沒設定就不做；寫失敗只記進 errors（實體 node:grafana_annotations），不影響通知、結案與 RCA 報告。
     不放進 after_finalize、也不擋心跳：註記寫不進去不代表告警沒送到。"""
@@ -180,8 +221,10 @@ class GrafanaAnnotationNotifier(BaseOperator):
             start = datetime.fromisoformat(a["first_seen"])
             end = datetime.fromisoformat(a.get("last_seen") or a["first_seen"])
             entities = [e.strip() for e in n.labels.get("entities", "").split(",") if e.strip()]
-            text = html.escape(a.get("summary", "")) + _links(a.get("grafana_rule_url", ""))
-            client.upsert(uid, start, end, [f"severity:{n.labels.get('severity', '')}", *(f"entity:{e}" for e in entities)], alert=text)
+            severity = n.labels.get("severity", "")
+            client.upsert(uid, start, end, [f"severity:{severity}", *(f"entity:{e}" for e in entities)],
+                          headline=_headline(severity, entities, a.get("event_count", "")),
+                          footer=_footer(start, end, a.get("grafana_rule_url", ""), ctx.pipeline))
         return len(seen)
 
     @staticmethod
@@ -189,15 +232,23 @@ class GrafanaAnnotationNotifier(BaseOperator):
         if not ctx.incidents:
             return 0
         incident = ctx.incidents[0]
+        tz, _ = _display_tz()
         label = CONCLUSION_SHORT.get(ctx.rca_conclusion_type, ctx.rca_conclusion_type)
         if ctx.rca_root_candidates:
             top = ctx.rca_root_candidates[0]
-            text = f"<b>根因（{label}）：{html.escape(top.entity)}</b><br>{html.escape(top.reason[:400])}"
+            others = [e for e in incident.entities if e != top.entity]
+            affected = f"；連帶影響 {'、'.join(others)}" if others else ""
+            rca = f"RCA 根因（{label}）：<b>{html.escape(top.entity)}</b>（{html.escape(_localize(top.reason, tz)[:240])}{html.escape(affected)}）"
         else:
-            text = f"<b>根因：{label}</b><br>{html.escape((ctx.rca_conclusion_reason or ctx.rca_root_note or '')[:400])}"
-        entities = [f"entity:{e}" for e in incident.entities]
-        # 這個事件群還沒有註記（例如外部告警的事件群，偵測管線沒掛這個節點）：連告警那一段一起補上
-        alert = None if client.find(incident.uid) else html.escape(f"[{incident.severity}] {', '.join(incident.entities)} 異常")
-        client.upsert(incident.uid, incident.start, incident.end, [f"severity:{incident.severity}", *entities], alert=alert, rca=text)
+            why = _localize(ctx.rca_conclusion_reason or ctx.rca_root_note or "", tz)[:240]
+            rca = f"RCA：{label}（{html.escape(why)}）" if why else f"RCA：{label}"
+        tags = [f"severity:{incident.severity}", *(f"entity:{e}" for e in incident.entities)]
+        if client.find(incident.uid):
+            client.upsert(incident.uid, incident.start, incident.end, tags, rca=rca)
+        else:  # 這個事件群還沒有註記（外部告警的事件群，或註記被清掉了）：另外兩行從事件群本身補上
+            urls = " ".join(sorted({str(e.attrs["grafana_rule_url"]) for e in incident.events if e.attrs.get("grafana_rule_url")}))
+            client.upsert(incident.uid, incident.start, incident.end, tags, rca=rca,
+                          headline=_headline(incident.severity, list(incident.entities), len(incident.events)),
+                          footer=_footer(as_utc(incident.start), as_utc(incident.end), urls, ctx.incident_pipeline))
         return 1
 

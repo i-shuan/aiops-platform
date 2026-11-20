@@ -59,16 +59,21 @@ class LogTransport:
 
 class GrafanaAnnotations:
     """Grafana 註記（Annotations API）：把事件群標在 Grafana 圖表的時間軸上。一個事件群一筆註記，用標籤
-    incident:<uid> 找回來更新（平台不另外存註記的編號）。
+    inc:<uid 的前 8 碼> 找回來更新（平台不另外存註記的編號；完整的 uid 太長，在浮出視窗上只是一串看不懂的字）。
 
-    註記的文字分兩段：告警那一段（偵測管線每一輪更新）與 RCA 那一段（跑 RCA 時更新），中間用 RCA_MARK 隔開，
-    更新其中一段時另一段原樣保留。Grafana 顯示註記時會過濾 HTML，只留連結、換行、粗體這類安全的標記。
+    註記的文字固定三行，用 <br> 隔開，各自更新、互不覆蓋：
+      第一行 headline：嚴重度、哪些實體、累計幾筆異常（偵測管線每一輪更新）
+      第二行 rca     ：RCA 的結論（跑 RCA 時更新；還沒跑過是 RCA_PENDING）
+      第三行 footer  ：異常起訖、回 Grafana 調整優先權的連結（偵測管線每一輪更新）
+    三行裡不能再有 <br>（呼叫端的文字都先跳脫過）。Grafana 顯示註記時會過濾 HTML，只留連結、換行、粗體這類安全的標記。
 
     需要的權限比其他地方多：讀資料只要 Viewer，寫註記要 Editor 的 service account token。
     已在 Grafana 13.0.7 驗證（2026-11-20）：POST／PATCH／GET /api/annotations，tags 用 AND 篩選。"""
 
     TAG = "aiops"
-    RCA_MARK = "<br>── RCA ──<br>"
+    BREAK = "<br>"
+    BREAK_COUNT = 2  # 三行之間的換行數
+    RCA_PENDING = "RCA：尚未分析"
 
     def __init__(self, base_url: str, headers: dict[str, str], client: httpx.Client | None = None, timeout: float = 5.0):
         self.base_url, self.headers = base_url.rstrip("/"), dict(headers)
@@ -82,24 +87,30 @@ class GrafanaAnnotations:
             raise InfrastructureError(f"Grafana 註記 {method} {path} 失敗：{e}") from e
         return resp
 
+    @staticmethod
+    def incident_tag(incident_uid: str) -> str:
+        return "inc:" + incident_uid.removeprefix("inc-")[:8]
+
     def find(self, incident_uid: str) -> dict | None:
-        rows = self._call("GET", "/api/annotations", params={"tags": [self.TAG, f"incident:{incident_uid}"], "limit": 1,
+        rows = self._call("GET", "/api/annotations", params={"tags": [self.TAG, self.incident_tag(incident_uid)], "limit": 1,
                                                              "from": 0, "to": 4102444800000}).json()
         return rows[0] if rows else None
 
-    def upsert(self, incident_uid: str, start: datetime, end: datetime, tags: list[str],
-               alert: str | None = None, rca: str | None = None) -> int:
-        """建立或更新這個事件群的註記；alert／rca 給 None = 那一段保留原樣。回傳註記編號。"""
+    def upsert(self, incident_uid: str, start: datetime, end: datetime, tags: list[str], headline: str | None = None,
+               footer: str | None = None, rca: str | None = None) -> int:
+        """建立或更新這個事件群的註記；headline／footer／rca 給 None = 那一行保留原樣。回傳註記編號。"""
         existing = self.find(incident_uid)
-        old_alert, _, old_rca = (existing or {}).get("text", "").partition(self.RCA_MARK)
-        alert_text, rca_text = (old_alert if alert is None else alert), (old_rca if rca is None else rca)
+        text = (existing or {}).get("text", "")
+        # 剛好兩個換行才是這個類別寫的三行；不是的（別的版本寫的，或還沒有註記）不沿用
+        three_lines = text.count(self.BREAK) == self.BREAK_COUNT
+        old_headline, old_rca, old_footer = text.split(self.BREAK) if three_lines else ("", self.RCA_PENDING, "")
+        lines = [old_headline if headline is None else headline, old_rca if rca is None else rca,
+                 old_footer if footer is None else footer]
         body = {"time": int(start.timestamp() * 1000), "timeEnd": int(end.timestamp() * 1000),
-                "tags": sorted({self.TAG, f"incident:{incident_uid}", *tags}),
-                "text": alert_text + (self.RCA_MARK + rca_text if rca_text else "")}
+                "tags": sorted({self.TAG, self.incident_tag(incident_uid), *tags}), "text": self.BREAK.join(lines)}
         if existing:
-            if alert is None:  # RCA 只補上結論：時間範圍與嚴重度標籤以告警那一邊為準
+            if headline is None:  # RCA 只補上結論：時間範圍與嚴重度標籤以告警那一邊為準
                 body = {"text": body["text"], "tags": sorted({*existing.get("tags", []), *body["tags"]})}
             self._call("PATCH", f"/api/annotations/{existing['id']}", json=body)
             return int(existing["id"])
         return int(self._call("POST", "/api/annotations", json=body).json()["id"])
-

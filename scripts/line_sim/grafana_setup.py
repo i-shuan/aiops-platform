@@ -96,12 +96,17 @@ def main() -> None:
 
 
 def line_dashboard() -> dict:
-    """三張時序圖（MQ／CIM／AMHS），儀表板層級查 aiops 標籤的註記：事件群會以紅色區間標在圖上，滑鼠移上去看摘要與根因。"""
-    def panel(pid: int, title: str, exprs: list[tuple[str, str]], y: int) -> dict:
+    """三張時序圖（MQ／CIM／AMHS），儀表板層級查 aiops 標籤的註記：事件群會以紅色區間標在圖上，滑鼠移上去看摘要與根因。
+    三張圖疊起來不到一個畫面高（留一點空間給最下面那張圖的註記浮出視窗）。每張圖兩條線、各用一邊的 Y 軸：兩條線的量級差很多（佇列深度幾千、消費者數 4），共用一軸其中一條會被壓成直線。"""
+    def panel(pid: int, title: str, left: tuple[str, str], right: tuple[str, str], y: int) -> dict:
         return {"id": pid, "type": "timeseries", "title": title, "datasource": {"type": "prometheus", "uid": DATASOURCE["uid"]},
-                "gridPos": {"x": 0, "y": y, "w": 24, "h": 8},
+                "gridPos": {"x": 0, "y": y, "w": 24, "h": 6},
+                "fieldConfig": {"defaults": {"custom": {"lineWidth": 2, "fillOpacity": 8}},
+                                "overrides": [{"matcher": {"id": "byName", "options": right[1]},
+                                               "properties": [{"id": "custom.axisPlacement", "value": "right"}]}]},
+                "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
                 "targets": [{"refId": chr(65 + i), "expr": f'max by (line) ({expr}{{line="fab12"}})', "legendFormat": legend}
-                            for i, (expr, legend) in enumerate(exprs)]}
+                            for i, (expr, legend) in enumerate((left, right))]}
     return {
         "uid": "aiops-line-sim", "title": "產線指標（模擬）＋ AIOps 事件群", "timezone": "browser", "schemaVersion": 39,
         "time": {"from": "now-3h", "to": "now"}, "refresh": "1m",
@@ -109,10 +114,9 @@ def line_dashboard() -> dict:
                                   "datasource": {"type": "grafana", "uid": "-- Grafana --"},
                                   "target": {"type": "tags", "tags": ["aiops"], "matchAny": False, "limit": 200}}]},
         "panels": [
-            panel(1, "MQ：佇列深度、消費者數", [("mq_queue_depth", "佇列深度"), ("mq_consumer_count", "消費者數")], 0),
-            panel(2, "CIM：在線機台數、逾時次數", [("cim_connected_eqp_count", "在線機台數"), ("cim_timeout_count", "逾時次數")], 8),
-            panel(3, "AMHS：搬運耗時、可用天車數、中止次數", [("amhs_transfer_duration_seconds", "搬運耗時（秒）"),
-                                                    ("amhs_active_vehicles", "可用天車數"), ("amhs_abort_count", "中止次數")], 16),
+            panel(1, "MQ：佇列深度（左軸）、消費者連線數（右軸）", ("mq_queue_depth", "佇列深度"), ("mq_consumer_count", "消費者連線數"), 0),
+            panel(2, "CIM：在線機台數（左軸）、通訊逾時次數（右軸）", ("cim_connected_eqp_count", "在線機台數"), ("cim_timeout_count", "通訊逾時次數"), 6),
+            panel(3, "AMHS：搬運耗時秒（左軸）、可用天車數（右軸）", ("amhs_transfer_duration_seconds", "搬運耗時（秒）"), ("amhs_active_vehicles", "可用天車數"), 12),
         ],
     }
 
