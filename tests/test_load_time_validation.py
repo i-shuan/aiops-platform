@@ -75,7 +75,9 @@ TUNABLE_CASES = _tunable_cases()
 def test_the_sweep_really_covers_every_tunable_detector():
     covered = {c.values[0] for c in TUNABLE_CASES}
     assert {"detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic", "detector.sparse_count"} <= covered
-    assert len(TUNABLE_CASES) >= 80  # 4 個偵測器共 16 個可調參數 × 5 種壞值（移除 zscore／mad／quantile_drift 之前是 100 以上）
+    # 4 個偵測器共 6 個可調參數 × 5 種壞值 = 30。2026-11-20 以前是 16 個（>= 80）：min_scale、min_scale_ratio、fpr、
+    # max_tail_factor 這 10 個（跨三個偵測器）隨分母底噪與尾巴校正移除，掃描本身沒有變
+    assert len(TUNABLE_CASES) == 30
 
 
 @pytest.mark.parametrize("operator,key,value", TUNABLE_CASES)
@@ -114,8 +116,6 @@ def test_every_tunable_of_every_detector_is_range_checked_at_load(operator, key,
     ("alert.notify_payload", {"severity_thresholds": {"P0": 10, "SEV1": 5}}, "SEV1"),
     ("alert.notify_payload", {"severity_thresholds": {}}, "severity_thresholds"),
     ("alert.notify_payload", {"severity_thresholds": {"P0": "high"}}, "必須是有限的數值"),
-    ("detector.soft_vote", {"votes": 0}, "votes 必須大於 0"),
-    ("detector.soft_vote", {"votes": -2}, "votes 必須大於 0"),
     ("rca.section.similar_cases", {"w_entities": -1}, "w_entities 不能小於 0"),
     ("rca.section.similar_cases", {"w_entities": 0, "w_metrics": 0, "w_signals": 0}, "不能全是 0"),
 ])

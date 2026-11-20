@@ -93,8 +93,8 @@ def test_threshold_param():
 
 
 def test_constant_training_does_not_divide_by_zero():
-    # 底噪（docs/HARDENING_DESIGN.md 第 1 節）：訓練期完全不變（std = 0）時，整數序列分母至少 1 個單位，
-    # 5→6（多 1 筆）是 1 分、不是異常；跳 10 個單位照樣抓得到
+    # 訓練期完全不變（std = 0）時分母退到 1.0（base.guard_scale，只防除以 0；以前這裡是整數序列底噪的 1，數字剛好一樣）：
+    # 5→6 是 1 分、不是異常；跳 10 個單位照樣抓得到
     r = _algo("detector.hourly_baseline").fit(_df([5.0] * 30)).detect(_df([5.0] * 28 + [6.0, 15.0]))
     assert np.isfinite(r.scores).all() and r.scores[28] == 1.0 and not r.is_anomaly[28]
     assert r.is_anomaly[29] and r.scores[29] == 10.0
@@ -119,7 +119,7 @@ def test_execute_emits_events_and_saves_new_baseline():
 def test_saved_baseline_is_used_instead_of_refitting():
     """已存的基準線學的是「正常 50」：用這一輪資料重 fit 會把 90 當成常態（全是 90 的窗），用已存的就抓得到。"""
     state = DetectorState({"buckets": {}, "global": [50.0, 1.0]}, T0)
-    all_high = _df([90.0] * 60)  # 60 點：剛好夠第一次訓練（min_train_points 預設 60），少於這個數會不學、不判
+    all_high = _df([90.0] * 60)
     assert not any(OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(all_high)).anomaly_result.is_anomaly)
     ctx = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(all_high, detector_states={"detector.hourly_baseline": state}))
     assert all(ctx.anomaly_result.is_anomaly) and ctx.new_detector_states == {}

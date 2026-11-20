@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from aiops.engine.graph import Edge, Provenance, ServiceGraph
 from aiops.engine.health import RunCheck, StreamCheck
 from aiops.engine.rca_types import ConclusionType, EvidenceItem, Fact, RcaStatus
-from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
+from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification, SeverityRule
 
 
 @dataclass
@@ -75,22 +75,6 @@ class AnomalyResult:
     def to_dict(self) -> dict[str, Any]:
         return {"algorithm": self.algorithm, "timestamps": self.timestamps, "values": self.values,
                 "scores": self.scores, "is_anomaly": self.is_anomaly, "anomaly_count": self.count}
-
-
-@dataclass
-class DetectorEvidence:
-    """偵測節點開了 snr（節點參數）時交出的逐點證據：給 detector.soft_vote 軟投票、之後也能當連續證據餵給機率模型。
-
-    snr[i] = 這個節點的統計量在第 i 點的偏離 / 該統計量的雜訊尺度（也就是節點自己的分數，連續值、不是布林）。
-    threshold 跟 snr 同單位：由目標虛警率 p_fa 換算（threshold_source 說是怎麼換的，見 stages/detectors/base.snr_threshold）。
-    series_snr_db：序列層 SNR（訓練期 168 格季節基準的變異數 / 殘差雜訊變異數），資料不足時是 None。"""
-
-    timestamps: list[str]
-    snr: list[float]
-    threshold: float
-    threshold_source: str  # gaussian／empirical／fallback
-    p_fa: float
-    series_snr_db: float | None = None
 
 
 @dataclass
@@ -319,6 +303,8 @@ class PipelineContext:
     # 這條序列訓練基準線時要排除的時段（這個實體的歷史事故、維護窗；被標成誤報的事故不排除）
     training_exclusions: list[TrainingExclusion] = field(default_factory=list)
     silences: list[Silence] = field(default_factory=list)
+    # 使用者訂的嚴重度規則（哪一類異常是哪一級；engine/types.SeverityRule）。每輪從 Grafana 讀進來（平台不存），alert.notify_payload 用
+    severity_rules: list[SeverityRule] = field(default_factory=list)
     recent_notifications: list[RecentNotification] = field(default_factory=list)
     # 關係圖的載入格式（YAML、資料表、事件群快照都是這個形狀）。算子不直接讀這三個欄位，一律問 ctx.graph
     topology: list[tuple[str, str]] = field(default_factory=list)  # (caller, callee)
@@ -347,10 +333,8 @@ class PipelineContext:
     raw_df: pd.DataFrame | None = None
     train_df: pd.DataFrame | None = None
     peer_members: list[str] = field(default_factory=list)  # 動態同儕：peer_0、peer_1… 依序是哪些成員
-    detector_runs: list[str] = field(default_factory=list)  # 這條序列跑過的偵測節點（裁決算子用來知道誰沒投票）
+    detector_runs: list[str] = field(default_factory=list)  # 這條序列這一輪真的評估過資料的偵測節點
     anomaly_result: AnomalyResult | None = None
-    # 開了 snr 的偵測節點交出的逐點證據（節點名稱 -> 證據）；沒開的節點不會出現在這裡
-    detector_evidence: dict[str, DetectorEvidence] = field(default_factory=dict)
     new_detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 這次新訓練的，最後才存
     anomalies: list[AnomalyEvent] = field(default_factory=list)
     # 這一輪各序列偵測出來、要寫進資料庫的異常（由引擎彙整；不含從資料庫載入的外部匯入異常，那些另有自己的表）。

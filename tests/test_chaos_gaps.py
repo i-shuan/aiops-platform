@@ -135,32 +135,6 @@ def test_fetch_span_includes_the_end_point_so_single_point_windows_are_not_empty
     assert len(one) == 1 and pd.Timestamp(one["ts"].iloc[0]) == pd.Timestamp(end)
 
 
-def test_quantile_inference_now_covers_a_one_minute_false_positive(monkeypatch, now):
-    """單點誤報事件群（start == end）走完整分位數反推：以前 fetch_span 少抓最後一點 → 『時窗內沒有資料』→ 退回固定 ×1.2。
-    資料源用「含頭不含尾」的假源（跟 Elasticsearch 一樣），尖峰固定在一個時間戳上。"""
-    from aiops.control_plane.learning import threshold
-    from aiops.control_plane.learning.replay import Series
-    from aiops.stages.detectors.hourly_baseline import HourlyBaselineDetector
-    from aiops.stages.ingestion import fetch
-
-    spike = datetime(2026, 11, 8, 6, 0, tzinfo=timezone.utc)
-
-    class HalfOpenSpec:
-        def fetch_data(self, query, start, end, step_seconds, field_map=None):
-            ts = pd.date_range(start, end, freq=f"{step_seconds}s", tz="UTC", inclusive="left")  # [start, end)
-            seed = (ts.view("int64") // 60_000_000_000) % 1000
-            value = 50 + 2 * np.sin(np.asarray(seed) / 7.0)
-            value = np.where(ts == pd.Timestamp(spike), 200.0, value)
-            return pd.DataFrame({"ts": ts, "value": value})
-
-    monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: HalfOpenSpec())
-    ctx = PipelineContext(pipeline="sample_metrics_only", now=now, target=Target("elasticsearch", "q", "metric_a"))
-    got = threshold.infer(ctx, HourlyBaselineDetector, {"threshold": 3.5}, [Series("metric_a", "elasticsearch", "q")],
-                          "sample_metrics_only", "metric_a", spike, spike)
-    assert isinstance(got, dict), got  # 舊版回字串「時窗內沒有資料」
-    assert got["s_max"] > 3.5 and got["target"] >= got["s_max"] * 1.05 and got["series"][0]["window_points"] == 1
-
-
 # ── 場景 9：序列體檢的空桶 ──
 
 

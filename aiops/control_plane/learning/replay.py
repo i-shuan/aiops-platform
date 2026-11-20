@@ -1,5 +1,5 @@
 """學習閉環共用的「現抓現算」：對任意一條序列（不一定是這次請求的 target）抓一段歷史，訓練只用時窗之前的資料，
-重跑偵測。黃金事故防護罩（admin.proposal_backtest）、分位數反推門檻（admin.feedback_propose）、序列體檢
+重跑偵測。黃金事故防護罩（admin.proposal_backtest）、序列體檢
 （admin.series_profile）都走這裡。
 
 - 抓資料一律走 stages/ingestion/fetch.fetch_target_frame（跟正式偵測同一條路徑：欄位對照、同儕、lag）。
@@ -25,7 +25,7 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
 from aiops.interfaces.runner import workflow_path
 from aiops.sources.query.trace import parse_trace_query
-from aiops.stages.detectors.base import DEFAULT_MIN_TRAIN_POINTS, DetectorOperator
+from aiops.stages.detectors.base import DetectorOperator
 from aiops.stages.ingestion.fetch import TRACE_SOURCE, fetch_target_frame
 from aiops.storage.hooks import EXCLUSION_MARGIN, StorageHooks
 from aiops.storage.repository import Knowledge, Mappings, Traces
@@ -166,8 +166,8 @@ def replay_window(ctx: PipelineContext, cls: type[DetectorOperator], params: dic
         return "時窗內沒有資料"
     train = algo._training_frame(replace(ctx, training_exclusions=exclusions), df.iloc[:begin].reset_index(drop=True))
     points = algo.training_points(train) if not train.empty else 0
-    if cls.requires_training and points < DEFAULT_MIN_TRAIN_POINTS:
-        return f"時窗前的訓練資料只有 {points} 點（< {DEFAULT_MIN_TRAIN_POINTS}）"
+    if points < 1:  # 沒有最少點數的門檻（同正式偵測）；一個點都沒有才判不了
+        return "時窗前沒有訓練資料"
     offset = min(algo.warmup_points(), begin)
     window = df.iloc[begin - offset:stop].reset_index(drop=True)
     if not algo.can_evaluate(window):

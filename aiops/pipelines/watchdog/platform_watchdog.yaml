@@ -35,9 +35,10 @@ nodes:
     params: {cooldown_minutes: 30}
   - name: payload
     operator: alert.notify_payload
-    # 看門狗的卡最高只到 P2：對照表故意不列 P0、P1，分數再高也是 P2（tests/test_e2e_drill_fixes.py 擋著）。
+    # 看門狗的卡最高只到 P2（tests/test_e2e_drill_fixes.py 擋著）：演算法判出來的事件群預設是 P1（detected_severity），
+    # 這裡人工調成 P2；對照表也故意不列 P0、P1，沒有偵測器血緣的事件分數再高也是 P2。要改就改這一行。
     # 平台自己的問題不該半夜叫人；稀疏計數的分數沒有上限，門檻又只在模擬紀錄上驗過，誤報不能落在 P0／P1
-    params: {severity_thresholds: {P2: 3, P3: 0}}
+    params: {detected_severity: P2, severity_thresholds: {P2: 3, P3: 0}}
   - name: heartbeat
     operator: alert.heartbeat
     params: {resolve_after_minutes: 15}

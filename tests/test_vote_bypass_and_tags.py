@@ -1,11 +1,11 @@
 """雙軌制偵測（docs/DUAL_TRACK_DESIGN.md 方案 B）拆掉之後留下來的部分。
 
-致命軌（detector.hard_limit＋alert.fatal_floor）與布林多數決（detector.ensemble）已移除，它們自己的測試跟著刪掉。
+致命軌（detector.hard_limit＋alert.fatal_floor）、布林多數決（detector.ensemble）、軟投票（detector.soft_vote，
+2026-11-20）都已移除，它們自己的測試（含 bypass 接線檢查）跟著刪掉；檔名沿用。
 這個檔只剩雙軌制當初加進來、現在仍然存在的通用機制：
   - 抑制算子的標籤例外：alert.suppress_dedup 的 escalate_tags、alert.suppress_same_root_cause 的 exempt_tags
     （平台內已經沒有算子會打 fatal 標籤，這裡用它當任意標籤）；靜音窗不看標籤。
-  - 裁決節點（detector.soft_vote）的 bypass 接線：不投票的偵測節點必須列進 bypass，載入期檢查。
-  - 單點事件的死區：致命軌拿掉之後，偏離約 2.5 個尺度的單點沒有任何節點會發告警（照實留成 xfail）。
+  - 單點事件：以前是死區（軟投票加總不到 2 票等值，xfail）；表決移除後殘差突變節點單獨成立，現在抓得到。
 """
 from datetime import datetime, timedelta, timezone
 
@@ -132,18 +132,9 @@ def _wf(*nodes):
 
 
 VOTER = ("hourly", "detector.hourly_baseline", {"snr": {"p_fa": 0.001}})
-SOLO = ("solo", "detector.sparse_count", {})  # 不投票的偵測節點（votes = False）
-
-
-def test_non_voting_node_listed_in_bypass_is_a_valid_workflow():
-    pipe = Pipeline(_wf(VOTER, SOLO, ("vote", "detector.soft_vote", {"bypass": ["solo"]})))
-    assert [n.name for n in pipe.workflow.nodes][-1] == "vote"
 
 
 @pytest.mark.parametrize("nodes,message", [
-    ((VOTER, SOLO, ("vote", "detector.soft_vote", {})), "不參與表決，必須列進 bypass"),
-    ((VOTER, SOLO, ("vote", "detector.soft_vote", {"bypass": ["sollo"]})), "bypass 裡的 \\['sollo'\\] 不是這條 workflow 的偵測節點"),
-    ((VOTER, ("vote", "detector.soft_vote", {"bypass": "hourly"})), "bypass 必須是節點名稱的清單"),
     ((VOTER, ("dedup", "alert.suppress_dedup", {"escalate_tags": "fatal"})), "escalate_tags 必須是標籤的清單"),
 ])
 def test_wiring_mistakes_fail_when_the_pipeline_is_built(nodes, message):
@@ -151,15 +142,26 @@ def test_wiring_mistakes_fail_when_the_pipeline_is_built(nodes, message):
         Pipeline(_wf(*nodes))
 
 
-# ── 已知死區（CLAUDE.md 第 100 節第 4 條：照實留存，不換波形粉飾）──
+# ── 單點事件（以前的死區）──
 
 
 @pytest.mark.parametrize("name", ["sample_it_otel", "sample_factory"])
 @pytest.mark.parametrize("value", [BASE + 150, BASE - 150], ids=["單點尖峰", "單點瞬斷"])
-@pytest.mark.xfail(strict=True, reason="單點死區：重尾序列上偏離 150（約 2.5 個尺度）的單點，軟投票加總到不了 2 票等值，沒有任何通知。"
-                                       "以前靠致命硬上限（detector.hard_limit＋alert.fatal_floor）單點成立；那一軌已經移除，"
-                                       "平台的偵測段現在看不到這種事件——人訂的靜態界線要設成 Grafana 告警規則推進來。")
-def test_dead_zone_single_point_is_missed_by_the_soft_vote(name, value):
+def test_single_point_event_is_now_caught_by_the_residual_shift_node_alone(name, value):
+    """以前是 xfail(strict=True) 的單點死區：重尾序列上偏離 150 的單點，軟投票加總到不了 2 票等值，沒有任何通知
+    （致命硬上限那一軌更早就移除了）。2026-11-20 移除軟投票之後，殘差突變節點（detect_rshift）單獨成立：
+    第 40、41 分鐘（跳上去、跳回來）各一筆，+150 是 4.53／4.54 分、−150 是 5.64／5.64 分（門檻 3.29），有通知。
+    死區不存在了，xfail 標記拿掉。原本的斷言 ctx.notifications 沒動；另一條「audit 有 soft_vote:vote:voters=3」
+    是在確認三票都評估過，表決節點沒了，改成確認事件來自哪個節點。
+    同一份資料沒有注入時（一整天、每小時一輪共 24 輪）改版前後都是 0 則通知、0 個告警分鐘（scratch 量的）。"""
     ctx = _run(_shipped(name, points={"ETCH-01": {40: value}}))
-    assert any(line.startswith("soft_vote:vote:voters=3:need=2:") for line in ctx.audit)  # 三票都評估過，不是沒跑
+    assert sorted((e.detector_node, int((e.ts - T0).total_seconds() // 60)) for e in ctx.anomalies) == [
+        ("detect_rshift", 40), ("detect_rshift", 41)]
     assert ctx.notifications
+
+
+@pytest.mark.parametrize("name", ["sample_it_otel", "sample_factory"])
+def test_the_same_series_without_the_injected_point_sends_nothing(name):
+    """對照組：沒有注入的同一段資料沒有事件、沒有通知（上一個測試的通知是注入造成的，不是偵測段本來就在叫）。"""
+    ctx = _run(_shipped(name))
+    assert ctx.anomalies == [] and not ctx.notifications

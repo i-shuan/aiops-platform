@@ -79,3 +79,8 @@ def test_watchdog_cards_never_go_above_p2():
     for score in (2.0, 4.0, 6.0, 10.0, 300.0):
         inc = Incident([AnomalyEvent("it_otel", "runs/it_otel/failed", T, score)], score=score)
         assert payload.severity_of(inc) in ("P2", "P3"), score
+        # 真正的看門狗事件帶偵測器血緣：演算法判出來的預設是 P1（alert.notify_payload 的 detected_severity），
+        # 看門狗的 YAML 把它調成 P2，所以還是到不了 P0／P1
+        detected = Incident([AnomalyEvent("it_otel", "runs/it_otel/failed", T, score, {}, 1.0, "detector.sparse_count", "failures")],
+                            score=score)
+        assert payload.severity_of(detected) == "P2", score

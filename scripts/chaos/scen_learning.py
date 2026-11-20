@@ -1,4 +1,4 @@
-"""場景 6～10：LLM 幻覺守門、分位數門檻、黃金事故防護罩、ACF 與假日、PostgreSQL JSONB 併發。"""
+"""場景 6、8～10：LLM 幻覺守門、黃金事故防護罩、ACF 與假日、PostgreSQL JSONB 併發（場景 7 分位數門檻已移除）。"""
 from __future__ import annotations
 
 import json
@@ -6,8 +6,6 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
-
-import numpy as np
 
 from scripts.chaos import harness as H
 from scripts.chaos.world import Call, Svc, World
@@ -123,75 +121,8 @@ def scenario_6() -> H.Result:
     return r
 
 
-# ───────────────────────── 場景 7：極端毛刺 × 分位數反推門檻 ─────────────────────────
-def _s7_run(spike_minutes: int) -> dict:
-    """世界 40 天；在 INC+10min 起注入 spike_minutes 分鐘的瞬間抖動（每分鐘的 mad 分數 ~80）；偵測 → 標誤報 → 反推門檻。"""
-    from aiops.engine.requests import FeedbackPropose, FeedbackSubmit
-    from aiops.interfaces.runner import run
-
-    t0 = INC - timedelta(days=40)
-    end = INC + timedelta(minutes=40)
-    w = World(t0, _mins(t0, end + timedelta(minutes=10)), [Svc("bill-svc", "POST /bills", 30.0, [Call("billing-db", 1.0, "db", "postgresql", 10.0)])],
-              {"bill-svc": 25.0}, seed=11)
-    w.build()
-    m0 = w.m(INC + timedelta(minutes=10))
-    train = (w.sum_ok["bill-svc"] + w.sum_fail["bill-svc"])[m0 - 10080:m0]
-    med = float(np.median(train))
-    mad = float(np.median(np.abs(train - med)))
-    val = med + 80.0 * mad / 0.6745
-    for k in range(spike_minutes):
-        w.sum_ok["bill-svc"][m0 + k], w.n_ok["bill-svc"][m0 + k] = val, max(int(w.n_ok["bill-svc"][m0 + k]), 1)
-        w.n_fail["bill-svc"][m0 + k], w.sum_fail["bill-svc"][m0 + k] = 0, 0.0
-    H.fresh_db()
-    out: dict = {"median": med, "mad": mad, "value": val}
-    with H.es_for(w) as es:
-        wf = H.detection_workflow("sample_it_otel", H.targets(["bill-svc"]))
-        rp = H.replay(wf, INC, end)
-        incs = H.incidents()
-        out["incidents"] = [(i["id"], i["incident"]["start"][11:16], i["incident"]["end"][11:16]) for i in incs]
-        out["detect"] = f"{rp.rounds} 輪、異常 {rp.anomalies}、errors {rp.errors[:2]}"
-        inc = H.pick(incs, "bill-svc", INC)
-        out["inc"] = inc
-        if not inc:
-            return out
-        fb = run("admin_feedback_submit", request=FeedbackSubmit(incident_uid=inc["uid"], verdict="false_positive", detector="detector.hourly_baseline",
-                                                                text="瞬間網路抖動，不是事故", author="chaos"))["feedback"]
-        n_before = len(es.requests)
-        res = run("admin_feedback_propose", request=FeedbackPropose(feedback_id=fb["id"], proposer="chaos", detector="detector.hourly_baseline", scope="entity"))
-        out["proposal"] = res["proposal"]
-        out["generated_by"] = res.get("generated_by")
-        # 反推門檻時對 ES 發的查詢：誤報時窗的終點（lt）有沒有涵蓋事件群的最後一個點
-        lts = []
-        for path, body in es.requests[n_before:]:
-            for f in body.get("query", {}).get("bool", {}).get("filter", []):
-                if "range" in f and "lt" in f["range"].get("@timestamp", {}):
-                    lts.append(f["range"]["@timestamp"]["lt"])
-        out["queried_lt_max_near_incident"] = sorted({x for x in lts if x[:10] == inc["incident"]["end"][:10]})[-3:]
-        out["incident_end"] = inc["incident"]["end"]
-    return out
-
-
-def scenario_7() -> H.Result:
-    r = H.Result(7, "極端毛刺干擾下的分位數反推門檻",
-                 "bill-svc 平時穩定；注入瞬間抖動讓 mad 分數每分鐘 ~80（極端離群值），維運標記該事件為 false_positive。分兩組：(a) 1 分鐘單點毛刺、(b) 3 分鐘毛刺")
-    for label, minutes in (("a", 1), ("b", 3)):
-        o = _s7_run(minutes)
-        r.notes.append(f"({label}) 世界：mad 訓練窗 median={o['median']:.0f}、MAD={o['mad']:.0f}（µs/分）；注入值 {o['value']:.0f}（理論 mad 分數 80）；"
-                       f"偵測 {o['detect']}；事件群 {o['incidents']}")
-        if not r.check(f"({label}) 毛刺被偵測成事件群", "有", bool(o.get("inc")), bool(o.get("inc"))):
-            continue
-        p = o["proposal"]
-        th = (p["params"] or {}).get("threshold")
-        reason = p["reason"]
-        r.notes.append(f"({label}) 提案 threshold={th}；generated_by={o['generated_by']}；事件群結束={o['incident_end']}；"
-                       f"反推時對 ES 的查詢終點(lt)={o['queried_lt_max_near_incident']}；reason={reason[:420]}")
-        r.check(f"({label}) 門檻沒有被帶偏到 80", "< 80", th, th is not None and th < 80)
-        r.check(f"({label}) 單次調整 ≤ +50%（3.5 → ≤ 5.25）且方向向上", "3.5 < threshold ≤ 5.25", th, th is not None and 3.5 < th <= 5.25 + 1e-9)
-        quant = "分位數" in reason or "S_max" in reason or "Q" in reason.split("：")[-1][:4]
-        r.check(f"({label}) 走分位數反推（不是退回固定規則 ×1.2）", "reason 不含『固定規則』", reason[:90], "固定規則" not in reason)
-        trunc = "固定規則" not in reason and any(k in reason for k in ("步進截斷", "還差", "單次"))
-        r.check(f"({label}) reason 註明目標過大、執行步進截斷", "reason 含截斷說明", reason[:90], trunc)
-    return r
+# 場景 7（極端毛刺 × 分位數反推門檻）已於 2026-11-20 移除：誤報回饋不再自動產生把門檻調高的提案（admin.feedback_propose 回 400），
+# 分位數反推（control_plane/learning/threshold.py）跟著刪掉，這個場景沒有東西可驗。編號 7 留空，其他場景編號不動。
 
 
 # ───────────────────────── 場景 8：黃金事故防護罩一票否決 ─────────────────────────

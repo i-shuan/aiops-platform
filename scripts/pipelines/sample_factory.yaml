@@ -13,7 +13,7 @@ nodes:
     operator: ingestion.fetch
     params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
 
-  # 異常檢測：殘差組三票（週期票、突變票、漂移票）開 snr，由 detector.soft_vote 加總（寫法同 sample_it_otel）。
+  # 異常檢測：三個偵測節點（時段基準、殘差突變、殘差漂移）開 snr，各自成立、沒有表決（寫法同 sample_it_otel）。
   # 這個組合只在每分鐘請求數上回測過（docs/RESIDUAL_SNR_ENSEMBLE.md），沒有在機台感測值上驗證過。
   - name: detect
     operator: detector.hourly_baseline
@@ -24,9 +24,6 @@ nodes:
   - name: detect_rchronic
     operator: detector.residual_chronic
     params: {tz: Asia/Taipei, snr: {p_fa: 0.001, tz: Asia/Taipei}}
-  - name: vote
-    operator: detector.soft_vote
-    params: {votes: 2}
   - name: new_only
     operator: detector.new_only
 

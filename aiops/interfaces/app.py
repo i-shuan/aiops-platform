@@ -11,6 +11,7 @@ from aiops.interfaces.bootstrap import init_error_handlers, init_infrastructure,
 FEEDBACK_PAGE = (Path(__file__).parent / "static" / "feedback.html").read_text(encoding="utf-8")
 
 
+
 def create_app() -> FastAPI:
     app = FastAPI(title="AIOps Platform")
     init_infrastructure()

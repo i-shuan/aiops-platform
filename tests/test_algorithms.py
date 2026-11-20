@@ -120,25 +120,20 @@ def test_it_otel_uses_the_hourly_baseline_with_a_week_of_training():
     assert nodes["fetch"].params["train_lookback_minutes"] >= 10080
 
 
-def test_factory_sample_detection_is_a_soft_vote_of_three_detectors():
-    """factory 樣本的偵測組合：殘差組三票（週期、突變、漂移）都開 snr，由 detector.soft_vote 加總（votes: 2）。"""
+def test_factory_sample_detection_is_three_independent_detectors():
+    """factory 樣本的偵測組合：三個偵測節點（週期、突變、漂移）都開 snr，各自成立；沒有表決節點（soft_vote 已移除）。"""
     from aiops.interfaces.runner import workflow_path
 
     wf = load_workflow(workflow_path("sample_factory"))
     ops = [n.operator for n in wf.nodes]
     assert ops[ops.index("detector.hourly_baseline"):ops.index("detector.new_only") + 1] == [
-        "detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic",
-        "detector.soft_vote", "detector.new_only"]
-    vote = next(n for n in wf.nodes if n.operator == "detector.soft_vote")
-    assert vote.params == {"votes": 2}
+        "detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic", "detector.new_only"]
     # factory 保留預設的安全退回（不寫 min_weeks）
     hourly = next(n for n in wf.nodes if n.operator == "detector.hourly_baseline")
     assert hourly.params.get("min_weeks") is None
     pipeline = Pipeline(wf)
-    assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_rshift", "detect_rchronic"]  # 投票節點不載基準線
-    voters = [n for n, op in pipeline.nodes if getattr(op, "has_baseline", False) and op.votes]
-    assert [n.name for n in voters] == ["detect", "detect_rshift", "detect_rchronic"]
-    assert all(op.snr is not None for _, op in pipeline.nodes if getattr(op, "has_baseline", False))  # 軟投票的每一票都要有逐點證據
+    assert [n for n, _ in pipeline.detector_nodes] == ["detect", "detect_rshift", "detect_rchronic"]  # new_only 不載基準線
+    assert all(op.snr is not None for _, op in pipeline.nodes if getattr(op, "has_baseline", False))  # 門檻都由 p_fa 換算
 
 
 # ── A.2 動態同儕 ──
@@ -241,28 +236,32 @@ def test_lag_detectors_need_the_lag_column(now):
         OperatorRegistry.get("test.lag_probe")().execute(ctx)
 
 
-# ── A.4 多偵測器裁決 ──
+# ── A.4 多個偵測節點：各自成立、各自留血緣 ──
 
 
 def _event(node, minute, score=1.0):
     return AnomalyEvent("e", "m", SUNDAY + timedelta(minutes=minute), score, {"dept": "d"}, 1.0, "detector.hourly_baseline", node)
 
 
-def test_vote_in_a_pipeline_records_the_decision_with_lineage(tmp_path, now):
+def test_two_detector_nodes_in_a_pipeline_each_record_their_own_lineage(tmp_path, now):
+    """原本測的是軟投票裁決事件的血緣（anomalies 表只有 detector.soft_vote／vote）；soft_vote 已移除，
+    同一條管線改成驗「兩個節點各自的事件都落地、各帶自己的節點名」。"""
     _run_yaml(tmp_path, """name: voted
 nodes:
   - {name: fetch, operator: ingestion.fetch, params: {lookback_minutes: 60, train_lookback_minutes: 1440}}
   - {name: z_sensitive, operator: detector.hourly_baseline, params: {snr: {p_fa: 0.01}}}
   - {name: z_strict, operator: detector.hourly_baseline, params: {snr: {p_fa: 0.0001}}}
-  - {name: vote, operator: detector.soft_vote}
   - {name: new_only, operator: detector.new_only}
 targets:
   - {source_type: mock, query: 'cpu{service="cart"}', entity: cart}
 """, now, name="voted")
     rows = [r for r in crud.find(AnomalyRow) if r["pipeline"] == "voted"]
-    assert rows and {(r["detector_name"], r["detector_node"]) for r in rows} == {("detector.soft_vote", "vote")}
+    assert {(r["detector_name"], r["detector_node"]) for r in rows} == {("detector.hourly_baseline", "z_sensitive"),
+                                                                         ("detector.hourly_baseline", "z_strict")}
+    by_node = {node: {r["ts"] for r in rows if r["detector_node"] == node} for node in ("z_sensitive", "z_strict")}
+    assert by_node["z_strict"] <= by_node["z_sensitive"]  # 同一個演算法：門檻嚴的節點抓到的點，門檻鬆的一定也抓到
     wf = load_workflow(tmp_path / "voted.yaml")
-    assert [n for n, _ in Pipeline(wf).detector_nodes] == ["z_sensitive", "z_strict"]  # 裁決節點不載基準線
+    assert [n for n, _ in Pipeline(wf).detector_nodes] == ["z_sensitive", "z_strict"]
 
 
 @OperatorRegistry.register("test.lineage_frame")
@@ -280,8 +279,8 @@ class _LineageFrame(BaseOperator):
 
 
 def test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_snapshot(now):
-    """稽核 Q4：兩個偵測節點 + 軟投票裁決 + 一筆外部匯入異常，走 StorageHooks 落地。
-    anomalies 表只記裁決事件（detector.soft_vote／vote）；事件群快照帶著每個事件自己的 detector、detector_node、voted_by；
+    """稽核 Q4：兩個偵測節點 + 一筆外部匯入異常，走 StorageHooks 落地（原本中間有軟投票裁決，已移除）。
+    anomalies 表每個節點各記自己的事件；事件群快照帶著每個事件自己的 detector、detector_node（voted_by 現在一律是空的）；
     外部匯入的不寫 anomalies 表，快照裡是 external:<source>、節點空字串。"""
     from aiops.engine.pipeline import NodeSpec, TargetSpec, Workflow
     from aiops.storage.hooks import StorageHooks
@@ -295,7 +294,6 @@ def test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_
         NodeSpec(name="fetch", operator="test.lineage_frame"),
         NodeSpec(name="z", operator="detector.hourly_baseline", params={"snr": {"p_fa": 0.001}}),
         NodeSpec(name="m", operator="detector.hourly_baseline", params={"snr": {"p_fa": 0.001}}),
-        NodeSpec(name="vote", operator="detector.soft_vote"),
         NodeSpec(name="new_only", operator="detector.new_only"),
         NodeSpec(name="group", operator="alert.same_entity"),
         NodeSpec(name="absorb", operator="alert.absorb_open"),
@@ -304,12 +302,13 @@ def test_lineage_is_fixed_at_detection_and_lands_unchanged_in_the_table_and_the_
         NodeSpec(name="notify", operator="notifier.log")])
     ctx = Pipeline(wf, StorageHooks()).run(now=now)
     assert {(e.detector, e.detector_node, e.voted_by) for e in ctx.detected_anomalies} == \
-        {("detector.soft_vote", "vote", ("m", "z"))}
+        {("detector.hourly_baseline", "z", ()), ("detector.hourly_baseline", "m", ())}
     rows = [r for r in crud.find(AnomalyRow) if r["pipeline"] == "lineage"]
-    assert rows and {(r["entity"], r["detector_name"], r["detector_node"]) for r in rows} == {("svc", "detector.soft_vote", "vote")}
-    snapshot = {tuple(i["incident"]["entities"]): [(ev["detector"], ev["detector_node"], list(ev["voted_by"]))
-                                                   for ev in i["incident"]["events"]] for i in crud.find(IncidentRow)}
-    assert snapshot == {("svc",): [("detector.soft_vote", "vote", ["m", "z"])],
+    assert {(r["entity"], r["detector_name"], r["detector_node"]) for r in rows} == {
+        ("svc", "detector.hourly_baseline", "z"), ("svc", "detector.hourly_baseline", "m")}
+    snapshot = {tuple(i["incident"]["entities"]): sorted((ev["detector"], ev["detector_node"], list(ev["voted_by"]))
+                                                         for ev in i["incident"]["events"]) for i in crud.find(IncidentRow)}
+    assert snapshot == {("svc",): [("detector.hourly_baseline", "m", []), ("detector.hourly_baseline", "z", [])],
                         ("tool-9",): [("external:fdc", "", [])]}
 
 

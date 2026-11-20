@@ -1,10 +1,12 @@
-"""偵測回測，用 ES 的每分鐘請求數序列。組別（R+SNR 現行＝it_otel；R、A、A+SNR 是對照變體）見 scripts/backtest/variants.py。
+"""偵測回測，用 ES 的每分鐘請求數序列。偵測節點取自 sample_it_otel（scripts/backtest/variants.py）。
+2026-11-20 起沒有表決節點：任何一個偵測節點越線就算告警分鐘。這支腳本改完之後還沒有對 ES 重跑過，
+docs/RESIDUAL_SNR_ENSEMBLE.md 的數字是移除前量的。
 
-偵測走真的 Pipeline：從 it_otel.yaml 取出偵測節點（fetch 之後到裁決節點為止，含 hard_limit 與 bypass），
+偵測走真的 Pipeline：從 sample_it_otel.yaml 取出偵測節點，
 fetch 換成回放用的 replay.window（每輪給最近 60 分鐘，同 it_otel 的 lookback_minutes），基準線由記憶體版 Hooks 保存——
 第一輪沒有基準線時給訓練段 train_df、引擎訓練並交出 new_detector_states，之後每輪載入同一份（等同正式環境基準線還沒到期）。
-每 5 分鐘一輪（同 CronJob 週期）；一分鐘只要在任何一輪被 detector.ensemble 判成異常、或被 bypass 節點
-（不投票、單獨發告警）判成異常，就算告警分鐘。「各票」也列出 bypass 節點自己的分鐘數。
+每 5 分鐘一輪（同 CronJob 週期）；一分鐘只要在任何一輪被任何一個偵測節點判成異常，就算告警分鐘。
+「各節點」列出每個節點自己的分鐘數。
 
 訓練／測試切分：資料 >= 17 天用 14 天訓練，其餘 7 天。三種注入（測試期中段某個平日 11–13 點）：
   step  瞬間 ×0.3 持續 20 分    ramp  15 分鐘線性滑到 ×0.3 再維持 20 分    mild  ×0.8 持續 60 分
@@ -34,13 +36,13 @@ from aiops.engine.registry import OperatorRegistry  # noqa: E402
 from aiops.engine.types import ANOMALY  # noqa: E402
 from aiops.interfaces.runner import load_all  # noqa: E402
 from es_series import load_series  # noqa: E402
-from scripts.backtest.variants import VARIANTS as ALL_VARIANTS, VOTERS, detection_nodes  # noqa: E402
+from scripts.backtest.variants import detection_nodes  # noqa: E402
 
 warnings.filterwarnings("ignore")
 TZ = "Asia/Taipei"
 LOOKBACK, STEP = 60, 5
 SERVICES = ["mes-api", "wip-worker", "report-svc", "order-svc", "cart-api", "pay-api"]
-VARIANTS = {v: "sample_it_otel" for v in ALL_VARIANTS}  # 組別 -> 從哪條管線改出來（scripts/backtest/variants.py）
+VARIANTS = {"sample_it_otel": "sample_it_otel"}  # 結果的鍵 -> 偵測節點取自哪條樣本管線
 INJECTIONS = {"step": np.full(20, 0.3), "ramp": np.r_[np.linspace(1.0, 0.3, 15), np.full(20, 0.3)],
               "mild": np.full(60, 0.8)}
 
@@ -82,17 +84,13 @@ class MemoryHooks:
 
 
 class Runner:
-    def __init__(self, workflow: str, service: str, train: pd.DataFrame, variant: str = "R+SNR"):
+    def __init__(self, workflow: str, service: str, train: pd.DataFrame):
         self.pipe = Pipeline(Workflow(name=f"replay_{workflow}", nodes=detection_nodes(
-            "replay.window", variant, workflow=workflow, keep_members=True),
+            "replay.window", workflow=workflow),
                                       targets=[TargetSpec(source_type="mock", query=f"rpm:{service}", entity=service)]),
                              MemoryHooks())
         self.train = train
-        vote = next(op for _, op in self.pipe.target_nodes if op.operator_name in VOTERS)
-        # bypass 的節點（hard_limit、不投票的旁路漂移票）事件原樣留下，正式環境一樣會發告警：算進告警分鐘
-        self.bypass = set(vote.bypass)
-        self.voters = [n.name for n, op in self.pipe.target_nodes
-                       if getattr(op, "has_baseline", False) and n.name not in self.bypass]
+        self.voters = [n.name for n, op in self.pipe.target_nodes if getattr(op, "has_baseline", False)]
 
     def flags(self, test: pd.DataFrame, rounds) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         n = len(test)
@@ -108,11 +106,8 @@ class Runner:
                 k = pos.get(pd.Timestamp(e.ts))
                 if e.level != ANOMALY or k is None:
                     continue
-                if e.detector in VOTERS or e.detector_node in self.bypass:
+                if e.detector_node in member:  # 任何一個偵測節點越線就是告警
                     verdict[k] = True
-                if e.detector_node in self.bypass:
-                    member.setdefault(e.detector_node, np.zeros(n, bool))[k] = True
-                elif e.detector_node in member:
                     member[e.detector_node][k] = True
         return verdict, member
 
@@ -159,10 +154,10 @@ def run_service(service: str, df: pd.DataFrame) -> dict:
            "訓練天": train_days, "測試天": round(days, 2)}
     all_rounds = range(LOOKBACK - 1, len(test), STEP)
     for key, workflow in VARIANTS.items():
-        runner = Runner(workflow, service, train, key)
+        runner = Runner(workflow, service, train)
         verdict, member = runner.flags(test, all_rounds)
         r = {"workflow": workflow,
-             "各票_分/週": {k: round(int(v.sum()) * per_week) for k, v in member.items()},
+             "各節點_分/週": {k: round(int(v.sum()) * per_week) for k, v in member.items()},
              "誤報_分/週": round(int(verdict.sum()) * per_week, 1),
              "誤報_事件/週": round(clusters(verdict) * per_week, 1),
              "切換點±5分_分/週": round(switch_minutes(test, verdict) * per_week, 1)}
@@ -200,10 +195,7 @@ def main() -> None:
     ap.add_argument("--cache", type=Path, required=True, help="序列 CSV 快取目錄（不要放在 repo 裡）")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--services", default=",".join(SERVICES))
-    ap.add_argument("--variants", default=",".join(VARIANTS), help="要跑的組別（逗號分隔）")
     args = ap.parse_args()
-    for key in [k for k in VARIANTS if k not in args.variants.split(",")]:
-        del VARIANTS[key]
     result = {}
     for service in args.services.split(","):
         result[service] = run_service(service, load_series(service, args.cache, args.secrets))

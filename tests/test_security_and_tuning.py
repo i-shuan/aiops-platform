@@ -324,7 +324,7 @@ def test_too_little_data_to_split_is_rejected(now):
 def _feedback_for_incident(now):
     uid = run_context("sample_metrics_only", now=now, strict=False).incidents[0].uid
     return lambda: run("admin_feedback_submit", request=FeedbackSubmit(
-        incident_uid=uid, verdict="false_positive", detector=DETECTOR, text="誤報", author="a"))["feedback"]["id"]
+        incident_uid=uid, verdict="missed", detector=DETECTOR, text="太晚才報", author="a"))["feedback"]["id"]  # 誤報不再產生提案，改用漏報
 
 
 def _propose_from(fid, **kw):
@@ -349,7 +349,8 @@ def test_feedback_entity_must_belong_to_the_incident(now):
 def test_feedback_proposal_starts_from_the_layers_current_params(now):
     _set({"threshold": 4.0}, pipeline="sample_metrics_only")
     proposal = _propose_from(_feedback_for_incident(now)())
-    assert proposal["params"]["threshold"] == pytest.approx(4.8)  # 4.0 調高 20%，而不是從預設 3.0 起算
+    # 4.0 調低 20%，而不是從預設 3.0 起算（原本用誤報回饋：4.0 × 1.2 = 4.8；那條路已移除，改用漏報：4.0 × 0.8 = 3.2）
+    assert proposal["params"]["threshold"] == pytest.approx(3.2)
     assert proposal["base_version"] == 1
 
 

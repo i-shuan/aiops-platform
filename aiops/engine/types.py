@@ -29,8 +29,8 @@ WARNING = "warning"
 
 @dataclass(frozen=True)
 class AnomalyEvent:
-    """一筆異常。建立後不可修改（frozen）：偵測器名稱、分數一旦產生，下游（收斂、計分、裁決）只能讀、不能改，
-    要調整就產生新的事件（例如 detector.soft_vote 產生的裁決事件）。"""
+    """一筆異常。建立後不可修改（frozen）：偵測器名稱、分數一旦產生，下游（收斂、計分）只能讀、不能改，
+    要調整就產生新的事件。"""
 
     entity: str
     metric: str
@@ -43,7 +43,8 @@ class AnomalyEvent:
     detector_node: str = ""
     # 從哪個資料源來（RCA 重抓時序用）。外部匯入的異常留空
     source_type: str = ""
-    # 裁決事件（detector.ensemble）由哪些節點投票通過；一般偵測事件留空
+    # 舊版表決節點（已移除的 detector.ensemble／soft_vote）的裁決事件由哪些節點投票通過。現在沒有任何算子會填，
+    # 欄位留著只為了讀得回資料庫裡舊的事件群快照
     voted_by: tuple[str, ...] = ()
     # anomaly（越過門檻）或 warning（接近門檻的預警，偵測節點設了 warning_ratio 才會有）
     level: str = ANOMALY
@@ -195,3 +196,35 @@ class GrafanaLinks:
     var: str = "service"  # 儀表板上鎖服務用的變數名稱
     pad_minutes: float = 15  # 事故前後各多看幾分鐘
     datasources: dict[str, str] = field(default_factory=dict)  # {traces: apm-traces, logs: apm-logs}：Explore 連結用
+
+
+@dataclass(frozen=True)
+class SeverityRule:
+    """使用者訂的「這一類異常是哪個嚴重度」。四個條件都可以是 "*"（不限定）。
+    平台不存這份設定：來源是 Grafana（使用者在 Grafana 告警規則上改標籤），每輪讀進 ctx.severity_rules。
+
+    anomaly_class：異常的分類 = 判出它的偵測演算法（算子名，例如 detector.residual_shift）。
+    只管平台自己的演算法判出來的異常；外部告警的嚴重度由送告警的那一方（各團隊的 Grafana 規則）決定。"""
+
+    pipeline: str = "*"
+    anomaly_class: str = "*"
+    entity: str = "*"
+    metric: str = "*"
+    severity: str = "P1"
+    label: str = ""
+
+    def matches(self, pipeline: str, event: "AnomalyEvent") -> bool:
+        return (self.pipeline in ("*", pipeline) and self.anomaly_class in ("*", event.detector)
+                and self.entity in ("*", event.entity) and self.metric in ("*", event.metric))
+
+    @property
+    def specificity(self) -> tuple[int, int, int, int, int]:
+        """越具體越優先：先比指定了幾個條件；一樣多時 實體 > 指標 > 分類 > 管線。"""
+        named = [self.entity != "*", self.metric != "*", self.anomaly_class != "*", self.pipeline != "*"]
+        return (sum(named), *map(int, named))
+
+
+def severity_rule_for(rules: list[SeverityRule], pipeline: str, event: "AnomalyEvent") -> SeverityRule | None:
+    """這筆異常適用的規則：符合的裡面最具體的一條；沒有就 None（用管線的預設）。"""
+    hits = [r for r in rules if r.matches(pipeline, event)]
+    return max(hits, key=lambda r: r.specificity) if hits else None

@@ -1,4 +1,5 @@
-"""學習閉環步驟三：黃金事故防護罩、誤報的分位數反推門檻、序列體檢（ACF）。
+"""學習閉環步驟三：黃金事故防護罩、序列體檢（ACF）。誤報的分位數反推門檻已於 2026-11-20 移除（測試跟著刪），
+只留「誤報回饋不再產生提案」。
 
 合成資料：query 以 synth: 開頭的序列由這裡依「時間戳」產生（同一時刻不管從哪個時間窗查都是同一個值），
 雜訊 N(50, 2)，再依名稱在指定時段疊上尖峰。所以「事故時窗另外抓」與「回測時窗」看到的是同一份資料。
@@ -11,8 +12,7 @@ import pandas as pd
 import pytest
 from sqlalchemy import inspect
 
-from aiops.control_plane.learning import tuning_rules
-from aiops.engine.errors import Conflict, NoDataError
+from aiops.engine.errors import BadRequest, Conflict, NoDataError
 from aiops.engine.params import ANY
 from aiops.engine.requests import FeedbackPropose, FeedbackSubmit, ProposalApprove, ProposalBacktest, ProposalCreate
 from aiops.engine.types import AnomalyEvent, Incident
@@ -190,72 +190,22 @@ def test_old_backtests_without_a_safety_block_must_be_rerun():
         run("admin_proposal_approve", request=ProposalApprove(proposal_id=pid, approver="boss"))
 
 
-# ── 誤報：分位數反推門檻 ──
+# ── 誤報：不再自動產生提案 ──
 
 
-def _false_alarm_feedback():
-    uid = _incident(FALSE_ALARM)
-    return run("admin_feedback_submit", request=FeedbackSubmit(
-        incident_uid=uid, verdict="false_positive", detector=DETECTOR, text="批次作業，不是事故", author="amy"))["feedback"]["id"]
-
-
-def _propose(fid, scope="entity"):
-    return run("admin_feedback_propose", request=FeedbackPropose(feedback_id=fid, proposer="bot", scope=scope))
-
-
-def test_false_positive_threshold_clears_the_false_alarm_and_is_not_below_the_normal_tail():
+@pytest.mark.parametrize("scope", ["entity", "pipeline", "global"])
+def test_false_positive_feedback_never_produces_a_proposal(scope):
+    """以前：scope=entity 走分位數反推（新門檻 = max(S_max × 1.05, 過去 30 天分數的 99.9% 分位數)），其他層級固定 ×1.2。
+    現在三個層級都拒絕、不留下提案；現行參數不動。"""
     ActiveConfigs.set(DETECTOR, {"threshold": 4.0}, "manual", 0, expected_version=0, pipeline=PIPELINE, entity="svc")
-    _confirm(_incident(GOLDEN))  # 黃金事故的時段不能算進「正常分數」
-    out = _propose(_false_alarm_feedback())
-    q = out["quantile"]
-    assert out["generated_by"] == "quantile" and out["proposal"]["source"] == "auto"
-    new = out["proposal"]["params"]["threshold"]
-    assert 4.5 < q["s_max"] < 6.0  # +10 的誤報 ≈ 5 個標準差
-    assert 2.5 < q["q"] < 4.5  # 常態雜訊的 |z| 千分之一尾端 ≈ 3.3
-    assert q["q_points"] > 30 * 1440 * 0.9 and q["q_days"] == 30
-    assert q["target"] == pytest.approx(max(q["s_max"] * 1.05, q["q"]), abs=1e-3)
-    assert new == q["target"] and new > q["s_max"] and new >= q["q"]  # 這一場誤報會消失，而且不低於日常尾端
-    assert "S_max" in out["proposal"]["reason"] and str(q["s_max"]) in out["proposal"]["reason"]
-
-
-def test_golden_windows_are_excluded_from_the_normal_score_distribution():
-    """排除窗 = 正式偵測同一套（這條管線的事故、維護窗）＋經驗庫裡這個實體的黃金事故（不限管線）。
-    10 天前的真事故記在另一條管線：只有黃金事故這一層排得掉它；它被降級成誤報後，Q 會被那 2 小時 z ≈ 7 拉高。"""
-    old = (T0 - timedelta(days=10), T0 - timedelta(days=10) + timedelta(minutes=120))
-    _BUMPS["synth:svc"] = [(old, 14.0), (FALSE_ALARM, 10.0)]
-    try:
-        uid = _incident(old, pipeline="sample_factory")
-        _confirm(uid)
-        with_exclusion = _propose(_false_alarm_feedback())["quantile"]
-        Knowledge.upsert(uid, verdict="false_positive")
-        without = _propose(_false_alarm_feedback())["quantile"]
-    finally:
-        _BUMPS["synth:svc"] = [(GOLDEN, 12.0), (TINY, 1.0), (FALSE_ALARM, 10.0)]
-    assert with_exclusion["q"] < 4.5 < without["q"]
-    assert with_exclusion["excluded_windows"] == without["excluded_windows"] + 1
-
-
-def test_quantile_step_caps_at_fifty_percent_and_keeps_the_direction():
-    tunable = {"threshold": (3.0, 1.0, 10.0)}
-    params, note = tuning_rules.quantile_step(9.0, tunable, {"threshold": 3.0})
-    assert params == {"threshold": 4.5} and "還差" in note  # 單次最多 +50%，剩下的寫在 reason
-    params, note = tuning_rules.quantile_step(2.0, tunable, {"threshold": 3.0})
-    assert params is None and "不高於現行" in note  # 誤報只能調高
-    params, _ = tuning_rules.quantile_step(30.0, tunable, {"threshold": 8.0})
-    assert params == {"threshold": 10.0}  # 夾在 tunable 範圍內
-
-
-def test_pipeline_scope_and_missing_data_fall_back_to_the_fixed_rule(monkeypatch):
-    out = _propose(_false_alarm_feedback(), scope="pipeline")  # 用一條序列的分佈去定整條管線的門檻不合理
-    assert out["generated_by"] == "template" and out["proposal"]["params"] == {"threshold": 3.6}
-
-    def down(self, *a, **k):
-        raise NoDataError("ES 裡已經沒有這段")
-
-    monkeypatch.setattr(MockSpec, "fetch_data", down)
-    out = _propose(_false_alarm_feedback())
-    assert out["generated_by"] == "template" and out["proposal"]["params"] == {"threshold": 3.6}
-    assert "沒用分位數反推" in out["proposal"]["reason"] and "撈不到資料" in out["quantile"]["fallback"]
+    uid = _incident(FALSE_ALARM)
+    fid = run("admin_feedback_submit", request=FeedbackSubmit(
+        incident_uid=uid, verdict="false_positive", detector=DETECTOR, text="批次作業，不是事故", author="amy"))["feedback"]["id"]
+    with pytest.raises(BadRequest, match="誤報回饋不再自動產生"):
+        run("admin_feedback_propose", request=FeedbackPropose(feedback_id=fid, proposer="bot", scope=scope))
+    with db.read_session() as s:
+        assert s.query(models.TuningProposalRow).count() == 0
+    assert ActiveConfigs.get(DETECTOR, PIPELINE, "svc")["params"] == {"threshold": 4.0}
 
 
 # ── 序列體檢（ACF）──

@@ -43,13 +43,12 @@ class _Frame(BaseOperator):
         return ctx
 
 
-_SNR = {"snr": {"p_fa": 0.001}}  # detector.soft_vote 的參與節點都要開 snr（載入期檢查）
+_SNR = {"snr": {"p_fa": 0.001}}
 
 
-def _vote(nodes):
+def _detect(nodes):
     wf = Workflow(name="gap", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
-        NodeSpec(name="fetch", operator="audit_gap.frame"), *nodes,
-        NodeSpec(name="vote", operator="detector.soft_vote")])
+        NodeSpec(name="fetch", operator="audit_gap.frame"), *nodes])
     return Pipeline(wf).run(now=T0)
 
 
@@ -102,23 +101,6 @@ def test_import_guards_catch_indirect_imports(tmp_path, monkeypatch, rel, body, 
 # ── Q4：資料血緣 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q4 缺口：anomalies 表沒有 voted_by 欄位；detector.soft_vote 的裁決事件落地後，"
-                   "只剩事件群快照記得是哪些節點投的票（keep_members=false 時成員事件也不寫）")
-def test_anomalies_table_keeps_who_voted():
-    # m 的 min_slot_points 61：這 120 點每個時段只有 60 點，時段基準不成立、退回全段平均，殘差的跳變只剩最後那個尖峰。
-    # （用預設 30 的話，含尖峰的那個小時平均被拉高，整點交界多一筆只有 m 投的裁決，這個測試修好欄位後也不會轉綠）
-    wf = Workflow(name="gap_q4", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
-        NodeSpec(name="fetch", operator="audit_gap.frame"),
-        NodeSpec(name="z", operator="detector.hourly_baseline", params=_SNR),
-        NodeSpec(name="m", operator="detector.residual_shift", params={"min_slot_points": 61, **_SNR}),
-        NodeSpec(name="vote", operator="detector.soft_vote"),
-        NodeSpec(name="group", operator="alert.same_entity")])
-    Pipeline(wf, StorageHooks()).run(now=T0)
-    with db.read_session() as s:
-        rows = s.query(models.AnomalyRow).all()
-    assert rows and all(sorted(getattr(r, "voted_by", None) or []) == ["m", "z"] for r in rows)
-
-
 @pytest.mark.xfail(strict=True, reason="Q4 缺口：AnomalyEvent 是 frozen，但 attrs 是普通 dict，下游可以原地改（淺層凍結）")
 def test_anomaly_event_attrs_cannot_be_mutated_in_place():
     e = AnomalyEvent("svc", "q", T0, 9.0, {"dept": "it"}, detector="detector.hourly_baseline", detector_node="z")
@@ -126,19 +108,18 @@ def test_anomaly_event_attrs_cannot_be_mutated_in_place():
         e.attrs["dept"] = "changed"
 
 
-# ── Q5：裁決分母 ──
+# ── Q5：棄權 ──
 
 
 @pytest.mark.parametrize("op", ["detector.residual_chronic"])
 def test_window_longer_than_the_data_abstains(op):
-    """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權（不進 detector_runs，裁決的參與者只有 z）。
-    裁決節點原本是布林多數決（detector.ensemble，已移除）：那時棄權沒算好的話分母多一票、裁決事件會消失。
-    軟投票沒有分母，所以除了裁決結果，還直接看基底留下的棄權紀錄與參與者數。"""
-    ctx = _vote([NodeSpec(name="z", operator="detector.hourly_baseline", params=_SNR),
-                 NodeSpec(name="w", operator=op, params={"window": 600, **_SNR})])
-    assert [a.voted_by for a in ctx.anomalies] == [("z",)]
+    """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權，z 的事件不受影響。
+    原本後面接表決節點（detector.ensemble、後來 soft_vote），驗的是棄權者不算參與者；表決節點已移除，
+    改成直接看基底留下的棄權紀錄，與事件只來自 z（斷言 voted_by == ("z",) 改成 detector_node == "z"）。"""
+    ctx = _detect([NodeSpec(name="z", operator="detector.hourly_baseline", params=_SNR),
+                   NodeSpec(name="w", operator=op, params={"window": 600, **_SNR})])
+    assert [a.detector_node for a in ctx.anomalies] == ["z"]
     assert "detect:w:cannot-evaluate:abstain" in ctx.audit and "detect:z:cannot-evaluate:abstain" not in ctx.audit
-    assert any(line.startswith("soft_vote:vote:voters=1:") for line in ctx.audit)
 
 
 # ── Q6：入口 span 的定義 ──
@@ -235,9 +216,10 @@ def _ctx(raw, train=None, state=None):
     return c
 
 
-def test_cold_start_gate_counts_usable_points_for_peer_detectors():
-    """G11（已修）：冷啟動門檻數的是 training_points（lag／同儕有值的列），100 列只有 2 列有同儕的值 -> 不學、不判。
-    （原本用同比偵測器的 lag 欄位，它已移除；改用測試專用的同儕偵測器，同一條基底路徑）"""
+def test_baseline_records_usable_training_points_for_peer_detectors():
+    """G11：DetectorState.points 記的是 training_points（lag／同儕有值的列），不是列數：100 列只有 2 列有同儕的值 -> 2。
+    原本這裡驗的是冷啟動門檻（2 < min_train_points 60 -> 不學、不判，detector_runs == []）；min_train_points 已於
+    2026-11-20 移除，現在 2 個點也照學照判，所以斷言改成「有跑、記下來的點數是 2」。"""
     train = _frame(100)
     train["peer_0"] = float("nan")
     train.loc[98:, "peer_0"] = [50.0, 51.0]
@@ -247,17 +229,20 @@ def test_cold_start_gate_counts_usable_points_for_peer_detectors():
     op.node_name = "n"
     ctx = _ctx(raw, train)
     ctx.target = Target("mock", "q", "svc", {}, [PeerRef("mock", "p0")])
-    assert op.execute(ctx).detector_runs == []
+    out = op.execute(ctx)
+    assert out.detector_runs == ["n"] and out.new_detector_states["n"].points == 2
 
 
-def test_retrain_with_too_few_points_keeps_using_the_old_baseline():
-    """G12（已修）：到期重訓但訓練窗資料不足時，沿用資料庫裡的舊基準線照判，不留偵測盲區。"""
+def test_retrain_with_few_points_replaces_the_old_baseline():
+    """原本是 G12「到期重訓但訓練窗資料不足（20 點 < min_train_points）時沿用舊基準線」；min_train_points 與那條
+    沿用舊基準線的路已移除：20 個點也照樣重訓，新基準線取代舊的（照判，沒有偵測盲區這點不變）。"""
     old = DetectorState({"buckets": {}, "global": [50.0, 1.0]}, T0 - timedelta(days=2), points=1440, version=3,
                         detector="detector.hourly_baseline")  # 沒有時段資料：每個點都用全段的 (平均 50, 標準差 1)
     op = OperatorRegistry.create("detector.hourly_baseline")
     op.node_name = "n"
     ctx = op.execute(_ctx(_frame(30, 500.0), train=_frame(20), state=old))
     assert ctx.detector_runs == ["n"] and ctx.anomalies
+    assert ctx.new_detector_states["n"].points == 20 and not any("keep-old-baseline" in line for line in ctx.audit)
 
 
 # ── Q12：結案寫入失敗 ──

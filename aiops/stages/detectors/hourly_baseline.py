@@ -21,7 +21,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, DetectorOperator, is_integer_series, scale_floor
+from aiops.stages.detectors.base import DetectorOperator, guard_scale
 
 HOURS_PER_WEEK = 168
 
@@ -29,15 +29,14 @@ HOURS_PER_WEEK = 168
 @OperatorRegistry.register("detector.hourly_baseline")
 class HourlyBaselineDetector(DetectorOperator):
     """params: threshold（偏離幾個該時段標準差）、tz（時區，預設 UTC）、
-    min_points（時段最少訓練點，預設 3）、min_weeks（時段至少要看過幾次完整的一週，預設 2）、
-    min_scale／min_scale_ratio（分母底噪，見 base.scale_floor）。
+    min_points（時段最少訓練點，預設 3）、min_weeks（時段至少要看過幾次完整的一週，預設 2）。
 
-    每個時段的標準差下限 = max(全段 std × 0.1, 底噪)；底噪的中心用該時段的平均。
-    全段 std 為 0（訓練期完全不變）時以前分數全 0（永遠不報），現在分母退到底噪。"""
+    分母就是該時段量到的標準差，沒有下限（「全段 std 的一成」與 min_scale 底噪已於 2026-11-20 移除）；
+    只防除以 0：時段 std 不是正數就用全段 std，全段也不是就 1.0（base.guard_scale）。"""
 
     algorithm = "hourly_baseline"
     whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
-    tunable = {"threshold": (3.0, 1.0, 10.0), **SCALE_FLOOR_TUNABLE}
+    tunable = {"threshold": (3.0, 1.0, 10.0)}
     other_params = frozenset({"tz", "min_points", "min_weeks"})
 
     def __init__(self, **params: Any):
@@ -78,7 +77,6 @@ class HourlyBaselineDetector(DetectorOperator):
                          for b, r in agg.iterrows()}
         values = frame["v"]
         self.global_ = (float(values.mean()), float(values.std(ddof=0)))
-        self.integer_ = is_integer_series(values)
         self.fitted = True
         return self
 
@@ -90,31 +88,26 @@ class HourlyBaselineDetector(DetectorOperator):
     def get_state(self) -> dict:
         self._require_fitted()
         return {"buckets": {str(b): list(v) for b, v in self.buckets_.items()}, "global": list(self.global_),
-                "tz": str(self.tz), "buckets_ready": self.buckets_ready, "min_weeks": self.min_weeks,
-                "integer": self.integer_}
+                "tz": str(self.tz), "buckets_ready": self.buckets_ready, "min_weeks": self.min_weeks}
 
     def load_state(self, state: dict) -> HourlyBaselineDetector:
-        # 舊版存的每個時段只有 (平均, 標準差, 點數)，沒有「看過幾週」：保守當成 1 週，會退回全段統計
+        # 舊版存的每個時段只有 (平均, 標準差, 點數)，沒有「看過幾週」：保守當成 1 週，會退回全段統計。
+        # 舊基準線多帶的 integer 鍵（已移除的整數序列底噪）不讀
         self.buckets_ = {int(b): (float(v[0]), float(v[1]), int(v[2]), float(v[3]) if len(v) > 3 else 1.0)
                          for b, v in state["buckets"].items()}
         self.global_ = (float(state["global"][0]), float(state["global"][1]))
-        self.integer_ = bool(state.get("integer", False))
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
         g_mean, g_std = self.global_
-        min_scale, ratio = self.param("min_scale"), self.param("min_scale_ratio")
         means, stds = [], []
         for b in self._bucket(df["ts"]):
             m, s, n, occ = self.buckets_.get(int(b), (g_mean, g_std, 0, 0.0))
             if not self._ready(n, occ):
                 m, s = g_mean, g_std  # 回退：全段 z-score
             means.append(m)
-            # 某時段剛好完全不變時，避免除以 0 把小雜訊放大成異常：全段 std 的一成、再不夠就底噪。
-            # 量到的 std 要傳進 scale_floor：它在「所有下限都是 0」時退回 1.0，以前傳 0 進去，那個 1.0 會蓋掉真的 std
-            # （min_scale_ratio 設 0、或時段平均剛好是 0 的非整數序列，分母被墊到 1，分數小了幾十倍）
-            stds.append(scale_floor(max(s, g_std * 0.1), None, min_scale, ratio, center=m, integer=self.integer_))
+            stds.append(guard_scale(s, g_std))  # 只防除以 0：時段 std -> 全段 std -> 1.0
         scores = ((df["value"].astype(float) - np.array(means)) / np.array(stds)).abs()
         return self._result(df, scores, scores > self.param("threshold"))

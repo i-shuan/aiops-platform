@@ -9,10 +9,9 @@
 沒辦法像滾動平均那樣直接在訓練期殘差上量出「平常會偏到哪裡」來校正門檻。滾動平均記憶長度固定（window），
 回測的 warmup_points／can_evaluate 也沿用 chronic 的寫法。代價是要湊滿 window 個點：慢滑要幾分鐘才累積到門檻。
 
-門檻依序列自己的殘差雜訊伸縮（base.noise_stats／calibrated_scale）：分數 = |滾動平均(e)| / σ*，σ* 是在訓練期
-「滾動平均(e)」本身的分布上量的（MAD 與 1−fpr 分位數），殘差的自相關與時段基準的週間誤差都已經算進去。
-底噪不套「整數序列至少 1」：那條是給 MAD 為 0 的稀疏計數用的，30 個整數點的平均解析度是 1/30，持續少 0.5 筆／分也有意義；
-min_scale 與 |水位| × min_scale_ratio 照套。
+分數 = |滾動平均(e)| / σ，σ = 1.4826 × MAD，在訓練期「滾動平均(e)」本身的分布上量（base.noise_stats），
+殘差的自相關與時段基準的週間誤差都已經算進去。σ 為 0 時分母退到 1.0，只防除以 0（base.guard_scale）。
+滾動平均一越線就成立（連續越線 min_run 個點才算的條件已於 2026-11-20 移除）。
 """
 from __future__ import annotations
 
@@ -22,21 +21,18 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import (RESIDUAL_TUNABLE, SCALE_FLOOR_TUNABLE, DetectorOperator, calibrated_scale,
-                                         fit_seasonal_profile, noise_stats, parse_tz,
+from aiops.stages.detectors.base import (DetectorOperator, fit_seasonal_profile, guard_scale, noise_stats, parse_tz,
                                          seasonal_residual)
 
 
 @OperatorRegistry.register("detector.residual_chronic")
 class ResidualChronicDetector(DetectorOperator):
-    """params: threshold（預設 3）、window（滾動窗點數，預設 30）、fpr、max_tail_factor、
-    min_scale／min_scale_ratio（tunable）；tz、min_slot_points（同 residual_shift）；
-    min_run（預設 1）：滾動平均要連續越線幾個點才成立，給不投票、單獨發告警的旁路節點用（只認 YAML，調參改不到）。"""
+    """params: threshold（預設 3）、window（滾動窗點數，預設 30）（tunable）；tz、min_slot_points（同 residual_shift）。"""
 
     algorithm = "residual_chronic"
     whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
-    tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 3.0, 1440.0), **RESIDUAL_TUNABLE, **SCALE_FLOOR_TUNABLE}
-    other_params = frozenset({"tz", "min_slot_points", "min_run"})
+    tunable = {"threshold": (3.0, 1.0, 10.0), "window": (30.0, 3.0, 1440.0)}
+    other_params = frozenset({"tz", "min_slot_points"})
 
     def __init__(self, **params: Any):
         super().__init__(**params)
@@ -44,9 +40,6 @@ class ResidualChronicDetector(DetectorOperator):
         self.min_slot_points = int(params.get("min_slot_points", 30))
         if self.min_slot_points < 2:
             raise TypeError("detector.residual_chronic 的 min_slot_points 至少要 2")
-        self.min_run = int(params.get("min_run", 1))
-        if not 1 <= self.min_run <= 1440:
-            raise TypeError("detector.residual_chronic 的 min_run 要在 1 到 1440 之間（1 = 越線就算）")
 
     def _rolling(self, resid) -> pd.Series:
         w = int(self.param("window"))
@@ -55,22 +48,21 @@ class ResidualChronicDetector(DetectorOperator):
     def fit(self, df: pd.DataFrame) -> ResidualChronicDetector:
         self.profile_, resid = fit_seasonal_profile(df, self.tz, self.min_slot_points)
         rolling = self._rolling(resid)
-        if rolling.notna().sum() < 2:  # 訓練資料比窗口還短：退回逐點殘差的分布（尺度偏大、偏鈍，不會更吵）
+        if rolling.notna().sum() < 2:  # 訓練資料比窗口還短，量不到滾動平均的分布：用逐點殘差的分布（尺度偏大）
             rolling = pd.Series(resid)
-        self.noise_ = noise_stats(rolling.to_numpy(), self.param("fpr"))
+        self.noise_ = noise_stats(rolling.to_numpy())
         self.window_ = int(self.param("window"))
-        self.level_ = float(df["value"].median())
         self.fitted = True
         return self
 
     def get_state(self) -> dict:
         self._require_fitted()
-        return {"profile": self.profile_, "noise": self.noise_, "window": self.window_, "level": self.level_}
+        return {"profile": self.profile_, "noise": self.noise_, "window": self.window_}
 
     def load_state(self, state: dict) -> ResidualChronicDetector:
-        self.profile_, self.noise_ = dict(state["profile"]), dict(state["noise"])
+        # 舊基準線多帶的 level 與 noise 裡的 tail_q、fpr（已移除的底噪與尾巴校正）不讀
+        self.profile_, self.noise_ = dict(state["profile"]), {"noise": float(state["noise"]["noise"])}
         self.window_ = int(state["window"])
-        self.level_ = float(state["level"])
         self.fitted = True
         return self
 
@@ -78,7 +70,7 @@ class ResidualChronicDetector(DetectorOperator):
         return int(self.param("window")) - 1
 
     def can_evaluate(self, df: pd.DataFrame) -> bool:
-        return len(df) >= int(self.param("window"))  # 湊不滿就算不出分數：棄權，不投反對票
+        return len(df) >= int(self.param("window"))  # 湊不滿就算不出分數：棄權
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
@@ -86,17 +78,8 @@ class ResidualChronicDetector(DetectorOperator):
             # 後台改了 window：雜訊尺度是在舊窗口的滾動平均上量的，換窗口後尺度不對。照舊窗口判，下次重訓才換
             self.notes.append(f"window-changed:{self.window_}->{int(self.param('window'))}:until-retrain")
             self.params = {**self.params, "window": self.window_}
-        scale = calibrated_scale(self.noise_, self.param("threshold"), self.param("max_tail_factor"),
-                                 min_scale=self.param("min_scale"), min_scale_ratio=self.param("min_scale_ratio"),
-                                 level=self.level_, integer=False)
+        scale = guard_scale(self.noise_["noise"])
         rolling = self._rolling(seasonal_residual(df, self.profile_))
         rolling.index = df.index
         scores = (rolling.abs() / scale).fillna(0.0)
-        flagged = scores > self.param("threshold")
-        if self.min_run > 1:
-            # 持續越線 min_run 個點才成立（不投票的旁路節點用：單票就發，所以要求偏離撐得夠久）。
-            # 沒撐滿的點分數歸 0，warning_ratio 也不會把它們記成預警
-            run = flagged.groupby((~flagged).cumsum()).cumsum()
-            flagged = run >= self.min_run
-            scores = scores.where(flagged, 0.0)
-        return self._result(df, scores, flagged)
+        return self._result(df, scores, scores > self.param("threshold"))

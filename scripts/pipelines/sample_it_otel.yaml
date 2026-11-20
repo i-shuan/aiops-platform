@@ -13,15 +13,13 @@ nodes:
     operator: ingestion.fetch
     params: {lookback_minutes: 60, train_lookback_minutes: 10080, retrain_minutes: 1440}
 
-  # 異常檢測（R+SNR，docs/RESIDUAL_SNR_ENSEMBLE.md；ES 6 條流量序列回放、四組比較後採用）：
-  #   週期票 detector.hourly_baseline：該 週幾×小時 的平均與標準差
-  #   突變票 detector.residual_shift：扣掉該時段基準後的殘差，看相鄰差（瞬間斷崖）；每天固定的 09:00／19:00 切換被扣掉
-  #   漂移票 detector.residual_chronic：殘差的 30 分鐘滾動平均（慢滑、持續偏低）
-  # 三票都開 snr：門檻由目標逐點虛警率 p_fa 換算（白化過的節點 = 常態雙尾分位數 z_{1−p_fa/2}，p_fa 0.001 -> 3.29），
-  # 逐點證據交給 detector.soft_vote（每票 = 分數 / 門檻，加總 >= 2 票等值成立）。序列 SNR 記在基準線裡（診斷、證據），不進門檻。
-  # 誤報走回饋閉環：事件群標 false_positive -> admin.feedback_propose 對這些節點提 p_fa／votes／min_run 的調參（往少誤報的方向），
-  # 回測＋黃金事故防護罩不漏抓才准核准（docs/RESIDUAL_SNR_ENSEMBLE.md「誤報走回饋閉環」）。
-  # 殘差票的雜訊尺度在訓練期殘差上量：訓練窗 2 週以上是「留一週」量的；只有 7 天時每個時段只看過一次，量到的雜訊偏小（偏吵），
+  # 異常檢測（docs/RESIDUAL_SNR_ENSEMBLE.md）：三個偵測節點各自成立，任何一個越線就是一筆異常（沒有表決，2026-11-20 起）。
+  #   detector.hourly_baseline：該 週幾×小時 的平均與標準差
+  #   detector.residual_shift：扣掉該時段基準後的殘差，看相鄰差（瞬間斷崖）；每天固定的 09:00／19:00 切換被扣掉
+  #   detector.residual_chronic：殘差的 30 分鐘滾動平均（慢滑、持續偏低）
+  # 都開 snr：門檻由目標逐點虛警率 p_fa 換算（白化過的節點 = 常態雙尾分位數 z_{1−p_fa/2}，p_fa 0.001 -> 3.29）。
+  # snr 只決定門檻放哪；序列 SNR 記在基準線裡（診斷用），不進門檻、不壓制事件。
+  # 殘差偵測器的雜訊尺度在訓練期殘差上量：訓練窗 2 週以上是「留一週」量的；只有 7 天時每個時段只看過一次，量到的雜訊偏小（偏吵），
   # train_lookback_minutes 建議 20160 以上（Prometheus 抓 2 週以上要把 step_seconds 調大）。
   # min_weeks: 1：7 天訓練時每個時段只看過一次也用自己的基準（拿掉就是預設 2，資料不足 2 週時退回全段統計）。
   - name: detect
@@ -33,17 +31,6 @@ nodes:
   - name: detect_rchronic
     operator: detector.residual_chronic
     params: {tz: Asia/Taipei, snr: {p_fa: 0.001, tz: Asia/Taipei}}
-  # 旁路漂移票（不投票、單獨發告警，列在 vote 的 bypass）：低流量、雜訊大的序列持續低兩成時，只有漂移票看得到，
-  # 多數決永遠湊不到第二票（ES 回測 report-svc 0/60）。這個節點的殘差滾動平均要連續越線 min_run 分鐘才成立，
-  # 寧可多吵一點也不漏報。min_run 是「延遲 vs 誤報」的旋鈕（回測：10 分 -> report-svc 第 22 分鐘抓到，
-  # 訓練 14 天的序列每週多 0～4 分鐘；訓練只有 7 天的序列每週 13～25 件），見 docs/RESIDUAL_SNR_ENSEMBLE.md。
-  - name: detect_drift_solo
-    operator: detector.residual_chronic
-    params: {tz: Asia/Taipei, min_run: 10}
-  # 軟投票：三票的逐點證據換算成「門檻的幾倍」相加；旁路漂移票不投票、單獨成立
-  - name: vote
-    operator: detector.soft_vote
-    params: {votes: 2, bypass: [detect_drift_solo]}
   - name: new_only
     operator: detector.new_only
 
@@ -95,11 +82,7 @@ targets:
   # 範例（mock 資料源）。正式使用請複製這個檔，改成自己的 targets。
   # attrs.signal（latency／errors／traffic／saturation）：alert.golden_signals 加權與 RCA 建議處置的故障特徵都靠它判斷
   # 這條序列是哪一類；ES 這種 metric 是整段查詢 JSON 的資料源判不出類別，不填就不會觸發
-  # overrides 示範分母底噪 min_scale（單位跟指標一樣）：MAD／標準差小於它就用它當分母，避免幾乎不動的序列一點雜訊就爆分。
-  # 沒填時的通用保底是 min_scale_ratio（中心值的 1%）與整數序列的 1 個單位；單位只有 target 自己知道，例如：
-  #   每分鐘失敗數 -> {detect_rshift: {min_scale: 0.5}, detect: {min_scale: 0.5}}
-  #   延遲 µs（ES 的 transaction.duration.summary.sum）-> {detect_rshift: {min_scale: 5000}}
-  #   這裡的 cpu 百分比：0.5 個百分點以內的抖動不算
-  - {source_type: mock, query: 'cpu{service="cart"}', entity: cart, attrs: {dept: payments, signal: saturation},
-     overrides: {detect_rshift: {min_scale: 0.5}}}
+  # overrides[節點名稱] 可以替單一 target 改偵測器參數（例如 {detect_rchronic: {window: 60}}），載入期檢查名稱與範圍。
+  # 開了 snr 的節點門檻由 p_fa 換算，overrides 寫 threshold 不會生效。
+  - {source_type: mock, query: 'cpu{service="cart"}', entity: cart, attrs: {dept: payments, signal: saturation}}
   - {source_type: mock, query: 'cpu{service="redis"}', entity: redis, attrs: {dept: platform, signal: saturation}}

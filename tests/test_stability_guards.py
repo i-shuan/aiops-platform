@@ -4,7 +4,7 @@
    watchdog 不續命。查詢寫錯（BadRequest）是設定問題，不算斷流。
 2. 先寫資料庫、再送通知，寫入是單一交易並重試：推送失敗時事件群已存成進行中，下一輪心跳會補送；
    結案那一輪推送失敗，事件群不會被標成已結案，下一輪會再送一次 endsAt。
-3. 冷啟動資料太少就不學：訓練點數 < min_train_points 的偵測節點不訓練、不偵測、不投票；靜態規則不受影響。
+3. （已移除，2026-11-20）冷啟動資料太少就不學（min_train_points）：現在拿到幾個點就學幾個點，測試改成記錄新行為。
 
 每個測試在修正前都會失敗（第 2 項尤其：修正前 11:40 的異常在推送失敗後永遠不會發出）。
 """
@@ -199,7 +199,7 @@ def test_batch_persist_gives_up_cleanly_when_the_database_stays_down(monkeypatch
     assert Anomalies.entity_last_seen("spike", ["svc"]) == {} and Incidents.list_open("spike") == [] and sent == []
 
 
-# ── 3. 冷啟動資料太少就不學 ──
+# ── 3. 冷啟動：沒有最少訓練點數的門檻 ──
 
 
 def _ctx(raw, train=None):
@@ -215,35 +215,26 @@ def _frame(n, spike=None):
     return pd.DataFrame({"ts": pd.date_range(T0, periods=n, freq="60s"), "value": values})
 
 
-def test_too_few_training_points_means_no_training_no_votes_no_alerts():
+def test_a_handful_of_training_points_is_enough_to_train_and_alert():
+    """改版前（min_train_points 預設 60）：20 點、或訓練窗 45 點，都不學、不判、不進 detector_runs，audit 記
+    too-few-points:20<60／45<60，最後一點的 500 不會報。
+    2026-11-20 移除 min_train_points：拿到幾個點就學幾個點，500 的尖峰兩種情況都報。
+    代價照實寫：只有這一輪 20 個點時，基準線是連尖峰一起學的（平均被拉到 73、std 98），尖峰只有 4.36 分；
+    服務一上線就壞的話，壞的狀態會被學成正常。"""
     ctx = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_frame(20, spike=500.0)))
-    assert ctx.detector_runs == [] and ctx.new_detector_states == {} and ctx.anomalies == []
-    assert any("too-few-points:20<60" in a for a in ctx.audit)
+    assert ctx.detector_runs == ["detector.hourly_baseline"] and ctx.new_detector_states["detector.hourly_baseline"].points == 20
+    assert [(e.value, round(e.score, 2)) for e in ctx.anomalies] == [(500.0, 4.36)]
+    assert not any("too-few-points" in a for a in ctx.audit)
     ctx = OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_frame(20, spike=500.0), train=_frame(45)))
-    assert ctx.detector_runs == [] and any("too-few-points:45<60" in a for a in ctx.audit)
+    assert ctx.detector_runs == ["detector.hourly_baseline"] and ctx.new_detector_states["detector.hourly_baseline"].points == 45
+    assert [e.value for e in ctx.anomalies] == [500.0] and ctx.anomalies[0].score > 100  # 乾淨的 45 點：std 0.8，尖峰幾百分
 
 
-def test_min_train_points_is_a_node_param_with_default_60():
-    ok = OperatorRegistry.create("detector.hourly_baseline", {"min_train_points": 10}).execute(_ctx(_frame(20, spike=500.0)))
-    assert ok.detector_runs == ["detector.hourly_baseline"] and ok.anomalies
-    assert OperatorRegistry.create("detector.hourly_baseline").execute(_ctx(_frame(60, spike=500.0))).detector_runs
-    with pytest.raises(TypeError, match="行為參數"):
+def test_min_train_points_is_no_longer_a_parameter():
+    with pytest.raises(Exception, match="沒有參數"):
+        OperatorRegistry.create("detector.hourly_baseline", {"min_train_points": 10})
+    with pytest.raises(TypeError, match="沒有參數"):
         OperatorRegistry.create("detector.hourly_baseline").check_override({"min_train_points": 5})
-
-
-def test_abstaining_detector_is_not_counted_by_the_ensemble():
-    """冷啟動棄權的節點（45 點 < 預設 60）不進 detector_runs、也沒有證據；裁決（detector.soft_vote）只看真的評估過的那一票。
-    原本的另一票是 detector.rules（不需要訓練），它已移除；改成同一個演算法、min_train_points 調低的節點。"""
-    ctx = _ctx(_frame(20, spike=500.0), train=_frame(45))
-    snr = {"p_fa": 0.001}
-    for node, params in (("cold", {"snr": snr}), ("warm", {"snr": snr, "min_train_points": 10})):
-        o = OperatorRegistry.create("detector.hourly_baseline", params)
-        o.node_name = node
-        ctx = o.execute(ctx)
-    vote = OperatorRegistry.create("detector.soft_vote")
-    vote.node_name = "vote"
-    out = vote.execute(ctx)
-    assert ctx.detector_runs == ["warm"] and [e.voted_by for e in out.anomalies] == [("warm",)]  # 1 個參與者就它說了算
 
 
 # ── 稽核補強（docs/ARCH_AUDIT.md Q8、Q10、Q11）──

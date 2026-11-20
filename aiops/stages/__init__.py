@@ -2,7 +2,6 @@
 
   ingestion     抓資料（ingestion.fetch、ingestion.incident_series）
   detectors     異常偵測（detector.*，每個演算法一個檔，彼此不 import）
-  ensemble      多偵測器裁決（detector.ensemble）
   grouping      事件收斂（alert.same_entity、alert.topology_chain、alert.lot_path_chain）；
                 進行中事件群吸收新異常（alert.absorb_open，排在計分之後、抑制之前）
   scoring       計分（alert.golden_signals、alert.p0_boost）

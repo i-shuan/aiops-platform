@@ -255,7 +255,7 @@ class Pipeline:
             raise WorkflowError(f"Workflow {workflow.name}：未知的節點 scope {unknown}")
         if [order[s] for s in scopes] != sorted(order[s] for s in scopes):
             raise WorkflowError(f"Workflow {workflow.name}：節點順序必須是 scope=target → batch → after_persist → after_finalize")
-        # 跨節點的設定（裁決的 bypass 要認哪些節點…）由算子自己檢查，引擎只負責把整條 workflow 交給它
+        # 跨節點的設定（引用的節點存不存在、前後順序…）由算子自己檢查，引擎只負責把整條 workflow 交給它
         infos = [NodeInfo(n.name, n.operator, dict(n.params), op) for n, op in self.nodes]
         for n, op in self.nodes:
             check = getattr(op, "check_workflow", None)
@@ -272,7 +272,7 @@ class Pipeline:
         # 「已通知」與結案也記完之後才跑（自我健康心跳）：這一輪每一步都成功了才算活著
         self.after_finalize_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "after_finalize"]
         # (節點名稱, 算子名稱)：基準線與調參都以節點區分，同一個演算法掛兩次也不會互相覆蓋
-        # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only、ensemble 這類不需要）
+        # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only 這類不需要）
         self.detector_nodes = [(n.name, n.operator) for n, op in self.target_nodes if getattr(op, "has_baseline", False)]
         self._detectors = {n.name: (n.operator, op) for n, op in self.target_nodes if getattr(op, "has_baseline", False)}
         self._check_targets_are_used(workflow.targets, f"Workflow {workflow.name} 的 targets")
@@ -406,14 +406,11 @@ class Pipeline:
                 skipped = {name: reason for name in self._detectors
                            if (reason := self._skip_reason(name, ctx.target)) is not None}
                 active = [d for d in self.detector_nodes if d[0] not in skipped]
-                # fetch 看這個決定要不要抓訓練窗。不需要歷史資料的節點（requires_training = False：人訂的上下限）不算：
-                # 它棄權的那幾輪不會存基準線，算進來的話 fetch 會每一輪都抓訓練窗、其他節點每一輪都重訓，
-                # 把正在發生的事故學成常態（11/3 真實資料回放：75 個異常點掉到 51 個）
-                ctx.baseline_nodes = [name for name, _ in active
-                                      if getattr(self._detectors[name][1], "requires_training", True)]
+                # fetch 看這個決定要不要抓訓練窗（其中有節點還沒有基準線或到期才抓）
+                ctx.baseline_nodes = [name for name, _ in active]
                 loaded = False  # 這條序列的輸入載入完了：之後的錯才算在「抓這條資料流」頭上（載入失敗是資料庫的事）
                 try:
-                    # 被跳過的節點不載基準線與調參；也不會進 detector_runs，裁決時不算參與者
+                    # 被跳過的節點不載基準線與調參；也不會進 detector_runs
                     self.hooks.load_target(ctx, active)
                     loaded = True
                     for node, op in self.target_nodes:

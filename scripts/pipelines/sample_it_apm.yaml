@@ -13,7 +13,7 @@ nodes:
     params: {lookback_minutes: 60, train_lookback_minutes: 1440, retrain_minutes: 1440}
 
   # 異常檢測：168 時段基準線。訓練窗不到 min_weeks 週時整條退回全段平均與標準差。
-  # 要換成殘差組（hourly_baseline＋residual_shift＋residual_chronic＋soft_vote）照 sample_it_otel 的寫法。
+  # 要換成殘差組（hourly_baseline＋residual_shift＋residual_chronic）照 sample_it_otel 的寫法。
   - name: detect
     operator: detector.hourly_baseline
   - name: new_only

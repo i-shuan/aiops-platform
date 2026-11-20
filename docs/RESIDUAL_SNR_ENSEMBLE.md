@@ -1,5 +1,32 @@
 # 殘差白化＋自適應門檻＋SNR 軟投票（it_otel 的偵測段：R+SNR）
 
+> **2026-11-20：本文件描述的減少誤報機制已全部移除，下面的量測數字不再描述現行行為，而且沒有重新量測。**
+> 使用者決定偵測階段要最敏感，同一天移除了：
+> - **軟投票** `detector.soft_vote`（含 `bypass`、旁路漂移票 `detect_drift_solo`）——現在三個偵測節點各自成立，任何一個越線就是一筆異常；
+> - **`min_run`**（`residual_chronic` 連續越線幾點才成立）；
+> - **門檻倍率 `threshold_scale`** 與「誤報回饋 → 自動提調鈍的提案」整條路（`snr_feedback.py`、分位數反推 `threshold.py`、
+>   `scripts/backtest/feedback_e2e.py`）：`admin.feedback_propose` 對誤報回饋回 400，要調鈍只能由人走人工提案；
+> - **尾巴校正** `fpr`／`max_tail_factor`（`calibrated_scale`）：殘差偵測器的分母就是 σ = 1.4826 × MAD；
+> - 分母底噪 `min_scale`／`min_scale_ratio`／整數序列至少 1、冷啟動棄權 `min_train_points`。
+>
+> 節點參數 `snr: {p_fa: ...}` 還在，只用來把節點門檻換算成 z_{1−p_fa/2}；序列 SNR 仍記在基準線裡當診斷值。逐點證據
+> `ctx.detector_evidence` 已刪。
+>
+> 所以本文件「做法」第 2、5 節、「回測」「四組比較」「採用」「誤報走回饋閉環」「混沌回歸」各節的敘述與數字（誤報分鐘、18 格檢出、
+> 倍率提案的前後對照）都是**移除前**的程式量的，原樣保留當歷史紀錄。**移除之後沒有用 ES 序列重跑，也沒有重跑混沌場景**；
+> `scripts/backtest/residual_ensemble.py` 已改成「任何節點越線就算告警」，可以直接重跑。
+> 移除後只在合成序列上量過（`tests/test_residual_ensemble.py::test_normal_week_alert_minutes_after_removing_the_false_alarm_mechanisms`，
+> 沒有注入的一週 = 10080 分鐘，三個節點門檻 3.29，任何一個越線的分鐘數；「移除前」是同一份資料上用軟投票 ∪ 旁路漂移票重算的）：
+>
+> | 合成序列 | 移除前 | 移除後 | 移除後各節點（hourly／突變／漂移） |
+> |---|---|---|---|
+> | 291／135 筆、雜訊 9，訓練 14 天 | 29 分鐘 | 31 分鐘 | 20／12／2 |
+> | 低流量 Poisson 40／15 筆，訓練 14 天 | 20 分鐘 | 133 分鐘 | 20／72／46 |
+> | 291／135 筆、雜訊 9，訓練 7 天 | 93 分鐘 | 290 分鐘 | 19／6／268 |
+> | 低流量 Poisson，訓練 7 天 | 110 分鐘 | 681 分鐘 | 17／108／579 |
+>
+> 這四條是測試裡現成的合成序列，不是留出驗證，也不是真實流量；真實序列尾巴更肥，預期更吵，沒有量。
+
 > **歷史紀錄（2026-11-20 註）**：本文件拿來比較的偵測器與裁決——`detector.mad`、`detector.quantile_drift`、`detector.zscore`、
 > `detector.rules`、`detector.hard_limit`（連同 `alert.fatal_floor` 與「致命軌」旁路）、布林多數決 `detector.ensemble`——已於 2026-11-20 移除，
 > `scripts/backtest/variants.py` 的對照變體 R、A、A+SNR 也跟著拿掉，只剩 R+SNR。下面的數字與敘述原樣保留，當作現行組合

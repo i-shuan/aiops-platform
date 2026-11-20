@@ -66,7 +66,7 @@
 | state | JSON | 否 | | 算子 `get_state()` 的輸出，**形狀依算子而異**（第 17.3 節） |
 | train_start | DateTime | 否 | | 訓練窗起點 |
 | train_end | DateTime | 否 | | 訓練窗終點 |
-| points | INTEGER | 否 | | 訓練點數（冷啟動門檻數的就是這個） |
+| points | INTEGER | 否 | | 訓練點數（演算法真正用得到的點；冷啟動門檻 `min_train_points` 已於 2026-11-20 移除，這個數現在只是紀錄） |
 | trained_at | DateTime | 否 | 現在 | |
 | version | INTEGER | 否 | `1` | 樂觀鎖 |
 | artifact_format | VARCHAR(16) | 否 | `''` | 非 JSON 的模型本體格式；**只允許 `npz`**（禁止 pickle）；空字串 = 沒有 |
@@ -272,13 +272,13 @@
   "events": [
     {"entity": "ingress-gw", "metric": "<指標查詢字串>", "ts": "2026-11-09T12:00:00+00:00",
      "score": 133.75, "value": 8962000.0, "attrs": {"dept": "payments", "signal": "latency"},
-     "detector": "detector.soft_vote", "detector_node": "vote", "source_type": "elasticsearch",
-     "voted_by": ["detect", "detect_rshift"], "level": "anomaly"}
+     "detector": "detector.hourly_baseline", "detector_node": "detect", "source_type": "elasticsearch",
+     "voted_by": [], "level": "anomaly"}
   ]
 }
 ```
 - `tags`：收斂方式與標記，例：`same_entity`、`topology_chain`、`absorbed`（被進行中事件群吸收）、`escalated:P2>P0`（升級紀錄）。2026-11-20 之前的舊資料列可能還有 `fatal:<節點>`（致命硬上限；`detector.hard_limit`／`alert.fatal_floor` 已移除，平台內已經沒有算子會打這個標籤）。
-- `events[].detector` 與 `detector_node`：軟投票成立時是 `detector.soft_vote` 與裁決節點名稱；`voted_by` 列出有實質貢獻（權重達半個門檻以上）的節點。2026-11-20 之前的舊資料列可能是 `detector.ensemble`（布林多數決）或其他已移除的算子名。
+- `events[].detector` 與 `detector_node`：抓到這筆異常的偵測算子與節點名稱（每個偵測節點的事件各自成立）。`voted_by` 現在一律是空陣列：表決節點 `detector.soft_vote` 已於 2026-11-20 移除，欄位留著只為了讀舊資料。2026-11-20 之前的舊資料列可能是 `detector.soft_vote`／`vote`（`voted_by` 列出當時有貢獻的節點）、`detector.ensemble`（布林多數決）或其他已移除的算子名。
 - `events[].level`：`anomaly` 或 `warning`。
 
 ### 17.2 `incidents.context`
@@ -292,9 +292,9 @@
 
 | 算子 | state 的鍵 |
 |---|---|
-| `detector.hourly_baseline` | `buckets`（時段編號字串 → `[平均, 標準差, 點數, 週數]`，共 168 格）、`global`、`tz`、`buckets_ready`、`min_weeks`、`integer` |
-| `detector.residual_shift` | `profile`（見下）、`noise`（`noise`、`tail_q`、`fpr`、`points`）、`level`、`integer` |
-| `detector.residual_chronic` | `profile`、`noise`、`window`、`level` |
+| `detector.hourly_baseline` | `buckets`（時段編號字串 → `[平均, 標準差, 點數, 週數]`，共 168 格）、`global`、`tz`、`buckets_ready`、`min_weeks` |
+| `detector.residual_shift` | `profile`（見下）、`noise`（`noise` = σ、`points`） |
+| `detector.residual_chronic` | `profile`、`noise`、`window` |
 | `detector.sparse_count` | `window`、`points`、`events`、`zero_fraction`、`dispersion`、`countable` |
 
 `profile`（時段基準，`stages/detectors/base.fit_seasonal_profile`）：`tz`、`min_slot_points`、`slots`（週幾×小時編號字串 → `[平均, 點數]`）、
@@ -305,11 +305,13 @@
 `snr_lin`、`snr_db`（資料不足時是 null）、`p_fa`、`threshold`、`threshold_source`（`gaussian`／`empirical`）。
 沒開 snr 的節點沒有這個鍵；舊基準線沒有這個鍵時照節點原本的 `threshold` 判，下次重訓才補上。
 
+2026-11-20 以前訓練的基準線還會多帶 `integer`、`level` 與 `noise.tail_q`／`noise.fpr`（分母底噪與尾巴校正用的，已移除）：載入時不讀、不報錯，下次重訓就不再寫。
+
 `detector.zscore`、`mad`、`quantile_drift`、`rules`、`hard_limit` 已於 2026-11-20 移除，資料庫裡它們留下的舊基準線列沒有算子會再讀。`state` 內只能是 JSON；非 JSON 的模型本體放 `artifact`。
 
 ### 17.4 `tuning_proposals.params`、`active_detector_configs.params`
-參數名 → 值的物件，鍵只能是該偵測器 `tunable` 範圍內的參數，且在載入期檢查範圍。例：`{"threshold": 4.5, "min_scale": 5000}`。`include_entities`、`exclude_entities` 等路由參數會被拒絕。
-有 `threshold` 的偵測器另外收 `threshold_scale`（門檻倍率，1～10，預設 1；R+SNR 節點的誤報回饋提案改的就是它），例：`{"threshold_scale": 2.85}`。
+參數名 → 值的物件，鍵只能是該偵測器 `tunable` 範圍內的參數，且在建立提案時檢查範圍。例：`{"threshold": 4.5, "window": 45}`。`include_entities`、`exclude_entities` 等路由參數會被拒絕。
+2026-11-20 以前核准的列可能帶著已移除的鍵：`threshold_scale`（門檻倍率）、`min_scale`、`min_scale_ratio`、`fpr`、`max_tail_factor`。沒有補 migration：偵測載入調參時把不認得的鍵略過並記一行 `params:<節點>:ignored-unknown:<鍵>`（`stages/detectors/base.tuning_keys`／`layer_params`），其餘的鍵照用；新提案帶這些鍵會回 400。
 
 ### 17.5 `tuning_proposals.backtest`
 ```json
@@ -319,7 +321,7 @@
  "safety": {"passed": true, "missed_golden": [], "skipped_oldest": 0}}
 ```
 `safety.passed` 為 false（會漏抓已確認的真異常）時，提案狀態是 `rejected`，不能核准。`workflow.locked` 列出被 YAML 鎖住、提案改了也不會生效的鍵。`safety` 內部欄位以程式為準（`control_plane/learning/golden.py`）。
-R+SNR 節點（管線裡這個偵測器的節點開了 snr）的提案是**整段回測**（`control_plane/learning/snr_feedback.py`），形狀不同：
+管線裡這個偵測器的節點開了 snr 時，提案是**整段回測**（`control_plane/learning/segment.py`；2026-11-20 以前在 `snr_feedback.py`），形狀不同：
 多 `"mode": "segment"`、`entity`、`test_days`、`current_events`／`proposed_events`、`current_minutes_per_week`／`proposed_minutes_per_week`；
 沒有 `warmup_points`、`current_params`、`missed_windows`；`safety` 也多 `"mode": "segment"`，每場黃金事故記的是整段偵測的告警分鐘。
 
@@ -334,4 +336,4 @@ target 的 `attrs` 原樣複製：`dept`、`signal`（`latency`／`errors`／`tr
 - 第 17.3 節只列了四個算子的 `state`，其餘算子的鍵沒逐一核對。
 - `tuning_proposals.source` 的 `feedback`、`profile` 值，是從程式裡寫入的位置看到的，建立 API 的驗證只收 `auto`、`llm`、`manual`。
 - 這份文件對應 main（tag 1.1）的模型，加上分支 `feat/adopt-r-snr` 的 JSON 形狀補充（residual 兩個偵測器的 `state`、`"_snr"`、
-  `threshold_scale`、整段回測）。表與欄位沒有改；這些補充只對照了程式碼與單元測試，沒有對照實際資料庫裡的資料。
+  `threshold_scale`、整段回測）；2026-11-20 移除 `threshold_scale` 等鍵後改了第 17.1、17.3、17.4、17.5 節的說明。表與欄位沒有改；這些補充只對照了程式碼與單元測試，沒有對照實際資料庫裡的資料。

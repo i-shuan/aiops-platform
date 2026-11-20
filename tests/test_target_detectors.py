@@ -1,12 +1,12 @@
 """每個 target 自己宣告要跑哪些偵測器（detectors 白名單）、節點層 include／exclude_entities、
-target overrides、裁決的參與者（被跳過、沒資料、冷啟動的節點不算）、載入期防呆。
+target overrides、哪些節點真的跑了（被跳過、沒資料的節點不進 detector_runs）、載入期防呆。
 
 原本的載具是 detector.zscore／mad／quantile_drift 與 detector.ensemble（布林多數決），都已移除：
   - zscore 節點換成 detector.hourly_baseline。訓練段只有 100 分鐘（不到 min_weeks 週），它整條退回全段平均與標準差，
     分數跟 zscore 同一條式子，所以 threshold 2／5 與抓到的點（SMALL、BIG）都沒變。
   - 「另一種算子」（原本的 mad、quantile_drift）換成 detector.residual_shift／residual_chronic。
-  - 裁決節點換成 detector.soft_vote。布林多數決自己的規則（分母、tie_breaker、intersection／at_least）的測試刪掉；
-    「誰算參與者」的兩個管線測試移過來，裁決的期望值照軟投票的算法（Σ 分數÷門檻 >= 2）重算，寫在各測試裡。
+  - 裁決節點（後來的 detector.soft_vote）也在 2026-11-20 移除：沒有表決，每個節點的事件各自成立。
+    「誰算參與者」的管線測試改成「誰真的跑了、事件是誰的」；冷啟動棄權（min_train_points）那個測試跟著機制刪掉。
 """
 from datetime import datetime, timedelta, timezone
 
@@ -140,36 +140,37 @@ def test_routing_params_never_reach_the_algorithm_or_tuning():
         OperatorRegistry.create("detector.hourly_baseline", {"include_entities": "a"})  # 字串不是清單（會被拆成字元）
 
 
-# ── 裁決的參與者 ──
+# ── 哪些節點真的跑了 ──
 
 SNR = {"p_fa": 0.001}
-TAU = gaussian_threshold(0.001)  # 3.29：開 snr 的節點門檻由 p_fa 換算（取代 threshold），軟投票的權重 = 分數 ÷ 這個門檻
+TAU = gaussian_threshold(0.001)  # 3.29：開 snr 的節點門檻由 p_fa 換算（取代 threshold）
 V1 = ("v1", "detector.hourly_baseline", {"snr": SNR})
 V2 = ("v2", "detector.hourly_baseline", {"snr": SNR})
 V3 = ("v3", "detector.residual_shift", {"snr": SNR})
-VOTE = ("vote", "detector.soft_vote", {"votes": 2})
+FRESH = ("fresh", "detector.new_only", {})  # 不是偵測節點（沒有基準線）
 
 
-def _vote_line(ctx):
-    return next(line for line in ctx.audit if line.startswith("soft_vote:vote:"))
+def _by_node(events, minute):
+    return sorted(e.detector_node for e in events if e.ts == START + timedelta(minutes=minute))
 
 
-def test_soft_vote_in_pipeline_skipped_and_empty_nodes_do_not_participate():
-    # v1、v2 的分數就是值本身：SMALL 2.5 各 0.76 個門檻、BIG 8 各 2.43 個門檻
-    assert 2 * SMALL_VALUE / TAU < 2 <= BIG_VALUE / TAU
-    rec = _run(V1, V2, V3, VOTE,
+def test_skipped_and_empty_nodes_do_not_run_and_each_node_stands_alone():
+    """原本後面接 detector.soft_vote，斷言「參與者是誰、裁決事件由誰投的」。表決移除後每個節點的事件各自成立：
+    斷言改成 detector_runs 與事件來自哪些節點。v1、v2 的分數就是值本身：SMALL 2.5 < 門檻 3.29 不報、BIG 8 報。"""
+    assert SMALL_VALUE < TAU < BIG_VALUE
+    rec = _run(V1, V2, V3,
                targets=[{"source_type": "mock", "query": "a", "entity": "a"},
                         {"source_type": "mock", "query": "b", "entity": "b", "detectors": ["v2"]},
                         {"source_type": "mock", "query": "c", "entity": "c"}],
                frame={"empty_for": ["c"]})
     a, b, c = rec.contexts["a"], rec.contexts["b"], rec.contexts["c"]
-    assert a.detector_runs == ["v1", "v2", "v3"] and _vote_line(a).startswith("soft_vote:vote:voters=3:need=2:")
-    assert BIG in _minutes(a.anomalies) and {"v1", "v2"} <= set(_at(a.anomalies, BIG).voted_by)
-    # b 只選 v2：另外兩個沒跑、不是參與者；v2 自己的證據（2.43 個門檻）夠 2 票等值，單獨成立
-    assert b.detector_runs == ["v2"] and _vote_line(b).startswith("soft_vote:vote:voters=1:need=2:")
-    assert _minutes(b.anomalies) == [BIG] and [e.voted_by for e in b.anomalies] == [("v2",)]
-    # c 沒資料：沒有任何節點評估，也就沒有參與者、沒有裁決
-    assert c.detector_runs == [] and c.anomalies == [] and not [l for l in c.audit if l.startswith("soft_vote:")]
+    assert a.detector_runs == ["v1", "v2", "v3"]
+    assert {"v1", "v2"} <= set(_by_node(a.anomalies, BIG)) and _by_node(a.anomalies, SMALL) == []
+    # b 只選 v2：另外兩個沒跑；v2 自己的事件單獨成立
+    assert b.detector_runs == ["v2"]
+    assert _minutes(b.anomalies) == [BIG] and [e.detector_node for e in b.anomalies] == ["v2"]
+    # c 沒資料：沒有任何節點評估，沒有事件
+    assert c.detector_runs == [] and c.anomalies == []
 
 
 # ── overrides ──
@@ -179,11 +180,12 @@ def test_override_precedence_default_tuned_yaml_target():
     op = OperatorRegistry.create("detector.residual_chronic", {"window": 40})
     op.node_name = "q"
     ctx = PipelineContext(pipeline="p", now=NOW, target=Target("mock", "m", "e"))
-    ctx.detector_params = {"q": {"window": 20, "threshold": 4.0, "fpr": 0.01}}
-    assert op.effective_params(ctx) == {"window": 40, "threshold": 4.0, "fpr": 0.01}  # YAML 鎖 window
-    ctx.target.overrides = {"q": {"window": 60, "fpr": 0.005}}
-    assert op.effective_params(ctx) == {"window": 60, "threshold": 4.0, "fpr": 0.005}  # target 最優先
-    assert "params:q:target-override:fpr,window" in ctx.audit
+    # 第三個鍵原本用 fpr（已移除），換成 min_slot_points；優先序的斷言不變
+    ctx.detector_params = {"q": {"window": 20, "threshold": 4.0, "min_slot_points": 40}}
+    assert op.effective_params(ctx) == {"window": 40, "threshold": 4.0, "min_slot_points": 40}  # YAML 鎖 window
+    ctx.target.overrides = {"q": {"window": 60, "min_slot_points": 50}}
+    assert op.effective_params(ctx) == {"window": 60, "threshold": 4.0, "min_slot_points": 50}  # target 最優先
+    assert "params:q:target-override:min_slot_points,window" in ctx.audit
 
 
 def test_override_changes_what_the_node_flags():
@@ -215,11 +217,12 @@ def test_override_for_a_node_the_target_did_not_select_is_rejected():
 
 def test_unknown_detector_name_fails_at_load_and_lists_available_nodes():
     z_low = ("z_low", "detector.hourly_baseline", {"snr": SNR})
-    Pipeline(_wf(z_low, VOTE, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_low"]}]))
+    Pipeline(_wf(z_low, FRESH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_low"]}]))
     with pytest.raises(WorkflowError, match=r"z_lw.*z_low（detector.hourly_baseline）"):
-        Pipeline(_wf(z_low, VOTE, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_lw"]}]))
-    with pytest.raises(WorkflowError, match=r"vote.*z_low（detector.hourly_baseline）"):  # 裁決節點不是偵測節點
-        Pipeline(_wf(z_low, VOTE, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["vote"]}]))
+        Pipeline(_wf(z_low, FRESH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_lw"]}]))
+    # 沒有基準線的節點不是偵測節點（原本用裁決節點 vote 當例子，已移除，換成 detector.new_only）
+    with pytest.raises(WorkflowError, match=r"fresh.*z_low（detector.hourly_baseline）"):
+        Pipeline(_wf(z_low, FRESH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["fresh"]}]))
 
 
 def test_api_targets_get_the_same_checks():
@@ -254,25 +257,6 @@ targets:
     with pytest.raises(ValidationError) as e:
         TargetSpec(source_type="mock", query="a", detectors=[])
     assert [(err["loc"], err["type"]) for err in e.value.errors()] == [(("detectors",), "too_short")]
-
-
-# ── 稽核 Q5：冷啟動棄權、白名單跳過的節點不是參與者，剩下的那一個靠自己的證據裁決 ──
-
-
-def test_cold_start_and_skipped_nodes_leave_one_voter_who_decides_alone():
-    """原本對 detector.ensemble 的三種策略各跑一次，斷言分母變成 1（voters=1:need=1，剩下那票抓到就通過）。
-    軟投票沒有「分母」：need 固定是 2 票等值，剩下的那一票要自己的證據夠強（BIG 是 2.43 個門檻）才成立；
-    SMALL（0.76 個門檻）不成立。被跳過與冷啟動的節點不進參與者這件事沒變。"""
-    n_skip = ("n_skip", "detector.hourly_baseline", {"snr": SNR})                             # target 沒選它
-    n_cold = ("n_cold", "detector.residual_shift", {"snr": SNR, "min_train_points": 10_000})  # 訓練段 100 點 < 10000：冷啟動棄權
-    n_ok = ("n_ok", "detector.hourly_baseline", {"snr": SNR})
-    rec = _run(n_skip, n_cold, n_ok, VOTE,
-               targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["n_cold", "n_ok"]}])
-    a = rec.contexts["a"]
-    assert a.detector_runs == ["n_ok"]
-    assert "n_skip:skipped:not-selected" in a.audit and any(l.startswith("train:n_cold:too-few-points") for l in a.audit)
-    assert _vote_line(a).startswith("soft_vote:vote:voters=1:need=2:")
-    assert _minutes(a.anomalies) == [BIG] and [(e.detector_node, e.voted_by) for e in a.anomalies] == [("vote", ("n_ok",))]
 
 
 # ── 稽核 Q13：路由順序（exclude → include → detectors）與被跳過的節點零開銷 ──
