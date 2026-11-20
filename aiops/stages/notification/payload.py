@@ -14,13 +14,14 @@ from datetime import datetime
 from aiops.engine.context import PipelineContext
 from aiops.engine.params import number
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.types import (DEFAULT_SEVERITY, WARNING, GrafanaLinks, Incident, Notification, SeverityRule, as_utc,
-                                severity_rule_for)
+from aiops.engine.types import DEFAULT_SEVERITY, WARNING, GrafanaLinks, Incident, Notification, as_utc
 from aiops.stages._common import FATAL_TAG, ensure_incidents, tagged_with
 from aiops.stages.notification.links import feedback_url, incident_links, links_config
 from aiops.engine.operator import BaseOperator
 
 UNASSIGNED_DEPT = "unassigned"
+SEVERITY_ATTR = "severity"            # 事件 attrs 裡的嚴重度（Grafana 告警規則的 severity 標籤，P0～P3）
+RULE_URL_ATTR = "grafana_rule_url"    # 事件 attrs 裡回到 Grafana 那條規則的網址
 BY_SCORE = "score"  # detected_severity 的特殊值：演算法判出來的也照分數門檻定級
 
 
@@ -91,6 +92,9 @@ def build_notifications(incident: Incident, preset: str, severity: str, ends_at:
         + (f"；收斂方式：{', '.join(tags)}" if tags else "")
     )
     annotations = {"summary": title, "description": description, **s, **urls}
+    rule_urls = sorted({str(e.attrs[RULE_URL_ATTR]) for e in incident.events if e.attrs.get(RULE_URL_ATTR)})
+    if rule_urls:  # 演算法判出來的卡：連回 Grafana 上那條規則（改 severity 標籤、看查詢都在那裡），多條用空白分開
+        annotations["grafana_rule_url"] = " ".join(rule_urls)
     feedback = feedback_url(incident.uid)
     if feedback:  # 設了 AIOPS_PUBLIC_URL 才有：卡片上一條連到平台回饋頁的連結（學習閉環的入口）
         annotations["feedback_url"] = feedback
@@ -120,8 +124,9 @@ class NotifyPayload(BaseOperator):
     params: severity_thresholds（分數 >= 門檻就是該等級，例如 {P0: 10, P1: 6, P2: 3, P3: 0}）、
             detected_severity（預設 P1）：事件群裡有平台自己的偵測演算法判出來的異常時，嚴重度就是這一級，不看分數
             （演算法的分數是「偏離幾個雜訊單位」，各偵測器單位不同，拿它跟人訂的分數門檻比沒有意義）。
-            全部來自演算法 = 這一級；跟外部告警併在同一群 = 這一級與外部告警依分數定的那一級，取較嚴重的。
-            要調整就在管線 YAML 寫 P0～P3；寫 score = 不特別處理，照分數門檻定。外部告警（沒有偵測器血緣）一律照分數。
+            那條序列自己訂了等級的（事件 attrs.severity：使用者在 Grafana 告警規則上貼的 severity 標籤）以它為準；
+            跟外部告警併在同一群時取較嚴重的。管線預設要調整就在 YAML 寫 P0～P3；寫 score = 沒訂等級的照分數門檻定。
+            外部告警（血緣不是 detector.*）一律照分數。卡片的 grafana_rule_url 註解連回那條規則。
             notify_warnings（預設 true）：只有預警（每一筆都只是接近門檻）的事件群，嚴重度固定是 warning，
             通知照發並帶 level=warning 標籤，讓 Alertmanager 分到比較輕的通道；設 false 就只記錄不通知。
             links（深度連結，選填）：{dashboard: d/apm-overview, var: service, pad_minutes: 15,
@@ -150,28 +155,22 @@ class NotifyPayload(BaseOperator):
         self.links = dict(links or {})
 
     def severity_of(self, inc: Incident) -> str:
+        """演算法判出來的異常：那條序列自己訂的等級（事件 attrs.severity，來自 Grafana 告警規則的 severity 標籤）優先，
+        沒訂的用 detected_severity（score = 照分數）。外部告警那一半照它自己的分數，不被演算法的分數墊高。整張卡取最嚴重的。"""
         if inc.level == WARNING:
             return WARNING
         detected = [e for e in inc.events if by_algorithm(e)]
-        if not detected or self.detected_severity == BY_SCORE:
+        if not detected:
             return severity_for(inc.score, self.thresholds)
-        levels = [self.detected_severity]
-        external = [e.score for e in inc.events if not by_algorithm(e)]
-        if external:  # 外部告警那一半照它自己的分數，不被演算法的分數墊高
-            levels.append(severity_for(max(external), self.thresholds))
-        return max(levels, key=rank)
-
-    def severity_with_rules(self, inc: Incident, rules: list[SeverityRule], pipeline: str) -> str:
-        """有使用者訂的嚴重度規則時（ctx.severity_rules；規則從 Grafana 告警規則的標籤讀進來，平台自己不存）：演算法判出來的每一筆異常各自找最具體的規則，沒有規則的用 detected_severity
-        （設成 score 的管線：沒有規則的那幾筆照分數）；整張卡取最嚴重的，外部告警那一半仍照分數。規則優先於管線 YAML 的預設。"""
-        detected = [e for e in inc.events if by_algorithm(e)]
-        if inc.level == WARNING or not detected or not rules:
-            return self.severity_of(inc)
         levels = []
         for e in detected:
-            rule = severity_rule_for(rules, pipeline, e)
-            fallback = severity_for(e.score, self.thresholds) if self.detected_severity == BY_SCORE else self.detected_severity
-            levels.append(rule.severity if rule else fallback)
+            own = str(e.attrs.get(SEVERITY_ATTR, "")).upper()
+            if own in DEFAULT_SEVERITY:
+                levels.append(own)
+            elif self.detected_severity == BY_SCORE:
+                levels.append(severity_for(e.score, self.thresholds))
+            else:
+                levels.append(self.detected_severity)
         external = [e.score for e in inc.events if not by_algorithm(e)]
         if external:
             levels.append(severity_for(max(external), self.thresholds))
@@ -180,7 +179,7 @@ class NotifyPayload(BaseOperator):
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         ctx.grafana_links = links_config(self.links)  # 每輪重讀環境變數：常駐進程換了設定不用重啟
         for inc in ensure_incidents(ctx):
-            inc.severity = self.severity_with_rules(inc, ctx.severity_rules, ctx.pipeline)
+            inc.severity = self.severity_of(inc)
             if inc.level == WARNING and not self.notify_warnings and not inc.suppressed_by:
                 inc.suppressed_by = "warning_only：只是預警，這條管線設定不通知"
             if not inc.suppressed_by:
@@ -189,7 +188,7 @@ class NotifyPayload(BaseOperator):
         for o in ctx.open_incidents:
             if not o.changed:
                 continue
-            new = self.severity_with_rules(o.incident, ctx.severity_rules, ctx.pipeline)
+            new = self.severity_of(o.incident)
             if rank(new) > rank(o.severity):
                 ctx.log(f"escalate:{o.uid}:{o.severity}->{new}")
                 o.remember()

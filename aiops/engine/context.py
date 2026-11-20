@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from aiops.engine.graph import Edge, Provenance, ServiceGraph
 from aiops.engine.health import RunCheck, StreamCheck
 from aiops.engine.rca_types import ConclusionType, EvidenceItem, Fact, RcaStatus
-from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification, SeverityRule
+from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
 
 
 @dataclass
@@ -303,8 +303,6 @@ class PipelineContext:
     # 這條序列訓練基準線時要排除的時段（這個實體的歷史事故、維護窗；被標成誤報的事故不排除）
     training_exclusions: list[TrainingExclusion] = field(default_factory=list)
     silences: list[Silence] = field(default_factory=list)
-    # 使用者訂的嚴重度規則（哪一類異常是哪一級；engine/types.SeverityRule）。每輪從 Grafana 讀進來（平台不存），alert.notify_payload 用
-    severity_rules: list[SeverityRule] = field(default_factory=list)
     recent_notifications: list[RecentNotification] = field(default_factory=list)
     # 關係圖的載入格式（YAML、資料表、事件群快照都是這個形狀）。算子不直接讀這三個欄位，一律問 ctx.graph
     topology: list[tuple[str, str]] = field(default_factory=list)  # (caller, callee)

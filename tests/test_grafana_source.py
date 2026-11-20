@@ -166,13 +166,6 @@ def test_zero_shards_is_not_an_error_but_leaves_a_warning(caplog):
     assert caplog.text == ""  # 有 shard 只是沒資料：不吵
 
 
-def test_metric_series_are_not_supported_yet():
-    spec, seen = _spec(_ok)
-    with pytest.raises(InvalidQueryError, match="不支援指標時序"):
-        spec.fetch_data("up", T, T, 60)
-    assert seen == []
-
-
 # ── 設定 ──
 
 
@@ -211,14 +204,16 @@ def test_missing_uid_fails_that_signal_with_the_env_var_name_and_sends_nothing(s
 
 @pytest.mark.parametrize("operator, key, env", [("ingestion.incident_traces", "trace_fetch", "AIOPS_GRAFANA_TRACES_UID"),
                                                 ("ingestion.incident_logs", "log_fetch", "AIOPS_GRAFANA_LOGS_UID")])
-def test_rca_fetch_with_a_missing_uid_records_an_error_and_the_report_goes_on(monkeypatch, operator, key, env):
-    """沒設定（網址／認證都沒有）= 安靜略過；設定了一半（缺 UID）= 記進 errors，寫明缺哪個環境變數。兩種都不丟例外。"""
+def test_rca_fetch_without_that_kinds_uid_is_skipped_quietly_like_an_unconfigured_source(monkeypatch, operator, key, env):
+    """沒設 trace（或日誌）的資料源 UID = 這個環境沒有那種資料，跟整個資料源沒設定一樣安靜略過、不記錯誤。
+    2026-11-20 在真實環境改的：純指標的產線管線沒有 trace，原本缺 UID 會記成「trace 來源讀取失敗」，
+    根因演算法因此拒絕用關係圖推測、結論變成無法判定。（直接呼叫 fetch_spans 而沒有 UID 仍然丟錯，見上一個測試。）"""
     set_grafana_env(monkeypatch)
     monkeypatch.delenv(env)
     ctx = PipelineContext(pipeline="rca_report", now=T)
     ctx.incidents = [Incident([AnomalyEvent("cart-api", "lat", T, 5.0)])]
     ctx = OperatorRegistry.create(operator, {}).execute(ctx)
-    assert f"沒有設定 {env}" in ctx.result[key]["skipped"] and len(ctx.errors) == 1 and env in ctx.errors[0].message
+    assert "沒有設定" in ctx.result[key]["skipped"] and ctx.errors == []
     clear_grafana_env(monkeypatch)
     quiet = PipelineContext(pipeline="rca_report", now=T)
     quiet.incidents = ctx.incidents
@@ -289,5 +284,6 @@ def test_platform_code_holds_no_direct_elasticsearch_connection():
            for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if banned.search(line)]
     assert not bad, bad
     grafana = (root / "sources" / "grafana.py").read_text(encoding="utf-8")
-    assert grafana.count('"POST"') == 1 and "/_msearch" in grafana  # 整個檔只有一個 POST，就是 _msearch
+    # 整個檔只有兩個 POST：ES 資料源的 _msearch、規則查詢重放的 /api/ds/query（2026-11-20 加上指標；兩個都是唯讀查詢）
+    assert grafana.count('"POST"') == 2 and "/_msearch" in grafana and "/api/ds/query" in grafana
     assert not (root / "sources" / "elasticsearch.py").exists() and not (root / "sources" / "query" / "elasticsearch.py").exists()

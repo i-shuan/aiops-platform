@@ -303,7 +303,7 @@ def _use_spec(monkeypatch, spec):
     from aiops.stages.ingestion import fetch
 
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
-    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+    monkeypatch.setattr(fetch, "is_configured", lambda *_: True)
 
 
 def test_fetched_records_use_the_incident_entitys_own_spelling(monkeypatch):

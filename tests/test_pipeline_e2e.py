@@ -175,6 +175,7 @@ def grafana_bodies(monkeypatch):
     spec, _ = grafana_spec(handler)
     monkeypatch.setattr(GrafanaSpec, "from_env", classmethod(lambda cls: spec))
     monkeypatch.setattr(GrafanaSpec, "configured", classmethod(lambda cls: True))
+    monkeypatch.setattr(GrafanaSpec, "provides", classmethod(lambda cls, signal: True))  # trace 與日誌的資料源都有設
     return seen
 
 

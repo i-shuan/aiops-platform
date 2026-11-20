@@ -139,6 +139,10 @@ class Workflow(StrictModel):
     description: str = ""
     nodes: list[NodeSpec] = Field(min_length=1)
     targets: list[TargetSpec] = Field(default_factory=list)
+    # 偵測對象從哪裡來：grafana = 每一輪從 Grafana 讀標了 aiops_detect: <這條管線名稱> 的告警規則（一條規則一個對象，
+    # 嚴重度也在規則的標籤上；sources/grafana_rules.py）。對象在使用者的 Grafana 上增減，這個檔不用改。
+    # 寫了它就不能再寫 targets（兩個來源誰算數會說不清）。解析在組裝點 interfaces/runner.resolve_targets。
+    targets_from: Literal["grafana"] | None = None
     # 明確指定拓撲／Lot 流向時優先於從 trace、Lot 履歷自動推導的結果；給空清單代表「不要用」
     topology: list[tuple[str, str]] | None = None
     lot_edges: list[dict[str, Any]] | None = None
@@ -167,6 +171,8 @@ class Workflow(StrictModel):
         if len(names) != len(set(names)):
             raise ValueError(f"節點名稱不可重複：{names}")
         check_declared([e.to_edge() for e in self.graph])
+        if self.targets_from and self.targets:
+            raise ValueError("targets_from 與 targets 只能擇一：偵測對象要嘛寫在這個檔，要嘛從 Grafana 的告警規則讀")
         return self
 
 

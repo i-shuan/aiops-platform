@@ -412,8 +412,8 @@ class IncidentTracesFetch(BaseOperator):
         if not ctx.incidents:
             raise NotFound("沒有可以撈 trace 的事件群")
         incident = ctx.incidents[0]
-        if not is_configured(self.source_type):
-            return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
+        if not is_configured(self.source_type, "traces"):
+            return self._skip(ctx, f"{self.source_type} 沒有設定 trace 來源", as_error=False)
         inc_start = as_utc(incident.start)
         start, end = inc_start - self.before, as_utc(incident.end) + EVENT_BUCKET + self.after
         services = sorted(set(incident.entities)) if self.only_incident_services else None
@@ -507,8 +507,8 @@ class IncidentLogsFetch(BaseOperator):
         if not ctx.incidents:
             raise NotFound("沒有可以撈日誌的事件群")
         incident = ctx.incidents[0]
-        if not is_configured(self.source_type):
-            return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
+        if not is_configured(self.source_type, "logs"):
+            return self._skip(ctx, f"{self.source_type} 沒有設定日誌來源", as_error=False)
         start, end = as_utc(incident.start) - self.before, as_utc(incident.end) + self.after
         base_start = start - self.baseline
         services = sorted(set(incident.entities))
@@ -541,3 +541,10 @@ class IncidentLogsFetch(BaseOperator):
                                    "baseline_window": [base_start.isoformat(), start.isoformat()]}
         ctx.log(f"incident_logs:{len(ctx.rca_logs)}+{len(ctx.rca_logs_baseline)}baseline")
         return ctx
+
+
+def grafana_targets(pipeline: str) -> list[dict[str, Any]]:
+    """Workflow.targets_from: grafana 的偵測對象：Grafana 上標了 aiops_detect: <pipeline> 的告警規則。
+    回傳 TargetSpec 的欄位（由組裝點 interfaces/runner 建成 TargetSpec）。Grafana 沒設定或連不上丟 InfrastructureError：
+    不知道要看哪些序列時，這一輪要失敗給人看，不能當成「沒有對象、沒事」。"""
+    return get_datasource_spec("grafana").detection_targets(pipeline)

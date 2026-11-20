@@ -82,6 +82,9 @@ class GraphBasis(RcaSection):
                 seen.append(e.provenance)
         lines = []
         for (source, target, kind), origins in by_edge.items():
+            # 同一條邊既有說得出來源的、又有「來源未記錄」的（宣告的呼叫邊同時也在事件群快照的拓撲裡，那一份沒有出處）：
+            # 只列說得出來源的，不然每條宣告的邊都多一行「來源未記錄」
+            origins = [p for p in origins if p.origin in ORIGIN_TEXT] or origins
             lines.append(f"{source} {RELATION[kind]} {target}（{kind.value}）")
             lines += [f"  - {describe(p, incident.start)}" for p in origins]
         as_of = graph.as_of()

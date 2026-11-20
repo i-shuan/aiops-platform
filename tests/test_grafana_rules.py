@@ -95,3 +95,130 @@ def test_nulls_and_non_finite_values_are_dropped_and_broken_responses_say_why():
                               "不是時序")]:
         with pytest.raises(ValueError, match=message):
             gr.series_from_response(payload)
+
+
+# ── 連線那一半（sources/grafana.GrafanaSpec）：用假的 Grafana，回的是上面那兩份真實回應 ──
+
+def _grafana(handler):
+    import httpx
+    from aiops.sources.grafana import GrafanaSpec
+    seen = []
+
+    def record(request):
+        seen.append((request.method, request.url.path, request.content))
+        return handler(request)
+
+    return GrafanaSpec("http://grafana.test", token="t", client=httpx.Client(transport=httpx.MockTransport(record))), seen
+
+
+def _real(request):
+    import httpx
+    path = request.url.path
+    if path == "/api/v1/provisioning/alert-rules":
+        return httpx.Response(200, json=_labelled("drill-wip-latency", aiops_detect="line_detect", severity="P2"))
+    if path.startswith("/api/v1/provisioning/alert-rules/"):
+        rule = next((r for r in RULES if r["uid"] == path.rsplit("/", 1)[1]), None)
+        return httpx.Response(200, json=rule) if rule else httpx.Response(404, json={"message": "not found"})
+    if path == "/api/ds/query":
+        return httpx.Response(200, json=RESPONSE)
+    return httpx.Response(500)
+
+
+def test_targets_are_read_from_grafana_with_a_link_back_to_the_rule(monkeypatch):
+    monkeypatch.setenv("AIOPS_GRAFANA_PUBLIC_URL", "https://grafana.example.internal")
+    spec, seen = _grafana(_real)
+    (target,) = spec.detection_targets("line_detect")
+    assert (target["query"], target["entity"], target["attrs"]["severity"]) == ("drill-wip-latency", "rca-wip-worker", "P2")
+    assert target["attrs"]["grafana_rule_url"] == "https://grafana.example.internal/alerting/grafana/drill-wip-latency/view"
+    assert [(m, p) for m, p, _ in seen] == [("GET", "/api/v1/provisioning/alert-rules")]
+    monkeypatch.delenv("AIOPS_GRAFANA_PUBLIC_URL")
+    assert spec.detection_targets("line_detect")[0]["attrs"]["grafana_rule_url"].startswith("http://grafana.test/")
+
+
+def test_a_rule_uid_is_fetched_as_a_series_through_grafana():
+    spec, seen = _grafana(_real)
+    df = spec.fetch_data("drill-wip-latency", T - timedelta(hours=6), T, 60)
+    assert list(df.columns) == ["ts", "value"] and len(df) == 361 and str(df.ts.dt.tz) == "UTC"
+    assert [(m, p) for m, p, _ in seen] == [("GET", "/api/v1/provisioning/alert-rules/drill-wip-latency"), ("POST", "/api/ds/query")]
+    sent = json.loads(seen[1][2])
+    assert sent["queries"][0]["expr"].startswith("avg_over_time(") and sent["queries"][0]["range"] is True
+
+
+def test_a_long_window_is_asked_for_in_pieces_because_grafana_silently_widens_the_step():
+    """實測（Grafana 13.0.7＋Prometheus）：一次要 14 天、每 60 秒一點（20161 點），Grafana 不報錯，回來是每 120 秒一點。
+    所以一次最多要 QUERY_MAX_POINTS 點，分段要、接起來。"""
+    from aiops.sources.grafana import QUERY_MAX_POINTS
+    import httpx
+
+    def chunked(request):
+        if request.url.path != "/api/ds/query":
+            return _real(request)
+        body = json.loads(request.content)
+        lo, hi = int(body["from"]), int(body["to"])
+        assert (hi - lo) // 60000 <= QUERY_MAX_POINTS
+        stamps = list(range(lo, hi + 1, 60000))
+        frame = {"schema": {"fields": [{"name": "Time", "type": "time"}, {"name": "Value", "type": "number", "labels": {}}]},
+                 "data": {"values": [stamps, [1.0] * len(stamps)]}}
+        return httpx.Response(200, json={"results": {"A": {"status": 200, "frames": [frame]}}})
+
+    spec, seen = _grafana(chunked)
+    df = spec.fetch_data("drill-wip-latency", T - timedelta(days=14), T, 60)
+    assert len(df) == 14 * 1440 + 1 and (df.ts.diff().dropna().dt.total_seconds() == 60).all()  # 每分鐘一點、接縫沒有重複
+    assert sum(1 for m, p, _ in seen if p == "/api/ds/query") == 5
+
+
+def test_bad_rules_and_bad_answers_are_query_errors_and_an_empty_answer_is_no_data():
+    import httpx
+    from aiops.engine.errors import InfrastructureError, NoDataError
+    from aiops.sources.base import InvalidQueryError
+
+    def answer(payload, status=200):
+        return lambda request: _real(request) if request.url.path != "/api/ds/query" else httpx.Response(status, json=payload)
+
+    two = copy.deepcopy(RESPONSE)
+    two["results"]["A"]["frames"] *= 2
+    with pytest.raises(InvalidQueryError, match="回了 2 條序列"):
+        _grafana(answer(two))[0].fetch_data("drill-wip-latency", T - timedelta(hours=1), T, 60)
+    with pytest.raises(InvalidQueryError, match="bad_data"):
+        _grafana(answer({"results": {"A": {"error": "bad_data: parse error", "status": 400}}}, 400))[0].fetch_data(
+            "drill-wip-latency", T - timedelta(hours=1), T, 60)
+    with pytest.raises(NoDataError):
+        _grafana(answer({"results": {"A": {"status": 200, "frames": []}}}))[0].fetch_data("drill-wip-latency", T - timedelta(hours=1), T, 60)
+    with pytest.raises(InvalidQueryError, match="找不到告警規則"):
+        _grafana(_real)[0].fetch_data("deleted-rule", T - timedelta(hours=1), T, 60)
+    with pytest.raises(InfrastructureError, match="讀告警規則失敗"):
+        _grafana(lambda request: httpx.Response(200, json={"message": "not a list"}))[0].alert_rules()
+
+
+# ── 接進排程：Workflow.targets_from 與嚴重度 ──
+
+def test_a_pipeline_cannot_have_both_its_own_targets_and_targets_from_grafana():
+    from pydantic import ValidationError
+    from aiops.engine.pipeline import Workflow
+    nodes = [{"name": "fetch", "operator": "ingestion.fetch"}]
+    assert Workflow(name="w", nodes=nodes, targets_from="grafana").targets_from == "grafana"
+    with pytest.raises(ValidationError, match="只能擇一"):
+        Workflow(name="w", nodes=nodes, targets_from="grafana", targets=[{"source_type": "grafana", "query": "u"}])
+    with pytest.raises(ValidationError):
+        Workflow(name="w", nodes=nodes, targets_from="prometheus")
+
+
+def test_the_scheduled_run_asks_grafana_for_its_targets_and_a_caller_can_still_pass_its_own(monkeypatch):
+    from aiops.interfaces import runner
+    asked = []
+    monkeypatch.setattr(runner, "grafana_targets", lambda pipeline: asked.append(pipeline) or [
+        {"source_type": "grafana", "query": "u1", "entity": "mq-broker", "attrs": {"severity": "P0"}}])
+    pipeline = runner.build_pipeline("line_detect")
+    (target,) = runner.resolve_targets(pipeline, None)
+    assert asked == ["line_detect"] and (target.source_type, target.query, target.attrs) == ("grafana", "u1", {"severity": "P0"})
+    assert runner.resolve_targets(pipeline, []) == [] and asked == ["line_detect"]          # 呼叫端給了就不問 Grafana
+    assert runner.resolve_targets(runner.build_pipeline("it_otel"), None) is None            # 沒寫 targets_from 的管線不問
+
+
+def test_grafana_being_unreachable_fails_the_round_instead_of_looking_like_nothing_to_watch(monkeypatch):
+    from aiops.engine.errors import InfrastructureError
+    from aiops.interfaces import runner
+    for name in ("AIOPS_GRAFANA_URL", "AIOPS_GRAFANA_TOKEN", "AIOPS_GRAFANA_USER", "AIOPS_GRAFANA_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(InfrastructureError):
+        runner.run_scheduled("line_detect")

@@ -243,7 +243,7 @@ def test_ten_concurrent_rca_requests_for_one_incident_hit_the_data_source_and_th
 
     spec, llm = _CountingSpec(), _CountingLLM()
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
-    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+    monkeypatch.setattr(fetch, "is_configured", lambda *_: True)
     monkeypatch.setattr("aiops.stages.enrichment.summarizer.build_llm", lambda *a, **k: llm)
     original = runner.load_workflow
 

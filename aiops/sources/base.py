@@ -75,6 +75,11 @@ class BaseDataSourceSpec(ABC):
         預設不支援；支援多序列查詢的資料源（Prometheus 系列）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援動態同儕（peer_group），請改用 peers 寫死名單")
 
+    @classmethod
+    def provides(cls, signal: str) -> bool:
+        """這個資料源目前的設定有沒有提供某一種資料（traces／logs）。預設都有；要另外設定才有的覆寫它。"""
+        return True
+
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
                     max_spans: int = 20000, field_map: dict[str, str] | None = None,
                     environment: str | None = None) -> tuple[list[dict[str, Any]], bool]:

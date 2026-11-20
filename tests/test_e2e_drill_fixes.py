@@ -61,7 +61,7 @@ def test_a_single_point_incident_gets_the_spans_of_its_own_minute(monkeypatch):
     以前只撈到 03:04:00，事件期間剩下剛好落在 03:04:00 的那一筆，根因演算法只能回「入口請求不足」。"""
     spec = _Spans()
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
-    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+    monkeypatch.setattr(fetch, "is_configured", lambda *_: True)
     ctx = PipelineContext(pipeline="rca", now=T + timedelta(minutes=10))
     ctx.incidents = [Incident([AnomalyEvent("wip-worker", "WipWorkerProbeSlow", T, 6.0)])]
     OperatorRegistry.create("ingestion.incident_traces", {"before_minutes": 15, "after_minutes": 0}).execute(ctx)

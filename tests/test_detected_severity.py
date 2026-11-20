@@ -63,3 +63,44 @@ def test_a_warning_only_card_stays_a_warning():
 def test_a_misspelled_level_fails_when_the_pipeline_is_loaded(bad):
     with pytest.raises(WorkflowError, match="detected_severity"):
         OperatorRegistry.create("alert.notify_payload", {"detected_severity": bad})
+
+
+# ── 序列自己訂的等級（Grafana 告警規則的 severity 標籤 -> target attrs -> 事件 attrs）──
+
+def _labelled(severity, score=4.0, entity="web", url=None) -> AnomalyEvent:
+    attrs = {"severity": severity} if severity is not None else {}
+    if url:
+        attrs["grafana_rule_url"] = url
+    return AnomalyEvent(entity, "rule-uid", T, score, attrs, 1.0, "detector.residual_shift", "detect_shift")
+
+
+@pytest.mark.parametrize("label, expected", [("P0", "P0"), ("P2", "P2"), ("P3", "P3"), ("p3", "P3"), (None, "P1"),
+                                             ("critical", "P1"), ("", "P1")])
+def test_the_level_set_on_the_series_wins_over_the_pipeline_default(label, expected):
+    assert _severity([_labelled(label)]) == expected
+
+
+def test_a_card_takes_the_most_severe_of_its_series_and_the_score_never_matters():
+    assert _severity([_labelled("P3"), _labelled("P0", entity="db")]) == "P0"
+    assert _severity([_labelled("P3", score=900.0), _labelled("P3", entity="db")]) == "P3"
+    assert _severity([_labelled("P3"), _labelled(None, entity="db")]) == "P1"                     # 沒訂的那條是預設 P1
+    assert _severity([_labelled("P3"), _labelled(None, entity="db")], detected_severity="P3") == "P3"
+    assert _severity([_labelled(None, score=12.0)], detected_severity="score") == "P0"             # score：沒訂的照分數
+    assert _severity([_labelled("P3", score=12.0)], detected_severity="score") == "P3"             # 訂了的還是照訂的
+    assert _severity([_labelled("P3"), _external(12.0)]) == "P0" and _severity([_labelled("P3"), _external(1.0)]) == "P3"
+
+
+def test_the_card_links_back_to_the_grafana_rule_it_came_from():
+    from aiops.engine.context import PipelineContext
+
+    def card(events):
+        ctx = PipelineContext(pipeline="line_detect", now=T)
+        ctx.incidents, ctx.incidents_built = [Incident(list(events), score=4.0)], True
+        return OperatorRegistry.create("alert.notify_payload", {}).execute(ctx).notifications[0]
+
+    one = card([_labelled("P2", url="https://g/alerting/grafana/a/view")])
+    assert one.annotations["grafana_rule_url"] == "https://g/alerting/grafana/a/view" and one.labels["severity"] == "P2"
+    two = card([_labelled("P2", url="https://g/alerting/grafana/b/view"), _labelled("P2", entity="db", url="https://g/alerting/grafana/a/view")])
+    assert two.annotations["grafana_rule_url"] == "https://g/alerting/grafana/a/view https://g/alerting/grafana/b/view"
+    assert "grafana_rule_url" not in card([_external(4.0)]).annotations and "grafana_rule_url" not in one.labels
+

@@ -1,0 +1,57 @@
+name: line_detect
+description: "產線指標（MQ／CIM／AMHS）：偵測對象與嚴重度由使用者在 Grafana 告警規則上貼標籤決定，平台的演算法判讀"
+# 偵測對象不寫在這裡：每一輪從 Grafana 讀標了 aiops_detect: line_detect 的告警規則，一條規則一條序列，
+# 拿規則自己的查詢經 Grafana 要資料（sources/grafana.py、sources/grafana_rules.py）。使用者在 Grafana 上：
+#   aiops_detect: line_detect   交給這條管線
+#   severity: P0～P3            這條序列判出異常時的嚴重度（不貼 = P1）
+#   service: <名稱>             事件的實體（收斂與關係圖用）
+# 驗證狀態：2026-11-20 在演練叢集的 Grafana 13.0.7 上跑過一輪（資料是 scripts/line_sim 的模擬產線指標，
+# 不是真實產線）；門檻都是偵測器的預設值，沒有在真實產線資料上量過誤報。
+rca_workflow: rca_report
+targets_from: grafana
+
+nodes:
+  # 每分鐘一點、看最近 60 分鐘；基準線用 14 天訓練、一天重訓一次
+  - name: fetch
+    operator: ingestion.fetch
+    params: {lookback_minutes: 60, step_seconds: 60, train_lookback_minutes: 20160, retrain_minutes: 1440}
+
+  # 四個核心演算法各自判，任何一個越線就是一筆異常（沒有表決）
+  - name: detect_hourly      # 偏離「這個時段平常的值」
+    operator: detector.hourly_baseline
+    params: {tz: Asia/Taipei}
+  - name: detect_shift       # 突變：扣掉時段基準後的瞬間斷崖
+    operator: detector.residual_shift
+    params: {tz: Asia/Taipei}
+  - name: detect_drift       # 漂移：扣掉時段基準後持續偏高或偏低
+    operator: detector.residual_chronic
+    params: {tz: Asia/Taipei}
+  - name: detect_sparse      # 稀疏計數暴增：平常幾乎都是 0 的計數（逾時、中止）
+    operator: detector.sparse_count
+  - name: new_only
+    operator: detector.new_only
+
+  # ── 以下是批次層 ──
+  - name: group_entity
+    operator: alert.same_entity
+  - name: group_topology
+    operator: alert.topology_chain
+  - name: absorb_open
+    operator: alert.absorb_open
+    params: {resolve_after_minutes: 15}
+  - name: suppress_window
+    operator: alert.suppress_window
+  - name: suppress_dedup
+    operator: alert.suppress_dedup
+    params: {cooldown_minutes: 30}
+  # 嚴重度：序列自己在 Grafana 上訂的 severity 優先，沒訂的是 P1
+  - name: payload
+    operator: alert.notify_payload
+  - name: heartbeat
+    operator: alert.heartbeat
+    params: {resolve_after_minutes: 15}
+  - name: notify
+    operator: notifier.auto
+  - name: watchdog
+    operator: notifier.watchdog
+    params: {ttl_minutes: 30}

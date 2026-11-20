@@ -171,8 +171,10 @@ def test_heartbeat_pushes_are_counted_by_the_receipt_time_of_the_round(now):
 # ── 偵測入口政策：呼叫端給的序列只准平台看門狗管線、平台自己的紀錄 ──
 
 
-def test_the_shipped_policy_is_watchdog_only_and_platform_records_only(production_detection_scopes):
-    assert dict(production_detection_scopes) == {"watchdog": frozenset({PLATFORM_SOURCE})}
+def test_the_shipped_policy_is_watchdog_on_platform_records_and_grafana_pipelines_on_grafana(production_detection_scopes):
+    """2026-11-20 解除「偵測演算法只當看門狗」：pipelines/grafana/ 的管線可以跑演算法，但序列只能經 Grafana 查
+    （偵測對象是使用者在 Grafana 告警規則上貼標籤決定的）。看門狗仍然只准平台自己的紀錄。"""
+    assert dict(production_detection_scopes) == {"watchdog": frozenset({PLATFORM_SOURCE}), "grafana": frozenset({"grafana"})}
 
 
 def test_the_watchdog_pipeline_reads_nothing_but_platform_records():
@@ -194,6 +196,8 @@ def test_runs_with_caller_series_only_work_on_the_watchdog_with_platform_records
         ("sample_metrics_only", "mock"): 403,         # 樣本不是出貨的看門狗資料夾
         ("platform_watchdog", "mock"): 403,           # 看門狗也不准跑外部序列
         ("platform_watchdog", "grafana"): 403,
+        ("line_detect", "mock"): 403,                 # Grafana 規則管線只准經 Grafana 查的序列
+        ("line_detect", "platform"): 403,
         ("nope_pipeline", "platform"): 404,
     }
     for (workflow, source), status in cases.items():
@@ -203,7 +207,7 @@ def test_runs_with_caller_series_only_work_on_the_watchdog_with_platform_records
     ok = client.post("/api/v1/runs", json={"workflow": "platform_watchdog", "now": T.isoformat(),
                                            "targets": [{**_target("platform", "runs/metrics_only/failed"), "detectors": ["failures"]}]})
     assert ok.status_code == 200, ok.text
-    assert "偵測演算法只用來監控 AIOps 平台自己" in client.post("/api/v1/runs", json={
+    assert "這條管線只吃外部推進來的告警" in client.post("/api/v1/runs", json={
         "workflow": "it_otel", "targets": [_target("mock", "cpu")]}).json()["message"]
 
 

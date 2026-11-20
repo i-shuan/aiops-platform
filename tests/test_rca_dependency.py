@@ -194,7 +194,7 @@ class _SparseES:
 def _use(monkeypatch, fake):
     spec = grafana_spec(fake.handler)[0]
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
-    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+    monkeypatch.setattr(fetch, "is_configured", lambda *_: True)
 
 
 def _rca_ctx():

@@ -95,7 +95,7 @@ def fetch_traces(monkeypatch, spec, **params) -> PipelineContext:
     from aiops.stages.ingestion import fetch
 
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
-    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+    monkeypatch.setattr(fetch, "is_configured", lambda *_: True)
     ctx = PipelineContext(pipeline="rca", now=at(60))
     ctx.incidents = [Incident([AnomalyEvent(CONSUMER, "latency", T, 5.0), AnomalyEvent(CONSUMER, "latency", at(5), 5.0)])]
     return OperatorRegistry.create("ingestion.incident_traces", params).execute(ctx)

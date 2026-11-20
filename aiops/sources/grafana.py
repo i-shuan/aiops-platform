@@ -53,15 +53,16 @@ import json
 import logging
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import httpx
 import pandas as pd
 
 from aiops.engine.errors import InfrastructureError
-from aiops.sources import _http
-from aiops.sources.base import BaseDataSourceSpec, InvalidQueryError, canonical_service
+from aiops.sources import _http, grafana_rules
+from aiops.sources.query.window import align_window
+from aiops.sources.base import BaseDataSourceSpec, InvalidQueryError, NoDataError, canonical_service
 from aiops.sources.es_models import ELASTIC_APM, Resolved, current_model, get_path
 from aiops.sources.es_models import _links as _apm_links
 
@@ -69,6 +70,8 @@ logger = logging.getLogger("aiops.sources")
 URL_ENV, TOKEN_ENV = "AIOPS_GRAFANA_URL", "AIOPS_GRAFANA_TOKEN"
 USER_ENV, PASSWORD_ENV = "AIOPS_GRAFANA_USER", "AIOPS_GRAFANA_PASSWORD"  # 沒有 token 時的 HTTP basic
 # 訊號 -> 那個訊號的 Grafana 資料源 UID 放在哪個環境變數
+QUERY_MAX_POINTS = 5000  # 一次 /api/ds/query 最多要幾點（見 fetch_data）
+PUBLIC_URL_ENV = "AIOPS_GRAFANA_PUBLIC_URL"  # 人從瀏覽器點得到的 Grafana 網址（卡片連結用）；沒設就用 AIOPS_GRAFANA_URL
 UID_ENVS = {"traces": "AIOPS_GRAFANA_TRACES_UID", "logs": "AIOPS_GRAFANA_LOGS_UID"}
 ES_DATASOURCE_TYPE = "elasticsearch"  # Grafana 資料源的 type；check() 用它確認 UID 指到的是這個檔會講的後端
 
@@ -102,9 +105,67 @@ class GrafanaSpec(BaseDataSourceSpec):
     def configured(cls) -> bool:
         return bool(_env(URL_ENV) and (_env(TOKEN_ENV) or (_env(USER_ENV) and _env(PASSWORD_ENV))))
 
+    @classmethod
+    def provides(cls, signal: str) -> bool:
+        """trace／日誌要有設那一種的資料源 UID 才算有提供；沒設 = 這個環境沒有那種資料（跟整個資料源沒設定一樣略過）。"""
+        return signal not in UID_ENVS or bool(_env(UID_ENVS[signal]))
+
+    def alert_rules(self) -> list[dict[str, Any]]:
+        """這台 Grafana 上所有的告警規則（GET /api/v1/provisioning/alert-rules）。哪些是偵測對象由標籤決定
+        （sources/grafana_rules.detection_targets）。讀不到就是 InfrastructureError：偵測對象不明，這一輪不能當作沒事。"""
+        resp = _http.request(self.client, self.source_type, "GET", f"{self.base_url}/api/v1/provisioning/alert-rules",
+                             headers=self.headers)
+        try:
+            payload = resp.json() if resp.is_success else None
+        except ValueError as e:
+            raise InfrastructureError(f"grafana 讀告警規則的回應不是 JSON（HTTP {resp.status_code}）：{resp.text[:200]}") from e
+        if not isinstance(payload, list):
+            raise InfrastructureError(f"grafana 讀告警規則失敗（HTTP {resp.status_code}）：{resp.text[:200]}")
+        return payload
+
+    def detection_targets(self, pipeline: str) -> list[dict[str, Any]]:
+        """標了 aiops_detect: <pipeline> 的規則 -> 偵測對象（TargetSpec 的欄位）。卡片上回到 Grafana 的連結用
+        人從瀏覽器點得到的網址：AIOPS_GRAFANA_PUBLIC_URL，沒設就用平台自己連 Grafana 的那個網址。"""
+        return grafana_rules.detection_targets(self.alert_rules(), pipeline, _env(PUBLIC_URL_ENV) or self.base_url)
+
     def fetch_data(self, query: str, start: datetime, end: datetime, step_seconds: int,
                    field_map: dict[str, str] | None = None) -> pd.DataFrame:
-        raise InvalidQueryError("grafana 資料源目前只撈 trace 與日誌，不支援指標時序（指標經 Grafana 查詢還沒做）")
+        """指標時序。query 是 Grafana 告警規則的 uid：拿那條規則自己的查詢，經 POST /api/ds/query 要 [start, end] 的資料。
+        平台不組任何後端的查詢語法；後端是什麼由規則指到的 Grafana 資料源決定。field_map 用不到（欄位由 Grafana 回的
+        frame 決定）。一條規則的查詢只能回一條序列：回了好幾條就是查詢要再收斂（加標籤條件或彙總），不替使用者猜要哪一條。"""
+        uid = query.strip()
+        resp = _http.request(self.client, self.source_type, "GET",
+                             f"{self.base_url}/api/v1/provisioning/alert-rules/{uid}", headers=self.headers)
+        if resp.status_code == 404:
+            raise InvalidQueryError(f"grafana 找不到告警規則 uid={uid}（規則被刪了，或 uid 寫錯）")
+        try:
+            rule = resp.json()
+            grafana_rules.data_query(rule)
+        except ValueError as e:
+            raise InvalidQueryError(f"grafana 告警規則 uid={uid} 不能當偵測對象：{e}") from e
+        s, e = align_window(start, end, step_seconds)
+        # 一次只要 QUERY_MAX_POINTS 點：Prometheus 類的資料源一次查詢最多回 11,000 點，超過時 Grafana 不會報錯，
+        # 而是自己把間隔拉大（實測：14 天、每 60 秒一點的請求，回來變成每 120 秒一點）。訓練窗長就分段要。
+        span = timedelta(seconds=step_seconds * QUERY_MAX_POINTS)
+        points: dict[int, float] = {}
+        lo = s
+        while lo < e:
+            hi = min(lo + span, e)
+            resp = _http.request(self.client, self.source_type, "POST", f"{self.base_url}/api/ds/query",
+                                 headers=self.headers, json=grafana_rules.range_query(rule, lo, hi, step_seconds))
+            try:
+                series = grafana_rules.series_from_response(resp.json())
+            except ValueError as err:  # 查詢寫錯時 Grafana 回 400，錯誤訊息在 results.A.error
+                raise InvalidQueryError(f"grafana 規則 uid={uid} 的查詢失敗（HTTP {resp.status_code}）：{err}") from err
+            if len(series) > 1:
+                raise InvalidQueryError(f"grafana 規則 uid={uid} 的查詢回了 {len(series)} 條序列，偵測對象一條規則只能是一條序列："
+                                        f"請在查詢加標籤條件或彙總成一條（回來的標籤：{[labels for labels, _ in series[:3]]}…）")
+            points.update(series[0][1] if series else [])
+            lo = hi
+        if not points:
+            raise NoDataError(f"grafana 規則 uid={uid} 在這段時間沒有資料")
+        stamps = sorted(points)
+        return pd.DataFrame({"ts": pd.to_datetime(stamps, unit="ms", utc=True), "value": [points[k] for k in stamps]})
 
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
                     max_spans: int = 20000, field_map: dict[str, str] | None = None,
