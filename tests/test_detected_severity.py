@@ -94,7 +94,7 @@ def test_the_card_links_back_to_the_grafana_rule_it_came_from():
     from aiops.engine.context import PipelineContext
 
     def card(events):
-        ctx = PipelineContext(pipeline="line_detect", now=T)
+        ctx = PipelineContext(pipeline="grafana_detect", now=T)
         ctx.incidents, ctx.incidents_built = [Incident(list(events), score=4.0)], True
         return OperatorRegistry.create("alert.notify_payload", {}).execute(ctx).notifications[0]
 

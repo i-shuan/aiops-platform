@@ -55,7 +55,7 @@ def rule_body(uid: str, title: str, expr: str, service: str, severity: str | Non
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pipeline", default="line_detect", help="aiops_detect 標籤的值（偵測管線名稱）")
+    ap.add_argument("--pipeline", default="grafana_detect", help="aiops_detect 標籤的值（偵測管線名稱）")
     args = ap.parse_args()
     base = os.environ["AIOPS_GRAFANA_URL"].rstrip("/")
     client = httpx.Client(base_url=base, auth=(os.environ["AIOPS_GRAFANA_USER"], os.environ["AIOPS_GRAFANA_PASSWORD"]),

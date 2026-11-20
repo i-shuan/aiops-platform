@@ -90,6 +90,8 @@ def test_nulls_and_non_finite_values_are_dropped_and_broken_responses_say_why():
              "data": {"values": [[1000, 2000, 3000, 4000], [1.5, None, float("nan"), 2.5]]}}
     assert gr.series_from_response({"results": {"A": {"frames": [frame]}}}) == [({"a": "b"}, [(1000, 1.5), (4000, 2.5)])]
     assert gr.series_from_response({"results": {"A": {"frames": []}}}) == []
+    # 實測：查詢區間早於 Prometheus 保留期時，Grafana 回的是「沒有欄位的空 frame」，不是空的 frames 清單
+    assert gr.series_from_response({"results": {"A": {"status": 200, "frames": [{"schema": {"fields": []}, "data": {"values": []}}]}}}) == []
     for payload, message in [({"results": {}}, "沒有 results.A"), ({"results": {"A": {"error": "bad expr"}}}, "bad expr"),
                              ({"results": {"A": {"frames": [{"schema": {"fields": [{"type": "string"}]}, "data": {"values": [["x"]]}}]}}},
                               "不是時序")]:
@@ -115,7 +117,7 @@ def _real(request):
     import httpx
     path = request.url.path
     if path == "/api/v1/provisioning/alert-rules":
-        return httpx.Response(200, json=_labelled("drill-wip-latency", aiops_detect="line_detect", severity="P2"))
+        return httpx.Response(200, json=_labelled("drill-wip-latency", aiops_detect="grafana_detect", severity="P2"))
     if path.startswith("/api/v1/provisioning/alert-rules/"):
         rule = next((r for r in RULES if r["uid"] == path.rsplit("/", 1)[1]), None)
         return httpx.Response(200, json=rule) if rule else httpx.Response(404, json={"message": "not found"})
@@ -127,12 +129,12 @@ def _real(request):
 def test_targets_are_read_from_grafana_with_a_link_back_to_the_rule(monkeypatch):
     monkeypatch.setenv("AIOPS_GRAFANA_PUBLIC_URL", "https://grafana.example.internal")
     spec, seen = _grafana(_real)
-    (target,) = spec.detection_targets("line_detect")
+    (target,) = spec.detection_targets("grafana_detect")
     assert (target["query"], target["entity"], target["attrs"]["severity"]) == ("drill-wip-latency", "rca-wip-worker", "P2")
     assert target["attrs"]["grafana_rule_url"] == "https://grafana.example.internal/alerting/grafana/drill-wip-latency/view"
     assert [(m, p) for m, p, _ in seen] == [("GET", "/api/v1/provisioning/alert-rules")]
     monkeypatch.delenv("AIOPS_GRAFANA_PUBLIC_URL")
-    assert spec.detection_targets("line_detect")[0]["attrs"]["grafana_rule_url"].startswith("http://grafana.test/")
+    assert spec.detection_targets("grafana_detect")[0]["attrs"]["grafana_rule_url"].startswith("http://grafana.test/")
 
 
 def test_a_rule_uid_is_fetched_as_a_series_through_grafana():
@@ -208,10 +210,10 @@ def test_the_scheduled_run_asks_grafana_for_its_targets_and_a_caller_can_still_p
     asked = []
     monkeypatch.setattr(runner, "grafana_targets", lambda pipeline: asked.append(pipeline) or [
         {"source_type": "grafana", "query": "u1", "entity": "mq-broker", "attrs": {"severity": "P0"}}])
-    pipeline = runner.build_pipeline("line_detect")
+    pipeline = runner.build_pipeline("grafana_detect")
     (target,) = runner.resolve_targets(pipeline, None)
-    assert asked == ["line_detect"] and (target.source_type, target.query, target.attrs) == ("grafana", "u1", {"severity": "P0"})
-    assert runner.resolve_targets(pipeline, []) == [] and asked == ["line_detect"]          # 呼叫端給了就不問 Grafana
+    assert asked == ["grafana_detect"] and (target.source_type, target.query, target.attrs) == ("grafana", "u1", {"severity": "P0"})
+    assert runner.resolve_targets(pipeline, []) == [] and asked == ["grafana_detect"]          # 呼叫端給了就不問 Grafana
     assert runner.resolve_targets(runner.build_pipeline("it_otel"), None) is None            # 沒寫 targets_from 的管線不問
 
 
@@ -221,4 +223,15 @@ def test_grafana_being_unreachable_fails_the_round_instead_of_looking_like_nothi
     for name in ("AIOPS_GRAFANA_URL", "AIOPS_GRAFANA_TOKEN", "AIOPS_GRAFANA_USER", "AIOPS_GRAFANA_PASSWORD"):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(InfrastructureError):
-        runner.run_scheduled("line_detect")
+        runner.run_scheduled("grafana_detect")
+
+
+def test_aiops_severity_wins_over_severity_so_one_rule_can_serve_both_grafana_and_the_platform():
+    """演練環境的真實規則：severity 是 critical／high（Grafana 自己發告警時給接收端對照用）。平台要的等級另外貼 aiops_severity。"""
+    (target,) = gr.detection_targets(_labelled("drill-mes-errors", aiops_detect="p", aiops_severity="P2"), "p")
+    assert target["attrs"]["severity"] == "P2"                       # severity: critical 不是四級之一，不影響
+    (target,) = gr.detection_targets(_labelled("drill-mes-errors", aiops_detect="p", aiops_severity="P3", severity="P0"), "p")
+    assert target["attrs"]["severity"] == "P3"                       # 兩個都是四級之一：aiops_severity 優先
+    (target,) = gr.detection_targets(_labelled("drill-mes-errors", aiops_detect="p", aiops_severity="urgent", severity="P0"), "p")
+    assert target["attrs"]["severity"] == "P0"                       # aiops_severity 寫錯：退回 severity
+

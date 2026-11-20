@@ -196,8 +196,8 @@ def test_runs_with_caller_series_only_work_on_the_watchdog_with_platform_records
         ("sample_metrics_only", "mock"): 403,         # 樣本不是出貨的看門狗資料夾
         ("platform_watchdog", "mock"): 403,           # 看門狗也不准跑外部序列
         ("platform_watchdog", "grafana"): 403,
-        ("line_detect", "mock"): 403,                 # Grafana 規則管線只准經 Grafana 查的序列
-        ("line_detect", "platform"): 403,
+        ("grafana_detect", "mock"): 403,                 # Grafana 規則管線只准經 Grafana 查的序列
+        ("grafana_detect", "platform"): 403,
         ("nope_pipeline", "platform"): 404,
     }
     for (workflow, source), status in cases.items():

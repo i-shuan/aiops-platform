@@ -88,6 +88,12 @@ def incident_links(cfg: GrafanaLinks, entities: list[str], start: datetime, end:
     return out
 
 
+def traces_datasource_uid(default: str | None) -> str | None:
+    """Explore 連結要指到哪個 Grafana 資料源：平台自己撈 trace 用的那一個（AIOPS_GRAFANA_TRACES_UID）優先，
+    沒設才用管線 YAML 寫的。實測：只有一台 Grafana、資料源叫 es-traces 時，YAML 寫死的 apm-traces 會連到不存在的資料源。"""
+    return os.environ.get("AIOPS_GRAFANA_TRACES_UID", "").strip() or default
+
+
 def feedback_url(incident_uid: str) -> str | None:
     """告警卡片上的「回饋」連結：平台自己的回饋頁（interfaces/static/feedback.html）。
     基底網址只從環境變數 AIOPS_PUBLIC_URL 讀（人從瀏覽器點得到的平台網址，只有部署知道）；沒設回 None = 不產生連結。

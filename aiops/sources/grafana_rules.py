@@ -4,7 +4,9 @@
 
   在一條 Grafana 告警規則上加標籤
     aiops_detect: <管線名稱>     這條規則的查詢交給這條偵測管線的演算法看（規則自己會不會響、有沒有暫停都不影響）
-    severity: P0｜P1｜P2｜P3      演算法在這條序列上判出異常時的嚴重度；不寫或寫別的值 = 管線的預設（P1）
+    aiops_severity: P0｜P1｜P2｜P3  演算法在這條序列上判出異常時的嚴重度。沒有這個標籤就看 severity 標籤是不是 P0～P3；
+                                 都不是（沒寫、或 severity 寫的是 critical／high 這類給 Grafana 自己告警用的字）= 管線的預設（P1）。
+                                 分兩個標籤的原因：同一條規則可能同時是 Grafana 自己的告警（severity 給接收端對照用），兩邊的等級不必一樣
     service: <名稱>              事件的實體（沒有就用 aiops_entity，再沒有就用規則標題）
 
 平台每一輪從 Grafana 讀規則（GET /api/v1/provisioning/alert-rules），拿規則「自己的查詢」向 Grafana 要一段時序
@@ -25,7 +27,7 @@ from datetime import datetime
 from typing import Any
 
 DETECT_LABEL = "aiops_detect"
-SEVERITY_LABEL = "severity"
+SEVERITY_LABELS = ("aiops_severity", "severity")  # 前面的優先
 ENTITY_LABELS = ("aiops_entity", "service")
 SEVERITIES = ("P0", "P1", "P2", "P3")
 EXPRESSION_DATASOURCE = "__expr__"
@@ -34,8 +36,12 @@ REF_ID = "A"
 
 def rule_severity(rule: dict[str, Any]) -> str | None:
     """規則標籤上的嚴重度；不是 P0～P3（沒寫、或寫成 critical 這類給人看的字）回 None = 用管線的預設。"""
-    value = str((rule.get("labels") or {}).get(SEVERITY_LABEL, "")).strip().upper()
-    return value if value in SEVERITIES else None
+    labels = rule.get("labels") or {}
+    for name in SEVERITY_LABELS:
+        value = str(labels.get(name, "")).strip().upper()
+        if value in SEVERITIES:
+            return value
+    return None
 
 
 def rule_entity(rule: dict[str, Any]) -> str:
@@ -97,6 +103,8 @@ def series_from_response(payload: dict[str, Any]) -> list[tuple[dict[str, str], 
     for frame in result.get("frames") or []:
         fields = (frame.get("schema") or {}).get("fields") or []
         values = (frame.get("data") or {}).get("values") or []
+        if not fields:  # 這段時間完全沒有資料時，Grafana 回一個沒有欄位的空 frame（實測：查詢區間早於 Prometheus 的保留期）
+            continue
         time_at = next((i for i, f in enumerate(fields) if f.get("type") == "time"), None)
         value_at = next((i for i, f in enumerate(fields) if f.get("type") == "number"), None)
         if time_at is None or value_at is None or len(values) <= max(time_at, value_at):

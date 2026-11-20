@@ -1,12 +1,11 @@
-name: line_detect
-description: "產線指標（MQ／CIM／AMHS）：偵測對象與嚴重度由使用者在 Grafana 告警規則上貼標籤決定，平台的演算法判讀"
-# 偵測對象不寫在這裡：每一輪從 Grafana 讀標了 aiops_detect: line_detect 的告警規則，一條規則一條序列，
+name: grafana_detect
+description: "偵測對象與嚴重度由使用者在 Grafana 告警規則上貼標籤決定，平台的演算法判讀（服務指標、產線的 MQ／CIM／AMHS 指標都可以）"
+# 偵測對象不寫在這裡：每一輪從 Grafana 讀標了 aiops_detect: grafana_detect 的告警規則，一條規則一條序列，
 # 拿規則自己的查詢經 Grafana 要資料（sources/grafana.py、sources/grafana_rules.py）。使用者在 Grafana 上：
-#   aiops_detect: line_detect   交給這條管線
-#   severity: P0～P3            這條序列判出異常時的嚴重度（不貼 = P1）
+#   aiops_detect: grafana_detect   交給這條管線
+#   aiops_severity: P0～P3      這條序列判出異常時的嚴重度（沒有就看 severity 標籤是不是 P0～P3；都沒有 = P1）
 #   service: <名稱>             事件的實體（收斂與關係圖用）
-# 驗證狀態：2026-11-20 在演練叢集的 Grafana 13.0.7 上跑過一輪（資料是 scripts/line_sim 的模擬產線指標，
-# 不是真實產線）；門檻都是偵測器的預設值，沒有在真實產線資料上量過誤報。
+# 驗證狀態：2026-11-20 在演練叢集的 Grafana 13.0.7 上跑過（scripts/line_sim 的模擬產線指標，以及演練服務的真實指標）；門檻都是偵測器的預設值，沒有在真實產線資料上量過誤報。
 rca_workflow: rca_report
 targets_from: grafana
 
