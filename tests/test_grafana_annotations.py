@@ -81,7 +81,9 @@ def test_a_new_card_becomes_one_annotation_spanning_the_incident(grafana):
     (row,) = grafana.rows.values()
     assert (row["time"], row["timeEnd"]) == (int(T.timestamp() * 1000), int((T + timedelta(minutes=6)).timestamp() * 1000))
     assert row["tags"] == sorted(["aiops", f"incident:{incident.uid}", "severity:P0", "entity:cim-eap", "entity:mq-broker"])
-    assert row["text"].startswith("[P0] cim-eap, mq-broker 異常") and f'<a href="{RULE}">' in row["text"]
+    assert row["text"].startswith("[P0] cim-eap, mq-broker 異常")
+    # 連結排成一行、文字是規則的 uid（一張卡有好幾條規則時分得出誰是誰）
+    assert row["text"].endswith(f'<br>看規則、調整優先權：<a href="{RULE}">line-mq-consumers</a>')
     assert ctx.errors == []
 
 
@@ -147,3 +149,24 @@ def test_the_pipelines_that_should_annotate_do():
     for name in ("grafana_detect", "rca_report", "rca_report_llm"):
         nodes = {n.name: n.operator for n in build_pipeline(name).workflow.nodes}
         assert nodes.get("annotate") == "notifier.grafana_annotations", name
+
+
+def test_when_a_card_changes_labels_the_annotation_shows_the_new_state_not_the_closing_notice(grafana):
+    """實體變多（或升級）時 alert.heartbeat 先送一則舊標籤的結束通知、再送新的：註記要跟著最後一則。
+    2026-11-20 在演練叢集看到的：註記停在「[P0] cim-eap, mq-broker 異常：已恢復 7 分鐘，累計 24 筆」，
+    實際上那張卡當時有三個實體、86 筆、還在發生。"""
+    incident = _incident()
+    ctx = PipelineContext(pipeline="grafana_detect", now=incident.end + timedelta(minutes=1))
+    ctx.incidents, ctx.incidents_built = [incident], True
+    ctx = OperatorRegistry.create("alert.notify_payload", {}).execute(ctx)
+    (current,) = ctx.notifications
+    stale = type(current)(labels={**current.labels, "entities": "mq-broker"},
+                          annotations={**current.annotations, "summary": "[P0] mq-broker 異常：已恢復 7 分鐘，累計 3 筆",
+                                       "last_seen": current.annotations["first_seen"]},
+                          **{k: getattr(current, k) for k in current.__dataclass_fields__ if k not in ("labels", "annotations")})
+    ctx.notifications = [stale, current]
+    OperatorRegistry.create("notifier.grafana_annotations", {}).execute(ctx)
+    (row,) = grafana.rows.values()
+    assert row["text"].startswith("[P0] cim-eap, mq-broker 異常") and "已恢復" not in row["text"]
+    assert "entity:cim-eap" in row["tags"] and row["timeEnd"] == int(incident.end.timestamp() * 1000)
+

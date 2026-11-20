@@ -1,7 +1,7 @@
 """在演練用的 Grafana 上建立產線模擬要用的資料源、資料夾與告警規則（可重複執行：已經有的就更新）。
 
 這是「使用者在自己的 Grafana 上會做的事」的示範：每個要交給平台演算法看的指標建一條告警規則，貼上
-  aiops_detect: <偵測管線名稱>、severity: P0～P3（不貼 = 管線的預設 P1）、service: <實體>
+  aiops_detect: <偵測管線名稱>、aiops_severity: P0～P3（不貼 = 管線的預設 P1）、service: <實體>
 規則本身設成暫停（isPaused）：它只是用來告訴平台「看這條查詢」，Grafana 自己不會拿它發告警。
 
   AIOPS_GRAFANA_URL=http://127.0.0.1:13001 AIOPS_GRAFANA_USER=admin AIOPS_GRAFANA_PASSWORD=... python grafana_setup.py
@@ -39,7 +39,7 @@ RULES = [
 def rule_body(uid: str, title: str, expr: str, service: str, severity: str | None, pipeline: str) -> dict:
     labels = {"aiops_detect": pipeline, "service": service}
     if severity:
-        labels["severity"] = severity
+        labels["aiops_severity"] = severity  # 平台用的等級；severity 留給 Grafana 自己發告警時用
     return {
         "uid": uid, "title": title, "folderUID": FOLDER["uid"], "ruleGroup": GROUP, "orgID": 1, "condition": "C",
         "for": "5m", "noDataState": "OK", "execErrState": "OK", "isPaused": True, "labels": labels,

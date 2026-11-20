@@ -126,7 +126,14 @@ def _grafana_annotations() -> GrafanaAnnotations | None:
 
 
 def _links(urls: str) -> str:
-    return "".join(f'<br><a href="{html.escape(u, quote=True)}">看這條規則、調整優先權</a>' for u in urls.split())
+    """連回 Grafana 告警規則的連結排成一行，連結文字是規則的 uid（網址 …/alerting/grafana/<uid>/view 裡的那一段）：
+    一張卡常常有好幾條規則，每條都寫同一句話分不出誰是誰。"""
+    links = []
+    for u in urls.split():
+        parts = u.rstrip("/").split("/")
+        name = parts[-2] if len(parts) >= 2 and parts[-1] == "view" else parts[-1]
+        links.append(f'<a href="{html.escape(u, quote=True)}">{html.escape(name)}</a>')
+    return ("<br>看規則、調整優先權：" + "、".join(links)) if links else ""
 
 
 # 註記上的結論等級用短的說法（完整的說明在 RCA 報告的「可能的源頭」段落）
@@ -163,12 +170,12 @@ class GrafanaAnnotationNotifier(BaseOperator):
 
     @staticmethod
     def _alerts(ctx: PipelineContext, client: GrafanaAnnotations) -> int:
-        seen: set[str] = set()
-        for n in ctx.notifications:
-            uid = n.labels.get("incident_uid", "")
-            if not uid or uid in seen or n.labels.get("alertname") != "aiops_incident":
-                continue
-            seen.add(uid)
+        # 同一個事件群這一輪可能有好幾則通知：升級或實體變多時，alert.heartbeat 先送一則「舊標籤結束」再送新的。
+        # 註記要寫的是現在的樣子，所以取每個事件群的最後一則（實測：取第一則會把註記停在升級前，寫成「已恢復」）
+        latest = {n.labels["incident_uid"]: n for n in ctx.notifications
+                  if n.labels.get("incident_uid") and n.labels.get("alertname") == "aiops_incident"}
+        seen = set(latest)
+        for uid, n in latest.items():
             a = n.annotations
             start = datetime.fromisoformat(a["first_seen"])
             end = datetime.fromisoformat(a.get("last_seen") or a["first_seen"])
