@@ -18,6 +18,7 @@ llm:                                     # 整段可以不寫：沒設 url 與 m
   url: ""                                # OpenAI 相容端點，例如 https://llm.corp.example/v1
   api_key: ""
   model: ""
+  temperature:                           # 不寫 = 不送，用模型的預設值（有些模型只接受預設值，寫 0 會被拒絕）
   retry_initial_seconds: 60              # 分析失敗（連不上、逾時、回應格式不對、幻覺檢查沒過）後，第一次等多久再試
   retry_max_seconds: 1800                # 之後每失敗一次等待時間加倍（60、120、240…），最多等到這個秒數；成功就歸零
 

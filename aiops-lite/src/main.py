@@ -53,6 +53,7 @@ class Settings:
     llm_api_url: str = ""
     llm_api_key: str = field(default="", repr=False)
     llm_model: str = ""
+    llm_temperature: float | None = None   # 沒寫 = 不送，用模型的預設值
     llm_retry_initial_seconds: int = 60
     llm_retry_max_seconds: int = 1800
     es_datasource_uid: str = ""
@@ -80,7 +81,7 @@ class Settings:
         grafana = section(raw, "grafana", {"url", "token"})
         webhook = section(raw, "webhook", {"token", "port"})
         database = section(raw, "database", {"url"})
-        llm = section(raw, "llm", {"url", "api_key", "model", "retry_initial_seconds", "retry_max_seconds"})
+        llm = section(raw, "llm", {"url", "api_key", "model", "temperature", "retry_initial_seconds", "retry_max_seconds"})
         es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields"})
         missing = [name for name, value in (("grafana.url", grafana.get("url")), ("grafana.token", grafana.get("token")),
                                             ("webhook.token", webhook.get("token"))) if not value]
@@ -100,6 +101,10 @@ class Settings:
         ids = es.get("id_fields", list(cls.id_fields))
         if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids):
             raise ConfigError("es.id_fields 要是非空的欄位名稱清單")
+        temperature = llm.get("temperature")
+        if temperature is not None and (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+                                        or not 0 <= temperature <= 2):
+            raise ConfigError(f"llm.temperature={temperature!r} 要是 0～2 的數字（不寫 = 用模型的預設值）")
         retry = {}
         for key, default in (("retry_initial_seconds", cls.llm_retry_initial_seconds),
                              ("retry_max_seconds", cls.llm_retry_max_seconds)):
@@ -124,7 +129,7 @@ class Settings:
             es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es."),
             trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(i.strip() for i in ids),
             log_fields=field_map(es, "log_fields", LogFields), trace_fields=field_map(es, "trace_fields", TraceFields),
-            tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])), **retry, **timing)
+            tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])), llm_temperature=None if temperature is None else float(temperature), **retry, **timing)
 
 
 def read_config(path: str) -> dict[str, Any]:
@@ -247,7 +252,7 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             before = (inc.summary, inc.analyzed)
             inc.summary, inc.analyzed, reason = rca.analyze(
                 inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
-                model=settings.llm_model, transport=llm_transport)
+                model=settings.llm_model, transport=llm_transport, temperature=settings.llm_temperature)
             if (inc.summary, inc.analyzed) != before:
                 inc.changed, inc.annotated = True, False
             if not can_analyze:

@@ -201,3 +201,22 @@ def test_inbox_keeps_alerts_in_arrival_order_until_they_are_processed_with_the_i
     again.close()
     db.save_incidents([incident()], NOW, processed=ids[:2])
     assert db.pending() == ([ids[2]], alerts("resolved_mq")) and len(db.open_incidents()) == 1
+
+
+def test_temperature_is_not_sent_unless_configured(fake):
+    """有些模型只接受預設的 temperature，硬送 0 會被 400 拒絕（用真的 OpenAI 模型 gpt-6-luna 實測遇到的）。"""
+    transport, seen = llm(GOOD)
+    rca.analyze(incident(), evidence(fake), transport=transport, **LLM)
+    assert "temperature" not in json.loads(seen[0].content)
+    transport, seen = llm(GOOD)
+    rca.analyze(incident(), evidence(fake), transport=transport, temperature=0.2, **LLM)
+    assert json.loads(seen[0].content)["temperature"] == 0.2
+    transport, seen = llm(GOOD)
+    rca.analyze(incident(), evidence(fake), transport=transport, temperature=0, **LLM)  # 0 是合法值，不能被當成「沒設」
+    assert json.loads(seen[0].content)["temperature"] == 0
+
+
+def test_a_model_rejecting_the_request_falls_back_and_the_reason_names_the_problem(fake):
+    rejecting = httpx.MockTransport(lambda r: httpx.Response(400, json={"error": {"message": "Unsupported value: 'temperature'"}}))
+    line, analyzed, reason = rca.analyze(incident(), evidence(fake), transport=rejecting, temperature=0, **LLM)
+    assert not analyzed and "400" in reason and line.startswith("[未經分析]")

@@ -476,3 +476,20 @@ def test_retry_settings_default_and_can_be_changed(tmp_path):
     assert (s.llm_retry_initial_seconds, s.llm_retry_max_seconds) == (60, 1800)
     s = Settings.load(config(tmp_path, MINIMAL + "llm: {retry_initial_seconds: 30, retry_max_seconds: 600}\n"))
     assert (s.llm_retry_initial_seconds, s.llm_retry_max_seconds) == (30, 600)
+
+
+def test_llm_temperature_setting_is_optional_and_validated(tmp_path):
+    assert Settings.load(config(tmp_path, MINIMAL)).llm_temperature is None
+    assert Settings.load(config(tmp_path, MINIMAL + "llm: {temperature: 0}\n")).llm_temperature == 0.0
+    assert Settings.load(config(tmp_path, MINIMAL + "llm: {temperature: 0.7}\n")).llm_temperature == 0.7
+    for bad in ("-0.1", "3", "hot", "true"):
+        with pytest.raises(ConfigError, match="llm.temperature"):
+            Settings.load(config(tmp_path, MINIMAL + f"llm: {{temperature: {bad}}}\n"))
+
+
+def test_configured_temperature_reaches_the_llm_request(world):
+    from dataclasses import replace
+    w = world
+    w.receive("firing_mq")
+    w.run(64, settings=replace(w.settings, llm_temperature=0.3))
+    assert w.llm_calls[0]["temperature"] == 0.3

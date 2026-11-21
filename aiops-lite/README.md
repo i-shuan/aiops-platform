@@ -41,7 +41,7 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 grafana: {url: https://grafana.corp.example, token: ""}   # 必填
 webhook: {token: "", port: 8080}                          # token 必填
 database: {url: postgresql+psycopg://aiops:密碼@主機:5432/aiops}   # 沒寫 = sqlite:///aiops-lite.db
-llm: {url: "", api_key: "", model: "", retry_initial_seconds: 60, retry_max_seconds: 1800}   # 整段可省略 = 不分析
+llm: {url: "", api_key: "", model: "", retry_initial_seconds: 60, retry_max_seconds: 1800}   # 整段可省略 = 不分析；temperature 不寫 = 用模型預設值
 es:                                                       # 整段可省略 = 沒有日誌證據
   datasource_uid: ""
   log_index: "*"
@@ -178,12 +178,17 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 - 改成單一 config.yaml 之後，用 `env -i`（清空所有環境變數、只留 `AIOPS_CONFIG_FILE`）起服務，對真的 Grafana 13.0.7 + PostgreSQL 16
   + ES 8.19.23 再跑一次端到端：Webhook → debounce → 1 張事故 → 註記 → resolved → 結案都正常。那次 amhs-mcs 的規則沒有響
   （測試腳本在規則的 10 秒評估週期內就把值改回去），所以事故只有 2 個系統；三個系統串起來的情況是先前（SQLite、環境變數版）驗過的。
+- **用真的 LLM（OpenAI，模型 `gpt-6-luna`，金鑰是你授權使用的環境金鑰）跑過端到端**（2026-11-21，本機 Grafana 13.0.7 + PostgreSQL 16 + ES 8.19.23，
+  日誌與告警是腳本灌的假資料）：三個系統先後越線 → 收成 1 張 P1 事故 → 真模型回出
+  「可能源頭為 mq-broker 的 lot.dispatch 消費延遲，影響下游 cim-eap 與 amhs-mcs，錯誤集中於 EQP-CVD-07、LOT24A0031 與 FOUP0912」，
+  通過幻覺檢查，註記標 `[LLM 推論]`；全部恢復後結案。錯的金鑰（401）也實測過：退回 `[未經分析]`、錯誤訊息不含金鑰。
+  這次實測抓到一個問題並已修掉：程式原本固定送 `temperature: 0`，這個模型只接受預設值、回 400；現在預設不送，要送請設 `llm.temperature`。
 - Helm chart 用 `helm lint` 與 `helm template` 檢查過；產生的 Secret 裡的 `config.yaml` 用程式的 `Settings.from_dict` 讀過；
   Deployment 沒有任何 `env`。
 
 沒做過的：
 - **沒有任何真實產線資料與真實的告警風暴**；60 秒夠不夠等到齊，要看現場各系統的告警時間差與 ES 延遲，請依實際情況調 YAML。
-- **LLM 沒有接過真的模型**：只對本機的 OpenAI 相容假端點驗過 HTTP 接線；摘要品質、真模型多常被幻覺檢查擋掉都不知道。
+- **真模型只實測過一個情境、一個模型**：摘要品質、不同情境下多常被幻覺檢查擋掉、其他模型的相容性都不知道；答案是不是對的根因，只有現場人員能判斷。
 - chart 沒有部署到叢集、映像檔沒有實際 build 過（這個環境沒有 Docker 與叢集）。
 - 只測過 Grafana 13.0.7。
 

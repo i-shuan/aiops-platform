@@ -39,6 +39,7 @@ llm:             # 整段留空 = 不分析，註記第 2 行是 [未經分析] 
   url: ""        # OpenAI 相容端點（…/v1）
   apiKey: ""
   model: ""
+  temperature: null         # null = 不送，用模型的預設值（有些模型只接受預設值）
   retryInitialSeconds: 60   # 分析失敗後第一次等多久再試；之後每失敗一次加倍，成功歸零
   retryMaxSeconds: 1800     # 退避的上限
 

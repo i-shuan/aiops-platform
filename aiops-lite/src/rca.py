@@ -126,14 +126,15 @@ def build_prompt(evidence: dict[str, Any]) -> str:
 
 
 def call_llm(api_url: str, api_key: str, model: str, prompt: str, transport: httpx.BaseTransport | None = None,
-             timeout: float = 60.0) -> str:
-    """OpenAI 相容的 chat completions。llm.url 可以是 …/v1 或完整的 …/chat/completions。失敗丟例外。"""
+             timeout: float = 60.0, temperature: float | None = None) -> str:
+    """OpenAI 相容的 chat completions。llm.url 可以是 …/v1 或完整的 …/chat/completions。失敗丟例外。
+    temperature 預設不送（用模型自己的預設值）：有些模型只接受預設值，硬送 0 會被 400 拒絕（實測 gpt-6-luna 就是）。"""
     url = api_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
     with httpx.Client(timeout=timeout, transport=transport) as http:
         r = http.post(url, headers={"Authorization": f"Bearer {api_key}"} if api_key else {}, json={
-            "model": model, "temperature": 0,
+            "model": model, **({} if temperature is None else {"temperature": temperature}),
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]})
     r.raise_for_status()
     return str(r.json()["choices"][0]["message"]["content"])
@@ -159,13 +160,14 @@ def check_answer(text: str, evidence: dict[str, Any]) -> str:
 
 
 def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
-            transport: httpx.BaseTransport | None = None) -> tuple[str, bool, str]:
+            transport: httpx.BaseTransport | None = None, temperature: float | None = None) -> tuple[str, bool, str]:
     """回傳 (註記第 2 行, 是不是通過檢查的 LLM 推論, 沒通過的原因)。任何失敗都退回原始摘要，不丟例外。"""
     fallback = f"[未經分析] {raw_summary(incident)}"
     if not api_url or not model:
         return fallback, False, "沒有設定 llm.url、llm.model"
     try:
-        summary = check_answer(call_llm(api_url, api_key, model, build_prompt(evidence), transport), evidence)
+        summary = check_answer(call_llm(api_url, api_key, model, build_prompt(evidence), transport,
+                                       temperature=temperature), evidence)
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:  # ValueError 含 JSON 解析失敗
         reason = f"{type(e).__name__}: {e}"[:300]
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
