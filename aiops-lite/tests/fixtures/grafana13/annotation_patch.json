@@ -1,0 +1,20 @@
+{
+ "request": {
+  "method": "PATCH",
+  "path": "/api/annotations/1",
+  "json": {
+   "timeEnd": 1795221420000,
+   "tags": [
+    "aiops",
+    "aiops-incident:rec-0001",
+    "P1",
+    "closed"
+   ],
+   "text": "l1\nl2\nl3"
+  }
+ },
+ "status": 200,
+ "response": {
+  "message": "Annotation patched"
+ }
+}

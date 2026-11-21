@@ -1,0 +1,14 @@
+{
+ "grafana": {
+  "database": "ok",
+  "version": "13.0.7",
+  "commit": "392e53a167a4382a14d2d6246284a36bc198ae3d"
+ },
+ "recorded_at": "2026-11-21T00:36:38.000Z",
+ "token_role": "Editor",
+ "datasource_uids": {
+  "prometheus": "dg4x5ecrtv474d",
+  "postgres": "eg4x5ecsstp1cd",
+  "elasticsearch": "bg4x5ecthsohsa"
+ }
+}

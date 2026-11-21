@@ -1,0 +1,159 @@
+{
+  "uid": "aiops-lite-overview",
+  "title": "AIOps 事件總覽",
+  "tags": [
+    "aiops"
+  ],
+  "timezone": "Asia/Taipei",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "AIOps 事故",
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "red",
+        "target": {
+          "type": "tags",
+          "tags": [
+            "aiops"
+          ],
+          "matchAny": false,
+          "limit": 200
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "每張卡片是 aiops-lite 收斂後的一個事故（Grafana 註記，標籤 `aiops`）。第 1 行：受影響系統、嚴重度、收斂筆數；第 2 行：`[LLM 推論]` 是模型依證據的推測、`[未經分析]` 是原始異常清單；第 3 行：起訖時間（台灣時間）與調整 `aiops_severity` 的規則連結。**清單是空的 = 這段時間沒有事故，或 aiops-lite 沒有在跑**（看 CronJob 與資料庫的 `rounds` 表）。"
+      }
+    },
+    {
+      "id": 2,
+      "type": "annolist",
+      "title": "進行中的事故",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "options": {
+        "limit": 50,
+        "tags": [
+          "aiops",
+          "open"
+        ],
+        "onlyFromThisDashboard": false,
+        "onlyInTimeRange": false,
+        "showTags": true,
+        "showTime": true,
+        "showUser": false,
+        "navigateBefore": "10m",
+        "navigateAfter": "10m",
+        "navigateToPanel": false
+      }
+    },
+    {
+      "id": 3,
+      "type": "annolist",
+      "title": "P0 事故（所選時間範圍）",
+      "gridPos": {
+        "h": 14,
+        "w": 8,
+        "x": 0,
+        "y": 15
+      },
+      "options": {
+        "limit": 100,
+        "tags": [
+          "aiops",
+          "P0"
+        ],
+        "onlyFromThisDashboard": false,
+        "onlyInTimeRange": true,
+        "showTags": false,
+        "showTime": true,
+        "showUser": false,
+        "navigateBefore": "10m",
+        "navigateAfter": "10m",
+        "navigateToPanel": false
+      }
+    },
+    {
+      "id": 4,
+      "type": "annolist",
+      "title": "P1 事故（所選時間範圍）",
+      "gridPos": {
+        "h": 14,
+        "w": 8,
+        "x": 8,
+        "y": 15
+      },
+      "options": {
+        "limit": 100,
+        "tags": [
+          "aiops",
+          "P1"
+        ],
+        "onlyFromThisDashboard": false,
+        "onlyInTimeRange": true,
+        "showTags": false,
+        "showTime": true,
+        "showUser": false,
+        "navigateBefore": "10m",
+        "navigateAfter": "10m",
+        "navigateToPanel": false
+      }
+    },
+    {
+      "id": 5,
+      "type": "annolist",
+      "title": "已結案（所選時間範圍）",
+      "gridPos": {
+        "h": 14,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "options": {
+        "limit": 100,
+        "tags": [
+          "aiops",
+          "closed"
+        ],
+        "onlyFromThisDashboard": false,
+        "onlyInTimeRange": true,
+        "showTags": false,
+        "showTime": true,
+        "showUser": false,
+        "navigateBefore": "10m",
+        "navigateAfter": "10m",
+        "navigateToPanel": false
+      }
+    }
+  ]
+}

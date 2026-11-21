@@ -1,0 +1,7 @@
+tests/
+deploy/
+dashboards/
+*.md
+*.db
+.git
+__pycache__/

@@ -1,0 +1,53 @@
+image:
+  repository: aiops-lite
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# 每 5 分鐘一輪。上一輪還沒跑完就跳過這一輪（concurrencyPolicy: Forbid）。
+schedule: "*/5 * * * *"
+activeDeadlineSeconds: 270
+
+grafana:
+  url: ""            # 必填：公司 Grafana 的網址，例如 https://grafana.corp.example
+
+# 機密不進 chart：先自己建好這個 Secret，鍵名如下
+#   GRAFANA_TOKEN      Grafana Editor 服務帳號的 Token（必要）
+#   POSTGRES_PASSWORD  下面這個 PostgreSQL 的密碼（必要；會放進連線字串，請只用英數字）
+#   LLM_API_KEY        LLM 的金鑰（沒有 LLM 可以不放）
+existingSecret: aiops-lite
+
+llm:
+  apiUrl: ""         # OpenAI 相容端點（…/v1）；留空 = 不分析，註記第 2 行是 [未經分析] 原始摘要
+  model: ""
+
+logs:
+  datasourceUid: ""  # Grafana 上 Elasticsearch 資料源的 uid；留空 = RCA 沒有日誌證據
+  logIndex: "*"
+  traceIndex: ""     # 沒有 Trace 就留空
+  idFields: "eqp_id,lot_id,carrier_id"
+
+# 系統層級的上下游關係（[上游, 下游]），3～5 條就夠；不要把機台寫進來
+edges:
+  - [mq-broker, cim-eap]
+  - [cim-eap, amhs-mcs]
+
+settings:
+  tz: Asia/Taipei
+  stepSeconds: 60
+  lookbackMinutes: 60
+  trainDays: 14
+  retrainHours: 24
+  closeAfterRounds: 3
+  logLevel: INFO
+
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {memory: 1Gi}
+
+postgres:
+  image: postgres:16
+  storage: 5Gi
+  storageClassName: ""   # 留空 = 叢集預設的 StorageClass
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}

@@ -1,0 +1,33 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/api/annotations",
+  "params": {
+   "tags": "aiops-incident:rec-0001",
+   "limit": 10
+  }
+ },
+ "status": 200,
+ "response": [
+  {
+   "id": 1,
+   "dashboardUID": "",
+   "userUID": "fg4x5ecu6rny8a",
+   "created": 1795221399084,
+   "updated": 1795221399100,
+   "time": 1795217760000,
+   "timeEnd": 1795221420000,
+   "text": "l1\nl2\nl3",
+   "tags": [
+    "aiops",
+    "aiops-incident:rec-0001",
+    "P1",
+    "closed"
+   ],
+   "login": "sa-1-aiops-lite-1795221398",
+   "email": "sa-1-aiops-lite-1795221398",
+   "avatarUrl": "/avatar/bdc7b9ad91ebba0d42f3cf326cf7194e",
+   "data": {}
+  }
+ ]
+}

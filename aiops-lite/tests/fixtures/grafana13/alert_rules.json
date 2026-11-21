@@ -1,0 +1,354 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/api/v1/provisioning/alert-rules"
+ },
+ "status": 200,
+ "response": [
+  {
+   "id": 1,
+   "uid": "bg4x5ecxq4hkwa",
+   "orgID": 1,
+   "folderUID": "factory",
+   "ruleGroup": "factory",
+   "title": "MQ queue depth",
+   "condition": "C",
+   "data": [
+    {
+     "refId": "A",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 600,
+      "to": 0
+     },
+     "datasourceUid": "dg4x5ecrtv474d",
+     "model": {
+      "expr": "max(mq_queue_depth{service=\"mq-broker\"})",
+      "instant": false,
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "range": true,
+      "refId": "A"
+     }
+    },
+    {
+     "refId": "B",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "expression": "A",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "reducer": "last",
+      "refId": "B",
+      "type": "reduce"
+     }
+    },
+    {
+     "refId": "C",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "conditions": [
+       {
+        "evaluator": {
+         "params": [
+          200
+         ],
+         "type": "gt"
+        }
+       }
+      ],
+      "expression": "B",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "refId": "C",
+      "type": "threshold"
+     }
+    }
+   ],
+   "updated": "2026-11-21T00:36:38Z",
+   "noDataState": "OK",
+   "execErrState": "OK",
+   "for": "1m",
+   "keep_firing_for": "0s",
+   "annotations": {
+    "summary": "MQ queue depth"
+   },
+   "labels": {
+    "aiops_detect": "true",
+    "aiops_severity": "P1",
+    "service": "mq-broker"
+   },
+   "isPaused": false,
+   "notification_settings": null,
+   "record": null
+  },
+  {
+   "id": 2,
+   "uid": "fg4x5ecyk39q8c",
+   "orgID": 1,
+   "folderUID": "factory",
+   "ruleGroup": "factory",
+   "title": "CIM T3 timeout",
+   "condition": "C",
+   "data": [
+    {
+     "refId": "A",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 600,
+      "to": 0
+     },
+     "datasourceUid": "dg4x5ecrtv474d",
+     "model": {
+      "expr": "sum(increase(cim_t3_timeout_total{service=\"cim-eap\"}[1m]))",
+      "instant": false,
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "range": true,
+      "refId": "A"
+     }
+    },
+    {
+     "refId": "B",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "expression": "A",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "reducer": "last",
+      "refId": "B",
+      "type": "reduce"
+     }
+    },
+    {
+     "refId": "C",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "conditions": [
+       {
+        "evaluator": {
+         "params": [
+          5
+         ],
+         "type": "gt"
+        }
+       }
+      ],
+      "expression": "B",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "refId": "C",
+      "type": "threshold"
+     }
+    }
+   ],
+   "updated": "2026-11-21T00:36:38Z",
+   "noDataState": "OK",
+   "execErrState": "OK",
+   "for": "1m",
+   "keep_firing_for": "0s",
+   "annotations": {
+    "summary": "CIM T3 timeout"
+   },
+   "labels": {
+    "aiops_detect": "true",
+    "aiops_severity": "P2",
+    "service": "cim-eap"
+   },
+   "isPaused": false,
+   "notification_settings": null,
+   "record": null
+  },
+  {
+   "id": 3,
+   "uid": "bg4x5ecz9296of",
+   "orgID": 1,
+   "folderUID": "factory",
+   "ruleGroup": "factory",
+   "title": "AMHS transfer duration",
+   "condition": "C",
+   "data": [
+    {
+     "refId": "A",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 600,
+      "to": 0
+     },
+     "datasourceUid": "eg4x5ecsstp1cd",
+     "model": {
+      "format": "time_series",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "rawQuery": true,
+      "rawSql": "SELECT $__timeGroupAlias(ts,'1m'), avg(transfer_duration) AS value FROM transfer_stats WHERE $__timeFilter(ts) GROUP BY 1 ORDER BY 1",
+      "refId": "A"
+     }
+    },
+    {
+     "refId": "B",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "expression": "A",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "reducer": "last",
+      "refId": "B",
+      "type": "reduce"
+     }
+    },
+    {
+     "refId": "C",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "conditions": [
+       {
+        "evaluator": {
+         "params": [
+          90
+         ],
+         "type": "gt"
+        }
+       }
+      ],
+      "expression": "B",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "refId": "C",
+      "type": "threshold"
+     }
+    }
+   ],
+   "updated": "2026-11-21T00:36:38Z",
+   "noDataState": "OK",
+   "execErrState": "OK",
+   "for": "1m",
+   "keep_firing_for": "0s",
+   "annotations": {
+    "summary": "AMHS transfer duration"
+   },
+   "labels": {
+    "aiops_detect": "true",
+    "aiops_severity": "P2",
+    "service": "amhs-mcs"
+   },
+   "isPaused": false,
+   "notification_settings": null,
+   "record": null
+  },
+  {
+   "id": 4,
+   "uid": "ag4x5ed00j4zkf",
+   "orgID": 1,
+   "folderUID": "factory",
+   "ruleGroup": "factory",
+   "title": "Not managed by aiops",
+   "condition": "C",
+   "data": [
+    {
+     "refId": "A",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 600,
+      "to": 0
+     },
+     "datasourceUid": "dg4x5ecrtv474d",
+     "model": {
+      "expr": "up",
+      "instant": true,
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "refId": "A"
+     }
+    },
+    {
+     "refId": "B",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "expression": "A",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "reducer": "last",
+      "refId": "B",
+      "type": "reduce"
+     }
+    },
+    {
+     "refId": "C",
+     "queryType": "",
+     "relativeTimeRange": {
+      "from": 0,
+      "to": 0
+     },
+     "datasourceUid": "__expr__",
+     "model": {
+      "conditions": [
+       {
+        "evaluator": {
+         "params": [
+          0
+         ],
+         "type": "gt"
+        }
+       }
+      ],
+      "expression": "B",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200,
+      "refId": "C",
+      "type": "threshold"
+     }
+    }
+   ],
+   "updated": "2026-11-21T00:36:38Z",
+   "noDataState": "OK",
+   "execErrState": "OK",
+   "for": "1m",
+   "keep_firing_for": "0s",
+   "annotations": {
+    "summary": "Not managed by aiops"
+   },
+   "labels": {
+    "team": "infra"
+   },
+   "isPaused": false,
+   "notification_settings": null,
+   "record": null
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-edges
+  labels: {app.kubernetes.io/name: aiops-lite, app.kubernetes.io/instance: {{ .Release.Name }}}
+data:
+  edges.yaml: |
+    edges:
+    {{- range .Values.edges }}
+      - [{{ index . 0 | quote }}, {{ index . 1 | quote }}]
+    {{- end }}

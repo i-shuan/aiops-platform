@@ -1,0 +1,230 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/api/datasources/proxy/uid/bg4x5ecthsohsa/_msearch",
+  "content": "{\"index\": \"factory-logs\", \"ignore_unavailable\": true}\n{\"size\": 50, \"sort\": [{\"@timestamp\": \"desc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795217760000, \"lte\": 1795221420000, \"format\": \"epoch_millis\"}}}, {\"terms\": {\"log.level\": [\"ERROR\", \"error\"]}}]}}}\n{\"index\": \"factory-traces\", \"ignore_unavailable\": true}\n{\"size\": 50, \"sort\": [{\"@timestamp\": \"desc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795217760000, \"lte\": 1795221420000, \"format\": \"epoch_millis\"}}}, {\"term\": {\"status.code\": \"error\"}}]}}}\n"
+ },
+ "status": 200,
+ "response": {
+  "took": 71,
+  "responses": [
+   {
+    "took": 69,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 6,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": [
+      {
+       "_index": "factory-logs",
+       "_id": "BxCI-6EBZyuDIEjdpL98",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:30:18.000Z",
+        "service": {
+         "name": "mq-broker"
+        },
+        "log": {
+         "level": "ERROR"
+        },
+        "message": "consumer lag exceeded on queue lot.dispatch"
+       },
+       "sort": [
+        1795221018000
+       ]
+      },
+      {
+       "_index": "factory-logs",
+       "_id": "BhCI-6EBZyuDIEjdpL98",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:29:58.000Z",
+        "service": {
+         "name": "cim-eap"
+        },
+        "log": {
+         "level": "ERROR"
+        },
+        "message": "T3 timeout waiting S6F12 reply",
+        "eqp_id": "EQP-ETCH-02",
+        "lot_id": "LOT24A0058",
+        "carrier_id": "FOUP0120"
+       },
+       "sort": [
+        1795220998000
+       ]
+      },
+      {
+       "_index": "factory-logs",
+       "_id": "BRCI-6EBZyuDIEjdpL98",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:29:38.000Z",
+        "service": {
+         "name": "amhs-mcs"
+        },
+        "log": {
+         "level": "ERROR"
+        },
+        "message": "transfer job aborted: destination port occupied",
+        "eqp_id": "STK01",
+        "lot_id": "LOT24A0031",
+        "carrier_id": "FOUP0912"
+       },
+       "sort": [
+        1795220978000
+       ]
+      },
+      {
+       "_index": "factory-logs",
+       "_id": "BBCI-6EBZyuDIEjdpL98",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:28:18.000Z",
+        "service": {
+         "name": "cim-eap"
+        },
+        "log": {
+         "level": "ERROR"
+        },
+        "message": "equipment disconnected (HSMS NOT SELECTED)",
+        "eqp_id": "EQP-CVD-07",
+        "lot_id": "LOT24A0044",
+        "carrier_id": "FOUP0377"
+       },
+       "sort": [
+        1795220898000
+       ]
+      },
+      {
+       "_index": "factory-logs",
+       "_id": "AxCI-6EBZyuDIEjdpL98",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:27:38.000Z",
+        "service": {
+         "name": "cim-eap"
+        },
+        "log": {
+         "level": "ERROR"
+        },
+        "message": "T3 timeout waiting S2F42 reply",
+        "eqp_id": "EQP-CVD-07",
+        "lot_id": "LOT24A0031",
+        "carrier_id": "FOUP0912"
+       },
+       "sort": [
+        1795220858000
+       ]
+      },
+      {
+       "_index": "factory-logs",
+       "_id": "AhCI-6EBZyuDIEjdpL97",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:26:38.000Z",
+        "service": {
+         "name": "cim-eap"
+        },
+        "log": {
+         "level": "ERROR"
+        },
+        "message": "T3 timeout waiting S6F12 reply",
+        "eqp_id": "EQP-CVD-07",
+        "lot_id": "LOT24A0031",
+        "carrier_id": "FOUP0912"
+       },
+       "sort": [
+        1795220798000
+       ]
+      }
+     ]
+    },
+    "status": 200
+   },
+   {
+    "took": 63,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 2,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": [
+      {
+       "_index": "factory-traces",
+       "_id": "CxCI-6EBZyuDIEjdpL98",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:29:48.000Z",
+        "service": {
+         "name": "amhs-mcs"
+        },
+        "span": {
+         "name": "transfer FOUP0912"
+        },
+        "trace": {
+         "id": "t-0002"
+        },
+        "status": {
+         "code": "error"
+        },
+        "duration": 9000000,
+        "error": {
+         "message": "destination port occupied"
+        }
+       },
+       "sort": [
+        1795220988000
+       ]
+      },
+      {
+       "_index": "factory-traces",
+       "_id": "CRCI-6EBZyuDIEjdpL98",
+       "_score": null,
+       "_source": {
+        "@timestamp": "2026-11-21T00:26:48.000Z",
+        "service": {
+         "name": "cim-eap"
+        },
+        "span": {
+         "name": "SECS S6F11 report"
+        },
+        "trace": {
+         "id": "t-0001"
+        },
+        "status": {
+         "code": "error"
+        },
+        "duration": 45000000,
+        "error": {
+         "message": "T3 timeout"
+        }
+       },
+       "sort": [
+        1795220808000
+       ]
+      }
+     ]
+    },
+    "status": 200
+   }
+  ]
+ }
+}
