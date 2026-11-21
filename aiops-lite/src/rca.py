@@ -166,8 +166,11 @@ def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_k
     if not api_url or not model:
         return fallback, False, "沒有設定 llm.url、llm.model"
     try:
-        summary = check_answer(call_llm(api_url, api_key, model, build_prompt(evidence), transport,
-                                       temperature=temperature), evidence)
+        prompt = build_prompt(evidence)
+        log.debug("事故 %s 送給 LLM 的內容：\n%s", incident.uid, prompt)
+        answer = call_llm(api_url, api_key, model, prompt, transport, temperature=temperature)
+        log.debug("事故 %s LLM 的原始回應：%s", incident.uid, answer)
+        summary = check_answer(answer, evidence)
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:  # ValueError 含 JSON 解析失敗
         reason = f"{type(e).__name__}: {e}"[:300]
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
