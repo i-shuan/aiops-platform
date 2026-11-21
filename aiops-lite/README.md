@@ -46,6 +46,30 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（PromQL / SQL / ES 資料源 + 貼標�
 
 平台不接收 webhook：對方的規則有沒有 firing 不影響平台，平台自己重放查詢、自己判。
 
+## Grafana 要做的設定
+
+**都在公司 Grafana 的網頁介面（或它的 API）上做；不改 Grafana 映像檔、不裝外掛、不動 Contact Point 與通知路由、不改規則的閾值。**
+repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不使用、也沒改它。
+
+| # | 項目 | 在哪做 | 怎麼做 |
+| --- | --- | --- | --- |
+| 1 | 服務帳號與 Token | Administration → Users and access → Service accounts | 新增角色 **Editor** 的帳號 → Add token → 複製後放進 K8s Secret 的 `GRAFANA_TOKEN` |
+| 2 | 告警規則標籤 | Alerting → Alert rules → 編輯規則 → Labels | 每條要納管的規則加 `aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名>`（要跟關係邊的名稱一致） |
+| 3 | 規則的查詢（不符格式才改） | 同一頁的 Query 區 | SQL 加 `$__timeFilter(時間欄)`、只留一個時間欄加一個數值欄；PromQL 聚合成一條；計數用 `round(increase(...))` |
+| 4 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（只用內建註記清單面板，不需要資料源） |
+| 5 | ES 資料源 uid（要日誌證據才需要） | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 Helm values 的 `logs.datasourceUid` |
+
+不需要新增資料源：規則本來就在用的 Prometheus、SQL、ES 資料源直接沿用。
+
+### 注意
+
+1. **標籤沒有 YAML 檔可改。** 公司的告警規則若是用 provisioning（YAML、Terraform）管的，在 UI 上改會被下次部署蓋掉，
+   標籤要加進原本管規則的那份檔案。這是各系統團隊的事。
+2. **RBAC 只在預設權限下驗過。** Editor 能讀規則、重放 `/api/ds/query`、走 ES 代理、寫註記，是在 Grafana 13.0.7 預設權限下確認的；
+   公司 Grafana 若改窄過 Editor，要再確認這四件事。
+3. **Token 只放 Secret，不進 chart 或 values。**
+4. 註記寫入需要 Token 有建立與更新註記的權限；儀表板用標籤 `aiops` 查詢註記，不綁特定儀表板。
+
 ## 流程細節
 
 - **基準線**：每條規則第一次看到時抓 14 天訓練窗（每段 5,000 點），之後 24 小時重訓一次；查詢改了就重訓。
