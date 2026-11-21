@@ -43,6 +43,8 @@ incidents = sa.Table(
     sa.Column("analyzed", sa.Boolean, nullable=False, default=False),
     sa.Column("annotation_id", sa.BigInteger),
     sa.Column("annotated", sa.Boolean, nullable=False, default=False),
+    sa.Column("llm_failures", sa.Integer, nullable=False, default=0, server_default="0"),
+    sa.Column("llm_next_try", TS),
     sa.Column("updated_at", TS, nullable=False),
 )
 
@@ -80,6 +82,22 @@ class Database:
     def __init__(self, url: str):
         self.engine = sa.create_engine(url, future=True, pool_pre_ping=True)
         metadata.create_all(self.engine)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """舊版建好的表沒有後來新增的欄位（create_all 不會補）：啟動時補上，可以重複執行。
+        只處理「加欄位」；改欄位型別、刪欄位要手動處理。"""
+        inspector = sa.inspect(self.engine)
+        for table in metadata.sorted_tables:
+            have = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in have:
+                    continue
+                ddl = column.type.compile(self.engine.dialect)
+                default = f" DEFAULT {column.server_default.arg}" if column.server_default is not None else ""
+                with self.engine.begin() as conn:
+                    conn.execute(sa.text(f'ALTER TABLE {table.name} ADD COLUMN {column.name} {ddl}'
+                                         f'{default}{"" if column.nullable else " NOT NULL"}'))
 
     def close(self) -> None:
         self.engine.dispose()
@@ -118,7 +136,7 @@ class Database:
             signals=signals, started_at=_utc(row["started_at"]), last_seen_at=_utc(row["last_seen_at"]),
             ended_at=_utc(row["ended_at"]), resolved_at=_utc(row["resolved_at"]), alert_count=row["alert_count"],
             summary=row["summary"], analyzed=bool(row["analyzed"]), annotation_id=row["annotation_id"],
-            annotated=bool(row["annotated"]))
+            annotated=bool(row["annotated"]), llm_failures=row["llm_failures"], llm_next_try=_utc(row["llm_next_try"]))
 
     def _select(self, where: Any) -> list[Incident]:
         with self.engine.connect() as conn:
@@ -148,7 +166,7 @@ class Database:
                     "started_at": inc.started_at, "last_seen_at": inc.last_seen_at, "ended_at": inc.ended_at,
                     "resolved_at": inc.resolved_at, "alert_count": inc.alert_count, "summary": inc.summary,
                     "analyzed": inc.analyzed, "annotation_id": inc.annotation_id, "annotated": inc.annotated,
-                    "updated_at": now}
+                    "llm_failures": inc.llm_failures, "llm_next_try": inc.llm_next_try, "updated_at": now}
                 done = conn.execute(sa.update(incidents).where(incidents.c.uid == inc.uid).values(**values))
                 if done.rowcount == 0:
                     conn.execute(sa.insert(incidents).values(uid=inc.uid, **values))

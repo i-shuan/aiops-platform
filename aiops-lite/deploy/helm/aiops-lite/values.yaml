@@ -39,6 +39,8 @@ llm:             # 整段留空 = 不分析，註記第 2 行是 [未經分析] 
   url: ""        # OpenAI 相容端點（…/v1）
   apiKey: ""
   model: ""
+  retryInitialSeconds: 60   # 分析失敗後第一次等多久再試；之後每失敗一次加倍，成功歸零
+  retryMaxSeconds: 1800     # 退避的上限
 
 es:              # datasourceUid 留空 = RCA 沒有日誌證據
   datasourceUid: ""

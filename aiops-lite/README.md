@@ -41,7 +41,7 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 grafana: {url: https://grafana.corp.example, token: ""}   # 必填
 webhook: {token: "", port: 8080}                          # token 必填
 database: {url: postgresql+psycopg://aiops:密碼@主機:5432/aiops}   # 沒寫 = sqlite:///aiops-lite.db
-llm: {url: "", api_key: "", model: ""}                    # 整段可省略 = 不分析
+llm: {url: "", api_key: "", model: "", retry_initial_seconds: 60, retry_max_seconds: 1800}   # 整段可省略 = 不分析
 es:                                                       # 整段可省略 = 沒有日誌證據
   datasource_uid: ""
   log_index: "*"
@@ -117,6 +117,10 @@ repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不
 - **RCA**：事故的成員或嚴重度有變時才問 LLM（重複通知不重問）；LLM 失敗的進行中事故下一輪再試。
   LLM 回 JSON（summary／systems／ids），程式檢查點名的系統在事故或關係邊裡、機台批號在識別碼統計裡、
   摘要文字裡夾數字的識別碼在證據裡找得到；不通過就用 `[未經分析] 原始摘要`。
+- **LLM 失敗會指數退避**：分析失敗（連不上、逾時、回應格式不對、幻覺檢查沒過）後，等 `llm.retry_initial_seconds`（預設 60）才再試，
+  之後每失敗一次加倍（60、120、240…），最多 `llm.retry_max_seconds`（預設 1800）；成功就歸零。退避期間**不查 ES、不打 LLM、不重寫註記**
+  （續跑的輪次照常跑，只是跳過這一步）；期間有新告警併進來，註記的 `[未經分析]` 原始摘要會跟著更新，到時間再帶完整成員重試。
+  退避狀態存在資料庫，服務重啟不會重置。沒設 LLM（`llm.url` 留空）不算失敗、不退避。**不需要為了止損去清空 `llm.url`**。
 - **寫回**：先寫自己的資料庫，再寫註記；一個事故一筆註記（標籤 `aiops`、`aiops-incident:<uid>`、嚴重度、`open`／`closed`、
   各系統名稱），之後原地更新。註記寫失敗下一輪補，不會重複建。
 

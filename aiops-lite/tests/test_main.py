@@ -323,3 +323,156 @@ def test_configured_field_names_are_used_for_the_es_query_and_for_reading_the_do
     assert '"status.code"' in text  # 沒改的欄位照預設
     prompt = w.llm_calls[0]["messages"][1]["content"]
     assert "T3 timeout" in prompt and "EQP-CVD-07" in prompt and "SECS S6F11" in prompt
+
+
+# ── LLM 失敗的指數退避 ──
+
+def llm_down():
+    attempts = []
+
+    def handler(request):
+        attempts.append(request)
+        raise httpx.ConnectError("llm down")
+
+    return httpx.MockTransport(handler), attempts
+
+
+def es_calls(w):
+    return sum(1 for _m, path in w.fake.calls if path.endswith("/_msearch"))
+
+
+def annotation_calls(w):
+    return sum(1 for _m, path in w.fake.calls if path.startswith("/api/annotations"))
+
+
+def test_backoff_doubles_each_failure_and_stops_at_the_cap():
+    from src.main import backoff_seconds
+    assert [backoff_seconds(n, 60, 1800) for n in range(1, 8)] == [60, 120, 240, 480, 960, 1800, 1800]
+    assert backoff_seconds(10_000, 60, 1800) == 1800          # 失敗次數再大也不會溢位
+    assert backoff_seconds(1, 5, 5) == 5
+
+
+def test_llm_outage_backs_off_instead_of_retrying_every_round(world):
+    from dataclasses import replace
+    w = world
+    settings = replace(w.settings, llm_retry_initial_seconds=60, llm_retry_max_seconds=240)
+    transport, attempts = llm_down()
+    w.receive("firing_mq")
+    out = w.run(64, settings=settings, llm=transport)                    # 第 1 次失敗：60 秒後再試
+    assert out["status"] == "degraded" and "連續第 1 次" in out["errors"][0] and "60 秒後再試" in out["errors"][0]
+    [inc] = rows(w, dbmod.incidents)
+    assert inc["llm_failures"] == 1 and inc["analyzed"] is False and inc["llm_next_try"] is not None
+    assert len(attempts) == 1 and es_calls(w) == 1
+    written = annotation_calls(w)
+
+    for at in (94, 123):                                                   # 退避期間（followup 照常每輪都跑）
+        out = w.run(at, settings=settings, llm=transport)
+        assert out["status"] == "ok" and out["errors"] == [] and out["open_incidents"] == 1
+    assert len(attempts) == 1 and es_calls(w) == 1                          # 沒有再打 LLM、沒有再查 ES
+    assert annotation_calls(w) == written                                   # 註記也不重寫
+
+    schedule = [(124, 2, 120), (183, None, None), (243, None, None), (244, 3, 240), (483, None, None), (484, 4, 240)]
+    for at, failures, delay in schedule:                                   # 120 → 240 → 封頂 240
+        out = w.run(at, settings=settings, llm=transport)
+        if failures:
+            assert f"連續第 {failures} 次" in out["errors"][0] and f"{delay} 秒後再試" in out["errors"][0]
+        else:
+            assert out["errors"] == []
+    assert len(attempts) == 4 and es_calls(w) == 4                          # 失敗 4 次，ES 跟著只查 4 次
+    [inc] = rows(w, dbmod.incidents)
+    assert inc["llm_failures"] == 4 and len(w.fake.annotations) == 1
+
+
+def test_a_successful_retry_ends_the_backoff(world):
+    w = world
+    transport, attempts = llm_down()
+    w.receive("firing_mq")
+    w.run(64, llm=transport)
+    w.run(100, llm=transport)
+    assert len(attempts) == 1
+    w.run(124)                                                              # 退避時間到、LLM 回來了
+    [inc] = rows(w, dbmod.incidents)
+    assert inc["analyzed"] and inc["llm_failures"] == 0 and inc["llm_next_try"] is None and len(w.llm_calls) == 1
+    assert "[LLM 推論]" in w.fake.annotations[inc["annotation_id"]]["text"]
+    w.run(500)
+    assert len(w.llm_calls) == 1                                            # 之後不再問
+
+
+def test_new_alerts_during_backoff_update_the_fallback_summary_without_calling_anything(world):
+    w = world
+    transport, attempts = llm_down()
+    w.receive("firing_mq")
+    w.run(64, llm=transport)
+    es_before = es_calls(w)
+    w.receive("firing_cim")                                                 # 退避期間下游才響
+    out = w.run(90, llm=transport)
+    assert out["errors"] == [] and len(attempts) == 1 and es_calls(w) == es_before
+    [inc] = rows(w, dbmod.incidents)
+    assert inc["alert_count"] == 2 and inc["analyzed"] is False
+    assert "[未經分析] mq-broker：MQ queue depth；cim-eap：CIM T3 timeout" in w.fake.annotations[inc["annotation_id"]]["text"]
+    w.run(124)                                                              # 到時間：帶著完整的成員重新分析
+    assert rows(w, dbmod.incidents)[0]["analyzed"] and "CIM T3 timeout" in w.llm_calls[0]["messages"][1]["content"]
+
+
+def test_an_unconfigured_llm_is_not_a_failure_and_never_backs_off(world):
+    from dataclasses import replace
+    w = world
+    settings = replace(w.settings, llm_api_url="", llm_model="")
+    w.receive("firing_mq")
+    for at in (64, 124, 184):
+        assert w.run(at, settings=settings)["errors"] == []
+    [inc] = rows(w, dbmod.incidents)
+    assert inc["llm_failures"] == 0 and inc["llm_next_try"] is None and w.llm_calls == []
+
+
+def test_llm_answers_that_fail_the_check_back_off_too(world):
+    w = world
+    bad = httpx.MockTransport(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+        {"summary": "源頭是 erp-core", "systems": ["erp-core"], "ids": []})}}]}))
+    w.receive("firing_mq")
+    out = w.run(64, llm=bad)
+    assert "erp-core" in out["errors"][0] and "連續第 1 次" in out["errors"][0]
+    assert rows(w, dbmod.incidents)[0]["llm_failures"] == 1
+
+
+def test_a_table_created_by_an_older_version_gets_the_new_columns(db_url):
+    import sqlalchemy as sa
+    engine = sa.create_engine(db_url)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "CREATE TABLE incidents (uid VARCHAR(32) PRIMARY KEY, status VARCHAR(16) NOT NULL, severity VARCHAR(4) NOT NULL, "
+            "services TEXT NOT NULL, signals TEXT NOT NULL, started_at TIMESTAMP WITH TIME ZONE NOT NULL, "
+            "last_seen_at TIMESTAMP WITH TIME ZONE NOT NULL, ended_at TIMESTAMP WITH TIME ZONE, "
+            "resolved_at TIMESTAMP WITH TIME ZONE, alert_count INTEGER NOT NULL, summary TEXT NOT NULL, "
+            "analyzed BOOLEAN NOT NULL, annotation_id BIGINT, annotated BOOLEAN NOT NULL, "
+            "updated_at TIMESTAMP WITH TIME ZONE NOT NULL)"))
+        conn.execute(sa.text(
+            "INSERT INTO incidents VALUES ('old1', 'open', 'P1', '[\"mq-broker\"]', '{}', :t, :t, NULL, NULL, 1, 's', :f, NULL, :f, :t)"),
+            {"t": T0, "f": False})
+    engine.dispose()
+    database = dbmod.Database(db_url)                      # 啟動：補欄位
+    dbmod.Database(db_url).close()                         # 再啟動一次：可以重複執行
+    [inc] = database.open_incidents()
+    assert inc.uid == "old1" and inc.llm_failures == 0 and inc.llm_next_try is None
+    inc.llm_failures, inc.llm_next_try = 2, T0 + timedelta(seconds=120)
+    database.save_incidents([inc], T0)
+    assert database.get_incident("old1").llm_failures == 2 and database.get_incident("old1").llm_next_try == inc.llm_next_try
+    database.close()
+
+
+@pytest.mark.parametrize("text, message", [
+    ("llm: {retry_initial_seconds: 0}", "llm.retry_initial_seconds"),
+    ("llm: {retry_max_seconds: 1.5}", "llm.retry_max_seconds"),
+    ("llm: {retry_initial_seconds: 600, retry_max_seconds: 60}", "不能比"),
+    ("llm: {retry_initial: 60}", "不認得的設定"),
+])
+def test_retry_settings_are_validated(tmp_path, text, message):
+    with pytest.raises(ConfigError, match=message):
+        Settings.load(config(tmp_path, MINIMAL + text + "\n"))
+
+
+def test_retry_settings_default_and_can_be_changed(tmp_path):
+    s = Settings.load(config(tmp_path, MINIMAL))
+    assert (s.llm_retry_initial_seconds, s.llm_retry_max_seconds) == (60, 1800)
+    s = Settings.load(config(tmp_path, MINIMAL + "llm: {retry_initial_seconds: 30, retry_max_seconds: 600}\n"))
+    assert (s.llm_retry_initial_seconds, s.llm_retry_max_seconds) == (30, 600)

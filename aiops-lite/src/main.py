@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -53,6 +53,8 @@ class Settings:
     llm_api_url: str = ""
     llm_api_key: str = field(default="", repr=False)
     llm_model: str = ""
+    llm_retry_initial_seconds: int = 60
+    llm_retry_max_seconds: int = 1800
     es_datasource_uid: str = ""
     log_index: str = "*"
     trace_index: str = ""
@@ -78,7 +80,7 @@ class Settings:
         grafana = section(raw, "grafana", {"url", "token"})
         webhook = section(raw, "webhook", {"token", "port"})
         database = section(raw, "database", {"url"})
-        llm = section(raw, "llm", {"url", "api_key", "model"})
+        llm = section(raw, "llm", {"url", "api_key", "model", "retry_initial_seconds", "retry_max_seconds"})
         es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields"})
         missing = [name for name, value in (("grafana.url", grafana.get("url")), ("grafana.token", grafana.get("token")),
                                             ("webhook.token", webhook.get("token"))) if not value]
@@ -98,6 +100,15 @@ class Settings:
         ids = es.get("id_fields", list(cls.id_fields))
         if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids):
             raise ConfigError("es.id_fields 要是非空的欄位名稱清單")
+        retry = {}
+        for key, default in (("retry_initial_seconds", cls.llm_retry_initial_seconds),
+                             ("retry_max_seconds", cls.llm_retry_max_seconds)):
+            value = llm.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigError(f"llm.{key}={value!r} 要是 1 以上的整數（秒）")
+            retry[f"llm_{key}"] = value
+        if retry["llm_retry_max_seconds"] < retry["llm_retry_initial_seconds"]:
+            raise ConfigError("llm.retry_max_seconds 不能比 llm.retry_initial_seconds 小")
         timing = {}
         for key, default in TIMING_DEFAULTS.items():
             value = raw.get(key, default)
@@ -113,7 +124,7 @@ class Settings:
             es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es."),
             trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(i.strip() for i in ids),
             log_fields=field_map(es, "log_fields", LogFields), trace_fields=field_map(es, "trace_fields", TraceFields),
-            tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])), **timing)
+            tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])), **retry, **timing)
 
 
 def read_config(path: str) -> dict[str, Any]:
@@ -188,6 +199,11 @@ def split_batch(alerts: list[grouping.Alert]) -> tuple[list[grouping.Alert], lis
     return list(firing.values()), [a for a in latest.values() if a.status == "resolved"]
 
 
+def backoff_seconds(failures: int, initial: int, maximum: int) -> int:
+    """連續失敗第 n 次之後要等多久：initial、2×、4×…，最多 maximum（指數退避）。"""
+    return min(initial * 2 ** min(max(failures - 1, 0), 30), maximum)
+
+
 def process(settings: Settings, *, now: datetime | None = None, grafana_transport: httpx.BaseTransport | None = None,
             llm_transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
     """跑一輪，回傳這一輪的摘要（needs_followup = 還有事要做，沒有新 Webhook 也要再跑）。
@@ -210,22 +226,40 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
         incidents += [i for i in db.unannotated_incidents() if i.uid not in known]
         can_analyze = bool(settings.llm_api_url and settings.llm_model)
         for inc in incidents:
-            # 成員或嚴重度變了就重新分析；上一輪 LLM 沒成功的進行中事故，這一輪再試一次
-            if inc.status == "open" and (inc.fresh or not inc.summary or (can_analyze and not inc.analyzed)):
-                evidence = rca.collect_evidence(
-                    inc, edges, grafana, es_datasource_uid=settings.es_datasource_uid, log_index=settings.log_index,
-                    trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
-                    log_fields=settings.log_fields, trace_fields=settings.trace_fields)
-                before = (inc.summary, inc.analyzed)
-                inc.summary, inc.analyzed, reason = rca.analyze(
-                    inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
-                    model=settings.llm_model, transport=llm_transport)
-                if (inc.summary, inc.analyzed) != before:
-                    inc.changed, inc.annotated = True, False
-                if reason and can_analyze:
-                    errors.append(f"事故 {inc.uid} 未經 LLM 分析：{reason}")
-            elif not inc.summary:
-                inc.summary = f"[未經分析] {rca.raw_summary(inc)}"
+            if inc.status != "open":
+                if not inc.summary:
+                    inc.summary = f"[未經分析] {rca.raw_summary(inc)}"
+                continue
+            # 成員或嚴重度變了就重新分析；上一輪 LLM 沒成功的進行中事故，到了退避時間再試
+            if not (inc.fresh or not inc.summary or (can_analyze and not inc.analyzed)):
+                continue
+            if can_analyze and inc.llm_next_try is not None and now < inc.llm_next_try:
+                # 退避中：不查 ES、不打 LLM。摘要退回原始版本，但成員變了要跟著更新（誠實：沒有分析過）
+                raw = f"[未經分析] {rca.raw_summary(inc)}"
+                if (inc.summary, inc.analyzed) != (raw, False):
+                    inc.summary, inc.analyzed, inc.changed, inc.annotated = raw, False, True, False
+                log.debug("事故 %s 的 LLM 分析退避中，%s 之前不再試", inc.uid, inc.llm_next_try.isoformat())
+                continue
+            evidence = rca.collect_evidence(
+                inc, edges, grafana, es_datasource_uid=settings.es_datasource_uid, log_index=settings.log_index,
+                trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
+                log_fields=settings.log_fields, trace_fields=settings.trace_fields)
+            before = (inc.summary, inc.analyzed)
+            inc.summary, inc.analyzed, reason = rca.analyze(
+                inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
+                model=settings.llm_model, transport=llm_transport)
+            if (inc.summary, inc.analyzed) != before:
+                inc.changed, inc.annotated = True, False
+            if not can_analyze:
+                continue  # 沒設定 LLM 不是故障：不算失敗、不退避
+            if inc.analyzed:
+                if inc.llm_failures or inc.llm_next_try:
+                    inc.llm_failures, inc.llm_next_try, inc.changed = 0, None, True
+            else:
+                inc.llm_failures += 1
+                delay = backoff_seconds(inc.llm_failures, settings.llm_retry_initial_seconds, settings.llm_retry_max_seconds)
+                inc.llm_next_try, inc.changed = now + timedelta(seconds=delay), True
+                errors.append(f"事故 {inc.uid} 未經 LLM 分析（連續第 {inc.llm_failures} 次）：{reason}；{delay} 秒後再試")
         # 寫入順序：先落地自己的資料庫（事故 + 這批告警處理完了），再寫 Grafana；註記寫成功才記 annotated
         db.save_incidents([i for i in incidents if i.changed], now, processed=ids)
         written = []

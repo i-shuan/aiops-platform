@@ -50,6 +50,8 @@ class Incident:
     analyzed: bool = False           # 第 2 行是不是通過檢查的 LLM 推論
     annotation_id: int | None = None
     annotated: bool = False          # 目前的內容寫回 Grafana 了沒（沒寫成功下一輪補）
+    llm_failures: int = 0            # LLM 分析連續失敗幾次（成功就歸零）；退避用
+    llm_next_try: datetime | None = None  # 退避中：這個時間之前不再查 ES、不再打 LLM
     changed: bool = field(default=False, compare=False)  # 這一輪有沒有變（只活在記憶體，不存檔）
     fresh: bool = field(default=False, compare=False)    # 這一輪成員或嚴重度變了（只活在記憶體）：要重新分析
 
