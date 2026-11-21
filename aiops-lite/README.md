@@ -88,6 +88,7 @@ edges:
    （要跟關係邊裡的名稱一樣）。這三個標籤名稱是預設值，可以在 config.yaml 的 `labels` 改。沒有 `service` 的告警會被略過並回報給送出端；`aiops_severity` 寫錯當成 P3。
 
 系統沒有 Metrics（老舊的 CIM、AMHS、MQ）時怎麼把日誌或資料庫紀錄變成告警規則，見 **`FACTORY_METRICS.md`**。
+Fluent Bit 的設定範例在 `deploy/fluent-bit/`。
 
 ## Grafana 要做的設定
 

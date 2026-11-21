@@ -74,7 +74,7 @@ DB 唯讀 View ─▶ Grafana（直接寫 SQL 算次數、發告警）─▶ aio
 | 型別沒先宣告、數值寫成字串時聚合會失敗 | 用真的 ES 8.19.23 重現過（回 400） |
 | SQL 查表當 Grafana 規則 → Webhook → aiops-lite | 實測過（本機 Grafana 13.0.7 + PostgreSQL，假資料） |
 | ES 計數當 **Grafana 告警規則** | **沒有實測過**（只驗了 ES 這一側的聚合）；是 Grafana 支援的標準做法 |
-| Fluent Bit 的 parser | **沒有用 Fluent Bit 跑過**；範例的正規表示式只用 Python 對範例那一行驗過 |
+| Fluent Bit 設定（`deploy/fluent-bit/` 三份）→ ES → aiops-lite 的證據查詢 | 用真的 Fluent Bit 5.2.0 + ES 8.19.23 跑過（2026-11-21，本機，範例日誌）；TLS／帳密、日誌輪替、斷線補送沒有驗 |
 | IBM MQ exporter、Fluent Bit `log_to_metrics`、`sql_exporter`、textfile collector、Logstash JDBC | **沒有實測過**；細節以各工具的官方文件為準 |
 
 下面的查詢與設定是範例，表名、欄位名、門檻都要換成現場的。
@@ -162,22 +162,36 @@ PUT _index_template/factory-logs
 
 這份 template 在 ES 8.19.23 套用成功。要在第一筆資料寫進去**之前**建好；已經存在的 index 型別改不了，要重建。
 
-### 收集端拆欄位的範例（第 1 步）
+### 收集端拆欄位的設定（第 1 步）：Fluent Bit 範例
 
-以 `2026-11-21 10:41:07 [ERROR] EQP-CVD-07 HSMS T3 Timeout on LOT-9921 carrier FOUP0912` 這種格式為例，
-Fluent Bit 的 parser 大致長這樣（**沒有用 Fluent Bit 跑過**，正規表示式只對這一行驗過能拆出六個欄位；實際格式要照現場的日誌改）：
+三份可以直接改的設定在 `deploy/fluent-bit/`，一個系統一份，裝在該系統的伺服器上，只讀日誌檔：
 
-```ini
-[PARSER]
-    Name        eap_log
-    Format      regex
-    Regex       ^(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(?<level>[A-Z]+)\] (?<eqp_id>EQP-[A-Z0-9-]+) (?<message>.*?)(?: on (?<lot_id>LOT-?[A-Z0-9]+))?(?: carrier (?<carrier_id>FOUP[0-9]+))?$
-    Time_Key    time
-    Time_Format %Y-%m-%d %H:%M:%S
-```
+| 檔案 | 來源 | 做的事 |
+| --- | --- | --- |
+| `cim-eap.yaml` | EAP 的文字日誌 | 拆出時間、等級、機台、訊息、批號、載具；依訊息補 `error_type`（T3_TIMEOUT、DISCONNECT、LOT_HOLD） |
+| `amhs-mcs.yaml` | MCS 的文字日誌（key=value 風格） | 拆出載具、來源設備、搬運耗時（轉成數字）；依結果補 `error_type`（TRANSFER_ABORT、TRANSFER_BLOCKED） |
+| `mq-broker.yaml` | MQ 探針腳本印的 JSON 行 | 直接讀 JSON；檔案開頭規定了腳本要印成什麼樣子 |
 
-拆出來的 `level` 要再搬到 `log.level`、補上固定的 `service.name: cim-eap`、依訊息內容補 `error_type`，
-這些用收集器的欄位改寫功能或 ES 的 Ingest Pipeline 做。日誌的時間如果是當地時間，收集端要設好時區，不然事故時間窗會對不上。
+三份的共同做法：`tail` 讀檔 → parser 拆欄位 → `modify` 補上 `service.name`、把 `level` 改名成 `log.level` → 送進 ES 的 `factory-logs-<系統>`。
+不算次數、不判斷門檻。
+
+**實測結果**（2026-11-21，Fluent Bit 5.2.0 → Elasticsearch 8.19.23，本機，範例日誌）：
+
+- 三份設定都能啟動、沒有錯誤；範例日誌共 10 行全部寫進 ES。
+- 台灣時間的日誌（`time_offset: '+0800'`）寫進 ES 後的 `@timestamp` 是正確的 UTC。
+- `service.name`、`log.level` 用帶點的鍵名送出，ES 套用 index template 後型別是 `keyword`。
+- `error_type` 算得出筆數（T3_TIMEOUT 2、DISCONNECT 1、LOT_HOLD 1、TRANSFER_ABORT 1）；`queue_depth` 取得到最大值、`transfer_seconds` 取得到平均。
+- aiops-lite 的證據查詢撈到 5 筆 `ERROR` 日誌（`WARN`、`INFO` 沒有進來），機台、批號、載具的出現次數正確。
+- 格式對不上的行不會丟掉：整行放進 `message`、有 `service.name`、沒有等級與識別碼（所以不會成為 RCA 證據，但在 ES 裡查得到）。
+
+**改設定時要注意的四件事**（都是實測時踩到或確認過的）
+
+1. **日誌格式是假設的**。parser 的 `regex` 要照現場的日誌改；改完先用幾行真實日誌在測試機跑過。
+2. **`modify` 的 `condition` 裡不能有空白**（會被當成參數分隔，Fluent Bit 啟動失敗）。要比對空白用 `\s`，例如 `NOT\sSELECTED`。
+3. **`tail` 要設 `key: message`**。預設的鍵名是 `log`，拆不開的行會變成 `log: "整行文字"`，跟 `log.level` 這個物件欄位衝突，ES 會拒收。
+4. **時區**：日誌寫的是當地時間就要設 `time_offset`，不然會被當成 UTC，事故時間窗差 8 小時，aiops-lite 會撈不到。
+
+沒有驗的：TLS 與帳號密碼連 ES（範例裡有寫，實測時關掉了）、日誌輪替（log rotation）、ES 長時間斷線後的補送、大流量下的效能。
 
 ### 三個系統怎麼照規範接
 

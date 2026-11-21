@@ -1,0 +1,59 @@
+# Fluent Bit 設定範例：AMHS（MCS）的文字日誌 → 拆欄位 → Elasticsearch
+#
+# 範例假設日誌是「key=value」風格（格式是假設的，請照現場的日誌改 regex）：
+#   2026-11-21 10:41:50 ERROR Transfer ABORT carrier=FOUP0912 from=STK01 to=EQP-CVD-07 elapsed=412.5 reason=destination port occupied
+#   2026-11-21 10:42:10 INFO Transfer DONE carrier=FOUP0120 from=STK02 to=EQP-ETCH-02 elapsed=38.0
+#
+# 用 Fluent Bit 5.2.0 + Elasticsearch 8.19.23 實測過。MCS 沒有日誌檔、資料只在資料庫時，這份設定用不上（見 FACTORY_METRICS.md 的路線 B）。
+
+service:
+  flush: 5
+  log_level: info
+
+parsers:
+  - name: mcs_log
+    format: regex
+    regex: '^(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?<level>[A-Z]+) (?<message>Transfer (?<result>[A-Z]+) carrier=(?<carrier_id>\S+) from=(?<eqp_id>\S+) to=(?<to_eqp>\S+) elapsed=(?<transfer_seconds>[0-9.]+)(?: reason=.*)?)$'
+    time_key: time
+    time_format: '%Y-%m-%d %H:%M:%S'
+    time_offset: '+0800'
+    types: transfer_seconds:float   # 數值欄位要轉成數字，不然 Grafana 沒辦法取平均
+
+pipeline:
+  inputs:
+    - name: tail
+      tag: mcs
+      path: /var/log/mcs/*.log
+      parser: mcs_log
+      key: message
+      db: /var/lib/fluent-bit/mcs.db
+      read_from_head: false
+      skip_long_lines: on
+      mem_buf_limit: 20MB
+      refresh_interval: 10
+
+  filters:
+    - name: modify
+      match: mcs
+      add: service.name amhs-mcs
+      rename: level log.level
+    - name: modify
+      match: mcs
+      condition: Key_value_equals result ABORT
+      add: error_type TRANSFER_ABORT
+    - name: modify
+      match: mcs
+      condition: Key_value_equals result BLOCKED
+      add: error_type TRANSFER_BLOCKED
+
+  outputs:
+    - name: es
+      match: mcs
+      host: es.corp.example
+      port: 9200
+      index: factory-logs-amhs
+      suppress_type_name: on
+      tls: on
+      http_user: fluent-bit-writer
+      http_passwd: ${ES_PASSWORD}
+      retry_limit: 5

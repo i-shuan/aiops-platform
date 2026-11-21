@@ -1,0 +1,50 @@
+# Fluent Bit 設定範例：MQ 的定時探針腳本印出的 JSON 行 → Elasticsearch
+#
+# 老舊 MQ 沒有 exporter 時：寫一支定時腳本（每 30～60 秒）呼叫 MQ 的管理指令或管理 API，把結果一行一筆 JSON 寫到檔案。
+# 腳本怎麼取值依 MQ 的廠牌而定，這裡只規定它要印成什麼樣子：
+#   {"time":"2026-11-21T02:41:10Z","level":"INFO","message":"queue status","queue":"lot.dispatch","queue_depth":120,"consumers":4}
+#   {"time":"2026-11-21T02:41:40Z","level":"ERROR","message":"queue depth over limit, no consumer","error_type":"CONSUMER_LAG","queue":"lot.dispatch","queue_depth":4210,"consumers":0}
+# 平常印 INFO 的狀態行（給 Grafana 取最大值）；超過門檻時多印一行 ERROR（aiops-lite 只撈錯誤等級的日誌當 RCA 證據）。
+# queue_depth、consumers 要印成數字，不要加引號。腳本自己要有逾時：MQ 卡住時腳本跟著卡住就沒有資料了。
+#
+# 用 Fluent Bit 5.2.0 + Elasticsearch 8.19.23 實測過。
+
+service:
+  flush: 5
+  log_level: info
+
+parsers:
+  - name: mq_probe_json
+    format: json
+    time_key: time
+    time_format: '%Y-%m-%dT%H:%M:%SZ'
+
+pipeline:
+  inputs:
+    - name: tail
+      tag: mq
+      path: /var/log/mq-probe/*.jsonl
+      parser: mq_probe_json
+      key: message
+      db: /var/lib/fluent-bit/mq.db
+      read_from_head: false
+      mem_buf_limit: 5MB
+      refresh_interval: 10
+
+  filters:
+    - name: modify
+      match: mq
+      add: service.name mq-broker
+      rename: level log.level
+
+  outputs:
+    - name: es
+      match: mq
+      host: es.corp.example
+      port: 9200
+      index: factory-logs-mq
+      suppress_type_name: on
+      tls: on
+      http_user: fluent-bit-writer
+      http_passwd: ${ES_PASSWORD}
+      retry_limit: 5
