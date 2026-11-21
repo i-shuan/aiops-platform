@@ -1,0 +1,62 @@
+{
+ "headers": {
+  "User-Agent": "Grafana",
+  "Content-Type": "application/json"
+ },
+ "body": {
+  "receiver": "aiops-lite",
+  "status": "firing",
+  "alerts": [
+   {
+    "status": "firing",
+    "labels": {
+     "aiops_detect": "true",
+     "aiops_severity": "P1",
+     "alertname": "MQ queue depth",
+     "grafana_folder": "factory",
+     "service": "mq-broker"
+    },
+    "annotations": {
+     "summary": "MQ queue depth"
+    },
+    "startsAt": "2026-11-21T02:41:10Z",
+    "endsAt": "0001-01-01T00:00:00Z",
+    "generatorURL": "http://localhost:23000/alerting/grafana/cg4xgh0mv7oqod/view?orgId=1",
+    "fingerprint": "369c5f4adcb630d1",
+    "silenceURL": "http://localhost:23000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dcg4xgh0mv7oqod&matcher=aiops_detect%3Dtrue&matcher=aiops_severity%3DP1&matcher=service%3Dmq-broker&orgId=1",
+    "dashboardURL": "",
+    "panelURL": "",
+    "ruleUID": "cg4xgh0mv7oqod",
+    "values": {
+     "A": 350,
+     "C": 1
+    },
+    "valueString": "[ var='A' labels={} type='query' value=350 ], [ var='C' labels={} type='threshold' value=1 ]",
+    "orgId": 1
+   }
+  ],
+  "groupLabels": {
+   "alertname": "MQ queue depth",
+   "grafana_folder": "factory"
+  },
+  "commonLabels": {
+   "aiops_detect": "true",
+   "aiops_severity": "P1",
+   "alertname": "MQ queue depth",
+   "grafana_folder": "factory",
+   "service": "mq-broker"
+  },
+  "commonAnnotations": {
+   "summary": "MQ queue depth"
+  },
+  "externalURL": "http://localhost:23000/",
+  "appVersion": "13.0.7",
+  "version": "1",
+  "groupKey": "{}/{aiops_detect=\"true\"}:{alertname=\"MQ queue depth\", grafana_folder=\"factory\"}",
+  "truncatedAlerts": 0,
+  "orgId": 1,
+  "title": "[FIRING:1] MQ queue depth factory (true P1 mq-broker)",
+  "state": "alerting",
+  "message": "**Firing**\n\nValue: A=350, C=1\nLabels:\n - alertname = MQ queue depth\n - aiops_detect = true\n - aiops_severity = P1\n - grafana_folder = factory\n - service = mq-broker\nAnnotations:\n - summary = MQ queue depth\nSource: http://localhost:23000/alerting/grafana/cg4xgh0mv7oqod/view?orgId=1\nSilence: http://localhost:23000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dcg4xgh0mv7oqod&matcher=aiops_detect%3Dtrue&matcher=aiops_severity%3DP1&matcher=service%3Dmq-broker&orgId=1\n"
+ }
+}

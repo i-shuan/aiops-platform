@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels: {app.kubernetes.io/name: aiops-lite, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: server}
+spec:
+  selector: {app.kubernetes.io/name: aiops-lite, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: server}
+  ports:
+    - {name: http, port: {{ .Values.service.port }}, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels: {app.kubernetes.io/name: aiops-lite, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: server}
+spec:
+  # 只能 1 個副本：debounce 的計時在記憶體裡。Recreate = 升級時先停舊的再起新的，不會兩個同時跑
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: aiops-lite, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: server}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: aiops-lite, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: server}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001}
+      containers:
+        - name: aiops-lite
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          ports:
+            - {name: http, containerPort: 8080}
+          # 就緒：設定載入成功、HTTP 服務起來了，Service 才把 Grafana 的 Webhook 導進來
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          # 存活：連續 3 次（45 秒）沒回 200 就重啟 Pod——HTTP 沒回應、工作執行緒死了、或同一輪卡超過 10 分鐘
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            - {name: config, mountPath: /etc/aiops, readOnly: true}
+          resources: {{ toJson .Values.resources }}
+      volumes:
+        - name: config
+          secret: {secretName: {{ .Release.Name }}-config, defaultMode: 0440}

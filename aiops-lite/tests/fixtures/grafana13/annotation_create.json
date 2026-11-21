@@ -1,0 +1,22 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/api/annotations",
+  "json": {
+   "time": 1795217760000,
+   "timeEnd": 1795221360000,
+   "tags": [
+    "aiops",
+    "aiops-incident:rec-0001",
+    "P1",
+    "open"
+   ],
+   "text": "line1\nline2\nline3"
+  }
+ },
+ "status": 200,
+ "response": {
+  "id": 1,
+  "message": "Annotation added"
+ }
+}

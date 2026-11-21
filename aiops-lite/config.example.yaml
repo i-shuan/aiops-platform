@@ -1,0 +1,90 @@
+# aiops-lite 的全部設定都在這一份檔案（沒有環境變數）。
+# 預設讀 /etc/aiops/config.yaml；要換位置用環境變數 AIOPS_CONFIG_FILE（唯一的一個）。
+# 複製成 config.yaml 再填：config.yaml 含 Token 與密碼，已列入 .gitignore，不要推上 Git。
+# 鍵名打錯、型別不對、必填沒填，啟動時直接報錯。
+#
+# 必填只有三個（grafana.url、grafana.token、webhook.token）。其他都是選填：
+#   - 沒有註解掉的是常用設定，寫的是預設值。
+#   - 用 # 註解掉的是「進階調整」：平常不用寫，要調的時候把該行的 # 拿掉、改值。每一項的說明見 CONFIG.md。
+
+grafana:
+  url: https://grafana.corp.example      # 必填
+  token: ""                              # 必填：Editor 服務帳號的 Token
+  # timeout_seconds: 30                  # 呼叫 Grafana（含 ES 代理）的逾時
+  # retries: 2                           # 短暫失敗（連線失敗、逾時、429／502／503／504）重試幾次；0 = 不重試
+  # retry_backoff_seconds: 0.5           # 每次重試多等幾秒（第 n 次等 n 倍）
+
+webhook:
+  token: ""                              # 必填：Grafana Contact Point 帶的 Bearer 密鑰（兩邊填一樣）
+  port: 8080
+  # host: 0.0.0.0                        # 服務綁定的位址
+  # max_body_bytes: 1000000              # 單次 Webhook 內容大小上限
+
+database:
+  url: sqlite:///aiops-lite.db           # 正式環境：postgresql+psycopg://aiops:密碼@主機:5432/aiops
+
+llm:                                     # 整段可以不寫：沒設 url 與 model = 不分析，註記第 2 行是原始摘要
+  url: ""                                # OpenAI 相容端點，例如 https://llm.corp.example/v1
+  api_key: ""
+  model: ""
+  # temperature: 0.2                     # 不寫 = 不送，用模型的預設值（有些模型只接受預設值，寫了會被拒絕）
+  retry_initial_seconds: 60              # 分析失敗（連不上、逾時、回應格式不對、幻覺檢查沒過）後，第一次等多久再試
+  retry_max_seconds: 1800                # 之後每失敗一次等待時間加倍（60、120、240…），最多等到這個秒數；成功就歸零
+  # timeout_seconds: 60                  # 等 LLM 回應的逾時；推理型模型比較慢就調大（healthcheck.stuck_seconds 也要跟著調）
+  # max_log_samples: 20                  # 給 LLM 看幾筆錯誤日誌樣本
+  # max_trace_samples: 10                # 給 LLM 看幾筆 Trace 錯誤片段
+  # max_message_chars: 300               # 單筆日誌訊息截斷長度
+  # top_ids: 10                          # 每種識別碼（機台、批號…）只列出現次數前幾名
+  # max_summary_chars: 300               # LLM 摘要超過這個長度就截斷（註記第 2 行）
+  # system_prompt_file: system_prompt.txt  # 自訂系統提示詞的檔案（相對路徑 = 相對於這份設定檔）；
+  #                                        # 必須保留「只輸出含 summary、systems、ids 的 JSON」，不然啟動時報錯
+  # id_pattern: "[A-Za-z][A-Za-z0-9_.\\-]*\\d[A-Za-z0-9_.\\-]*"   # 幻覺檢查：摘要文字裡符合這個樣式的字必須在證據裡找得到。
+  #                                        # 預設是「字母開頭、夾數字」；模型常寫 HTTP2 這類泛稱而被誤擋時，改成只認你們的編號格式，
+  #                                        # 例如 "(EQP|LOT|FOUP)[-A-Z0-9]+"；設成 "" = 不檢查摘要文字（systems／ids 清單照樣檢查）
+
+es:                                      # 整段可以不寫：沒設 datasource_uid = RCA 沒有日誌證據
+  datasource_uid: ""                     # Grafana 上 Elasticsearch 資料源的 uid
+  log_index: "*"
+  trace_index: ""                        # 沒有 Trace 就留空
+  id_fields: [eqp_id, lot_id, carrier_id]   # 錯誤日誌裡要統計出現次數的識別碼欄位
+  log_fields:                            # 日誌文件的欄位名稱（巢狀物件或帶點的扁平鍵都可以）；下面是預設值
+    time: "@timestamp"
+    service: service.name                # 要跟告警的 service 標籤值一致
+    level: log.level
+    message: message
+  trace_fields:                          # Trace／span 文件的欄位名稱；下面是預設值
+    time: "@timestamp"
+    service: service.name
+    span: span.name
+    trace_id: trace.id
+    status: status.code
+    error: error.message
+  # error_levels: [ERROR, error, Error, FATAL, fatal, CRITICAL, critical]   # 日誌等級是這些值才算錯誤（大小寫不同要分開列）
+  # error_statuses: [error, ERROR, Error, STATUS_CODE_ERROR]               # span 狀態是這些值才算錯誤
+  # max_hits: 100                        # 每次查詢最多撈幾筆；識別碼的出現次數只統計這幾筆
+  # window_padding_minutes: 10           # 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現）
+
+# labels:                                # 告警規則上的標籤名稱；改了要同步通知各系統團隊與 Grafana 的通知路由
+#   detect: aiops_detect                 # 值是 true 才納管
+#   severity: aiops_severity             # P0～P3
+#   service: service                     # 系統名稱，要跟 edges 裡的名稱一樣
+#   default_severity: P3                 # 嚴重度標籤沒寫或寫錯時當成哪一級
+
+timezone: Asia/Taipei                    # 註記裡顯示的時間
+log_level: INFO                          # DEBUG／INFO／WARNING／ERROR（DEBUG 會記下送給 LLM 的內容與原始回應）
+
+debounce_seconds: 60                     # 收到第一個 Webhook 後等多久才開始分析（等上下游告警到齊、ES 日誌落盤）
+followup_seconds: 60                     # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪
+close_after_seconds: 300                 # 成員告警全部 resolved 之後，再安靜多久才結案
+# retry_failed_round_seconds: 30         # 一輪失敗（例如資料庫斷線）之後多久再試
+# rounds_retention_days: 90              # 每輪執行紀錄（rounds 表）保留幾天
+
+# healthcheck:
+#   stuck_seconds: 600                   # 同一輪跑超過這麼久，/healthz 回 503（K8s 會重啟 Pod）
+
+# annotation:
+#   max_rule_links: 5                    # 註記第 3 行最多列幾條「調整優先權」的規則連結
+
+edges:                                   # 系統層級的上下游關係 [上游, 下游]，3～5 條就夠
+  - [mq-broker, cim-eap]
+  - [cim-eap, amhs-mcs]
