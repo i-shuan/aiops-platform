@@ -6,7 +6,8 @@
 
   POST /webhook   Grafana Contact Point（Webhook）推告警進來，要帶 Authorization: Bearer <AIOPS_WEBHOOK_TOKEN>
                   先存進資料庫才回 200：存不進去回 503，Grafana 會重送
-  GET  /healthz   存活檢查
+  GET  /healthz   給 Kubernetes 探針用，不用 Token。工作執行緒死了、或同一輪跑超過 STUCK_SECONDS（卡死）回 503，
+                  K8s 連續失敗幾次就會重啟 Pod；HTTP 服務本身沒回應也一樣
 
 同一時間只會有一輪在跑（單一工作執行緒）；跑的途中進來的告警排進下一個視窗。有進行中事故時，沒有新 Webhook 也會每隔
 followup_seconds 再跑一輪（結案、補寫註記、重試 LLM）。服務重啟時若資料庫裡還有沒處理的告警或進行中事故，啟動後自動排一輪。
@@ -33,6 +34,9 @@ log = logging.getLogger("aiops_lite.server")
 
 MAX_BODY_BYTES = 1_000_000
 RETRY_SECONDS = 30  # 一輪失敗（資料庫斷線）之後多久再試
+# 一輪跑多久算卡死。正常的一輪是幾秒；最慢的情況是每個進行中事故各等一次 ES（30 秒 × 重試 3 次）與 LLM（60 秒逾時），
+# 所以抓 10 分鐘：寧可晚一點重啟，也不要把「LLM 很慢」當成卡死而砍掉正在跑的分析
+STUCK_SECONDS = 600
 
 
 class Debounce:
@@ -74,6 +78,7 @@ class Worker(threading.Thread):
         self.wake = threading.Condition()
         self.stopping = False
         self.rounds = 0
+        self.round_started: float | None = None  # 正在跑的那一輪是什麼時候開始的；沒在跑是 None
 
     def notify_webhook(self) -> None:
         with self.wake:
@@ -90,6 +95,15 @@ class Worker(threading.Thread):
             self.stopping = True
             self.wake.notify()
 
+    def health(self) -> str | None:
+        """健康回 None，不健康回原因。is_alive 抓得到「執行緒死了」，抓不到「還活著但卡住」，所以另外看這一輪跑了多久。"""
+        if not self.is_alive():
+            return "worker dead"
+        started = self.round_started
+        if started is not None and self.clock() - started > STUCK_SECONDS:
+            return f"round stuck for {int(self.clock() - started)}s"
+        return None
+
     def run(self) -> None:
         while True:
             with self.wake:
@@ -101,12 +115,14 @@ class Worker(threading.Thread):
                 if self.stopping:
                     return
                 self.debounce.start_round()  # 從這一刻起進來的告警屬於下一個視窗
+            self.round_started = self.clock()
             try:
                 summary = self.run_round()
                 log_summary(summary)
                 delay = self.settings.followup_seconds if summary["needs_followup"] else None
             except Exception:  # process 已經記了完整的錯誤；告警還在 inbox，晚點再試
                 delay = RETRY_SECONDS
+            self.round_started = None
             self.rounds += 1
             if delay is not None:
                 self.schedule(delay)
@@ -123,7 +139,12 @@ def make_handler(settings: Settings, db: Database, worker: Worker) -> type[BaseH
             self.wfile.write(raw)
 
         def do_GET(self) -> None:
-            self._reply(200, {"status": "ok"}) if self.path == "/healthz" else self._reply(404, {"error": "not found"})
+            if self.path != "/healthz":
+                return self._reply(404, {"error": "not found"})
+            reason = worker.health()
+            if reason:
+                return self._reply(503, {"status": "unhealthy", "reason": reason})
+            self._reply(200, {"status": "ok"})
 
         def do_POST(self) -> None:
             if self.path.split("?")[0] != "/webhook":

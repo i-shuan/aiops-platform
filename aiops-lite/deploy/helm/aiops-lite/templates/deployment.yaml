@@ -33,12 +33,17 @@ spec:
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           ports:
             - {name: http, containerPort: 8080}
+          # 就緒：設定載入成功、HTTP 服務起來了，Service 才把 Grafana 的 Webhook 導進來
           readinessProbe:
             httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 3
             periodSeconds: 10
+          # 存活：連續 3 次（45 秒）沒回 200 就重啟 Pod——HTTP 沒回應、工作執行緒死了、或同一輪卡超過 10 分鐘
           livenessProbe:
             httpGet: {path: /healthz, port: http}
-            periodSeconds: 30
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
           env:
             - {name: GRAFANA_URL, value: {{ required "grafana.url 必填" .Values.grafana.url | quote }}}
             - name: GRAFANA_TOKEN

@@ -64,7 +64,7 @@ edges:
 
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
-| `src/server.py` | 196 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
+| `src/server.py` | 217 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
 | `src/main.py` | 242 | 設定（環境變數 + YAML）與「一輪」的流程；規格的單一入口邏輯 |
 | `src/grafana.py` | 160 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
 | `src/grouping.py` | 164 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
@@ -116,6 +116,19 @@ repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不
 - **寫回**：先寫自己的資料庫，再寫註記；一個事故一筆註記（標籤 `aiops`、`aiops-incident:<uid>`、嚴重度、`open`／`closed`、
   各系統名稱），之後原地更新。註記寫失敗下一輪補，不會重複建。
 
+## 健康檢查
+
+`GET /healthz` 不用 Token，給 Kubernetes 探針用（chart 已設好 readiness 與 liveness）。回 503 的情況：
+
+- 工作執行緒死了（`worker dead`）。
+- 同一輪跑超過 10 分鐘（`round stuck`）：執行緒還活著但卡住，單看「活著沒」抓不到，所以另外看這一輪跑了多久。
+
+HTTP 服務本身沒回應，或連續 3 次（45 秒）沒回 200，K8s 會重啟 Pod。重啟不掉告警：還沒處理的都在資料庫的 inbox，啟動後自動排一輪。
+一輪失敗（例如資料庫斷線）不算不健康：工作執行緒會自己在 30 秒後重試。
+
+探針只管 Pod 裡面。**Pod 活著但 Webhook 送不到**（路由設錯、Token 不一致、網路不通）要靠 Grafana 那一側發現：
+看 Contact Point 的送達狀態，或對 Grafana 內建 Alertmanager 的通知失敗指標設告警（這一段沒有在這個 repo 驗證過）。
+
 ## 部署與執行
 
 環境變數見 `src/main.py` 開頭。必填：`GRAFANA_URL`、`GRAFANA_TOKEN`、`AIOPS_WEBHOOK_TOKEN`。
@@ -129,7 +142,7 @@ repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不
 ## 驗證狀態（照實寫）
 
 做過的：
-- 82 個測試通過。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
+- 85 個測試通過。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
   常駐服務的測試真的起 HTTP 服務、連發 Webhook。
 - 對真的 Grafana 13.0.7 + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本控制的**）：
   三條規則各隔 20 秒越線，Grafana 在 43 秒內陸續推了 3 個 Webhook；aiops-lite 在第一個 Webhook 後整整 60 秒才跑第一輪，
@@ -145,8 +158,8 @@ repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不
 
 ## 已知限制
 
-- **沒有 Webhook 就什麼都不會發生**。Contact Point 送不到、路由沒設對、Grafana 自己掛了，平台都不會知道，也沒有對外的心跳告警；
-  只能看 Grafana Contact Point 的送達狀態與資料庫的 `rounds` 表。
+- **沒有 Webhook 就什麼都不會發生**。Contact Point 送不到、路由沒設對、Grafana 自己掛了，平台都不會知道（`/healthz` 只管 Pod 自己）；
+  要靠 Grafana 那一側的送達狀態或通知失敗告警，以及資料庫的 `rounds` 表。
 - **resolved 沒送到，事故就不會結案**（Contact Point 勾了 Disable resolved message、或那一次推送失敗且重送用盡）。
   平台不猜「應該已經好了」。
 - **只能跑 1 個副本**：debounce 的計時在記憶體裡（告警本身有落地）。chart 固定 1 個副本、Recreate 升級。

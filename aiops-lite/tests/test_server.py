@@ -11,6 +11,7 @@ import sqlalchemy as sa
 
 from src import db as dbmod
 from src.main import Settings, process
+from src import server as servermod
 from src.server import Debounce, serve
 from tests.conftest import webhook
 
@@ -63,6 +64,8 @@ def live(fake, tmp_path):
     summaries = []
 
     def run_round():
+        if live.hold is not None:
+            live.hold.wait(10)  # 測試用來模擬「這一輪卡住」
         summaries.append(process(settings, grafana_transport=fake.transport))
         return summaries[-1]
 
@@ -80,6 +83,7 @@ def live(fake, tmp_path):
 
     live = Live()
     live.settings, live.summaries, live.start, live.fake = settings, summaries, start, fake
+    live.started, live.hold = started, None
     yield live
     for server, worker, db in started:
         worker.stop()
@@ -175,3 +179,45 @@ def test_database_failure_on_receive_returns_503_so_grafana_retries(live, monkey
     assert httpx.post(f"{url}/webhook", json=webhook("firing_mq"), headers=AUTH).status_code == 503
     time.sleep(1.5)
     assert live.summaries == []
+
+
+def test_healthz_needs_no_token_and_reports_a_dead_worker(live):
+    url = live.start()
+    r = httpx.get(f"{url}/healthz")  # 沒帶 Authorization：K8s 探針不會被擋
+    assert r.status_code == 200 and r.json() == {"status": "ok"}
+    _server, worker, _db = live.started[0]
+    worker.stop()
+    worker.join(5)
+    r = httpx.get(f"{url}/healthz")
+    assert r.status_code == 503 and r.json() == {"status": "unhealthy", "reason": "worker dead"}
+
+
+def test_healthz_reports_a_round_that_is_stuck_and_recovers_when_it_finishes(live, monkeypatch):
+    live.hold = threading.Event()
+    url = live.start()
+    assert httpx.post(f"{url}/webhook", json=webhook("firing_mq"), headers=AUTH).status_code == 200
+    _server, worker, _db = live.started[0]
+    assert wait_for(lambda: worker.round_started is not None)       # debounce 到了，這一輪開始跑、然後卡住
+    assert httpx.get(f"{url}/healthz").status_code == 200           # 還在正常的執行時間內：健康
+    monkeypatch.setattr(servermod, "STUCK_SECONDS", 0.2)
+    time.sleep(0.4)
+    r = httpx.get(f"{url}/healthz")                                 # 工作執行緒還活著（is_alive），但卡太久
+    assert worker.is_alive() and r.status_code == 503 and r.json()["reason"].startswith("round stuck")
+    live.hold.set()                                                 # 那一輪跑完了
+    assert wait_for(lambda: live.summaries and worker.round_started is None)
+    assert httpx.get(f"{url}/healthz").status_code == 200
+
+
+def test_a_failing_round_does_not_kill_the_worker(live, monkeypatch):
+    calls = []
+
+    def boom(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(servermod, "RETRY_SECONDS", 0.2)
+    monkeypatch.setattr("tests.test_server.process", boom)
+    url = live.start()
+    httpx.post(f"{url}/webhook", json=webhook("firing_mq"), headers=AUTH)
+    assert wait_for(lambda: len(calls) >= 2)                        # 失敗後自己重試
+    assert httpx.get(f"{url}/healthz").status_code == 200
