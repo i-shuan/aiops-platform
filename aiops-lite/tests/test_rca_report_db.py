@@ -170,8 +170,8 @@ def test_two_instances_of_one_rule_share_a_link_and_missing_rule_uid_gives_no_li
 # ── 資料庫 ──
 
 @pytest.fixture
-def db(tmp_path):
-    database = Database(f"sqlite:///{tmp_path}/t.db")
+def db(db_url):
+    database = Database(db_url)
     yield database
     database.close()
 
@@ -188,7 +188,7 @@ def test_incident_round_trips_through_the_database(db):
     assert db.open_incidents() == [] and [i.uid for i in db.unannotated_incidents()] == [inc.uid]
 
 
-def test_inbox_keeps_alerts_in_arrival_order_until_they_are_processed_with_the_incidents(db, tmp_path):
+def test_inbox_keeps_alerts_in_arrival_order_until_they_are_processed_with_the_incidents(db, db_url):
     assert db.pending() == ([], [])
     db.enqueue([], NOW)
     db.enqueue(alerts("firing_mq"), NOW)
@@ -196,7 +196,7 @@ def test_inbox_keeps_alerts_in_arrival_order_until_they_are_processed_with_the_i
     ids, got = db.pending()
     assert got == alerts("firing_mq", "firing_cim", "resolved_mq") and len(ids) == 3
     assert got[2].ends_at == datetime(2026, 11, 21, 2, 42, 20, tzinfo=timezone.utc) and got[0].values == {"A": 350, "C": 1}
-    again = Database(f"sqlite:///{tmp_path}/t.db")  # 服務重啟：還沒處理的告警還在
+    again = Database(db_url)  # 服務重啟：還沒處理的告警還在
     assert again.pending()[1] == got
     again.close()
     db.save_incidents([incident()], NOW, processed=ids[:2])

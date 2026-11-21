@@ -1,7 +1,8 @@
-"""跟公司 Grafana 講話的唯一出口：只用 GRAFANA_URL + 一把 Editor Token，不直連任何資料庫、Prometheus 或 ES。
+"""跟公司 Grafana 講話的唯一出口：只用 config.yaml 的 grafana.url + 一把 Editor Token，不直連任何資料庫、Prometheus 或 ES。
 
   parse_webhook     解析 Grafana 告警 webhook（Contact Point 推進來的）：哪條規則、哪個系統、嚴重度、firing／resolved
   search_errors     POST /api/datasources/proxy/uid/<uid>/_msearch  經 Grafana 的 ES 資料源查錯誤日誌與 Trace 片段
+                    （欄位名稱由 LogFields／TraceFields 決定，來自 config.yaml）
   upsert_annotation POST／PATCH /api/annotations                  每個事故一筆註記
 
 格式以 tests/fixtures/grafana13/（Grafana 13.0.7 實際送出、實際回應的內容）為準。
@@ -12,6 +13,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +29,26 @@ DEFAULT_SEVERITY = "P3"                # aiops_severity 沒寫或寫錯：當最
 TRUE_VALUES = {"true", "1", "yes", "on"}
 ERROR_LEVELS = ["ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical"]
 ERROR_STATUS = ["error", "ERROR", "Error", "STATUS_CODE_ERROR"]
+
+
+@dataclass(frozen=True)
+class LogFields:
+    """日誌文件的欄位名稱（config.yaml 的 es.log_fields）；巢狀物件與帶點的扁平鍵都讀得到。"""
+    time: str = "@timestamp"
+    service: str = "service.name"
+    level: str = "log.level"
+    message: str = "message"
+
+
+@dataclass(frozen=True)
+class TraceFields:
+    """Trace／span 文件的欄位名稱（config.yaml 的 es.trace_fields）。"""
+    time: str = "@timestamp"
+    service: str = "service.name"
+    span: str = "span.name"
+    trace_id: str = "trace.id"
+    status: str = "status.code"
+    error: str = "error.message"
 
 
 class GrafanaError(Exception):
@@ -116,31 +138,35 @@ class Grafana:
     # ── 日誌與 Trace（經 Grafana 的 ES 資料源代理）──
 
     def search_errors(self, datasource_uid: str, log_index: str, trace_index: str | None, services: list[str],
-                      start: datetime, end: datetime, size: int = 100) -> dict[str, list[dict[str, Any]]]:
+                      start: datetime, end: datetime, size: int = 100, *, log_fields: LogFields = LogFields(),
+                      trace_fields: TraceFields = TraceFields()) -> dict[str, list[dict[str, Any]]]:
         """撈時間窗內這些系統的錯誤日誌與錯誤 span，回傳 {"logs": [...], "traces": [...]}（各是 ES 的 _source）。"""
-        window = {"range": {"@timestamp": {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
+        def window(field: str) -> dict[str, Any]:
+            return {"range": {field: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
 
         def either(name: str, values: list[str]) -> dict[str, Any]:
             # 欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到
             return {"bool": {"minimum_should_match": 1, "should": [
                 {"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
 
-        def search(index: str, extra: dict[str, Any]) -> str:
-            query = {"bool": {"filter": [window, either("service.name", services), extra]}}
+        def search(index: str, time_field: str, service_field: str, extra: dict[str, Any]) -> str:
+            query = {"bool": {"filter": [window(time_field), either(service_field, services), extra]}}
             return (json.dumps({"index": index, "ignore_unavailable": True}) + "\n"
-                    + json.dumps({"size": size, "sort": [{"@timestamp": "desc"}], "query": query}) + "\n")
+                    + json.dumps({"size": size, "sort": [{time_field: "desc"}], "query": query}) + "\n")
 
-        kinds = [("logs", log_index, either("log.level", ERROR_LEVELS))]
+        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service,
+                                            either(log_fields.level, ERROR_LEVELS)))]
         if trace_index:
-            kinds.append(("traces", trace_index, either("status.code", ERROR_STATUS)))
+            kinds.append(("traces", trace_index, search(trace_index, trace_fields.time, trace_fields.service,
+                                                        either(trace_fields.status, ERROR_STATUS))))
         raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(search(index, extra) for _k, index, extra in kinds),
+                            content="".join(body for _k, _index, body in kinds),
                             headers={"Content-Type": "application/x-ndjson"})
         responses = raw.get("responses") if isinstance(raw, dict) else None
         if not isinstance(responses, list) or len(responses) != len(kinds):
             raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
         out: dict[str, list[dict[str, Any]]] = {"logs": [], "traces": []}
-        for (kind, index, _extra), resp in zip(kinds, responses):
+        for (kind, index, _body), resp in zip(kinds, responses):
             if resp.get("error"):
                 raise GrafanaError(f"ES 查詢 {index} 失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
             out[kind] = [h.get("_source") or {} for h in (resp.get("hits") or {}).get("hits") or []]

@@ -57,9 +57,9 @@ def test_zero_debounce_runs_immediately():
 # ── HTTP 服務 ──
 
 @pytest.fixture
-def live(fake, tmp_path):
+def live(fake, db_url):
     settings = Settings(grafana_url="http://grafana.test", grafana_token="t", webhook_token="hook-secret",
-                        database_url=f"sqlite:///{tmp_path}/lite.db", port=0, debounce_seconds=1, followup_seconds=1,
+                        database_url=db_url, port=0, debounce_seconds=1, followup_seconds=1,
                         close_after_seconds=0, edges=(("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")))
     summaries = []
 

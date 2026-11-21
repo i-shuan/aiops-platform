@@ -1,54 +1,67 @@
+# aiops-lite 的 Helm 設定範本。所有設定會產生成一份 config.yaml，放進 Secret 掛載給 Pod（程式沒有任何環境變數）。
+#
+# 這個檔案只放空白範本，可以進 Git。真實的 Token 與密碼寫在另一份「不進 Git」的檔案（例如 secrets.values.yaml，
+# .gitignore 已排除），部署時一起帶：
+#   helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
+# secrets.values.yaml 只需要填下面標「必填」的那幾個值，例如：
+#   grafana: {url: https://grafana.corp.example, token: glsa_xxx}
+#   webhook: {token: xxx}
+#   postgres: {password: xxx}
+
 image:
   repository: aiops-lite
-  tag: "0.1.0"
+  tag: "0.3.0"
   pullPolicy: IfNotPresent
 
-# 事件驅動的時間設定（秒）。會寫進 ConfigMap 的 config.yaml，改了之後 helm upgrade 會自動重啟服務。
-timing:
-  debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析：等上下游告警到齊、等 ES 日誌落盤
-  followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪（結案、補寫註記、重試 LLM）
-  closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案（剛恢復又響不會另開一張）
+grafana:
+  url: ""        # 必填
+  token: ""      # 必填：Editor 服務帳號的 Token
+
+webhook:
+  token: ""      # 必填：Grafana Contact Point 帶的 Bearer 密鑰（兩邊填一樣）
 
 service:
-  port: 8080               # Grafana 的 Contact Point 打 http://<release>.<namespace>.svc:8080/webhook
-
-grafana:
-  url: ""            # 必填：公司 Grafana 的網址，例如 https://grafana.corp.example
-
-# 機密不進 chart：先自己建好這個 Secret，鍵名如下
-#   GRAFANA_TOKEN        Grafana Editor 服務帳號的 Token（必要）
-#   AIOPS_WEBHOOK_TOKEN  Grafana Contact Point 帶的 Bearer 密鑰（必要；兩邊填一樣的值）
-#   POSTGRES_PASSWORD  下面這個 PostgreSQL 的密碼（必要；會放進連線字串，請只用英數字）
-#   LLM_API_KEY        LLM 的金鑰（沒有 LLM 可以不放）
-existingSecret: aiops-lite
-
-llm:
-  apiUrl: ""         # OpenAI 相容端點（…/v1）；留空 = 不分析，註記第 2 行是 [未經分析] 原始摘要
-  model: ""
-
-logs:
-  datasourceUid: ""  # Grafana 上 Elasticsearch 資料源的 uid；留空 = RCA 沒有日誌證據
-  logIndex: "*"
-  traceIndex: ""     # 沒有 Trace 就留空
-  idFields: "eqp_id,lot_id,carrier_id"
-
-# 系統層級的上下游關係（[上游, 下游]），3～5 條就夠；不要把機台寫進來
-edges:
-  - [mq-broker, cim-eap]
-  - [cim-eap, amhs-mcs]
-
-settings:
-  tz: Asia/Taipei
-  logLevel: INFO
-
-resources:
-  requests: {cpu: 100m, memory: 256Mi}
-  limits: {memory: 1Gi}
+  port: 8080     # Grafana 的 Contact Point 打 http://<release>.<namespace>.svc:8080/webhook
 
 postgres:
+  password: ""   # 必填：只用英數字（會放進連線字串）
   image: postgres:16
   storage: 5Gi
   storageClassName: ""   # 留空 = 叢集預設的 StorageClass
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
+
+database:
+  url: ""        # 留空 = 連上面這個 PostgreSQL；要連外部資料庫才填完整連線字串
+
+llm:             # 整段留空 = 不分析，註記第 2 行是 [未經分析] 原始摘要
+  url: ""        # OpenAI 相容端點（…/v1）
+  apiKey: ""
+  model: ""
+
+es:              # datasourceUid 留空 = RCA 沒有日誌證據
+  datasourceUid: ""
+  logIndex: "*"
+  traceIndex: ""
+  idFields: [eqp_id, lot_id, carrier_id]
+  logFields: {time: "@timestamp", service: service.name, level: log.level, message: message}
+  traceFields: {time: "@timestamp", service: service.name, span: span.name, trace_id: trace.id, status: status.code, error: error.message}
+
+timezone: Asia/Taipei
+logLevel: INFO
+
+# 事件驅動的時間設定（秒）。改了之後 helm upgrade 會自動重啟服務。
+timing:
+  debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析：等上下游告警到齊、等 ES 日誌落盤
+  followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪（結案、補寫註記、重試 LLM）
+  closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案（剛恢復又響不會另開一張）
+
+# 系統層級的上下游關係（[上游, 下游]），3～5 條就夠；不要把機台寫進來
+edges:
+  - [mq-broker, cim-eap]
+  - [cim-eap, amhs-mcs]
+
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {memory: 1Gi}

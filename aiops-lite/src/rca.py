@@ -9,7 +9,7 @@ LLM 連不上、逾時、格式不對、或點名了證據裡沒有的系統／�
 
 已知限制（照實寫）：
   - 送給 LLM 的日誌樣本**沒有遮罩**（封存的 aiops-platform 有遮罩出口，lite 沒有）。日誌裡的帳號、IP、業務機密
-    要由產生日誌的系統先去識別化，或把 LLM_API_URL 指到公司內部的模型。
+    要由產生日誌的系統先去識別化，或把 llm.url 指到公司內部的模型。
   - 幻覺檢查只擋「名稱不存在」：LLM 把存在的系統講錯因果，程式看不出來，所以第 2 行固定標 [LLM 推論]。
   - 工廠沒有 Trace 時，「集中在哪台機台／哪個批號」只是錯誤日誌的計數，不是因果證據。
 """
@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from src.grafana import Grafana, GrafanaError
+from src.grafana import Grafana, GrafanaError, LogFields, TraceFields
 from src.grouping import Incident
 
 log = logging.getLogger("aiops_lite.rca")
@@ -73,7 +73,8 @@ def raw_summary(incident: Incident) -> str:
 
 
 def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: Grafana, *, es_datasource_uid: str,
-                     log_index: str, trace_index: str, id_fields: list[str], now: datetime) -> dict[str, Any]:
+                     log_index: str, trace_index: str, id_fields: list[str], now: datetime,
+                     log_fields: LogFields = LogFields(), trace_fields: TraceFields = TraceFields()) -> dict[str, Any]:
     """組 4 包證據。日誌／Trace 撈不到（沒設資料源、Grafana 回錯）不擋分析：那一包留空並寫明原因。"""
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
     evidence: dict[str, Any] = {
@@ -88,7 +89,8 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
         return evidence
     try:
         found = grafana.search_errors(es_datasource_uid, log_index, trace_index or None, incident.services,
-                                      incident.started_at - EVIDENCE_PAD, max(incident.last_seen_at, now))
+                                      incident.started_at - EVIDENCE_PAD, max(incident.last_seen_at, now),
+                                      log_fields=log_fields, trace_fields=trace_fields)
     except GrafanaError as e:
         log.warning("事故 %s 撈不到日誌證據：%s", incident.uid, e)
         evidence["notes"].append(f"日誌與 Trace 撈取失敗：{e}")
@@ -101,12 +103,12 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
                 counts[f][str(value)] += 1
     evidence["id_counts"] = {f: dict(c.most_common(TOP_IDS)) for f, c in counts.items()}
     evidence["error_logs"] = [{
-        "time": _dig(d, "@timestamp"), "system": _dig(d, "service.name"),
-        "message": str(_dig(d, "message") or "")[:MAX_MESSAGE_CHARS],
+        "time": _dig(d, log_fields.time), "system": _dig(d, log_fields.service),
+        "message": str(_dig(d, log_fields.message) or "")[:MAX_MESSAGE_CHARS],
         **{f: _dig(d, f) for f in id_fields if _dig(d, f) not in (None, "")}} for d in found["logs"][:MAX_LOG_SAMPLES]]
     evidence["error_traces"] = [{
-        "time": _dig(d, "@timestamp"), "system": _dig(d, "service.name"), "span": _dig(d, "span.name"),
-        "trace_id": _dig(d, "trace.id"), "error": str(_dig(d, "error.message") or "")[:MAX_MESSAGE_CHARS]}
+        "time": _dig(d, trace_fields.time), "system": _dig(d, trace_fields.service), "span": _dig(d, trace_fields.span),
+        "trace_id": _dig(d, trace_fields.trace_id), "error": str(_dig(d, trace_fields.error) or "")[:MAX_MESSAGE_CHARS]}
         for d in found["traces"][:MAX_TRACE_SAMPLES]]
     if not found["logs"] and not found["traces"]:
         evidence["notes"].append("事故時間窗內沒有查到這些系統的錯誤日誌或錯誤 Trace")
@@ -125,7 +127,7 @@ def build_prompt(evidence: dict[str, Any]) -> str:
 
 def call_llm(api_url: str, api_key: str, model: str, prompt: str, transport: httpx.BaseTransport | None = None,
              timeout: float = 60.0) -> str:
-    """OpenAI 相容的 chat completions。LLM_API_URL 可以是 …/v1 或完整的 …/chat/completions。失敗丟例外。"""
+    """OpenAI 相容的 chat completions。llm.url 可以是 …/v1 或完整的 …/chat/completions。失敗丟例外。"""
     url = api_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
@@ -161,7 +163,7 @@ def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_k
     """回傳 (註記第 2 行, 是不是通過檢查的 LLM 推論, 沒通過的原因)。任何失敗都退回原始摘要，不丟例外。"""
     fallback = f"[未經分析] {raw_summary(incident)}"
     if not api_url or not model:
-        return fallback, False, "沒有設定 LLM_API_URL／LLM_MODEL"
+        return fallback, False, "沒有設定 llm.url、llm.model"
     try:
         summary = check_answer(call_llm(api_url, api_key, model, build_prompt(evidence), transport), evidence)
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:  # ValueError 含 JSON 解析失敗

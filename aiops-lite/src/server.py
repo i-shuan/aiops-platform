@@ -4,7 +4,7 @@
 一場事故連發好幾個 Webhook 還會同時跑好幾次。所以收到第一個 Webhook 後固定等 debounce_seconds，
 這段時間進來的告警全部收進同一批，時間到才一起收斂、撈證據、問一次 LLM。視窗不會因為後面一直有告警進來而延後。
 
-  POST /webhook   Grafana Contact Point（Webhook）推告警進來，要帶 Authorization: Bearer <AIOPS_WEBHOOK_TOKEN>
+  POST /webhook   Grafana Contact Point（Webhook）推告警進來，要帶 Authorization: Bearer <config.yaml 的 webhook.token>
                   先存進資料庫才回 200：存不進去回 503，Grafana 會重送
   GET  /healthz   給 Kubernetes 探針用，不用 Token。工作執行緒死了、或同一輪跑超過 STUCK_SECONDS（卡死）回 503，
                   K8s 連續失敗幾次就會重啟 Pod；HTTP 服務本身沒回應也一樣
@@ -18,7 +18,6 @@ from __future__ import annotations
 import hmac
 import json
 import logging
-import os
 import sys
 import threading
 import time
@@ -195,7 +194,8 @@ def serve(settings: Settings, *, host: str = "0.0.0.0", run_round: Callable[[], 
 def main() -> int:
     setup_logging()
     try:
-        settings = Settings.load(os.environ)
+        settings = Settings.load()
+        setup_logging(settings.log_level)
     except ConfigError as e:
         log.error("設定錯誤：%s", e)
         return 2

@@ -13,11 +13,11 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 │   → 1 收斂（同系統、關係邊）→ 2 收集 4 包證據 → 3 LLM → 4 寫註記          │
 │ 有進行中事故時每 followup 秒續跑一輪，直到全部 resolved 並安靜夠久才結案   │
 └──────────────────────────────┬──────────────────────────────────────────┘
-                               ▼ GRAFANA_URL + GRAFANA_TOKEN
+                               ▼ config.yaml 的 grafana.url + grafana.token
             Grafana Annotations（三行摘要）+「AIOps 事件總覽」儀表板
 ```
 
-部署物：1 個常駐 Deployment（+ Service）、1 個帶 PVC 的 PostgreSQL、1 個設定 ConfigMap（`deploy/helm/aiops-lite`）。
+部署物：1 個常駐 Deployment（+ Service）、1 個帶 PVC 的 PostgreSQL、1 個放整份 config.yaml 的 Secret（`deploy/helm/aiops-lite`）。
 
 **什麼算異常由各系統自己的 Grafana 告警規則決定**：規則 firing 就是異常，平台不重放查詢、不自己判數值（原本的 5 個偵測器已拿掉）。
 
@@ -32,47 +32,51 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 所以收到**第一個** Webhook 後固定等 `debounce_seconds`，這段時間進來的告警全部收進同一批，時間到才一起收斂、撈證據、問一次 LLM。
 視窗不會因為後面一直有告警進來而延後；跑的途中進來的告警排進下一個視窗，併入同一張事故並重新分析。
 
-## 時間設定（YAML）
+## 設定：全部在一份 config.yaml
 
-寫在設定檔（`AIOPS_CONFIG_FILE`，預設 `/etc/aiops-lite/config.yaml`）；用 Helm 部署時改 `values.yaml` 的 `timing`，
-chart 會產生這個檔並在變更時自動重啟服務：
-
-```yaml
-# values.yaml
-timing:
-  debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析
-  followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪
-  closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案
-edges:
-  - [mq-broker, cim-eap]   # [上游, 下游]
-  - [cim-eap, amhs-mcs]
-```
+沒有環境變數。程式只讀一份 `config.yaml`，預設路徑 `/etc/aiops/config.yaml`；要換位置只有一個環境變數 `AIOPS_CONFIG_FILE`。
+完整範例與每一項的說明見 `config.example.yaml`：
 
 ```yaml
-# 產生的 config.yaml（不用 Helm 時自己寫這個）
-debounce_seconds: 60
-followup_seconds: 60
-close_after_seconds: 300
+grafana: {url: https://grafana.corp.example, token: ""}   # 必填
+webhook: {token: "", port: 8080}                          # token 必填
+database: {url: postgresql+psycopg://aiops:密碼@主機:5432/aiops}   # 沒寫 = sqlite:///aiops-lite.db
+llm: {url: "", api_key: "", model: ""}                    # 整段可省略 = 不分析
+es:                                                       # 整段可省略 = 沒有日誌證據
+  datasource_uid: ""
+  log_index: "*"
+  trace_index: ""
+  id_fields: [eqp_id, lot_id, carrier_id]
+  log_fields:   {time: "@timestamp", service: service.name, level: log.level, message: message}
+  trace_fields: {time: "@timestamp", service: service.name, span: span.name, trace_id: trace.id, status: status.code, error: error.message}
+timezone: Asia/Taipei
+log_level: INFO
+debounce_seconds: 60      # 收到第一個 Webhook 後等多久才開始分析
+followup_seconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪
+close_after_seconds: 300  # 成員告警全部 resolved 之後，再安靜多久才結案
 edges:
-  - [mq-broker, cim-eap]
-  - [cim-eap, amhs-mcs]
+  - [mq-broker, cim-eap]  # [上游, 下游]
 ```
 
-鍵名打錯、不是整數、關係邊不是一對名稱，啟動時直接報錯。實際看到註記的延遲 ≈ 規則的 `for` + Grafana 路由的 `group_wait` + `debounce_seconds` + LLM 回應時間。
+- **啟動時嚴格檢查**：檔案不存在、鍵名打錯（任何一層）、型別不對、必填沒填，直接報錯、不啟動。數字開頭的密鑰要加引號。
+- **日誌與 Trace 的欄位名稱可以改**（`es.log_fields`、`es.trace_fields`）：查詢條件、排序、讀回來的內容都照這裡的名稱；沒寫的用預設值。
+- **檔案裡有 Token 與密碼，不要推上 Git**：`config.yaml` 已在 `.gitignore` 與 `.dockerignore`，專案裡只有 `config.example.yaml`。
+  設定被印出來（log、例外訊息）時，Token、密鑰、連線字串不會出現。
+- 實際看到註記的延遲 ≈ 規則的 `for` + Grafana 路由的 `group_wait` + `debounce_seconds` + LLM 回應時間。
 
 ## 檔案
 
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
 | `src/server.py` | 217 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 242 | 設定（環境變數 + YAML）與「一輪」的流程；規格的單一入口邏輯 |
-| `src/grafana.py` | 160 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/main.py` | 291 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
+| `src/grafana.py` | 186 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
 | `src/grouping.py` | 164 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/rca.py` | 171 | 不寫推理演算法：收集 4 包證據、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/rca.py` | 173 | 不寫推理演算法：收集 4 包證據、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
 | `src/report.py` | 60 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
 | `src/db.py` | 166 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
 
-合計約 1,160 行。
+合計約 1,257 行。
 
 ## 各系統要做的事（平台零直連）
 
@@ -88,19 +92,19 @@ repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不
 
 | # | 項目 | 在哪做 | 怎麼做 |
 | --- | --- | --- | --- |
-| 1 | 服務帳號與 Token | Administration → Users and access → Service accounts | 新增角色 **Editor** 的帳號 → Add token → 放進 K8s Secret 的 `GRAFANA_TOKEN` |
+| 1 | 服務帳號與 Token | Administration → Users and access → Service accounts | 新增角色 **Editor** 的帳號 → Add token → 填進 config.yaml 的 `grafana.token` |
 | 2 | 告警規則標籤 | Alerting → Alert rules → 編輯規則 → Labels | 每條要納管的規則加 `aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名>` |
-| 3 | **Contact Point**（新增 1 個） | Alerting → Contact points → Add | 類型 Webhook；URL `http://<release>.<namespace>.svc:8080/webhook`；Authorization scheme `Bearer`、credentials 填 Secret 的 `AIOPS_WEBHOOK_TOKEN`；**不要**勾 Disable resolved message |
+| 3 | **Contact Point**（新增 1 個） | Alerting → Contact points → Add | 類型 Webhook；URL `http://<release>.<namespace>.svc:8080/webhook`；Authorization scheme `Bearer`、credentials 填 config.yaml 的 `webhook.token`；**不要**勾 Disable resolved message |
 | 4 | **Notification policy**（新增 1 條路由） | Alerting → Notification policies → New child policy | Matcher `aiops_detect = true` → 上面的 Contact Point；`group_wait` 設短（0～10 秒，平台自己會等 debounce）；要同時保留原本的通知就勾 Continue matching |
 | 5 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（只用內建註記清單面板，不需要資料源） |
-| 6 | ES 資料源 uid（要日誌證據才需要） | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 Helm values 的 `logs.datasourceUid` |
+| 6 | ES 資料源 uid（要日誌證據才需要） | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 config.yaml 的 `es.datasource_uid`（Helm：`es.datasourceUid`） |
 
 ### 注意
 
 1. **規則、Contact Point、路由若是用 provisioning（YAML、Terraform）管的**，在 UI 上改會被下次部署蓋掉，要加進原本那份檔案。
 2. **Grafana 要連得到 aiops-lite 的 Service**（同叢集用 Service 名稱；不同叢集要自己開路）。
 3. **RBAC 只在預設權限下驗過**：Editor 能走 ES 代理、寫註記，是在 Grafana 13.0.7 預設權限下確認的。
-4. **Token 與 Webhook 密鑰只放 Secret**，不進 chart 或 values。
+4. **Token 與 Webhook 密鑰只放 `secrets.values.yaml`（不進 Git）**，專案裡的 `values.yaml` 保持空白。
 
 ## 流程細節
 
@@ -131,24 +135,47 @@ HTTP 服務本身沒回應，或連續 3 次（45 秒）沒回 200，K8s 會重�
 
 ## 部署與執行
 
-環境變數見 `src/main.py` 開頭。必填：`GRAFANA_URL`、`GRAFANA_TOKEN`、`AIOPS_WEBHOOK_TOKEN`。
+**Helm**：整份 `config.yaml` 由 chart 用 values 產生，放進一個 **Secret**，掛載成 `/etc/aiops/config.yaml` 給 Pod 讀（唯讀、`0440`）；
+Pod 沒有任何環境變數設定。Secret 內容有變就會自動重啟服務。
 
-部署：先建 Secret（`GRAFANA_TOKEN`、`AIOPS_WEBHOOK_TOKEN`、`POSTGRES_PASSWORD`，有 LLM 再加 `LLM_API_KEY`），然後
-`helm upgrade --install aiops-lite deploy/helm/aiops-lite --set grafana.url=https://…`。
+`values.yaml` 只放空白範本，可以進 Git。真實的 Token 與密碼寫在另一份**不進 Git** 的檔案（`secrets.values.yaml`、`*.secret.yaml` 已在 `.gitignore`），部署時一起帶：
 
-本機：`python -m src.server`（預設 SQLite、port 8080）。`python -m src.main` 會立刻處理 inbox 裡的告警一輪（不等 debounce，除錯用）。
-測試：`python -m pytest tests -q`。
+```yaml
+# secrets.values.yaml（不進 Git）
+grafana:  {url: https://grafana.corp.example, token: glsa_xxx}
+webhook:  {token: xxx}
+postgres: {password: xxx}        # 只用英數字（會放進連線字串）
+llm:      {url: https://llm.corp.example/v1, apiKey: xxx, model: xxx}   # 可省略
+es:       {datasourceUid: xxx}                                          # 可省略
+```
+
+```
+helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
+```
+
+`grafana.url`、`grafana.token`、`webhook.token`、`postgres.password` 沒填，`helm template` 會直接報錯。
+`database.url` 留空 = 連 chart 自帶的 PostgreSQL；要連外部資料庫才填。
+
+**本機**：`cp config.example.yaml config.yaml`，填好之後 `AIOPS_CONFIG_FILE=config.yaml python -m src.server`
+（預設 SQLite、port 8080）。`python -m src.main` 會立刻處理 inbox 裡的告警一輪（不等 debounce，除錯用）。
+
+**測試**：`python -m pytest tests -q`（預設用 SQLite）；`TEST_DATABASE_URL=postgresql+psycopg://… python -m pytest tests -q`
+改在真的 PostgreSQL 上跑同一批測試（每個測試前後把表清掉重建，請用專門的測試資料庫）。
 
 ## 驗證狀態（照實寫）
 
 做過的：
-- 85 個測試通過。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
+- 104 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
   常駐服務的測試真的起 HTTP 服務、連發 Webhook。
 - 對真的 Grafana 13.0.7 + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本控制的**）：
   三條規則各隔 20 秒越線，Grafana 在 43 秒內陸續推了 3 個 Webhook；aiops-lite 在第一個 Webhook 後整整 60 秒才跑第一輪，
   一輪收了 3 筆告警、收斂成 1 張 P1 事故（三個系統經兩條關係邊串起來）、寫 1 筆註記；三筆 resolved 進來後，
   安靜滿設定的 60 秒結案，註記原地改成已結案，之後不再續跑。期間的錯誤日誌是在 debounce 期間才寫進 ES 的，分析時撈得到。
-- Helm chart 用 `helm lint` 與 `helm template` 檢查過；產生的 `config.yaml` 用程式的 `load_config` 讀過。
+- 改成單一 config.yaml 之後，用 `env -i`（清空所有環境變數、只留 `AIOPS_CONFIG_FILE`）起服務，對真的 Grafana 13.0.7 + PostgreSQL 16
+  + ES 8.19.23 再跑一次端到端：Webhook → debounce → 1 張事故 → 註記 → resolved → 結案都正常。那次 amhs-mcs 的規則沒有響
+  （測試腳本在規則的 10 秒評估週期內就把值改回去），所以事故只有 2 個系統；三個系統串起來的情況是先前（SQLite、環境變數版）驗過的。
+- Helm chart 用 `helm lint` 與 `helm template` 檢查過；產生的 Secret 裡的 `config.yaml` 用程式的 `Settings.from_dict` 讀過；
+  Deployment 沒有任何 `env`。
 
 沒做過的：
 - **沒有任何真實產線資料與真實的告警風暴**；60 秒夠不夠等到齊，要看現場各系統的告警時間差與 ES 延遲，請依實際情況調 YAML。
@@ -163,7 +190,7 @@ HTTP 服務本身沒回應，或連續 3 次（45 秒）沒回 200，K8s 會重�
 - **resolved 沒送到，事故就不會結案**（Contact Point 勾了 Disable resolved message、或那一次推送失敗且重送用盡）。
   平台不猜「應該已經好了」。
 - **只能跑 1 個副本**：debounce 的計時在記憶體裡（告警本身有落地）。chart 固定 1 個副本、Recreate 升級。
-- **送給 LLM 的日誌樣本沒有遮罩**。日誌裡的敏感資訊要在產生端去識別化，或把 `LLM_API_URL` 指到公司內部的模型。
+- **送給 LLM 的日誌樣本沒有遮罩**。日誌裡的敏感資訊要在產生端去識別化，或把 `llm.url` 指到公司內部的模型。
 - 幻覺檢查只擋「名稱不存在」，擋不了「存在的系統被講錯因果」；所以第 2 行固定標 `[LLM 推論]`。
 - 沒有 Trace 時「集中在哪台機台／批號」只是錯誤日誌的計數，不是因果證據。
 - 上游沒有告警規則（或沒越線）時平台看不到它：只會看到下游的告警，不會替上游補洞。

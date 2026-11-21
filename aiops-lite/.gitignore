@@ -3,4 +3,6 @@ __pycache__/
 .pytest_cache/
 *.db
 .env
-secrets.local.yaml
+config.yaml
+secrets.values.yaml
+*.secret.yaml

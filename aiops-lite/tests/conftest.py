@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -64,3 +65,20 @@ class FakeGrafana:
 @pytest.fixture
 def fake() -> FakeGrafana:
     return FakeGrafana()
+
+
+@pytest.fixture
+def db_url(tmp_path):
+    """資料庫連線字串：預設每個測試一個全新的 SQLite 檔；設 TEST_DATABASE_URL=postgresql+psycopg://… 就改在真的 PostgreSQL 上跑
+    （每個測試前後把三張表清掉重建）。測試程式碼完全一樣，換的只是資料庫。"""
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        yield f"sqlite:///{tmp_path}/lite.db"
+        return
+    import sqlalchemy as sa
+    from src import db as dbmod
+    engine = sa.create_engine(url)
+    dbmod.metadata.drop_all(engine)
+    yield url
+    dbmod.metadata.drop_all(engine)
+    engine.dispose()

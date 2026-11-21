@@ -1,0 +1,49 @@
+# aiops-lite 的全部設定都在這一份檔案（沒有環境變數）。
+# 預設讀 /etc/aiops/config.yaml；要換位置用環境變數 AIOPS_CONFIG_FILE（唯一的一個）。
+# 複製成 config.yaml 再填：config.yaml 含 Token 與密碼，已列入 .gitignore，不要推上 Git。
+# 鍵名打錯、型別不對、必填沒填，啟動時直接報錯。
+
+grafana:
+  url: https://grafana.corp.example      # 必填
+  token: ""                              # 必填：Editor 服務帳號的 Token
+
+webhook:
+  token: ""                              # 必填：Grafana Contact Point 帶的 Bearer 密鑰（兩邊填一樣）
+  port: 8080
+
+database:
+  url: sqlite:///aiops-lite.db           # 正式環境：postgresql+psycopg://aiops:密碼@主機:5432/aiops
+
+llm:                                     # 整段可以不寫：沒設 url 與 model = 不分析，註記第 2 行是原始摘要
+  url: ""                                # OpenAI 相容端點，例如 https://llm.corp.example/v1
+  api_key: ""
+  model: ""
+
+es:                                      # 整段可以不寫：沒設 datasource_uid = RCA 沒有日誌證據
+  datasource_uid: ""                     # Grafana 上 Elasticsearch 資料源的 uid
+  log_index: "*"
+  trace_index: ""                        # 沒有 Trace 就留空
+  id_fields: [eqp_id, lot_id, carrier_id]   # 錯誤日誌裡要統計出現次數的識別碼欄位
+  log_fields:                            # 日誌文件的欄位名稱（巢狀物件或帶點的扁平鍵都可以）；下面是預設值
+    time: "@timestamp"
+    service: service.name                # 要跟告警的 service 標籤值一致
+    level: log.level
+    message: message
+  trace_fields:                          # Trace／span 文件的欄位名稱；下面是預設值
+    time: "@timestamp"
+    service: service.name
+    span: span.name
+    trace_id: trace.id
+    status: status.code
+    error: error.message
+
+timezone: Asia/Taipei                    # 註記裡顯示的時間
+log_level: INFO                          # DEBUG／INFO／WARNING／ERROR
+
+debounce_seconds: 60                     # 收到第一個 Webhook 後等多久才開始分析（等上下游告警到齊、ES 日誌落盤）
+followup_seconds: 60                     # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪
+close_after_seconds: 300                 # 成員告警全部 resolved 之後，再安靜多久才結案
+
+edges:                                   # 系統層級的上下游關係 [上游, 下游]，3～5 條就夠
+  - [mq-broker, cim-eap]
+  - [cim-eap, amhs-mcs]

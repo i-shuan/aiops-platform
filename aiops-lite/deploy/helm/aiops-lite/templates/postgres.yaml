@@ -32,7 +32,7 @@ spec:
             - {name: POSTGRES_DB, value: aiops}
             - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
             - name: POSTGRES_PASSWORD
-              valueFrom: {secretKeyRef: {name: {{ .Values.existingSecret }}, key: POSTGRES_PASSWORD}}
+              valueFrom: {secretKeyRef: {name: {{ .Release.Name }}-config, key: POSTGRES_PASSWORD}}
           ports:
             - {name: postgres, containerPort: 5432}
           readinessProbe:

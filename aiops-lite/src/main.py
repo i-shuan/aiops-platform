@@ -8,30 +8,19 @@
 
 Grafana 連不上時註記寫不進去：事故照樣存在資料庫，下一輪補寫。資料庫連不上這一輪才算失敗，告警留在 inbox 下一輪再處理。
 
-時間設定與關係邊寫在 YAML（AIOPS_CONFIG_FILE，預設 /etc/aiops-lite/config.yaml；Helm 由 values 產生）：
-
-    debounce_seconds: 60        # 收到第一個 Webhook 後等多久才開始分析（等上下游告警到齊、等 ES 日誌落盤）
-    followup_seconds: 60        # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪（結案、補寫註記、重試 LLM）
-    close_after_seconds: 300    # 成員告警全部 resolved 之後，再安靜多久才結案
-    edges:
-      - [mq-broker, cim-eap]    # [上游, 下游]
-
-環境變數（★ 必填）：
-  ★ GRAFANA_URL、★ GRAFANA_TOKEN（Editor 服務帳號）、★ AIOPS_WEBHOOK_TOKEN（Grafana Contact Point 帶的 Bearer）
-  DATABASE_URL（預設 sqlite:///aiops-lite.db；正式環境 postgresql+psycopg://…）、AIOPS_PORT（8080）
-  LLM_API_URL、LLM_API_KEY、LLM_MODEL（沒設 = 不分析，註記第 2 行是原始摘要）
-  AIOPS_ES_DATASOURCE_UID（Grafana 上 ES 資料源的 uid；沒設 = 沒有日誌證據）、AIOPS_LOG_INDEX、AIOPS_TRACE_INDEX、
-  AIOPS_ID_FIELDS（預設 eqp_id,lot_id,carrier_id）、AIOPS_TZ（Asia/Taipei）
+**所有設定都在一份 config.yaml**（沒有其他環境變數）。檔案路徑預設 /etc/aiops/config.yaml，要換用環境變數
+AIOPS_CONFIG_FILE 指定（唯一的一個）。檔案不存在、鍵名打錯、型別不對、必填沒填，啟動時直接報錯。完整範例見 config.example.yaml。
+檔案裡有 Token 與密碼：不要推上 Git（.gitignore 已排除 config.yaml）；Kubernetes 用 Secret 掛載。
 """
 from __future__ import annotations
 
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -39,86 +28,145 @@ import yaml
 
 from src import grouping, rca, report
 from src.db import Database
-from src.grafana import Grafana, GrafanaError
+from src.grafana import Grafana, GrafanaError, LogFields, TraceFields
 
 log = logging.getLogger("aiops_lite")
 
+DEFAULT_CONFIG_PATH = "/etc/aiops/config.yaml"
+CONFIG_ENV = "AIOPS_CONFIG_FILE"
 TIMING_DEFAULTS = {"debounce_seconds": 60, "followup_seconds": 60, "close_after_seconds": 300}
 TIMING_MINIMUM = {"debounce_seconds": 0, "followup_seconds": 1, "close_after_seconds": 0}
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 
 class ConfigError(Exception):
-    """環境變數或設定檔寫錯：啟動時就報錯，不跑。"""
+    """設定檔寫錯：啟動時就報錯，不跑。"""
 
 
 @dataclass(frozen=True)
 class Settings:
     grafana_url: str
-    grafana_token: str
-    webhook_token: str
-    database_url: str = "sqlite:///aiops-lite.db"
+    grafana_token: str = field(repr=False)     # repr=False：設定被印進 log 或例外訊息時不會洩漏
+    webhook_token: str = field(repr=False)
+    database_url: str = field(default="sqlite:///aiops-lite.db", repr=False)  # 連線字串裡有密碼
     port: int = 8080
     llm_api_url: str = ""
-    llm_api_key: str = ""
+    llm_api_key: str = field(default="", repr=False)
     llm_model: str = ""
     es_datasource_uid: str = ""
     log_index: str = "*"
     trace_index: str = ""
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
+    log_fields: LogFields = LogFields()
+    trace_fields: TraceFields = TraceFields()
     tz: str = "Asia/Taipei"
+    log_level: str = "INFO"
     debounce_seconds: int = TIMING_DEFAULTS["debounce_seconds"]
     followup_seconds: int = TIMING_DEFAULTS["followup_seconds"]
     close_after_seconds: int = TIMING_DEFAULTS["close_after_seconds"]
     edges: tuple[tuple[str, str], ...] = ()
 
     @classmethod
-    def load(cls, env: Mapping[str, str]) -> "Settings":
-        missing = [k for k in ("GRAFANA_URL", "GRAFANA_TOKEN", "AIOPS_WEBHOOK_TOKEN") if not env.get(k)]
+    def load(cls, path: str | None = None) -> "Settings":
+        """讀 config.yaml。path 沒給就看環境變數 AIOPS_CONFIG_FILE，再沒有就用 /etc/aiops/config.yaml。"""
+        return cls.from_dict(read_config(path or os.environ.get(CONFIG_ENV) or DEFAULT_CONFIG_PATH))
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "Settings":
+        known = {"grafana", "webhook", "database", "llm", "es", "timezone", "log_level", "edges", *TIMING_DEFAULTS}
+        check_keys(raw, known, "")
+        grafana = section(raw, "grafana", {"url", "token"})
+        webhook = section(raw, "webhook", {"token", "port"})
+        database = section(raw, "database", {"url"})
+        llm = section(raw, "llm", {"url", "api_key", "model"})
+        es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields"})
+        missing = [name for name, value in (("grafana.url", grafana.get("url")), ("grafana.token", grafana.get("token")),
+                                            ("webhook.token", webhook.get("token"))) if not value]
         if missing:
-            raise ConfigError(f"缺少環境變數：{'、'.join(missing)}")
-        tz = env.get("AIOPS_TZ") or cls.tz
+            raise ConfigError(f"缺少必填設定：{'、'.join(missing)}")
+        tz = text(raw, "timezone", "Asia/Taipei")
         try:
             ZoneInfo(tz)
         except (KeyError, ValueError):
-            raise ConfigError(f"AIOPS_TZ={tz!r} 不是合法時區") from None
-        try:
-            port = int(env.get("AIOPS_PORT") or cls.port)
-        except ValueError:
-            raise ConfigError(f"AIOPS_PORT={env.get('AIOPS_PORT')!r} 不是整數") from None
-        ids = tuple(f.strip() for f in (env.get("AIOPS_ID_FIELDS") or ",".join(cls.id_fields)).split(",") if f.strip())
+            raise ConfigError(f"timezone={tz!r} 不是合法時區") from None
+        level = text(raw, "log_level", "INFO").upper()
+        if level not in LOG_LEVELS:
+            raise ConfigError(f"log_level={level!r} 要是 {'、'.join(LOG_LEVELS)} 其中之一")
+        port = webhook.get("port", 8080)
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConfigError(f"webhook.port={port!r} 要是 1～65535 的整數")
+        ids = es.get("id_fields", list(cls.id_fields))
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids):
+            raise ConfigError("es.id_fields 要是非空的欄位名稱清單")
+        timing = {}
+        for key, default in TIMING_DEFAULTS.items():
+            value = raw.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, int) or value < TIMING_MINIMUM[key]:
+                raise ConfigError(f"{key}={value!r} 要是 {TIMING_MINIMUM[key]} 以上的整數（秒）")
+            timing[key] = value
         return cls(
-            grafana_url=env["GRAFANA_URL"], grafana_token=env["GRAFANA_TOKEN"],
-            webhook_token=env["AIOPS_WEBHOOK_TOKEN"], database_url=env.get("DATABASE_URL") or cls.database_url,
-            port=port, llm_api_url=env.get("LLM_API_URL", ""), llm_api_key=env.get("LLM_API_KEY", ""),
-            llm_model=env.get("LLM_MODEL", ""), es_datasource_uid=env.get("AIOPS_ES_DATASOURCE_UID", ""),
-            log_index=env.get("AIOPS_LOG_INDEX") or cls.log_index, trace_index=env.get("AIOPS_TRACE_INDEX", ""),
-            id_fields=ids, tz=tz, **load_config(env.get("AIOPS_CONFIG_FILE") or "/etc/aiops-lite/config.yaml"))
+            grafana_url=text(grafana, "url", "", "grafana."), grafana_token=text(grafana, "token", "", "grafana."),
+            webhook_token=text(webhook, "token", "", "webhook."), port=port,
+            database_url=text(database, "url", cls.database_url, "database."),
+            llm_api_url=text(llm, "url", "", "llm."), llm_api_key=text(llm, "api_key", "", "llm."),
+            llm_model=text(llm, "model", "", "llm."),
+            es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es."),
+            trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(i.strip() for i in ids),
+            log_fields=field_map(es, "log_fields", LogFields), trace_fields=field_map(es, "trace_fields", TraceFields),
+            tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])), **timing)
 
 
-def load_config(path: str) -> dict[str, Any]:
-    """讀 YAML 設定檔，回傳 {debounce_seconds, followup_seconds, close_after_seconds, edges}。
-    檔案不存在 = 全部用預設值、沒有關係邊；寫錯（打錯鍵名、不是整數、邊不是一對名稱）直接報錯。"""
+def read_config(path: str) -> dict[str, Any]:
     file = Path(path)
-    raw: Any = {}
-    if file.exists():
-        try:
-            raw = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as e:
-            raise ConfigError(f"設定檔 {path} 不是合法的 YAML：{e}") from e
+    if not file.exists():
+        raise ConfigError(f"找不到設定檔 {path}（範例見 config.example.yaml；要換位置用環境變數 {CONFIG_ENV}）")
+    try:
+        raw = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise ConfigError(f"設定檔 {path} 不是合法的 YAML：{e}") from e
     if not isinstance(raw, dict):
         raise ConfigError(f"設定檔 {path} 最外層要是物件")
-    unknown = sorted(set(raw) - set(TIMING_DEFAULTS) - {"edges"})
+    return raw
+
+
+def check_keys(raw: dict[str, Any], known: set[str], where: str) -> None:
+    unknown = sorted(set(raw) - known)
     if unknown:
-        raise ConfigError(f"設定檔 {path} 有不認得的設定 {unknown}；可用：{sorted([*TIMING_DEFAULTS, 'edges'])}")
-    out: dict[str, Any] = {}
-    for key, default in TIMING_DEFAULTS.items():
-        value = raw.get(key, default)
-        if isinstance(value, bool) or not isinstance(value, int) or value < TIMING_MINIMUM[key]:
-            raise ConfigError(f"設定檔的 {key}={value!r} 要是 {TIMING_MINIMUM[key]} 以上的整數（秒）")
-        out[key] = value
-    items = raw.get("edges", [])
+        raise ConfigError(f"設定檔{('的 ' + where + ' ') if where else ''}有不認得的設定 {unknown}；可用：{sorted(known)}")
+
+
+def section(raw: dict[str, Any], name: str, known: set[str]) -> dict[str, Any]:
+    value = raw.get(name) or {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name} 要是一組設定（物件）")
+    check_keys(value, known, name)
+    return value
+
+
+def text(raw: dict[str, Any], key: str, default: str, prefix: str = "") -> str:
+    value = raw.get(key, default)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ConfigError(f"{prefix}{key}={value!r} 要是文字（數字開頭的密鑰請加引號）")
+    return value.strip()
+
+
+def field_map(es: dict[str, Any], key: str, cls: type) -> Any:
+    raw = es.get(key) or {}
+    names = {f.name for f in fields(cls)}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"es.{key} 要是 欄位用途: 欄位名稱 的對照")
+    check_keys(raw, names, f"es.{key}")
+    values = {k: text(raw, k, getattr(cls(), k), f"es.{key}.") for k in raw}
+    if not all(values.values()):
+        raise ConfigError(f"es.{key} 的欄位名稱不能是空的")
+    return cls(**values)
+
+
+def parse_edges(items: Any) -> tuple[tuple[str, str], ...]:
     if not isinstance(items, list):
-        raise ConfigError("設定檔的 edges 要是清單")
+        raise ConfigError("edges 要是清單")
     edges = []
     for item in items:
         pair = [p.strip() for p in item.split("->")] if isinstance(item, str) else item
@@ -126,8 +174,7 @@ def load_config(path: str) -> dict[str, Any]:
                 or pair[0].strip() == pair[1].strip()):
             raise ConfigError(f"關係邊 {item!r} 寫錯：要是 [上游, 下游] 兩個不同的系統名稱")
         edges.append((pair[0].strip(), pair[1].strip()))
-    out["edges"] = tuple(edges)
-    return out
+    return tuple(edges)
 
 
 def split_batch(alerts: list[grouping.Alert]) -> tuple[list[grouping.Alert], list[grouping.Alert]]:
@@ -167,7 +214,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             if inc.status == "open" and (inc.fresh or not inc.summary or (can_analyze and not inc.analyzed)):
                 evidence = rca.collect_evidence(
                     inc, edges, grafana, es_datasource_uid=settings.es_datasource_uid, log_index=settings.log_index,
-                    trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now)
+                    trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
+                    log_fields=settings.log_fields, trace_fields=settings.trace_fields)
                 before = (inc.summary, inc.analyzed)
                 inc.summary, inc.analyzed, reason = rca.analyze(
                     inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
@@ -213,9 +261,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
     return summary
 
 
-def setup_logging() -> None:
-    logging.basicConfig(level=os.environ.get("AIOPS_LOG_LEVEL", "INFO"),
-                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+def setup_logging(level: str = "INFO") -> None:
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s %(message)s", force=True)
     logging.getLogger("httpx").setLevel(logging.WARNING)  # 每個 HTTP 請求一行太吵；錯誤我們自己會記
 
 
@@ -229,7 +276,9 @@ def log_summary(summary: dict[str, Any]) -> None:
 def main() -> int:
     setup_logging()
     try:
-        log_summary(process(Settings.load(os.environ)))
+        settings = Settings.load()
+        setup_logging(settings.log_level)
+        log_summary(process(settings))
     except ConfigError as e:
         log.error("設定錯誤：%s", e)
         return 2
