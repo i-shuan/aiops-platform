@@ -59,7 +59,6 @@ rounds = sa.Table(
     sa.Column("errors", sa.Text, nullable=False, default="[]"),  # JSON 陣列（字串）
 )
 
-ROUND_RETENTION = timedelta(days=90)
 MEMBER_TIMES = ("starts_at", "ends_at")
 
 
@@ -176,9 +175,9 @@ class Database:
     # ── 執行紀錄 ──
 
     def record_round(self, *, started_at: datetime, finished_at: datetime, status: str, alerts: int,
-                     open_incidents: int, errors: list[str]) -> None:
+                     open_incidents: int, errors: list[str], retention_days: int = 90) -> None:
         with self.engine.begin() as conn:
             conn.execute(sa.insert(rounds).values(
                 started_at=started_at, finished_at=finished_at, status=status, alerts=alerts,
                 open_incidents=open_incidents, errors=json.dumps(errors, ensure_ascii=False)))
-            conn.execute(sa.delete(rounds).where(rounds.c.started_at < started_at - ROUND_RETENTION))
+            conn.execute(sa.delete(rounds).where(rounds.c.started_at < started_at - timedelta(days=retention_days)))

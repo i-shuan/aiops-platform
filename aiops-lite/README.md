@@ -58,6 +58,8 @@ edges:
   - [mq-broker, cim-eap]  # [上游, 下游]
 ```
 
+- **進階調整**（逾時、重試、ES 筆數上限、錯誤等級的值、給 LLM 的樣本數、提示詞、幻覺檢查樣式、標籤名稱、健康檢查門檻…）
+  也都在這份檔案，全部選填；`config.example.yaml` 裡用 `#` 註解掉的就是。完整清單、預設值、範圍，以及哪些東西刻意不開放設定，見 **`CONFIG.md`**。
 - **啟動時嚴格檢查**：檔案不存在、鍵名打錯（任何一層）、型別不對、必填沒填，直接報錯、不啟動。數字開頭的密鑰要加引號。
 - **日誌與 Trace 的欄位名稱可以改**（`es.log_fields`、`es.trace_fields`）：查詢條件、排序、讀回來的內容都照這裡的名稱；沒寫的用預設值。
 - **檔案裡有 Token 與密碼，不要推上 Git**：`config.yaml` 已在 `.gitignore` 與 `.dockerignore`，專案裡只有 `config.example.yaml`。
@@ -68,22 +70,22 @@ edges:
 
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
-| `src/server.py` | 217 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 291 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
-| `src/grafana.py` | 186 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
-| `src/grouping.py` | 164 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/rca.py` | 173 | 不寫推理演算法：收集 4 包證據、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
-| `src/report.py` | 60 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
-| `src/db.py` | 166 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
+| `src/server.py` | 218 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
+| `src/main.py` | 425 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
+| `src/grafana.py` | 200 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/grouping.py` | 166 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
+| `src/rca.py` | 206 | 不寫推理演算法：收集 4 包證據、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/report.py` | 59 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
+| `src/db.py` | 183 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
 
-合計約 1,257 行。
+合計約 1,457 行。
 
 ## 各系統要做的事（平台零直連）
 
 1. 把資料送進公司 Grafana 看得到的資料源：MQ 掛 Prometheus exporter；CIM 用日誌收集器做 Log 轉指標；AMHS 開唯讀 View 給
    Grafana 的 SQL 資料源。錯誤日誌進 ES，帶 `service.name`、`log.level`、`message`、`@timestamp`，以及有的話 `eqp_id`／`lot_id`／`carrier_id`。
 2. 在 Grafana 建告警規則（閾值自己定）並貼標籤：`aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名稱>`
-   （要跟關係邊裡的名稱一樣）。沒有 `service` 的告警會被略過並回報給送出端；`aiops_severity` 寫錯當成 P3。
+   （要跟關係邊裡的名稱一樣）。這三個標籤名稱是預設值，可以在 config.yaml 的 `labels` 改。沒有 `service` 的告警會被略過並回報給送出端；`aiops_severity` 寫錯當成 P3。
 
 ## Grafana 要做的設定
 
@@ -159,6 +161,7 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 
 `grafana.url`、`grafana.token`、`webhook.token`、`postgres.password` 沒填，`helm template` 會直接報錯。
 `database.url` 留空 = 連 chart 自帶的 PostgreSQL；要連外部資料庫才填。
+進階的選填設定寫在 values 的 `extraConfig`（結構跟 config.yaml 一樣）；自訂提示詞填 `llm.systemPrompt`。
 
 **本機**：`cp config.example.yaml config.yaml`，填好之後 `AIOPS_CONFIG_FILE=config.yaml python -m src.server`
 （預設 SQLite、port 8080）。`python -m src.main` 會立刻處理 inbox 裡的告警一輪（不等 debounce，除錯用）。
@@ -169,7 +172,7 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 ## 驗證狀態（照實寫）
 
 做過的：
-- 104 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
+- 162 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
   常駐服務的測試真的起 HTTP 服務、連發 Webhook。
 - 對真的 Grafana 13.0.7 + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本控制的**）：
   三條規則各隔 20 秒越線，Grafana 在 43 秒內陸續推了 3 個 Webhook；aiops-lite 在第一個 Webhook 後整整 60 秒才跑第一輪，

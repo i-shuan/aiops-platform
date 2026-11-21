@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
@@ -28,7 +29,7 @@ import yaml
 
 from src import grouping, rca, report
 from src.db import Database
-from src.grafana import Grafana, GrafanaError, LogFields, TraceFields
+from src.grafana import Grafana, GrafanaError, LabelNames, LogFields, TraceFields
 
 log = logging.getLogger("aiops_lite")
 
@@ -50,10 +51,15 @@ class Settings:
     webhook_token: str = field(repr=False)
     database_url: str = field(default="sqlite:///aiops-lite.db", repr=False)  # 連線字串裡有密碼
     port: int = 8080
+    webhook_host: str = "0.0.0.0"
+    webhook_max_body_bytes: int = 1_000_000
+    grafana_timeout_seconds: float = 30.0
+    grafana_retries: int = 2
+    grafana_retry_backoff_seconds: float = 0.5
     llm_api_url: str = ""
     llm_api_key: str = field(default="", repr=False)
     llm_model: str = ""
-    llm_temperature: float | None = None   # 沒寫 = 不送，用模型的預設值
+    llm: rca.LlmOptions = rca.LlmOptions()
     llm_retry_initial_seconds: int = 60
     llm_retry_max_seconds: int = 1800
     es_datasource_uid: str = ""
@@ -62,27 +68,42 @@ class Settings:
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
     log_fields: LogFields = LogFields()
     trace_fields: TraceFields = TraceFields()
+    evidence: rca.EvidenceLimits = rca.EvidenceLimits()
+    labels: LabelNames = LabelNames()
     tz: str = "Asia/Taipei"
     log_level: str = "INFO"
     debounce_seconds: int = TIMING_DEFAULTS["debounce_seconds"]
     followup_seconds: int = TIMING_DEFAULTS["followup_seconds"]
     close_after_seconds: int = TIMING_DEFAULTS["close_after_seconds"]
+    retry_failed_round_seconds: int = 30       # 一輪失敗（資料庫斷線）之後多久再試
+    healthcheck_stuck_seconds: int = 600       # 同一輪跑超過這麼久，/healthz 回 503
+    rounds_retention_days: int = 90            # rounds 表保留幾天
+    annotation_max_rule_links: int = 5         # 註記第 3 行最多列幾條規則連結
     edges: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def load(cls, path: str | None = None) -> "Settings":
         """讀 config.yaml。path 沒給就看環境變數 AIOPS_CONFIG_FILE，再沒有就用 /etc/aiops/config.yaml。"""
-        return cls.from_dict(read_config(path or os.environ.get(CONFIG_ENV) or DEFAULT_CONFIG_PATH))
+        path = path or os.environ.get(CONFIG_ENV) or DEFAULT_CONFIG_PATH
+        return cls.from_dict(read_config(path), base_dir=Path(path).parent)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "Settings":
-        known = {"grafana", "webhook", "database", "llm", "es", "timezone", "log_level", "edges", *TIMING_DEFAULTS}
+    def from_dict(cls, raw: dict[str, Any], base_dir: Path | None = None) -> "Settings":
+        """base_dir：llm.system_prompt_file 寫相對路徑時相對於哪裡（= 設定檔所在的資料夾）。"""
+        known = {"grafana", "webhook", "database", "llm", "es", "labels", "healthcheck", "annotation", "timezone",
+                 "log_level", "edges", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
         check_keys(raw, known, "")
-        grafana = section(raw, "grafana", {"url", "token"})
-        webhook = section(raw, "webhook", {"token", "port"})
+        grafana = section(raw, "grafana", {"url", "token", "timeout_seconds", "retries", "retry_backoff_seconds"})
+        webhook = section(raw, "webhook", {"token", "port", "host", "max_body_bytes"})
         database = section(raw, "database", {"url"})
-        llm = section(raw, "llm", {"url", "api_key", "model", "temperature", "retry_initial_seconds", "retry_max_seconds"})
-        es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields"})
+        llm = section(raw, "llm", {"url", "api_key", "model", "temperature", "timeout_seconds", "retry_initial_seconds",
+                                   "retry_max_seconds", "max_log_samples", "max_trace_samples", "max_message_chars",
+                                   "top_ids", "max_summary_chars", "system_prompt_file", "id_pattern"})
+        es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields",
+                                 "error_levels", "error_statuses", "max_hits", "window_padding_minutes"})
+        labels = section(raw, "labels", {"detect", "severity", "service", "default_severity"})
+        health = section(raw, "healthcheck", {"stuck_seconds"})
+        annotation = section(raw, "annotation", {"max_rule_links"})
         missing = [name for name, value in (("grafana.url", grafana.get("url")), ("grafana.token", grafana.get("token")),
                                             ("webhook.token", webhook.get("token"))) if not value]
         if missing:
@@ -95,41 +116,111 @@ class Settings:
         level = text(raw, "log_level", "INFO").upper()
         if level not in LOG_LEVELS:
             raise ConfigError(f"log_level={level!r} 要是 {'、'.join(LOG_LEVELS)} 其中之一")
-        port = webhook.get("port", 8080)
-        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-            raise ConfigError(f"webhook.port={port!r} 要是 1～65535 的整數")
+        d_ev, d_llm, d_lab = rca.EvidenceLimits(), rca.LlmOptions(), LabelNames()
+        default_severity = text(labels, "default_severity", d_lab.default_severity, "labels.").upper()
+        if default_severity not in grouping.SEVERITY_RANK:
+            raise ConfigError(f"labels.default_severity={default_severity!r} 要是 P0～P3")
+        names = LabelNames(**{k: text(labels, k, getattr(d_lab, k), "labels.") for k in ("detect", "severity", "service")},
+                           default_severity=default_severity)
+        if not all((names.detect, names.severity, names.service)) or len({names.detect, names.severity, names.service}) < 3:
+            raise ConfigError("labels.detect、labels.severity、labels.service 要是三個不同、非空的標籤名稱")
+        temperature = llm.get("temperature")
+        if temperature is not None:
+            temperature = number(llm, "temperature", 0.0, 0, 2, "llm.")
+        id_pattern = text(llm, "id_pattern", d_llm.id_pattern, "llm.")
+        try:
+            re.compile(id_pattern)
+        except re.error as e:
+            raise ConfigError(f"llm.id_pattern 不是合法的正規表示式：{e}") from None
+        retry_initial = integer(llm, "retry_initial_seconds", cls.llm_retry_initial_seconds, 1, prefix="llm.")
+        retry_max = integer(llm, "retry_max_seconds", cls.llm_retry_max_seconds, 1, prefix="llm.")
+        if retry_max < retry_initial:
+            raise ConfigError("llm.retry_max_seconds 不能比 llm.retry_initial_seconds 小")
         ids = es.get("id_fields", list(cls.id_fields))
         if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids):
             raise ConfigError("es.id_fields 要是非空的欄位名稱清單")
-        temperature = llm.get("temperature")
-        if temperature is not None and (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
-                                        or not 0 <= temperature <= 2):
-            raise ConfigError(f"llm.temperature={temperature!r} 要是 0～2 的數字（不寫 = 用模型的預設值）")
-        retry = {}
-        for key, default in (("retry_initial_seconds", cls.llm_retry_initial_seconds),
-                             ("retry_max_seconds", cls.llm_retry_max_seconds)):
-            value = llm.get(key, default)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ConfigError(f"llm.{key}={value!r} 要是 1 以上的整數（秒）")
-            retry[f"llm_{key}"] = value
-        if retry["llm_retry_max_seconds"] < retry["llm_retry_initial_seconds"]:
-            raise ConfigError("llm.retry_max_seconds 不能比 llm.retry_initial_seconds 小")
-        timing = {}
-        for key, default in TIMING_DEFAULTS.items():
-            value = raw.get(key, default)
-            if isinstance(value, bool) or not isinstance(value, int) or value < TIMING_MINIMUM[key]:
-                raise ConfigError(f"{key}={value!r} 要是 {TIMING_MINIMUM[key]} 以上的整數（秒）")
-            timing[key] = value
         return cls(
             grafana_url=text(grafana, "url", "", "grafana."), grafana_token=text(grafana, "token", "", "grafana."),
-            webhook_token=text(webhook, "token", "", "webhook."), port=port,
-            database_url=text(database, "url", cls.database_url, "database."),
+            grafana_timeout_seconds=number(grafana, "timeout_seconds", cls.grafana_timeout_seconds, 1, 600, "grafana."),
+            grafana_retries=integer(grafana, "retries", cls.grafana_retries, 0, 10, "grafana."),
+            grafana_retry_backoff_seconds=number(grafana, "retry_backoff_seconds", cls.grafana_retry_backoff_seconds,
+                                                 0, 60, "grafana."),
+            webhook_token=text(webhook, "token", "", "webhook."),
+            port=integer(webhook, "port", cls.port, 1, 65535, "webhook."),
+            webhook_host=text(webhook, "host", cls.webhook_host, "webhook.") or cls.webhook_host,
+            webhook_max_body_bytes=integer(webhook, "max_body_bytes", cls.webhook_max_body_bytes, 1024, prefix="webhook."),
+            database_url=text(database, "url", cls.database_url, "database.") or cls.database_url,
             llm_api_url=text(llm, "url", "", "llm."), llm_api_key=text(llm, "api_key", "", "llm."),
             llm_model=text(llm, "model", "", "llm."),
-            es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es."),
+            llm=rca.LlmOptions(
+                timeout_seconds=number(llm, "timeout_seconds", d_llm.timeout_seconds, 1, 3600, "llm."),
+                temperature=temperature,
+                max_summary_chars=integer(llm, "max_summary_chars", d_llm.max_summary_chars, 20, prefix="llm."),
+                system_prompt=read_prompt(text(llm, "system_prompt_file", "", "llm."), base_dir),
+                id_pattern=id_pattern),
+            llm_retry_initial_seconds=retry_initial, llm_retry_max_seconds=retry_max,
+            es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es.") or "*",
             trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(i.strip() for i in ids),
             log_fields=field_map(es, "log_fields", LogFields), trace_fields=field_map(es, "trace_fields", TraceFields),
-            tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])), llm_temperature=None if temperature is None else float(temperature), **retry, **timing)
+            evidence=rca.EvidenceLimits(
+                max_hits=integer(es, "max_hits", d_ev.max_hits, 1, 10000, "es."),
+                window_padding_minutes=integer(es, "window_padding_minutes", d_ev.window_padding_minutes, 0, 1440, "es."),
+                error_levels=words(es, "error_levels", d_ev.error_levels), error_statuses=words(es, "error_statuses", d_ev.error_statuses),
+                max_log_samples=integer(llm, "max_log_samples", d_ev.max_log_samples, 0, prefix="llm."),
+                max_trace_samples=integer(llm, "max_trace_samples", d_ev.max_trace_samples, 0, prefix="llm."),
+                max_message_chars=integer(llm, "max_message_chars", d_ev.max_message_chars, 20, prefix="llm."),
+                top_ids=integer(llm, "top_ids", d_ev.top_ids, 1, prefix="llm.")),
+            labels=names, tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])),
+            retry_failed_round_seconds=integer(raw, "retry_failed_round_seconds", cls.retry_failed_round_seconds, 1),
+            healthcheck_stuck_seconds=integer(health, "stuck_seconds", cls.healthcheck_stuck_seconds, 30, prefix="healthcheck."),
+            rounds_retention_days=integer(raw, "rounds_retention_days", cls.rounds_retention_days, 1),
+            annotation_max_rule_links=integer(annotation, "max_rule_links", cls.annotation_max_rule_links, 0, prefix="annotation."),
+            **{key: integer(raw, key, default, TIMING_MINIMUM[key]) for key, default in TIMING_DEFAULTS.items()})
+
+
+def integer(raw: dict[str, Any], key: str, default: int, minimum: int, maximum: int | None = None, prefix: str = "") -> int:
+    value = raw.get(key)
+    if value is None:
+        return default
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)  # Helm 產生的 YAML 會把整數寫成 60.0 這種形式
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or (maximum is not None and value > maximum):
+        limit = f"{minimum}～{maximum}" if maximum is not None else f"{minimum} 以上"
+        raise ConfigError(f"{prefix}{key}={value!r} 要是 {limit} 的整數")
+    return value
+
+
+def number(raw: dict[str, Any], key: str, default: float, minimum: float, maximum: float, prefix: str = "") -> float:
+    value = raw.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum:
+        raise ConfigError(f"{prefix}{key}={value!r} 要是 {minimum}～{maximum} 的數字")
+    return float(value)
+
+
+def words(es: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = es.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, list) or not value or not all(isinstance(v, str) and v.strip() for v in value):
+        raise ConfigError(f"es.{key} 要是非空的文字清單（大小寫不同要分開列）")
+    return tuple(v.strip() for v in value)
+
+
+def read_prompt(path: str, base_dir: Path | None) -> str:
+    """讀 llm.system_prompt_file。提示詞一定要保留輸出格式（summary／systems／ids 的 JSON），不然回答解析不了。"""
+    if not path:
+        return ""
+    file = Path(path) if Path(path).is_absolute() or base_dir is None else base_dir / path
+    if not file.exists():
+        raise ConfigError(f"llm.system_prompt_file 指到的檔案不存在：{file}")
+    prompt = file.read_text(encoding="utf-8").strip()
+    lacking = [word for word in ("summary", "systems", "ids") if word not in prompt]
+    if lacking:
+        raise ConfigError(f"llm.system_prompt_file 的提示詞少了輸出格式的欄位名稱 {lacking}："
+                          f"必須要求模型只輸出含 summary、systems、ids 的 JSON（照 src/rca.py 的 SYSTEM_PROMPT 改）")
+    return prompt
 
 
 def read_config(path: str) -> dict[str, Any]:
@@ -217,7 +308,9 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
     now = (now or started).astimezone(timezone.utc)
     edges = list(settings.edges)
     db = Database(settings.database_url)
-    grafana = Grafana(settings.grafana_url, settings.grafana_token, transport=grafana_transport)
+    grafana = Grafana(settings.grafana_url, settings.grafana_token, transport=grafana_transport,
+                      timeout=settings.grafana_timeout_seconds, retries=settings.grafana_retries,
+                      retry_backoff_seconds=settings.grafana_retry_backoff_seconds)
     errors: list[str] = []
     incidents: list[grouping.Incident] = []
     batch: list[grouping.Alert] = []
@@ -248,11 +341,11 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             evidence = rca.collect_evidence(
                 inc, edges, grafana, es_datasource_uid=settings.es_datasource_uid, log_index=settings.log_index,
                 trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
-                log_fields=settings.log_fields, trace_fields=settings.trace_fields)
+                log_fields=settings.log_fields, trace_fields=settings.trace_fields, limits=settings.evidence)
             before = (inc.summary, inc.analyzed)
             inc.summary, inc.analyzed, reason = rca.analyze(
                 inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
-                model=settings.llm_model, transport=llm_transport, temperature=settings.llm_temperature)
+                model=settings.llm_model, transport=llm_transport, options=settings.llm)
             if (inc.summary, inc.analyzed) != before:
                 inc.changed, inc.annotated = True, False
             if not can_analyze:
@@ -273,7 +366,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 continue
             try:
                 inc.annotation_id = grafana.upsert_annotation(
-                    inc.annotation_id, report.uid_tag(inc.uid), report.render(inc, settings.grafana_url, settings.tz))
+                    inc.annotation_id, report.uid_tag(inc.uid), report.render(inc, settings.grafana_url, settings.tz,
+                                                                        settings.annotation_max_rule_links))
                 inc.annotated = True
                 written.append(inc)
             except GrafanaError as e:
@@ -292,7 +386,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                    "needs_followup": open_count > 0 or any(not i.annotated for i in incidents)}
         try:
             db.record_round(started_at=started, finished_at=datetime.now(timezone.utc), status=status,
-                            alerts=len(batch), open_incidents=open_count, errors=errors)
+                            alerts=len(batch), open_incidents=open_count, errors=errors,
+                            retention_days=settings.rounds_retention_days)
         except Exception:  # 連執行紀錄都寫不進去（資料庫斷線）：留一行 log，不蓋掉原本的錯誤
             log.exception("這一輪的執行紀錄寫不進資料庫")
         grafana.close()

@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 from src.grouping import SEVERITY_RANK, Incident
 
-MAX_LINKS = 5
 STATUS_TEXT = {"open": "進行中", "closed": "已結案"}
 
 
@@ -33,7 +32,7 @@ def rule_link(grafana_url: str, rule_uid: str, title: str) -> str:
     return f'<a href="{html.escape(href, quote=True)}" target="_blank">{html.escape(title)}</a>'
 
 
-def render(incident: Incident, grafana_url: str, tz: str) -> dict[str, Any]:
+def render(incident: Incident, grafana_url: str, tz: str, max_links: int = 5) -> dict[str, Any]:
     """回傳 POST／PATCH /api/annotations 的內容（time、timeEnd、tags、text）。"""
     line1 = (f"【{incident.severity}・{STATUS_TEXT[incident.status]}】"
              f"受影響系統：{html.escape('、'.join(incident.services))}｜收斂告警 {incident.alert_count} 筆")
@@ -45,8 +44,8 @@ def render(incident: Incident, grafana_url: str, tz: str) -> dict[str, Any]:
         key = (m["rule_uid"], m["title"])
         rules[key] = min(rules.get(key, m["severity"]), m["severity"], key=SEVERITY_RANK.__getitem__)
     ranked = sorted(rules.items(), key=lambda kv: (SEVERITY_RANK[kv[1]], kv[0][1]))
-    links = "、".join(rule_link(grafana_url, uid, f"{title}（{sev}）") for (uid, title), sev in ranked[:MAX_LINKS])
-    more = f" 等 {len(ranked)} 條" if len(ranked) > MAX_LINKS else ""
+    links = "、".join(rule_link(grafana_url, uid, f"{title}（{sev}）") for (uid, title), sev in ranked[:max_links])
+    more = f" 等 {len(ranked)} 條" if len(ranked) > max_links else ""
     line3 = f"{span}｜調整優先權：{links}{more}"
     return {
         "time": int(incident.started_at.timestamp() * 1000),

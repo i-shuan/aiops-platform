@@ -209,14 +209,14 @@ def test_temperature_is_not_sent_unless_configured(fake):
     rca.analyze(incident(), evidence(fake), transport=transport, **LLM)
     assert "temperature" not in json.loads(seen[0].content)
     transport, seen = llm(GOOD)
-    rca.analyze(incident(), evidence(fake), transport=transport, temperature=0.2, **LLM)
+    rca.analyze(incident(), evidence(fake), transport=transport, options=rca.LlmOptions(temperature=0.2), **LLM)
     assert json.loads(seen[0].content)["temperature"] == 0.2
     transport, seen = llm(GOOD)
-    rca.analyze(incident(), evidence(fake), transport=transport, temperature=0, **LLM)  # 0 是合法值，不能被當成「沒設」
+    rca.analyze(incident(), evidence(fake), transport=transport, options=rca.LlmOptions(temperature=0), **LLM)  # 0 是合法值，不能被當成「沒設」
     assert json.loads(seen[0].content)["temperature"] == 0
 
 
 def test_a_model_rejecting_the_request_falls_back_and_the_reason_names_the_problem(fake):
     rejecting = httpx.MockTransport(lambda r: httpx.Response(400, json={"error": {"message": "Unsupported value: 'temperature'"}}))
-    line, analyzed, reason = rca.analyze(incident(), evidence(fake), transport=rejecting, temperature=0, **LLM)
+    line, analyzed, reason = rca.analyze(incident(), evidence(fake), transport=rejecting, options=rca.LlmOptions(temperature=0), **LLM)
     assert not analyzed and "400" in reason and line.startswith("[未經分析]")

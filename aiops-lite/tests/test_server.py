@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -60,7 +61,7 @@ def test_zero_debounce_runs_immediately():
 def live(fake, db_url):
     settings = Settings(grafana_url="http://grafana.test", grafana_token="t", webhook_token="hook-secret",
                         database_url=db_url, port=0, debounce_seconds=1, followup_seconds=1,
-                        close_after_seconds=0, edges=(("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")))
+                        close_after_seconds=0, retry_failed_round_seconds=1, edges=(("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")))
     summaries = []
 
     def run_round():
@@ -71,8 +72,8 @@ def live(fake, db_url):
 
     started = []
 
-    def start():
-        server, worker, db = serve(settings, host="127.0.0.1", run_round=run_round)
+    def start(override=None):  # override：同一個資料庫、換別的設定（測 webhook 相關的選填設定）
+        server, worker, db = serve(override or settings, host="127.0.0.1", run_round=run_round)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         started.append((server, worker, db))
@@ -199,7 +200,7 @@ def test_healthz_reports_a_round_that_is_stuck_and_recovers_when_it_finishes(liv
     _server, worker, _db = live.started[0]
     assert wait_for(lambda: worker.round_started is not None)       # debounce 到了，這一輪開始跑、然後卡住
     assert httpx.get(f"{url}/healthz").status_code == 200           # 還在正常的執行時間內：健康
-    monkeypatch.setattr(servermod, "STUCK_SECONDS", 0.2)
+    worker.settings = replace(worker.settings, healthcheck_stuck_seconds=0.2)
     time.sleep(0.4)
     r = httpx.get(f"{url}/healthz")                                 # 工作執行緒還活著（is_alive），但卡太久
     assert worker.is_alive() and r.status_code == 503 and r.json()["reason"].startswith("round stuck")
@@ -215,9 +216,21 @@ def test_a_failing_round_does_not_kill_the_worker(live, monkeypatch):
         calls.append(1)
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(servermod, "RETRY_SECONDS", 0.2)
     monkeypatch.setattr("tests.test_server.process", boom)
     url = live.start()
     httpx.post(f"{url}/webhook", json=webhook("firing_mq"), headers=AUTH)
     assert wait_for(lambda: len(calls) >= 2)                        # 失敗後自己重試
     assert httpx.get(f"{url}/healthz").status_code == 200
+
+
+def test_configured_label_names_and_body_limit_are_used_by_the_webhook_endpoint(live):
+    from src.grafana import LabelNames
+    url = live.start(replace(live.settings, webhook_max_body_bytes=2000,
+                             labels=LabelNames(detect="managed_by_aiops", severity="priority", service="system")))
+    big = {**webhook("firing_mq"), "padding": "x" * 3000}
+    assert httpx.post(f"{url}/webhook", json=big, headers=AUTH).status_code == 413       # 超過設定的 2000 bytes
+    small = {"alerts": [{"status": "firing", "fingerprint": "f1", "startsAt": "2026-11-21T02:41:10Z",
+                         "labels": {"alertname": "MQ", "managed_by_aiops": "true", "priority": "P0", "system": "mq-broker"}}]}
+    assert httpx.post(f"{url}/webhook", json=small, headers=AUTH).json() == {"accepted": 1, "problems": []}
+    old_names = {"alerts": [{**small["alerts"][0], "labels": {"alertname": "MQ", "aiops_detect": "true", "service": "mq-broker"}}]}
+    assert httpx.post(f"{url}/webhook", json=old_names, headers=AUTH).json()["accepted"] == 0  # 預設的標籤名稱不再被認

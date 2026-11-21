@@ -189,9 +189,9 @@ def test_split_batch_keeps_alerts_that_fired_and_resolved_within_the_window():
 
 FULL_CONFIG = """
 grafana: {url: "https://grafana.corp", token: "glsa_x"}
-webhook: {token: "hook", port: 9090}
+webhook: {token: "wh-s3cret", port: 9090}
 database: {url: "postgresql+psycopg://u:p@db:5432/aiops"}
-llm: {url: "https://llm.corp/v1", api_key: "sk", model: "m"}
+llm: {url: "https://llm.corp/v1", api_key: "sk-s3cret", model: "m"}
 es:
   datasource_uid: "abc"
   log_index: "factory-logs"
@@ -219,9 +219,9 @@ def config(tmp_path, text):
 
 def test_every_setting_comes_from_the_one_yaml_file(tmp_path):
     s = Settings.load(config(tmp_path, FULL_CONFIG))
-    assert (s.grafana_url, s.grafana_token, s.webhook_token, s.port) == ("https://grafana.corp", "glsa_x", "hook", 9090)
+    assert (s.grafana_url, s.grafana_token, s.webhook_token, s.port) == ("https://grafana.corp", "glsa_x", "wh-s3cret", 9090)
     assert s.database_url == "postgresql+psycopg://u:p@db:5432/aiops"
-    assert (s.llm_api_url, s.llm_api_key, s.llm_model) == ("https://llm.corp/v1", "sk", "m")
+    assert (s.llm_api_url, s.llm_api_key, s.llm_model) == ("https://llm.corp/v1", "sk-s3cret", "m")
     assert (s.es_datasource_uid, s.log_index, s.trace_index, s.id_fields) == ("abc", "factory-logs", "factory-traces", ("eqp_id", "lot_id"))
     assert (s.log_fields.time, s.log_fields.service, s.log_fields.level, s.log_fields.message) == ("ts", "app", "severity", "msg")
     assert (s.trace_fields.service, s.trace_fields.span, s.trace_fields.status) == ("app", "operation", "status.code")  # 沒寫的用預設
@@ -259,7 +259,7 @@ def test_config_path_defaults_and_the_single_environment_variable(tmp_path, monk
 
 def test_secrets_do_not_appear_when_settings_are_printed(tmp_path):
     shown = repr(Settings.load(config(tmp_path, FULL_CONFIG)))
-    for secret in ("glsa_x", "hook", "sk", "u:p@db"):
+    for secret in ("glsa_x", "wh-s3cret", "sk-s3cret", "u:p@db"):
         assert secret not in shown
 
 
@@ -479,9 +479,9 @@ def test_retry_settings_default_and_can_be_changed(tmp_path):
 
 
 def test_llm_temperature_setting_is_optional_and_validated(tmp_path):
-    assert Settings.load(config(tmp_path, MINIMAL)).llm_temperature is None
-    assert Settings.load(config(tmp_path, MINIMAL + "llm: {temperature: 0}\n")).llm_temperature == 0.0
-    assert Settings.load(config(tmp_path, MINIMAL + "llm: {temperature: 0.7}\n")).llm_temperature == 0.7
+    assert Settings.load(config(tmp_path, MINIMAL)).llm.temperature is None
+    assert Settings.load(config(tmp_path, MINIMAL + "llm: {temperature: 0}\n")).llm.temperature == 0.0
+    assert Settings.load(config(tmp_path, MINIMAL + "llm: {temperature: 0.7}\n")).llm.temperature == 0.7
     for bad in ("-0.1", "3", "hot", "true"):
         with pytest.raises(ConfigError, match="llm.temperature"):
             Settings.load(config(tmp_path, MINIMAL + f"llm: {{temperature: {bad}}}\n"))
@@ -491,5 +491,6 @@ def test_configured_temperature_reaches_the_llm_request(world):
     from dataclasses import replace
     w = world
     w.receive("firing_mq")
-    w.run(64, settings=replace(w.settings, llm_temperature=0.3))
+    from src.rca import LlmOptions
+    w.run(64, settings=replace(w.settings, llm=LlmOptions(temperature=0.3)))
     assert w.llm_calls[0]["temperature"] == 0.3

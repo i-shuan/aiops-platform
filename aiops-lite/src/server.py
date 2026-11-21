@@ -6,7 +6,7 @@
 
   POST /webhook   Grafana Contact Point（Webhook）推告警進來，要帶 Authorization: Bearer <config.yaml 的 webhook.token>
                   先存進資料庫才回 200：存不進去回 503，Grafana 會重送
-  GET  /healthz   給 Kubernetes 探針用，不用 Token。工作執行緒死了、或同一輪跑超過 STUCK_SECONDS（卡死）回 503，
+  GET  /healthz   給 Kubernetes 探針用，不用 Token。工作執行緒死了、或同一輪跑超過 healthcheck.stuck_seconds（卡死）回 503，
                   K8s 連續失敗幾次就會重啟 Pod；HTTP 服務本身沒回應也一樣
 
 同一時間只會有一輪在跑（單一工作執行緒）；跑的途中進來的告警排進下一個視窗。有進行中事故時，沒有新 Webhook 也會每隔
@@ -31,11 +31,12 @@ from src.main import ConfigError, Settings, log_summary, process, setup_logging
 
 log = logging.getLogger("aiops_lite.server")
 
-MAX_BODY_BYTES = 1_000_000
-RETRY_SECONDS = 30  # 一輪失敗（資料庫斷線）之後多久再試
-# 一輪跑多久算卡死。正常的一輪是幾秒；最慢的情況是每個進行中事故各等一次 ES（30 秒 × 重試 3 次）與 LLM（60 秒逾時），
-# 所以抓 10 分鐘：寧可晚一點重啟，也不要把「LLM 很慢」當成卡死而砍掉正在跑的分析
-STUCK_SECONDS = 600
+# 這個檔案沒有寫死的門檻，都在 config.yaml（選填，預設值見 main.Settings）：
+#   webhook.max_body_bytes       Webhook 內容大小上限（1 MB）
+#   retry_failed_round_seconds   一輪失敗（資料庫斷線）之後多久再試（30 秒）
+#   healthcheck.stuck_seconds    一輪跑多久算卡死（600 秒）。正常的一輪是幾秒；最慢的情況是每個進行中事故各等一次 ES 與 LLM 的逾時，
+#                                所以預設抓 10 分鐘：寧可晚一點重啟，也不要把「LLM 很慢」當成卡死而砍掉正在跑的分析。
+#                                調大了 llm.timeout_seconds 的話這個也要跟著調大
 
 
 class Debounce:
@@ -99,7 +100,7 @@ class Worker(threading.Thread):
         if not self.is_alive():
             return "worker dead"
         started = self.round_started
-        if started is not None and self.clock() - started > STUCK_SECONDS:
+        if started is not None and self.clock() - started > self.settings.healthcheck_stuck_seconds:
             return f"round stuck for {int(self.clock() - started)}s"
         return None
 
@@ -120,7 +121,7 @@ class Worker(threading.Thread):
                 log_summary(summary)
                 delay = self.settings.followup_seconds if summary["needs_followup"] else None
             except Exception:  # process 已經記了完整的錯誤；告警還在 inbox，晚點再試
-                delay = RETRY_SECONDS
+                delay = self.settings.retry_failed_round_seconds
             self.round_started = None
             self.rounds += 1
             if delay is not None:
@@ -155,10 +156,10 @@ def make_handler(settings: Settings, db: Database, worker: Worker) -> type[BaseH
                 length = int(self.headers.get("Content-Length", ""))
             except ValueError:
                 return self._reply(411, {"error": "要有 Content-Length"})
-            if length > MAX_BODY_BYTES:
-                return self._reply(413, {"error": f"內容超過 {MAX_BODY_BYTES} bytes"})
+            if length > settings.webhook_max_body_bytes:
+                return self._reply(413, {"error": f"內容超過 {settings.webhook_max_body_bytes} bytes"})
             try:
-                alerts, problems = parse_webhook(json.loads(self.rfile.read(length)))
+                alerts, problems = parse_webhook(json.loads(self.rfile.read(length)), settings.labels)
             except (WebhookError, ValueError) as e:  # ValueError 含 JSON 解析失敗、時間格式不對
                 return self._reply(400, {"error": str(e)})
             for line in problems:
@@ -178,12 +179,12 @@ def make_handler(settings: Settings, db: Database, worker: Worker) -> type[BaseH
     return Handler
 
 
-def serve(settings: Settings, *, host: str = "0.0.0.0", run_round: Callable[[], dict[str, Any]] | None = None
+def serve(settings: Settings, *, host: str | None = None, run_round: Callable[[], dict[str, Any]] | None = None
           ) -> tuple[ThreadingHTTPServer, Worker, Database]:
     """起 HTTP 服務與工作執行緒，回傳 (server, worker, db)；呼叫端負責 server.serve_forever()。"""
     db = Database(settings.database_url)
     worker = Worker(settings, run_round or (lambda: process(settings)))
-    server = ThreadingHTTPServer((host, settings.port), make_handler(settings, db, worker))
+    server = ThreadingHTTPServer((host or settings.webhook_host, settings.port), make_handler(settings, db, worker))
     worker.start()
     ids, _alerts = db.pending()
     if ids or db.open_incidents() or db.unannotated_incidents():

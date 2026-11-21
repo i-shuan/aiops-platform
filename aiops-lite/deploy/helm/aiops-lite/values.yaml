@@ -42,6 +42,9 @@ llm:             # 整段留空 = 不分析，註記第 2 行是 [未經分析] 
   temperature: null         # null = 不送，用模型的預設值（有些模型只接受預設值）
   retryInitialSeconds: 60   # 分析失敗後第一次等多久再試；之後每失敗一次加倍，成功歸零
   retryMaxSeconds: 1800     # 退避的上限
+  # 自訂系統提示詞（多行文字）。留空 = 用程式內建的。必須保留「只輸出含 summary、systems、ids 的 JSON」，不然服務啟動時報錯。
+  # 有填的話 chart 會把它放進同一個 Secret 的 system_prompt.txt，並自動設好 llm.system_prompt_file。
+  systemPrompt: ""
 
 es:              # datasourceUid 留空 = RCA 沒有日誌證據
   datasourceUid: ""
@@ -53,6 +56,15 @@ es:              # datasourceUid 留空 = RCA 沒有日誌證據
 
 timezone: Asia/Taipei
 logLevel: INFO
+
+# 進階的選填設定：照 config.yaml 的結構寫，會合併進產生的 config.yaml（同名的鍵以這裡為準）。
+# 可用的鍵與預設值見 config.example.yaml 裡註解掉的那些行，以及 CONFIG.md。平常留空。例如：
+#   extraConfig:
+#     llm: {timeout_seconds: 180, id_pattern: "(EQP|LOT|FOUP)[-A-Z0-9]+"}
+#     es: {error_levels: [E, SEVERE], max_hits: 500}
+#     labels: {service: system}
+#     healthcheck: {stuck_seconds: 1200}
+extraConfig: {}
 
 # 事件驅動的時間設定（秒）。改了之後 helm upgrade 會自動重啟服務。
 timing:
