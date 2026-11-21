@@ -1,109 +1,132 @@
-"""跨系統收斂：同實體、拓撲鏈、併入進行中事故、嚴重度只升不降、連續 N 輪無異常結案。"""
+"""跨系統收斂：同實體、拓撲鏈、併入進行中事故、嚴重度只升不降、全部 resolved 並安靜一段時間才結案。"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from src.grouping import Signal, converge, group_signals
+from src.grouping import Alert, converge, group_alerts
 
 T0 = datetime(2026, 11, 21, 0, 0, tzinfo=timezone.utc)
 EDGES = [("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")]
 
 
-def sig(rule: str, service: str, severity: str = "P2", minute: int = 0, count: int = 3) -> Signal:
-    return Signal(rule, f"rule {rule}", service, severity, T0 + timedelta(minutes=minute),
-                  T0 + timedelta(minutes=minute + count - 1), count, 5.0, ("hourly_baseline",))
+def alert(fp: str, service: str, severity: str = "P2", second: int = 0, status: str = "firing") -> Alert:
+    return Alert(fp, status, f"rule-{fp}", f"rule {fp}", service, severity, T0 + timedelta(seconds=second),
+                 T0 + timedelta(seconds=second + 60) if status == "resolved" else None, {"A": 1})
+
+
+def done(fp: str, service: str = "x") -> Alert:
+    return alert(fp, service, status="resolved")
 
 
 def services(groups) -> list[list[str]]:
-    return [sorted({s.service for s in g}) for g in groups]
+    return [sorted({a.service for a in g}) for g in groups]
 
 
-def round_(open_, signals, edges=EDGES, blind=(), close_after=3):
-    return converge(open_, signals, edges, blind_services=set(blind), close_after_rounds=close_after)
+def round_(open_, firing=(), resolved=(), edges=EDGES, at=0, close_after=300):
+    return converge(open_, list(firing), list(resolved), edges, now=T0 + timedelta(seconds=at),
+                    close_after_seconds=close_after)
 
 
-def test_two_rules_on_the_same_service_are_one_group():
-    assert services(group_signals([sig("a", "cim-eap"), sig("b", "cim-eap")], [])) == [["cim-eap"]]
+def test_two_alerts_on_the_same_service_are_one_group():
+    assert services(group_alerts([alert("a", "cim-eap"), alert("b", "cim-eap")], [])) == [["cim-eap"]]
 
 
 def test_services_joined_by_an_edge_are_one_group_in_either_direction():
-    assert services(group_signals([sig("a", "cim-eap"), sig("b", "mq-broker")], EDGES)) == [["cim-eap", "mq-broker"]]
-    assert services(group_signals([sig("a", "mq-broker"), sig("b", "cim-eap")], EDGES)) == [["cim-eap", "mq-broker"]]
+    assert services(group_alerts([alert("a", "cim-eap"), alert("b", "mq-broker")], EDGES)) == [["cim-eap", "mq-broker"]]
+    assert services(group_alerts([alert("a", "mq-broker"), alert("b", "cim-eap")], EDGES)) == [["cim-eap", "mq-broker"]]
 
 
-def test_chain_is_followed_through_anomalous_services():
-    got = group_signals([sig("a", "amhs-mcs"), sig("b", "mq-broker"), sig("c", "cim-eap")], EDGES)
+def test_chain_is_followed_through_alerting_services_regardless_of_arrival_order():
+    """下游先響、上游晚響（門檻比較嚴的先到）：順序不影響結果。"""
+    got = group_alerts([alert("a", "amhs-mcs"), alert("b", "mq-broker", second=40), alert("c", "cim-eap", second=20)], EDGES)
     assert services(got) == [["amhs-mcs", "cim-eap", "mq-broker"]]
 
 
-def test_chain_is_not_followed_through_a_service_that_is_not_anomalous():
-    got = group_signals([sig("a", "amhs-mcs", minute=1), sig("b", "mq-broker")], EDGES)
+def test_chain_is_not_followed_through_a_service_without_alerts():
+    got = group_alerts([alert("a", "amhs-mcs", second=1), alert("b", "mq-broker")], EDGES)
     assert services(got) == [["mq-broker"], ["amhs-mcs"]]
 
 
 def test_unrelated_services_stay_separate_and_cycles_do_not_hang():
     cyc = EDGES + [("amhs-mcs", "mq-broker")]
-    got = group_signals([sig("a", "mq-broker"), sig("b", "erp", minute=2), sig("c", "amhs-mcs", minute=1)], cyc)
+    got = group_alerts([alert("a", "mq-broker"), alert("b", "erp", second=2), alert("c", "amhs-mcs", second=1)], cyc)
     assert services(got) == [["amhs-mcs", "mq-broker"], ["erp"]]
 
 
-def test_new_group_opens_an_incident_with_the_highest_severity_and_total_count():
-    [inc] = round_([], [sig("a", "mq-broker", "P2", count=4), sig("b", "cim-eap", "P1", minute=2, count=6)])
-    assert inc.status == "open" and inc.severity == "P1" and inc.alert_count == 10
+def test_new_group_opens_one_incident_with_the_highest_severity():
+    [inc] = round_([], [alert("a", "mq-broker", "P2"), alert("b", "cim-eap", "P1", second=20)], at=60)
+    assert inc.status == "open" and inc.severity == "P1" and inc.alert_count == 2
     assert inc.services == ["cim-eap", "mq-broker"] and inc.started_at == T0
-    assert inc.last_seen_at == T0 + timedelta(minutes=7) and inc.fresh and inc.changed and not inc.annotated
+    assert inc.last_seen_at == T0 + timedelta(seconds=60) and inc.fresh and inc.changed and not inc.annotated
+    assert inc.signals["a"]["status"] == "firing" and inc.signals["a"]["values"] == {"A": 1}
 
 
-def test_later_anomalies_are_absorbed_into_the_open_incident_and_severity_never_drops():
-    [inc] = round_([], [sig("a", "cim-eap", "P1")])
-    uid = inc.uid
-    inc.annotated = True
-    [again] = round_([inc], [sig("b", "amhs-mcs", "P3", minute=10, count=2)])  # 下游、比較輕
-    assert again.uid == uid and again.severity == "P1" and again.alert_count == 5
-    assert again.services == ["amhs-mcs", "cim-eap"] and set(again.signals) == {"a", "b"}
-    assert not again.annotated  # 內容變了，註記要重寫
-    [up] = round_([again], [sig("a", "cim-eap", "P0", minute=20)])
-    assert up.severity == "P0" and up.signals["a"]["count"] == 6 and up.signals["a"]["first_ts"] == T0
+def test_later_alerts_are_absorbed_and_severity_never_drops():
+    [inc] = round_([], [alert("a", "cim-eap", "P1")])
+    uid, inc.annotated = inc.uid, True
+    [again] = round_([inc], [alert("b", "amhs-mcs", "P3", second=90)], at=150)  # 下游、比較輕
+    assert again.uid == uid and again.severity == "P1" and again.alert_count == 2 and again.fresh
+    assert again.services == ["amhs-mcs", "cim-eap"] and not again.annotated
+    [up] = round_([again], [alert("c", "cim-eap", "P0", second=200)], at=260)
+    assert up.severity == "P0" and up.alert_count == 3 and up.started_at == T0
 
 
-def test_unrelated_anomaly_opens_a_second_incident():
-    [inc] = round_([], [sig("a", "mq-broker")])
-    both = round_([inc], [sig("z", "erp", minute=5)])
+def test_repeat_notification_of_a_member_is_not_fresh():
+    [inc] = round_([], [alert("a", "cim-eap")])
+    [again] = round_([inc], [alert("a", "cim-eap")], at=14400)  # Grafana 的 repeat_interval 重複通知
+    assert again.alert_count == 1 and not again.fresh
+
+
+def test_unrelated_alert_opens_a_second_incident():
+    [inc] = round_([], [alert("a", "mq-broker")])
+    both = round_([inc], [alert("z", "erp", second=5)], at=60)
     assert len(both) == 2 and {i.status for i in both} == {"open"} and both[0].uid != both[1].uid
 
 
-def test_incident_closes_after_n_quiet_rounds_and_not_before():
-    [inc] = round_([], [sig("a", "mq-broker")])
-    for expected in (1, 2):
-        [inc] = round_([inc], [])
-        assert inc.status == "open" and inc.quiet_rounds == expected
-    [inc] = round_([inc], [])
-    assert inc.status == "closed" and inc.ended_at == inc.last_seen_at and not inc.annotated
+def test_incident_stays_open_while_any_member_is_firing():
+    [inc] = round_([], [alert("a", "mq-broker"), alert("b", "cim-eap")])
+    [inc] = round_([inc], resolved=[done("a")], at=100)
+    assert inc.status == "open" and inc.resolved_at is None and inc.signals["a"]["status"] == "resolved"
+    [inc] = round_([inc], at=10000)  # 過再久，還有一筆在響就不結案
+    assert inc.status == "open" and not inc.changed
 
 
-def test_new_anomaly_resets_the_quiet_counter():
-    [inc] = round_([], [sig("a", "mq-broker")])
-    [inc] = round_([inc], [])
-    [inc] = round_([inc], [])
-    [inc] = round_([inc], [sig("a", "mq-broker", minute=15)])
-    assert inc.quiet_rounds == 0 and inc.status == "open"
-    [inc] = round_([inc], [])
-    assert inc.quiet_rounds == 1 and inc.status == "open"
+def test_incident_closes_only_after_all_resolved_and_quiet_long_enough():
+    [inc] = round_([], [alert("a", "mq-broker")])
+    [inc] = round_([inc], resolved=[done("a")], at=100)
+    assert inc.status == "open" and inc.resolved_at == T0 + timedelta(seconds=100) and not inc.annotated
+    [inc] = round_([inc], at=399)
+    assert inc.status == "open"
+    [inc] = round_([inc], at=400)
+    assert inc.status == "closed" and inc.ended_at == T0 + timedelta(seconds=60) and not inc.annotated
 
 
-def test_a_round_without_data_does_not_count_as_quiet():
-    [inc] = round_([], [sig("a", "mq-broker")])
-    for _ in range(5):
-        [inc] = round_([inc], [], blind=["mq-broker"])
-    assert inc.status == "open" and inc.quiet_rounds == 0 and not inc.changed
+def test_refiring_before_close_keeps_the_same_incident():
+    [inc] = round_([], [alert("a", "mq-broker")])
+    uid = inc.uid
+    [inc] = round_([inc], resolved=[done("a")], at=100)
+    [inc] = round_([inc], [alert("a", "mq-broker", second=200)], at=260)  # 剛恢復又響
+    assert inc.uid == uid and inc.status == "open" and inc.resolved_at is None and inc.alert_count == 1
+    [inc] = round_([inc], at=2000)
+    assert inc.status == "open"
+
+
+def test_alert_that_fired_and_resolved_inside_one_window_still_leaves_an_incident():
+    [inc] = round_([], [alert("a", "mq-broker")], [done("a")], at=60)
+    assert inc.status == "open" and inc.signals["a"]["status"] == "resolved" and inc.resolved_at is not None
+    [inc] = round_([inc], at=360)
+    assert inc.status == "closed"
+
+
+def test_resolved_for_something_we_never_saw_does_nothing():
+    assert round_([], resolved=[done("ghost")]) == []
 
 
 def test_group_touching_two_open_incidents_folds_them_into_the_older_one():
-    [a] = round_([], [sig("a", "mq-broker", "P3")])
-    b = round_([a], [sig("b", "amhs-mcs", "P1", minute=5)])[1]
-    assert a.uid != b.uid  # 中間的 cim-eap 還沒異常：兩張
-    result = round_([a, b], [sig("c", "cim-eap", "P2", minute=10)])
-    kept, folded = result[0], result[1]
-    assert kept.uid == a.uid and kept.status == "open" and kept.severity == "P1" and kept.alert_count == 9
+    [a] = round_([], [alert("a", "mq-broker", "P3")])
+    b = round_([a], [alert("b", "amhs-mcs", "P1", second=5)], at=65)[1]
+    assert a.uid != b.uid  # 中間的 cim-eap 還沒響：兩張
+    kept, folded = round_([a, b], [alert("c", "cim-eap", "P2", second=70)], at=130)
+    assert kept.uid == a.uid and kept.status == "open" and kept.severity == "P1" and kept.alert_count == 3
     assert kept.services == ["amhs-mcs", "cim-eap", "mq-broker"]
     assert folded.status == "closed" and kept.uid in folded.summary and not folded.annotated

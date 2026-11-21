@@ -1,0 +1,62 @@
+{
+ "headers": {
+  "User-Agent": "Grafana",
+  "Content-Type": "application/json"
+ },
+ "body": {
+  "receiver": "aiops-lite",
+  "status": "resolved",
+  "alerts": [
+   {
+    "status": "resolved",
+    "labels": {
+     "aiops_detect": "true",
+     "aiops_severity": "P2",
+     "alertname": "AMHS transfer duration",
+     "grafana_folder": "factory",
+     "service": "amhs-mcs"
+    },
+    "annotations": {
+     "summary": "AMHS transfer duration"
+    },
+    "startsAt": "2026-11-21T02:41:50Z",
+    "endsAt": "2026-11-21T02:42:10Z",
+    "generatorURL": "http://localhost:23000/alerting/grafana/dg4xgh0oy4n40b/view?orgId=1",
+    "fingerprint": "79a105fdcc14b20b",
+    "silenceURL": "http://localhost:23000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Ddg4xgh0oy4n40b&matcher=aiops_detect%3Dtrue&matcher=aiops_severity%3DP2&matcher=service%3Damhs-mcs&orgId=1",
+    "dashboardURL": "",
+    "panelURL": "",
+    "ruleUID": "dg4xgh0oy4n40b",
+    "values": {
+     "A": 30,
+     "C": 0
+    },
+    "valueString": "[ var='A' labels={} type='query' value=30 ], [ var='C' labels={} type='threshold' value=0 ]",
+    "orgId": 1
+   }
+  ],
+  "groupLabels": {
+   "alertname": "AMHS transfer duration",
+   "grafana_folder": "factory"
+  },
+  "commonLabels": {
+   "aiops_detect": "true",
+   "aiops_severity": "P2",
+   "alertname": "AMHS transfer duration",
+   "grafana_folder": "factory",
+   "service": "amhs-mcs"
+  },
+  "commonAnnotations": {
+   "summary": "AMHS transfer duration"
+  },
+  "externalURL": "http://localhost:23000/",
+  "appVersion": "13.0.7",
+  "version": "1",
+  "groupKey": "{}/{aiops_detect=\"true\"}:{alertname=\"AMHS transfer duration\", grafana_folder=\"factory\"}",
+  "truncatedAlerts": 0,
+  "orgId": 1,
+  "title": "[RESOLVED] AMHS transfer duration factory (true P2 amhs-mcs)",
+  "state": "ok",
+  "message": "**Resolved**\n\nValue: A=30, C=0\nLabels:\n - alertname = AMHS transfer duration\n - aiops_detect = true\n - aiops_severity = P2\n - grafana_folder = factory\n - service = amhs-mcs\nAnnotations:\n - summary = AMHS transfer duration\nSource: http://localhost:23000/alerting/grafana/dg4xgh0oy4n40b/view?orgId=1\nSilence: http://localhost:23000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Ddg4xgh0oy4n40b&matcher=aiops_detect%3Dtrue&matcher=aiops_severity%3DP2&matcher=service%3Damhs-mcs&orgId=1\n"
+ }
+}

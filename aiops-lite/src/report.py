@@ -27,6 +27,8 @@ def local_time(t: datetime, tz: str) -> str:
 
 def rule_link(grafana_url: str, rule_uid: str, title: str) -> str:
     """Grafana 告警規則的編輯頁：在那裡改 aiops_severity 標籤，下一輪就生效。"""
+    if not rule_uid:  # webhook 沒帶 ruleUID：只顯示名稱，不給壞掉的連結
+        return html.escape(title)
     href = f"{grafana_url.rstrip('/')}/alerting/{quote(rule_uid, safe='')}/edit"
     return f'<a href="{html.escape(href, quote=True)}" target="_blank">{html.escape(title)}</a>'
 
@@ -38,8 +40,12 @@ def render(incident: Incident, grafana_url: str, tz: str) -> dict[str, Any]:
     line2 = html.escape(" ".join(incident.summary.split()))
     end = incident.ended_at if incident.status == "closed" and incident.ended_at else None
     span = f"{local_time(incident.started_at, tz)} ～ {local_time(end, tz) if end else '進行中'}（台灣時間）"
-    ranked = sorted(incident.signals.items(), key=lambda kv: (SEVERITY_RANK[kv[1]["severity"]], kv[1]["title"]))
-    links = "、".join(rule_link(grafana_url, uid, f"{s['title']}（{s['severity']}）") for uid, s in ranked[:MAX_LINKS])
+    rules: dict[tuple[str, str], str] = {}  # (rule_uid, 規則名稱) -> 這條規則在這個事故裡最高的嚴重度
+    for m in incident.signals.values():
+        key = (m["rule_uid"], m["title"])
+        rules[key] = min(rules.get(key, m["severity"]), m["severity"], key=SEVERITY_RANK.__getitem__)
+    ranked = sorted(rules.items(), key=lambda kv: (SEVERITY_RANK[kv[1]], kv[0][1]))
+    links = "、".join(rule_link(grafana_url, uid, f"{title}（{sev}）") for (uid, title), sev in ranked[:MAX_LINKS])
     more = f" 等 {len(ranked)} 條" if len(ranked) > MAX_LINKS else ""
     line3 = f"{span}｜調整優先權：{links}{more}"
     return {

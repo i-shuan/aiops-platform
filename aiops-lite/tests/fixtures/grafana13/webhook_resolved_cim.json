@@ -1,0 +1,62 @@
+{
+ "headers": {
+  "User-Agent": "Grafana",
+  "Content-Type": "application/json"
+ },
+ "body": {
+  "receiver": "aiops-lite",
+  "status": "resolved",
+  "alerts": [
+   {
+    "status": "resolved",
+    "labels": {
+     "aiops_detect": "true",
+     "aiops_severity": "P2",
+     "alertname": "CIM T3 timeout",
+     "grafana_folder": "factory",
+     "service": "cim-eap"
+    },
+    "annotations": {
+     "summary": "CIM T3 timeout"
+    },
+    "startsAt": "2026-11-21T02:41:30Z",
+    "endsAt": "2026-11-21T02:42:20Z",
+    "generatorURL": "http://localhost:23000/alerting/grafana/bg4xgh0nwo5xcc/view?orgId=1",
+    "fingerprint": "866d3aec816817da",
+    "silenceURL": "http://localhost:23000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dbg4xgh0nwo5xcc&matcher=aiops_detect%3Dtrue&matcher=aiops_severity%3DP2&matcher=service%3Dcim-eap&orgId=1",
+    "dashboardURL": "",
+    "panelURL": "",
+    "ruleUID": "bg4xgh0nwo5xcc",
+    "values": {
+     "A": 0,
+     "C": 0
+    },
+    "valueString": "[ var='A' labels={} type='query' value=0 ], [ var='C' labels={} type='threshold' value=0 ]",
+    "orgId": 1
+   }
+  ],
+  "groupLabels": {
+   "alertname": "CIM T3 timeout",
+   "grafana_folder": "factory"
+  },
+  "commonLabels": {
+   "aiops_detect": "true",
+   "aiops_severity": "P2",
+   "alertname": "CIM T3 timeout",
+   "grafana_folder": "factory",
+   "service": "cim-eap"
+  },
+  "commonAnnotations": {
+   "summary": "CIM T3 timeout"
+  },
+  "externalURL": "http://localhost:23000/",
+  "appVersion": "13.0.7",
+  "version": "1",
+  "groupKey": "{}/{aiops_detect=\"true\"}:{alertname=\"CIM T3 timeout\", grafana_folder=\"factory\"}",
+  "truncatedAlerts": 0,
+  "orgId": 1,
+  "title": "[RESOLVED] CIM T3 timeout factory (true P2 cim-eap)",
+  "state": "ok",
+  "message": "**Resolved**\n\nValue: A=0, C=0\nLabels:\n - alertname = CIM T3 timeout\n - aiops_detect = true\n - aiops_severity = P2\n - grafana_folder = factory\n - service = cim-eap\nAnnotations:\n - summary = CIM T3 timeout\nSource: http://localhost:23000/alerting/grafana/bg4xgh0nwo5xcc/view?orgId=1\nSilence: http://localhost:23000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dbg4xgh0nwo5xcc&matcher=aiops_detect%3Dtrue&matcher=aiops_severity%3DP2&matcher=service%3Dcim-eap&orgId=1\n"
+ }
+}

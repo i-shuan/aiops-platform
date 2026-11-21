@@ -1,63 +1,85 @@
 """跟公司 Grafana 講話的唯一出口：只用 GRAFANA_URL + 一把 Editor Token，不直連任何資料庫、Prometheus 或 ES。
 
-  list_rules        GET  /api/v1/provisioning/alert-rules        讀貼了 aiops_detect 標籤的告警規則
-  query_series      POST /api/ds/query                           重放規則的查詢，拿歷史與最新時序（每段最多 5,000 點）
+  parse_webhook     解析 Grafana 告警 webhook（Contact Point 推進來的）：哪條規則、哪個系統、嚴重度、firing／resolved
   search_errors     POST /api/datasources/proxy/uid/<uid>/_msearch  經 Grafana 的 ES 資料源查錯誤日誌與 Trace 片段
   upsert_annotation POST／PATCH /api/annotations                  每個事故一筆註記
 
-回應格式以 tests/fixtures/grafana13/（Grafana 13.0.7 實際回應）為準。防呆原則：格式不對就明講是哪條規則的查詢要改，
-不默默取第一欄、第一條序列。
+格式以 tests/fixtures/grafana13/（Grafana 13.0.7 實際送出、實際回應的內容）為準。
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
+import re
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-import pandas as pd
+
+from src.grouping import Alert
 
 log = logging.getLogger("aiops_lite.grafana")
 
-MAX_POINTS = 5000                      # 單次 /api/ds/query 的點數上限；訓練窗比它長就分段
 RETRY_STATUS = {429, 502, 503, 504}
 SEVERITIES = ("P0", "P1", "P2", "P3")
-DEFAULT_SEVERITY = "P3"                # aiops_severity 沒寫或寫錯：當最低優先權，並列進這一輪的問題清單
-EXPRESSION_UIDS = {"__expr__", "-100"}  # Grafana 的運算式節點（reduce／threshold），不是資料源查詢
+DEFAULT_SEVERITY = "P3"                # aiops_severity 沒寫或寫錯：當最低優先權，並列進問題清單
+TRUE_VALUES = {"true", "1", "yes", "on"}
 ERROR_LEVELS = ["ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical"]
 ERROR_STATUS = ["error", "ERROR", "Error", "STATUS_CODE_ERROR"]
 
 
 class GrafanaError(Exception):
-    """Grafana 連不上、Token 沒權限、回應不是預期的格式：這一輪做不下去。"""
+    """Grafana 連不上、Token 沒權限、回應不是預期的格式。"""
 
 
-class QueryError(GrafanaError):
-    """某一條規則的查詢不能用（寫錯、多個數值欄、長格式、沒有時間條件）：只影響那條規則。"""
-
-
-@dataclass(frozen=True)
-class Rule:
-    uid: str
-    title: str
-    service: str
-    severity: str
-    datasource_uid: str
-    model: dict[str, Any] = field(hash=False)
-
-    @property
-    def query_hash(self) -> str:
-        """查詢或資料源改了，舊基準線就不能用了。"""
-        raw = json.dumps([self.datasource_uid, self.model], sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+class WebhookError(ValueError):
+    """推進來的內容不是 Grafana 告警 webhook 的格式：整包拒收（HTTP 400）。"""
 
 
 def _ms(t: datetime) -> int:
     return int(t.timestamp() * 1000)
+
+
+def _when(raw: Any) -> datetime | None:
+    """Grafana 的時間（RFC3339，可能帶奈秒）；還沒結束的告警 endsAt 是 0001-01-01。"""
+    text = str(raw or "")
+    if not text or text.startswith("0001-"):
+        return None
+    # 小數秒最多留 6 位（Grafana 給奈秒，舊版 Python 的 fromisoformat 不吃）
+    return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", text.replace("Z", "+00:00"))).astimezone(timezone.utc)
+
+
+def parse_webhook(payload: Any) -> tuple[list[Alert], list[str]]:
+    """回傳 (納管的告警, 問題清單)。只收貼了 aiops_detect=true 的告警；少了 service 標籤的略過並列出來。
+    格式不對（不是物件、沒有 alerts、告警缺 fingerprint／status／startsAt）丟 WebhookError，整包不收。"""
+    if not isinstance(payload, dict) or not isinstance(payload.get("alerts"), list):
+        raise WebhookError("不是 Grafana 告警 webhook：要有 alerts 陣列")
+    alerts, problems = [], []
+    for item in payload["alerts"]:
+        if not isinstance(item, dict) or not isinstance(item.get("labels"), dict):
+            raise WebhookError("alerts 裡的每一筆都要是帶 labels 的物件")
+        labels = item["labels"]
+        title = str(labels.get("alertname", ""))
+        status, fingerprint, starts = item.get("status"), str(item.get("fingerprint") or ""), _when(item.get("startsAt"))
+        if status not in ("firing", "resolved") or not fingerprint or starts is None:
+            raise WebhookError(f"告警「{title}」缺 status／fingerprint／startsAt")
+        if str(labels.get("aiops_detect", "")).strip().lower() not in TRUE_VALUES:
+            continue
+        service = str(labels.get("service", "")).strip()
+        if not service:
+            problems.append(f"告警「{title}」沒有 service 標籤：略過")
+            continue
+        severity = str(labels.get("aiops_severity", "")).strip().upper()
+        if severity not in SEVERITIES:
+            problems.append(f"告警「{title}」的 aiops_severity={labels.get('aiops_severity')!r} 不是 P0～P3："
+                            f"當成 {DEFAULT_SEVERITY}")
+            severity = DEFAULT_SEVERITY
+        values = item.get("values") if isinstance(item.get("values"), dict) else {}
+        alerts.append(Alert(fingerprint=fingerprint, status=status, rule_uid=str(item.get("ruleUID") or ""),
+                            title=title, service=service, severity=severity, starts_at=starts,
+                            ends_at=_when(item.get("endsAt")) if status == "resolved" else None, values=values))
+    return alerts, problems
 
 
 class Grafana:
@@ -90,71 +112,6 @@ class Grafana:
             except ValueError as e:
                 raise GrafanaError(f"{method} {path} 回的不是 JSON：{r.text[:200]}") from e
         raise GrafanaError(f"{method} {path} 重試後仍失敗：{last}")
-
-    # ── 規則 ──
-
-    def list_rules(self) -> tuple[list[Rule], list[str]]:
-        """回傳 (納管的規則, 問題清單)。問題不擋其他規則：少了 service 標籤的規則略過並列出來。"""
-        raw = self._request("GET", "/api/v1/provisioning/alert-rules")
-        if not isinstance(raw, list):
-            raise GrafanaError("告警規則清單不是陣列")
-        rules, problems = [], []
-        for item in raw:
-            labels = item.get("labels") or {}
-            if str(labels.get("aiops_detect", "")).strip().lower() not in {"true", "1", "yes", "on"}:
-                continue
-            uid, title = str(item.get("uid", "")), str(item.get("title", ""))
-            if item.get("isPaused"):
-                continue
-            service = str(labels.get("service", "")).strip()
-            if not service:
-                problems.append(f"規則「{title}」({uid}) 沒有 service 標籤：略過")
-                continue
-            severity = str(labels.get("aiops_severity", "")).strip().upper()
-            if severity not in SEVERITIES:
-                problems.append(f"規則「{title}」({uid}) 的 aiops_severity={labels.get('aiops_severity')!r} "
-                                f"不是 P0～P3：當成 {DEFAULT_SEVERITY}")
-                severity = DEFAULT_SEVERITY
-            queries = [q for q in item.get("data") or [] if q.get("datasourceUid") not in EXPRESSION_UIDS]
-            if not queries:
-                problems.append(f"規則「{title}」({uid}) 沒有資料源查詢：略過")
-                continue
-            if len(queries) > 1:
-                problems.append(f"規則「{title}」({uid}) 有 {len(queries)} 個資料源查詢：只重放第一個"
-                                f"（{queries[0].get('refId')}）")
-            rules.append(Rule(uid, title, service, severity, str(queries[0]["datasourceUid"]),
-                              dict(queries[0].get("model") or {})))
-        return rules, problems
-
-    # ── 時序 ──
-
-    def query_series(self, rule: Rule, start: datetime, end: datetime, step_seconds: int) -> pd.DataFrame:
-        """重放規則的查詢，回傳 DataFrame(ts[UTC], value)，對齊到 step 的格線。超過 5,000 點就分段查。"""
-        step_ms = step_seconds * 1000
-        frames, cursor, end_ms = [], _ms(start), _ms(end)
-        while cursor < end_ms:
-            chunk_end = min(end_ms, cursor + MAX_POINTS * step_ms)
-            frames.append(self._query_chunk(rule, cursor, chunk_end, step_ms))
-            cursor = chunk_end
-        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame({"ts": [], "value": []})
-        if df.empty:
-            return pd.DataFrame({"ts": pd.Series([], dtype="datetime64[ns, UTC]"), "value": pd.Series([], dtype=float)})
-        df["ts"] = pd.to_datetime(df["ts"] // step_ms * step_ms, unit="ms", utc=True)
-        return df.groupby("ts", as_index=False)["value"].mean().sort_values("ts").reset_index(drop=True)
-
-    def _query_chunk(self, rule: Rule, from_ms: int, to_ms: int, step_ms: int) -> pd.DataFrame:
-        model = {k: v for k, v in rule.model.items() if k not in ("intervalMs", "maxDataPoints", "datasource")}
-        if "expr" in model:
-            # 告警規則的 PromQL 常是 instant（只要最新一點）；重放要的是整段時序
-            model.update({"instant": False, "range": True})
-            if model.get("queryType") == "instant":
-                model["queryType"] = "range"
-        body = {"from": str(from_ms), "to": str(to_ms), "queries": [{
-            **model, "refId": "A", "datasource": {"uid": rule.datasource_uid},
-            "intervalMs": step_ms, "maxDataPoints": MAX_POINTS}]}
-        # 查詢寫錯時 Grafana 回 400，錯誤訊息在 results.A.error：那是這條規則的問題，不是 Grafana 掛了
-        raw = self._request("POST", "/api/ds/query", json=body, accept=(400,))
-        return parse_frames(raw, rule, from_ms, to_ms, step_ms)
 
     # ── 日誌與 Trace（經 Grafana 的 ES 資料源代理）──
 
@@ -201,45 +158,3 @@ class Grafana:
             return int(self._request("POST", "/api/annotations", json=body)["id"])
         self._request("PATCH", f"/api/annotations/{annotation_id}", json=body)
         return annotation_id
-
-
-def parse_frames(raw: Any, rule: Rule, from_ms: int, to_ms: int, step_ms: int) -> pd.DataFrame:
-    """把 /api/ds/query 的回應轉成 (ts 毫秒, value)。只接受「一個時間欄 + 一個數值欄」的單一序列。"""
-    who = f"規則「{rule.title}」({rule.uid})"
-    result = ((raw or {}).get("results") or {}).get("A") if isinstance(raw, dict) else None
-    if result is None:
-        raise GrafanaError(f"{who} 的查詢回應沒有 results.A：{str(raw)[:200]}")
-    if result.get("error"):
-        raise QueryError(f"{who} 的查詢被資料源拒絕：{result['error']}")
-    frames = [f for f in result.get("frames") or [] if (f.get("schema") or {}).get("fields")]
-    frames = [f for f in frames if any(len(col) for col in (f.get("data") or {}).get("values") or [])]
-    if not frames:
-        return pd.DataFrame({"ts": pd.Series([], dtype="int64"), "value": pd.Series([], dtype=float)})
-    if len(frames) > 1:
-        raise QueryError(f"{who} 的查詢回了 {len(frames)} 條序列：一條規則只能對應一條序列，請在查詢裡聚合"
-                         f"（PromQL 用 sum／max，SQL 用 GROUP BY 時間）")
-    fields = frames[0]["schema"]["fields"]
-    values = frames[0]["data"]["values"]
-    by_type: dict[str, list[int]] = {}
-    for i, f in enumerate(fields):
-        by_type.setdefault(str(f.get("type")), []).append(i)
-    others = [fields[i]["name"] for t, idx in by_type.items() if t not in ("time", "number") for i in idx]
-    if others:
-        raise QueryError(f"{who} 的查詢結果有非數值欄 {others}（長格式）：平台分不出哪一列是哪個實體，"
-                         f"請改成「時間 + 單一數值」並在 SQL 裡聚合或篩到一個實體")
-    if len(by_type.get("time", [])) != 1:
-        raise QueryError(f"{who} 的查詢結果要有剛好一個時間欄，現在是 {len(by_type.get('time', []))} 個")
-    numbers = by_type.get("number", [])
-    if len(numbers) != 1:
-        raise QueryError(f"{who} 的查詢結果有 {len(numbers)} 個數值欄 {[fields[i]['name'] for i in numbers]}："
-                         f"只能有一個（不會默默取第一欄），其他欄請拆成另一條規則")
-    df = pd.DataFrame({"ts": values[by_type["time"][0]], "value": values[numbers[0]]}).dropna()
-    if df.empty:
-        return df.astype({"ts": "int64", "value": float})
-    df = df.astype({"ts": "int64", "value": float})
-    low, high = int(df["ts"].min()), int(df["ts"].max())
-    if low < from_ms - step_ms or high > to_ms + step_ms:
-        iso = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-        raise QueryError(f"{who} 的查詢回了請求視窗以外的資料（{iso(low)} ～ {iso(high)}，"
-                         f"請求的是 {iso(from_ms)} ～ {iso(to_ms)}）：SQL 請加上 $__timeFilter(時間欄)")
-    return df

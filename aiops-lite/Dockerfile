@@ -5,4 +5,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 USER 10001
-CMD ["python", "-m", "src.main"]
+EXPOSE 8080
+CMD ["python", "-m", "src.server"]

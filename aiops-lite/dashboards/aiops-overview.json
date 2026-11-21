@@ -48,7 +48,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "每張卡片是 aiops-lite 收斂後的一個事故（Grafana 註記，標籤 `aiops`）。第 1 行：受影響系統、嚴重度、收斂筆數；第 2 行：`[LLM 推論]` 是模型依證據的推測、`[未經分析]` 是原始異常清單；第 3 行：起訖時間（台灣時間）與調整 `aiops_severity` 的規則連結。**清單是空的 = 這段時間沒有事故，或 aiops-lite 沒有在跑**（看 CronJob 與資料庫的 `rounds` 表）。"
+        "content": "每張卡片是 aiops-lite 收斂後的一個事故（Grafana 註記，標籤 `aiops`）。告警觸發後約 1 分鐘（debounce）才會出現：平台刻意等上下游告警到齊、等日誌落盤再分析。第 1 行：受影響系統、嚴重度、收斂的告警筆數；第 2 行：`[LLM 推論]` 是模型依證據的推測、`[未經分析]` 是原始告警清單；第 3 行：起訖時間（台灣時間）與調整 `aiops_severity` 的規則連結。**清單是空的 = 這段時間沒有貼了 `aiops_detect` 的告警，或 Webhook 沒有送到 aiops-lite**（看 Contact Point 的送達狀態與資料庫的 `rounds` 表）。"
       }
     },
     {

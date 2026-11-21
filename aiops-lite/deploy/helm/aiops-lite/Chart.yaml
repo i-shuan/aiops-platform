@@ -1,6 +1,6 @@
 apiVersion: v2
 name: aiops-lite
-description: aiops-lite：1 個 CronJob + 1 個帶 PVC 的 PostgreSQL + 1 個關係邊 ConfigMap
+description: aiops-lite：1 個常駐服務（收 Grafana Webhook）+ 1 個帶 PVC 的 PostgreSQL + 1 個設定 ConfigMap
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"

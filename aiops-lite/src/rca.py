@@ -1,6 +1,6 @@
 """RCA：Python 不推理，只收集 4 包證據交給 LLM，再檢查它有沒有瞎編。
 
-  1. 這個事故收斂的異常指標（系統、規則、時間、嚴重度、筆數）
+  1. 這個事故收斂的告警（系統、規則、開始時間、嚴重度、觸發當下的數值、是否已恢復）
   2. 系統上下游關係邊（掛載的 YAML）
   3. 事故時間窗內的錯誤日誌樣本與 Trace 錯誤片段（有就附，沒有就空）
   4. eqp_id／lot_id／carrier_id 在錯誤日誌裡的出現次數
@@ -34,7 +34,7 @@ MAX_TRACE_SAMPLES = 10
 MAX_MESSAGE_CHARS = 300
 MAX_SUMMARY_CHARS = 300
 TOP_IDS = 10
-EVIDENCE_PAD = timedelta(minutes=10)  # 事故時間窗前後多看幾分鐘：上游的錯誤常比指標異常早出現
+EVIDENCE_PAD = timedelta(minutes=10)  # 事故時間窗前後多看幾分鐘：錯誤日誌常比告警觸發早出現（規則有 for 的等待時間）
 ID_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*")  # 夾數字的識別碼樣式（EQP-CVD-07、LOT24A0031）
 
 SYSTEM_PROMPT = """你是半導體工廠的 SRE。依照使用者給的四包證據判斷這個事故最可能的源頭與影響範圍。
@@ -58,23 +58,28 @@ def _dig(doc: dict[str, Any], path: str) -> Any:
     return cur
 
 
+def _members(incident: Incident) -> list[dict[str, Any]]:
+    return sorted(incident.signals.values(), key=lambda m: (m["starts_at"], m["title"], m["service"]))
+
+
 def raw_summary(incident: Incident) -> str:
-    """不經 LLM 的原始異常摘要：各系統哪些規則異常（不含推論）。"""
+    """不經 LLM 的原始摘要：各系統哪些告警響了（不含推論）。"""
     by_service: dict[str, list[str]] = {}
-    for s in sorted(incident.signals.values(), key=lambda s: (s["first_ts"], s["title"])):
-        by_service.setdefault(s["service"], []).append(s["title"])
+    for m in _members(incident):
+        titles = by_service.setdefault(m["service"], [])
+        if m["title"] not in titles:
+            titles.append(m["title"])
     return "；".join(f"{svc}：{'、'.join(titles)}" for svc, titles in by_service.items())
 
 
 def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: Grafana, *, es_datasource_uid: str,
-                     log_index: str, trace_index: str, id_fields: list[str]) -> dict[str, Any]:
+                     log_index: str, trace_index: str, id_fields: list[str], now: datetime) -> dict[str, Any]:
     """組 4 包證據。日誌／Trace 撈不到（沒設資料源、Grafana 回錯）不擋分析：那一包留空並寫明原因。"""
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
     evidence: dict[str, Any] = {
-        "anomalies": [{"system": s["service"], "rule": s["title"], "severity": s["severity"],
-                       "first_seen": iso(s["first_ts"]), "last_seen": iso(s["last_ts"]),
-                       "anomalous_points": s["count"], "detectors": list(s["detectors"])}
-                      for s in sorted(incident.signals.values(), key=lambda s: (s["first_ts"], s["title"]))],
+        "anomalies": [{"system": m["service"], "rule": m["title"], "severity": m["severity"],
+                       "started": iso(m["starts_at"]), "status": m["status"], "values": m["values"]}
+                      for m in _members(incident)],
         "edges": [{"upstream": a, "downstream": b} for a, b in edges],
         "error_logs": [], "error_traces": [], "id_counts": {f: {} for f in id_fields}, "notes": [],
     }
@@ -83,7 +88,7 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
         return evidence
     try:
         found = grafana.search_errors(es_datasource_uid, log_index, trace_index or None, incident.services,
-                                      incident.started_at - EVIDENCE_PAD, incident.last_seen_at + EVIDENCE_PAD)
+                                      incident.started_at - EVIDENCE_PAD, max(incident.last_seen_at, now))
     except GrafanaError as e:
         log.warning("事故 %s 撈不到日誌證據：%s", incident.uid, e)
         evidence["notes"].append(f"日誌與 Trace 撈取失敗：{e}")
@@ -110,7 +115,7 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
 
 def build_prompt(evidence: dict[str, Any]) -> str:
     dump = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
-    return (f"【1. 本次收斂的異常指標】\n{dump(evidence['anomalies'])}\n\n"
+    return (f"【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本】\n{dump(evidence['error_logs'])}\n"
             f"【3b. Trace 錯誤片段】\n{dump(evidence['error_traces'])}\n\n"

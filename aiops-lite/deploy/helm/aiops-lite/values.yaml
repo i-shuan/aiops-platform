@@ -3,15 +3,21 @@ image:
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 
-# 每 5 分鐘一輪。上一輪還沒跑完就跳過這一輪（concurrencyPolicy: Forbid）。
-schedule: "*/5 * * * *"
-activeDeadlineSeconds: 270
+# 事件驅動的時間設定（秒）。會寫進 ConfigMap 的 config.yaml，改了之後 helm upgrade 會自動重啟服務。
+timing:
+  debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析：等上下游告警到齊、等 ES 日誌落盤
+  followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪（結案、補寫註記、重試 LLM）
+  closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案（剛恢復又響不會另開一張）
+
+service:
+  port: 8080               # Grafana 的 Contact Point 打 http://<release>.<namespace>.svc:8080/webhook
 
 grafana:
   url: ""            # 必填：公司 Grafana 的網址，例如 https://grafana.corp.example
 
 # 機密不進 chart：先自己建好這個 Secret，鍵名如下
-#   GRAFANA_TOKEN      Grafana Editor 服務帳號的 Token（必要）
+#   GRAFANA_TOKEN        Grafana Editor 服務帳號的 Token（必要）
+#   AIOPS_WEBHOOK_TOKEN  Grafana Contact Point 帶的 Bearer 密鑰（必要；兩邊填一樣的值）
 #   POSTGRES_PASSWORD  下面這個 PostgreSQL 的密碼（必要；會放進連線字串，請只用英數字）
 #   LLM_API_KEY        LLM 的金鑰（沒有 LLM 可以不放）
 existingSecret: aiops-lite
@@ -33,11 +39,6 @@ edges:
 
 settings:
   tz: Asia/Taipei
-  stepSeconds: 60
-  lookbackMinutes: 60
-  trainDays: 14
-  retrainHours: 24
-  closeAfterRounds: 3
   logLevel: INFO
 
 resources:

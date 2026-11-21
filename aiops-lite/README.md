@@ -1,134 +1,158 @@
 # aiops-lite
 
-只拿一把 Grafana Editor Token 的極簡 AIOps：讀規則 → 重放查詢 → 偵測 → 跨系統收斂 → 收集證據交給 LLM → 寫回 Grafana 註記。
-不直連任何外部資料庫／ES，沒有 HTTP API，沒有前端。同一個 repo 裡原本的 `aiops/`（aiops-platform）已封存不再更動，
+事件驅動的極簡 AIOps：Grafana 告警經 Webhook 推進來 → 等一段 debounce → 跨系統收斂 → 收集證據交給 LLM → 寫回 Grafana 註記。
+只拿一把 Grafana Editor Token，不直連任何外部資料庫／ES，沒有前端。同一個 repo 裡原本的 `aiops/`（aiops-platform）已封存不再更動，
 lite 不 import 它的任何程式碼。
 
 ```
-MQ / CIM / AMHS ──▶ 公司 Grafana（PromQL / SQL / ES 資料源 + 貼標籤的告警規則）
-                          │  只靠 GRAFANA_URL + GRAFANA_TOKEN
-                          ▼
-┌──────────────── aiops-lite（單一 CronJob，每 5 分鐘）────────────────┐
-│ 1 讀規則與指標 → 2 異常偵測 → 3 跨系統收斂 → 4 收集 4 包證據 → LLM   │
-└──────────────────────────────┬───────────────────────────────────────┘
-                               ▼
+MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則）
+                          │ 告警 firing／resolved
+                          ▼ Webhook（Contact Point）
+┌──────────────────── aiops-lite（常駐服務，1 個副本）────────────────────┐
+│ 收 Webhook → 先存資料庫 → 等 debounce（預設 60 秒，YAML 可調）            │
+│   → 1 收斂（同系統、關係邊）→ 2 收集 4 包證據 → 3 LLM → 4 寫註記          │
+│ 有進行中事故時每 followup 秒續跑一輪，直到全部 resolved 並安靜夠久才結案   │
+└──────────────────────────────┬──────────────────────────────────────────┘
+                               ▼ GRAFANA_URL + GRAFANA_TOKEN
             Grafana Annotations（三行摘要）+「AIOps 事件總覽」儀表板
 ```
 
-部署物：1 個 CronJob、1 個帶 PVC 的 PostgreSQL、1 個關係邊 ConfigMap（`deploy/helm/aiops-lite`）。
+部署物：1 個常駐 Deployment（+ Service）、1 個帶 PVC 的 PostgreSQL、1 個設定 ConfigMap（`deploy/helm/aiops-lite`）。
 
-## 檔案
+**什麼算異常由各系統自己的 Grafana 告警規則決定**：規則 firing 就是異常，平台不重放查詢、不自己判數值（原本的 5 個偵測器已拿掉）。
 
-| 檔案 | 行數 | 負責內容 |
-| --- | --- | --- |
-| `src/main.py` | 277 | 單一入口：讀環境變數與關係邊 YAML，依序執行主流程；規則之間互相隔離 |
-| `src/grafana.py` | 245 | 讀規則標籤、重放 `/api/ds/query`（防呆、5,000 點分段）、ES Proxy 查日誌與 Trace、寫註記 |
-| `src/detectors.py` | 312 | 季節基準 + hourly_baseline／residual_shift／residual_chronic／sparse_count + new_only，1% 相對底噪 |
-| `src/grouping.py` | 150 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、連續 N 輪無異常結案 |
-| `src/rca.py` | 166 | 不寫推理演算法：收集 4 包證據、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
-| `src/report.py` | 54 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
-| `src/db.py` | 187 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：基準線、事故、每輪執行紀錄 |
+## 為什麼要等（debounce）
 
-合計約 1,390 行（原本預估 1,850）。
+收到 Webhook 的第 0 秒就分析，LLM 拿到的是殘缺的證據：
 
-## 各系統要做的事（平台零直連）
+- 上下游的告警有時間差：上游出事後下游可能幾十秒後才響，甚至門檻嚴的下游先響。太早分析會把受害者當成根因。
+- ES 日誌有寫入延遲（收集器緩衝、建索引）：太早查，撈不到機台與批號。
+- 一場事故會連發好幾個 Webhook：各跑各的會重複問 LLM、註記互相覆蓋。
 
-1. 把資料送進公司 Grafana 看得到的資料源：MQ 掛 Prometheus exporter；CIM 用日誌收集器做 Log 轉指標；AMHS 開唯讀 View 給
-   Grafana 的 SQL 資料源。錯誤日誌進 ES，帶 `service.name`、`log.level`、`message`、`@timestamp`，以及有的話 `eqp_id`／`lot_id`／`carrier_id`。
-2. 在 Grafana 建告警規則並貼標籤：`aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名稱>`
-   （要跟關係邊裡的名稱一樣）。
-3. 規則的查詢必須是**一條序列**：
-   - PromQL：聚合成一條（`sum(...)`／`max(...)`）。回多條序列會被拒絕。
-   - SQL：`time` + **一個**數值欄，並且寫 `$__timeFilter(時間欄)`。多個數值欄、長格式（帶字串欄）、沒有時間條件都會被拒絕，
-     錯誤訊息會寫明是哪條規則、要怎麼改；不會默默取第一欄。
-   - 稀疏的失敗計數要給**整數**：PromQL 的 `increase()` 會外插出小數，包一層 `round()`，不然 sparse_count 不適用。
-   - 一條規則有多個資料源查詢時只重放第一個（會列在該輪的 errors）。
+所以收到**第一個** Webhook 後固定等 `debounce_seconds`，這段時間進來的告警全部收進同一批，時間到才一起收斂、撈證據、問一次 LLM。
+視窗不會因為後面一直有告警進來而延後；跑的途中進來的告警排進下一個視窗，併入同一張事故並重新分析。
 
-平台不接收 webhook：對方的規則有沒有 firing 不影響平台，平台自己重放查詢、自己判。
+## 時間設定（YAML）
 
-## Grafana 要做的設定
-
-**都在公司 Grafana 的網頁介面（或它的 API）上做；不改 Grafana 映像檔、不裝外掛、不動 Contact Point 與通知路由、不改規則的閾值。**
-repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不使用、也沒改它。
-
-| # | 項目 | 在哪做 | 怎麼做 |
-| --- | --- | --- | --- |
-| 1 | 服務帳號與 Token | Administration → Users and access → Service accounts | 新增角色 **Editor** 的帳號 → Add token → 複製後放進 K8s Secret 的 `GRAFANA_TOKEN` |
-| 2 | 告警規則標籤 | Alerting → Alert rules → 編輯規則 → Labels | 每條要納管的規則加 `aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名>`（要跟關係邊的名稱一致） |
-| 3 | 規則的查詢（不符格式才改） | 同一頁的 Query 區 | SQL 加 `$__timeFilter(時間欄)`、只留一個時間欄加一個數值欄；PromQL 聚合成一條；計數用 `round(increase(...))` |
-| 4 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（只用內建註記清單面板，不需要資料源） |
-| 5 | ES 資料源 uid（要日誌證據才需要） | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 Helm values 的 `logs.datasourceUid` |
-
-不需要新增資料源：規則本來就在用的 Prometheus、SQL、ES 資料源直接沿用。
-
-### 注意
-
-1. **標籤沒有 YAML 檔可改。** 公司的告警規則若是用 provisioning（YAML、Terraform）管的，在 UI 上改會被下次部署蓋掉，
-   標籤要加進原本管規則的那份檔案。這是各系統團隊的事。
-2. **RBAC 只在預設權限下驗過。** Editor 能讀規則、重放 `/api/ds/query`、走 ES 代理、寫註記，是在 Grafana 13.0.7 預設權限下確認的；
-   公司 Grafana 若改窄過 Editor，要再確認這四件事。
-3. **Token 只放 Secret，不進 chart 或 values。**
-4. 註記寫入需要 Token 有建立與更新註記的權限；儀表板用標籤 `aiops` 查詢註記，不綁特定儀表板。
-
-## 流程細節
-
-- **基準線**：每條規則第一次看到時抓 14 天訓練窗（每段 5,000 點），之後 24 小時重訓一次；查詢改了就重訓。
-  訓練窗結束在觀察窗之前，並扣掉這個系統過去的事故時間。訓練點數不到 60 不判（列在 errors）。
-- **偵測**：三張統計票（hourly_baseline、residual_shift、residual_chronic）同一個時間點過半才算；sparse_count 不投票、越線就成立。
-  new_only 讓每一輪重看最近一小時也不會重複計數。
-- **收斂**：同 service、或兩個異常的 service 之間有關係邊（不分方向）就併成一張；中間的系統沒有異常不會串過去。
-  新異常碰到進行中事故就併進去；連續 3 輪沒有新異常結案。抓不到資料的系統那一輪不算「沒有異常」。
-- **RCA**：事故的成員規則或嚴重度有變時才問 LLM（只是多幾個異常點不重問）；LLM 失敗的進行中事故下一輪再試。
-  LLM 回 JSON（summary／systems／ids），程式檢查點名的系統在事故或關係邊裡、機台批號在識別碼統計裡、
-  摘要文字裡夾數字的識別碼在證據裡找得到；不通過就用 `[未經分析] 原始摘要`。
-- **寫回**：先寫自己的資料庫，再寫註記；一個事故一筆註記（標籤 `aiops`、`aiops-incident:<uid>`、嚴重度、`open`／`closed`、
-  各系統名稱），之後原地更新。註記寫失敗下一輪補，不會重複建。
-
-## 設定
-
-環境變數見 `src/main.py` 開頭。必填只有 `GRAFANA_URL`、`GRAFANA_TOKEN`；`DATABASE_URL` 正式環境用
-`postgresql+psycopg://…`。關係邊：
+寫在設定檔（`AIOPS_CONFIG_FILE`，預設 `/etc/aiops-lite/config.yaml`）；用 Helm 部署時改 `values.yaml` 的 `timing`，
+chart 會產生這個檔並在變更時自動重啟服務：
 
 ```yaml
+# values.yaml
+timing:
+  debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析
+  followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪
+  closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案
 edges:
   - [mq-broker, cim-eap]   # [上游, 下游]
   - [cim-eap, amhs-mcs]
 ```
 
-部署：先建 Secret（`GRAFANA_TOKEN`、`POSTGRES_PASSWORD`，有 LLM 再加 `LLM_API_KEY`），然後
-`helm upgrade --install aiops-lite deploy/helm/aiops-lite --set grafana.url=https://…`。
-儀表板：在 Grafana 匯入 `dashboards/aiops-overview.json`（只用內建的註記清單面板，不需要資料源）。
+```yaml
+# 產生的 config.yaml（不用 Helm 時自己寫這個）
+debounce_seconds: 60
+followup_seconds: 60
+close_after_seconds: 300
+edges:
+  - [mq-broker, cim-eap]
+  - [cim-eap, amhs-mcs]
+```
 
-本機跑一輪：`GRAFANA_URL=… GRAFANA_TOKEN=… python -m src.main`（預設用 SQLite）。測試：`python -m pytest tests -q`。
+鍵名打錯、不是整數、關係邊不是一對名稱，啟動時直接報錯。實際看到註記的延遲 ≈ 規則的 `for` + Grafana 路由的 `group_wait` + `debounce_seconds` + LLM 回應時間。
+
+## 檔案
+
+| 檔案 | 行數 | 負責內容 |
+| --- | --- | --- |
+| `src/server.py` | 196 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
+| `src/main.py` | 242 | 設定（環境變數 + YAML）與「一輪」的流程；規格的單一入口邏輯 |
+| `src/grafana.py` | 160 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/grouping.py` | 164 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
+| `src/rca.py` | 171 | 不寫推理演算法：收集 4 包證據、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/report.py` | 60 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
+| `src/db.py` | 166 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
+
+合計約 1,160 行。
+
+## 各系統要做的事（平台零直連）
+
+1. 把資料送進公司 Grafana 看得到的資料源：MQ 掛 Prometheus exporter；CIM 用日誌收集器做 Log 轉指標；AMHS 開唯讀 View 給
+   Grafana 的 SQL 資料源。錯誤日誌進 ES，帶 `service.name`、`log.level`、`message`、`@timestamp`，以及有的話 `eqp_id`／`lot_id`／`carrier_id`。
+2. 在 Grafana 建告警規則（閾值自己定）並貼標籤：`aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名稱>`
+   （要跟關係邊裡的名稱一樣）。沒有 `service` 的告警會被略過並回報給送出端；`aiops_severity` 寫錯當成 P3。
+
+## Grafana 要做的設定
+
+**都在公司 Grafana 的網頁介面（或它的 API）上做；不改 Grafana 映像檔、不裝外掛、不改規則的閾值。**
+repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不使用、也沒改它。
+
+| # | 項目 | 在哪做 | 怎麼做 |
+| --- | --- | --- | --- |
+| 1 | 服務帳號與 Token | Administration → Users and access → Service accounts | 新增角色 **Editor** 的帳號 → Add token → 放進 K8s Secret 的 `GRAFANA_TOKEN` |
+| 2 | 告警規則標籤 | Alerting → Alert rules → 編輯規則 → Labels | 每條要納管的規則加 `aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名>` |
+| 3 | **Contact Point**（新增 1 個） | Alerting → Contact points → Add | 類型 Webhook；URL `http://<release>.<namespace>.svc:8080/webhook`；Authorization scheme `Bearer`、credentials 填 Secret 的 `AIOPS_WEBHOOK_TOKEN`；**不要**勾 Disable resolved message |
+| 4 | **Notification policy**（新增 1 條路由） | Alerting → Notification policies → New child policy | Matcher `aiops_detect = true` → 上面的 Contact Point；`group_wait` 設短（0～10 秒，平台自己會等 debounce）；要同時保留原本的通知就勾 Continue matching |
+| 5 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（只用內建註記清單面板，不需要資料源） |
+| 6 | ES 資料源 uid（要日誌證據才需要） | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 Helm values 的 `logs.datasourceUid` |
+
+### 注意
+
+1. **規則、Contact Point、路由若是用 provisioning（YAML、Terraform）管的**，在 UI 上改會被下次部署蓋掉，要加進原本那份檔案。
+2. **Grafana 要連得到 aiops-lite 的 Service**（同叢集用 Service 名稱；不同叢集要自己開路）。
+3. **RBAC 只在預設權限下驗過**：Editor 能走 ES 代理、寫註記，是在 Grafana 13.0.7 預設權限下確認的。
+4. **Token 與 Webhook 密鑰只放 Secret**，不進 chart 或 values。
+
+## 流程細節
+
+- **收 Webhook**：驗 Bearer → 解析 → 存進資料庫的 inbox → 回 200。存不進去回 503，Grafana 會重送。等 debounce 的期間服務重啟，
+  告警還在 inbox，啟動後自動排一輪。
+- **收斂**：同 service、或兩個有告警的 service 之間有關係邊（不分方向）就併成一張；中間的系統沒有告警不會串過去。
+  新告警碰到進行中事故就併進去。告警到達的順序不影響結果（下游先響也一樣）。
+- **結案**：成員告警全部 resolved，再安靜 `close_after_seconds` 才結案；期間又響就同一張事故繼續。
+  視窗內先響又恢復的告警照樣會留下事故。
+- **RCA**：事故的成員或嚴重度有變時才問 LLM（重複通知不重問）；LLM 失敗的進行中事故下一輪再試。
+  LLM 回 JSON（summary／systems／ids），程式檢查點名的系統在事故或關係邊裡、機台批號在識別碼統計裡、
+  摘要文字裡夾數字的識別碼在證據裡找得到；不通過就用 `[未經分析] 原始摘要`。
+- **寫回**：先寫自己的資料庫，再寫註記；一個事故一筆註記（標籤 `aiops`、`aiops-incident:<uid>`、嚴重度、`open`／`closed`、
+  各系統名稱），之後原地更新。註記寫失敗下一輪補，不會重複建。
+
+## 部署與執行
+
+環境變數見 `src/main.py` 開頭。必填：`GRAFANA_URL`、`GRAFANA_TOKEN`、`AIOPS_WEBHOOK_TOKEN`。
+
+部署：先建 Secret（`GRAFANA_TOKEN`、`AIOPS_WEBHOOK_TOKEN`、`POSTGRES_PASSWORD`，有 LLM 再加 `LLM_API_KEY`），然後
+`helm upgrade --install aiops-lite deploy/helm/aiops-lite --set grafana.url=https://…`。
+
+本機：`python -m src.server`（預設 SQLite、port 8080）。`python -m src.main` 會立刻處理 inbox 裡的告警一輪（不等 debounce，除錯用）。
+測試：`python -m pytest tests -q`。
 
 ## 驗證狀態（照實寫）
 
 做過的：
-- 73 個測試通過、1 個 `xfail(strict)`（死區）。Grafana 回應的解析與防呆全部用 **Grafana 13.0.7 真實回應**
-  （`tests/fixtures/grafana13/`，Editor Token 錄的）。
-- 對真的 Grafana 13.0.7 + Prometheus + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本灌的**：
-  3 天歷史、最後 10 分鐘 MQ 積壓 + CIM 逾時 + AMHS 搬運變慢）：3 條規則（PromQL×2、SQL×1）各 4,26x 個訓練點，
-  偵測到 24 個異常點，收斂成 1 張 P1 事故（三個系統經兩條關係邊串起來），註記建立後下一輪原地更新；
-  ES 證據的機台統計是 EQP-CVD-07×3；平台自己的資料庫用 SQLite 與 PostgreSQL 16 各跑過。儀表板匯入後截圖確認三行與連結正常顯示。
-- 合成序列的留出驗證：訓練 3 週、第 4 週（沒有拿來學）10,080 點，誤報 0～1 點（3 組亂數種子）。
-- Helm chart 用 `helm lint` 與 `helm template` 檢查過。
+- 82 個測試通過。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
+  常駐服務的測試真的起 HTTP 服務、連發 Webhook。
+- 對真的 Grafana 13.0.7 + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本控制的**）：
+  三條規則各隔 20 秒越線，Grafana 在 43 秒內陸續推了 3 個 Webhook；aiops-lite 在第一個 Webhook 後整整 60 秒才跑第一輪，
+  一輪收了 3 筆告警、收斂成 1 張 P1 事故（三個系統經兩條關係邊串起來）、寫 1 筆註記；三筆 resolved 進來後，
+  安靜滿設定的 60 秒結案，註記原地改成已結案，之後不再續跑。期間的錯誤日誌是在 debounce 期間才寫進 ES 的，分析時撈得到。
+- Helm chart 用 `helm lint` 與 `helm template` 檢查過；產生的 `config.yaml` 用程式的 `load_config` 讀過。
 
 沒做過的：
-- **沒有任何真實產線資料**。偵測門檻與常數移植自封存的 aiops-platform，只在合成資料上回放過（未驗證泛化）。
+- **沒有任何真實產線資料與真實的告警風暴**；60 秒夠不夠等到齊，要看現場各系統的告警時間差與 ES 延遲，請依實際情況調 YAML。
 - **LLM 沒有接過真的模型**：只對本機的 OpenAI 相容假端點驗過 HTTP 接線；摘要品質、真模型多常被幻覺檢查擋掉都不知道。
 - chart 沒有部署到叢集、映像檔沒有實際 build 過（這個環境沒有 Docker 與叢集）。
-- 只測過 Grafana 13.0.7；Editor 能讀規則、查詢、走 ES 代理、寫註記是在預設權限下確認的，公司 Grafana 若改過 RBAC 要再確認。
+- 只測過 Grafana 13.0.7。
 
 ## 已知限制
 
+- **沒有 Webhook 就什麼都不會發生**。Contact Point 送不到、路由沒設對、Grafana 自己掛了，平台都不會知道，也沒有對外的心跳告警；
+  只能看 Grafana Contact Point 的送達狀態與資料庫的 `rounds` 表。
+- **resolved 沒送到，事故就不會結案**（Contact Point 勾了 Disable resolved message、或那一次推送失敗且重送用盡）。
+  平台不猜「應該已經好了」。
+- **只能跑 1 個副本**：debounce 的計時在記憶體裡（告警本身有落地）。chart 固定 1 個副本、Recreate 升級。
 - **送給 LLM 的日誌樣本沒有遮罩**。日誌裡的敏感資訊要在產生端去識別化，或把 `LLM_API_URL` 指到公司內部的模型。
 - 幻覺檢查只擋「名稱不存在」，擋不了「存在的系統被講錯因果」；所以第 2 行固定標 `[LLM 推論]`。
 - 沒有 Trace 時「集中在哪台機台／批號」只是錯誤日誌的計數，不是因果證據。
-- 多數決的代價：持續但小幅（約 1σ）的偏移只有 residual_chronic 一票，不會成立（`tests/test_detectors.py` 有標註）；
-  約 2σ 的偏移只會零星報出。
-- sparse_count 看「最近 30 點累積幾筆」：暴增結束後、離開窗口之前（最多 30 分鐘）仍會有越線點，
-  事故會晚結案、收斂筆數也會多算這一段。水位跳升恢復的那一個點也可能被算成一筆異常。
-- 基準線上線未滿 2 週時 hourly_baseline 退回全段統計，日夜週期明顯的指標在這段期間偏鈍。
-- 結案數的是「輪」不是時間：手動多跑幾次會讓事故提早結案。
-- 關係邊只在兩端都異常時才用來收斂；上游沒有規則、沒有資料，平台看不到它，不會替它補洞。
-- 自己的健康度只有 `rounds` 表與 CronJob 的成功／失敗；沒有對外的心跳告警。
+- 上游沒有告警規則（或沒越線）時平台看不到它：只會看到下游的告警，不會替上游補洞。
+- 進行中事故會吸收同系統或相鄰系統的新告警，不看時間間隔：一筆告警響很久沒恢復時，之後相鄰系統不相干的告警也會併進來。
+- 規則的標籤改了，Grafana 會把它當成另一筆告警（fingerprint 不同）。

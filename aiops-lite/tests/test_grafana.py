@@ -1,118 +1,62 @@
-"""Grafana 對接層：全部用 Grafana 13.0.7 的真實回應樣本（tests/fixtures/grafana13/）驗解析與防呆。"""
+"""Grafana 對接層：全部用 Grafana 13.0.7 的真實樣本（tests/fixtures/grafana13/）驗解析。"""
 from __future__ import annotations
 
-import copy
 import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
-from src.grafana import MAX_POINTS, Grafana, GrafanaError, QueryError, Rule, parse_frames
-from tests.conftest import recorded, replay
-
-RULE = Rule("uid1", "AMHS transfer duration", "amhs-mcs", "P2", "ds1", {"rawSql": "select 1"})
-
-
-def window(name: str) -> tuple[int, int]:
-    req = recorded(name)["request"]["json"]
-    return int(req["from"]), int(req["to"])
+from src.grafana import Grafana, GrafanaError, WebhookError, parse_webhook
+from tests.conftest import recorded, replay, webhook
 
 
 def client(handler) -> Grafana:
     return Grafana("http://grafana.test", "token", transport=httpx.MockTransport(handler))
 
 
-def test_only_rules_labelled_aiops_detect_are_managed():
-    rules, problems = client(lambda r: replay("alert_rules")).list_rules()
-    assert [(r.title, r.service, r.severity) for r in rules] == [
-        ("MQ queue depth", "mq-broker", "P1"), ("CIM T3 timeout", "cim-eap", "P2"),
-        ("AMHS transfer duration", "amhs-mcs", "P2")]
+def test_firing_webhook_becomes_an_alert():
+    [alert], problems = parse_webhook(webhook("firing_mq"))
     assert problems == []
-    assert "expr" in rules[0].model and "rawSql" in rules[2].model  # 重放的是資料源查詢，不是 reduce／threshold
+    assert (alert.status, alert.title, alert.service, alert.severity) == ("firing", "MQ queue depth", "mq-broker", "P1")
+    assert alert.fingerprint == "369c5f4adcb630d1" and alert.rule_uid == "cg4xgh0mv7oqod"
+    assert alert.starts_at == datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc) and alert.ends_at is None
+    assert alert.values == {"A": 350, "C": 1}
 
 
-def test_rule_without_service_is_skipped_and_bad_severity_is_reported():
-    raw = copy.deepcopy(recorded("alert_rules")["response"])
-    del raw[0]["labels"]["service"]
-    raw[1]["labels"]["aiops_severity"] = "critical"
-    raw[2]["isPaused"] = True
-    rules, problems = client(lambda r: httpx.Response(200, json=raw)).list_rules()
-    assert [(r.title, r.severity) for r in rules] == [("CIM T3 timeout", "P3")]
+def test_resolved_webhook_keeps_the_fingerprint_and_has_an_end_time():
+    [alert], _ = parse_webhook(webhook("resolved_mq"))
+    assert alert.status == "resolved" and alert.fingerprint == "369c5f4adcb630d1"
+    assert alert.ends_at == datetime(2026, 11, 21, 2, 42, 20, tzinfo=timezone.utc)
+
+
+def test_alerts_without_aiops_detect_are_ignored_and_bad_labels_are_reported():
+    payload = webhook("firing_mq")
+    base = payload["alerts"][0]
+    unmanaged = json.loads(json.dumps(base)); del unmanaged["labels"]["aiops_detect"]; unmanaged["fingerprint"] = "f1"
+    no_service = json.loads(json.dumps(base)); del no_service["labels"]["service"]; no_service["fingerprint"] = "f2"
+    bad_sev = json.loads(json.dumps(base)); bad_sev["labels"]["aiops_severity"] = "critical"; bad_sev["fingerprint"] = "f3"
+    payload["alerts"] = [base, unmanaged, no_service, bad_sev]
+    alerts, problems = parse_webhook(payload)
+    assert [(a.fingerprint, a.severity) for a in alerts] == [("369c5f4adcb630d1", "P1"), ("f3", "P3")]
     assert len(problems) == 2 and "沒有 service 標籤" in problems[0] and "不是 P0～P3" in problems[1]
 
 
-def test_query_hash_changes_when_the_query_changes():
-    other = Rule("uid1", "AMHS transfer duration", "amhs-mcs", "P2", "ds1", {"rawSql": "select 2"})
-    assert RULE.query_hash != other.query_hash
-    assert RULE.query_hash == Rule("uid1", "renamed", "amhs-mcs", "P0", "ds1", {"rawSql": "select 1"}).query_hash
+def test_nanosecond_timestamps_are_parsed():
+    payload = webhook("resolved_mq")
+    payload["alerts"][0]["endsAt"] = "2026-11-15T13:46:50.010208167Z"  # 舊平台樣本裡 Grafana 實際給過的格式
+    [alert], _ = parse_webhook(payload)
+    assert alert.ends_at == datetime(2026, 11, 15, 13, 46, 50, 10208, tzinfo=timezone.utc)
 
 
-def test_promql_response_becomes_a_series():
-    start, end = window("query_promql")
-    df = parse_frames(recorded("query_promql")["response"], RULE, start, end, 60000)
-    assert len(df) == 61 and df["ts"].is_monotonic_increasing
-    assert df["value"].iloc[0] == 46 and df["value"].max() > 300  # 樣本最後 15 分鐘是灌進去的積壓
-
-
-def test_sql_time_plus_single_value_is_accepted():
-    start, end = window("query_sql_single_value")
-    df = parse_frames(recorded("query_sql_single_value")["response"], RULE, start, end, 60000)
-    assert len(df) == 58 and df["value"].between(20, 120).all()
-
-
-def test_sql_with_two_value_columns_is_rejected_not_silently_truncated():
-    start, end = window("query_sql_multi_value")
-    with pytest.raises(QueryError, match="2 個數值欄.*transfer_duration.*pending_jobs"):
-        parse_frames(recorded("query_sql_multi_value")["response"], RULE, start, end, 60000)
-
-
-def test_sql_long_format_is_rejected():
-    start, end = window("query_sql_long_format")
-    with pytest.raises(QueryError, match="長格式"):
-        parse_frames(recorded("query_sql_long_format")["response"], RULE, start, end, 60000)
-
-
-def test_sql_without_timefilter_is_rejected():
-    start, end = window("query_sql_no_timefilter")  # 請求 15 分鐘，資料源回了整張表（3 小時）
-    with pytest.raises(QueryError, match=r"\$__timeFilter"):
-        parse_frames(recorded("query_sql_no_timefilter")["response"], RULE, start, end, 60000)
-
-
-def test_datasource_rejecting_the_query_is_a_rule_problem_not_an_outage():
-    g = client(lambda r: replay("query_promql_bad"))  # Grafana 回 HTTP 400，錯誤在 results.A.error
-    now = datetime(2026, 11, 21, tzinfo=timezone.utc)
-    with pytest.raises(QueryError, match="parse error"):
-        g.query_series(RULE, now - timedelta(hours=1), now, 60)
-
-
-def test_multiple_series_are_rejected():
-    raw = copy.deepcopy(recorded("query_promql")["response"])
-    raw["results"]["A"]["frames"].append(copy.deepcopy(raw["results"]["A"]["frames"][0]))
-    start, end = window("query_promql")
-    with pytest.raises(QueryError, match="2 條序列"):
-        parse_frames(raw, RULE, start, end, 60000)
-
-
-def test_no_data_is_an_empty_series_not_an_error():
-    raw = {"results": {"A": {"status": 200, "frames": [{"schema": {"fields": []}, "data": {"values": []}}]}}}
-    assert parse_frames(raw, RULE, 0, 60000, 60000).empty
-
-
-def test_training_window_is_fetched_in_chunks_and_instant_queries_become_range(fake):
-    fake.series[("ds1", "up")] = lambda ts: ts * 0 + 1.0
-    g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    rule = Rule("u", "t", "s", "P1", "ds1", {"expr": "up", "instant": True, "range": False, "intervalMs": 1000,
-                                             "maxDataPoints": 43200})
-    end = datetime(2026, 11, 21, tzinfo=timezone.utc)
-    df = g.query_series(rule, end - timedelta(days=14), end, 60)
-    assert len(fake.queries) == 5  # 20,160 點 / 5,000
-    assert len(df) == 14 * 1440 + 1 and not df["ts"].duplicated().any()
-    for body in fake.queries:
-        q = body["queries"][0]
-        assert (int(body["to"]) - int(body["from"])) / 60000 <= MAX_POINTS
-        assert q["instant"] is False and q["range"] is True and q["intervalMs"] == 60000
-        assert q["maxDataPoints"] == MAX_POINTS
+@pytest.mark.parametrize("payload", [
+    [], {}, {"alerts": "x"}, {"alerts": [1]}, {"alerts": [{"labels": {}, "status": "firing"}]},
+    {"alerts": [{"labels": {}, "status": "pending", "fingerprint": "a", "startsAt": "2026-11-21T00:00:00Z"}]},
+    {"alerts": [{"labels": {}, "status": "firing", "fingerprint": "a", "startsAt": "0001-01-01T00:00:00Z"}]},
+])
+def test_things_that_are_not_grafana_webhooks_are_rejected(payload):
+    with pytest.raises(WebhookError):
+        parse_webhook(payload)
 
 
 def test_es_proxy_returns_error_logs_and_error_spans():
@@ -156,14 +100,16 @@ def test_recorded_annotation_responses_have_the_fields_we_read():
 
 def test_auth_failure_is_reported_and_transient_errors_are_retried(monkeypatch):
     monkeypatch.setattr("src.grafana.time.sleep", lambda s: None)
+    now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+    search = lambda g: g.search_errors("u", "logs", "traces", ["a"], now, now)
     with pytest.raises(GrafanaError, match="HTTP 401"):
-        client(lambda r: httpx.Response(401, json={"message": "Unauthorized"})).list_rules()
+        search(client(lambda r: httpx.Response(401, json={"message": "Unauthorized"})))
     attempts = []
 
     def flaky(request: httpx.Request) -> httpx.Response:
         attempts.append(1)
-        return httpx.Response(503) if len(attempts) < 3 else replay("alert_rules")
+        return httpx.Response(503) if len(attempts) < 3 else replay("es_proxy_logs_traces")
 
-    assert len(client(flaky).list_rules()[0]) == 3 and len(attempts) == 3
+    assert len(search(client(flaky))["logs"]) == 6 and len(attempts) == 3
     with pytest.raises(GrafanaError, match="重試後仍失敗"):
-        client(lambda r: httpx.Response(503)).list_rules()
+        search(client(lambda r: httpx.Response(503)))
