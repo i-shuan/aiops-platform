@@ -101,7 +101,7 @@ repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不
 | 2 | 告警規則標籤 | Alerting → Alert rules → 編輯規則 → Labels | 每條要納管的規則加 `aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名>` |
 | 3 | **Contact Point**（新增 1 個） | Alerting → Contact points → Add | 類型 Webhook；URL `http://<release>.<namespace>.svc:8080/webhook`；Authorization scheme `Bearer`、credentials 填 config.yaml 的 `webhook.token`；**不要**勾 Disable resolved message |
 | 4 | **Notification policy**（新增 1 條路由） | Alerting → Notification policies → New child policy | Matcher `aiops_detect = true` → 上面的 Contact Point；`group_wait` 設短（0～10 秒，平台自己會等 debounce）；要同時保留原本的通知就勾 Continue matching |
-| 5 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（只用內建註記清單面板，不需要資料源） |
+| 5 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（事故清單：進行中、P0、P1、已結案；只用內建註記清單面板，不需要資料源）。另有 `dashboards/aiops-incident-metrics.json`（四張指標曲線，事故區間自動疊成紅色；匯入時選 ES 資料源，查詢要照 `FACTORY_METRICS.md` 的欄位規範，面板的查詢可自行改成各系統的指標） |
 | 6 | ES 資料源 uid（要日誌證據才需要） | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 config.yaml 的 `es.datasource_uid`（Helm：`es.datasourceUid`） |
 
 ### 注意
@@ -126,6 +126,7 @@ repo 裡的 `deploy/helm/aiops-grafana` 是舊平台自己的 Grafana，lite 不
   之後每失敗一次加倍（60、120、240…），最多 `llm.retry_max_seconds`（預設 1800）；成功就歸零。退避期間**不查 ES、不打 LLM、不重寫註記**
   （續跑的輪次照常跑，只是跳過這一步）；期間有新告警併進來，註記的 `[未經分析]` 原始摘要會跟著更新，到時間再帶完整成員重試。
   退避狀態存在資料庫，服務重啟不會重置。沒設 LLM（`llm.url` 留空）不算失敗、不退避。**不需要為了止損去清空 `llm.url`**。
+- **註記標籤變了就刪掉重建**：事故結案（open → closed）、嚴重度升級、有新系統加入時，註記的標籤會變。Grafana 13.0.7 實測：更新註記的標籤之後，用**舊標籤**查還是查得到它，儀表板的「進行中」清單會一直列著已結案的事故（用真的 Grafana 跑 demo 時發現的）。所以標籤變了就刪掉舊的、建一筆新的（註記 id 會換），只有文字或時間變才原地更新。
 - **寫回**：先寫自己的資料庫，再寫註記；一個事故一筆註記（標籤 `aiops`、`aiops-incident:<uid>`、嚴重度、`open`／`closed`、
   各系統名稱），之後原地更新。註記寫失敗下一輪補，不會重複建。
 
@@ -175,7 +176,7 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 ## 驗證狀態（照實寫）
 
 做過的：
-- 162 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
+- 164 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
   常駐服務的測試真的起 HTTP 服務、連發 Webhook。
 - 對真的 Grafana 13.0.7 + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本控制的**）：
   三條規則各隔 20 秒越線，Grafana 在 43 秒內陸續推了 3 個 Webhook；aiops-lite 在第一個 Webhook 後整整 60 秒才跑第一輪，
@@ -189,6 +190,11 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
   「可能源頭為 mq-broker 的 lot.dispatch 消費延遲，影響下游 cim-eap 與 amhs-mcs，錯誤集中於 EQP-CVD-07、LOT24A0031 與 FOUP0912」，
   通過幻覺檢查，註記標 `[LLM 推論]`；全部恢復後結案。錯的金鑰（401）也實測過：退回 `[未經分析]`、錯誤訊息不含金鑰。
   這次實測抓到一個問題並已修掉：程式原本固定送 `temperature: 0`，這個模型只接受預設值、回 400；現在預設不送，要送請設 `llm.temperature`。
+- **Grafana 規則改查 ES 的版本，對真的 Grafana 13.0.7 + ES 8.19.23 + PostgreSQL 16 + 真的 LLM 再跑一次端到端**（2026-11-22，本機，資料是腳本灌的、
+  格式照 `FACTORY_METRICS.md` 的統一欄位規範）：3 條 Grafana 告警規則直接查 ES（MQ 佇列深度、CIM T3 逾時筆數、AMHS 中止筆數）真的觸發，
+  收斂成 1 張 P1 事故，真 LLM 指出 mq-broker 無消費者為可能源頭、異常集中在 EQP-CVD-07 等；恢復後結案。截圖（Grafana 告警規則、規則細節、
+  指標曲線疊事故區間、事件總覽）是這次實跑的真實畫面。這次抓到註記標籤更新後舊標籤仍查得到的問題（見上面「註記標籤變了就刪掉重建」），已修正並重跑確認。
+  那次的第三個告警（AMHS）比第一輪分析晚了幾秒才到，併入同一張事故後重新分析：進行中畫面先是 2 個系統，結案時是 3 個。
 - Helm chart 用 `helm lint` 與 `helm template` 檢查過；產生的 Secret 裡的 `config.yaml` 用程式的 `Settings.from_dict` 讀過；
   Deployment 沒有任何 `env`。
 

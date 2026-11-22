@@ -35,6 +35,7 @@ class FakeGrafana:
 
     def __init__(self):
         self.annotations: dict[int, dict] = {}
+        self.tag_index: dict[int, set[str]] = {}   # 照 Grafana 13.0.7 的實測行為：更新標籤後，舊標籤還查得到
         self.calls: list[tuple[str, str]] = []
         self.fail: set[str] = set()   # 路徑開頭在這裡面的請求回 500
         self.es = recorded("es_proxy_logs_traces")["response"]
@@ -50,15 +51,28 @@ class FakeGrafana:
             self.es_requests.append(request.content.decode())
             return httpx.Response(200, json=self.es)
         if path == "/api/annotations" and request.method == "POST":
-            new_id = len(self.annotations) + 1
+            self.next_id = getattr(self, "next_id", 0) + 1
+            new_id = self.next_id
             self.annotations[new_id] = json.loads(request.content)
+            self.tag_index[new_id] = set(self.annotations[new_id]["tags"])
             return httpx.Response(200, json={"id": new_id, "message": "Annotation added"})
         if path == "/api/annotations" and request.method == "GET":
             tag = request.url.params["tags"]
-            return httpx.Response(200, json=[{"id": i, **a} for i, a in self.annotations.items() if tag in a["tags"]])
-        if path.startswith("/api/annotations/") and request.method == "PATCH":
-            self.annotations[int(path.rsplit("/", 1)[1])].update(json.loads(request.content))
-            return httpx.Response(200, json={"message": "Annotation patched"})
+            return httpx.Response(200, json=[{"id": i, **self.annotations[i]} for i, tags in self.tag_index.items()
+                                             if tag in tags])
+        if path.startswith("/api/annotations/"):
+            ann_id = int(path.rsplit("/", 1)[1])
+            if ann_id not in self.annotations:
+                return httpx.Response(403, json={"message": "You'll need additional permissions to perform this action."})
+            if request.method == "GET":
+                return httpx.Response(200, json={"id": ann_id, **self.annotations[ann_id]})
+            if request.method == "PATCH":
+                self.annotations[ann_id].update(json.loads(request.content))
+                self.tag_index[ann_id] |= set(self.annotations[ann_id]["tags"])   # 只加不減
+                return httpx.Response(200, json={"message": "Annotation patched"})
+            if request.method == "DELETE":
+                del self.annotations[ann_id], self.tag_index[ann_id]
+                return httpx.Response(200, json={"message": "Annotation deleted"})
         return httpx.Response(404, json={"message": "Not found"})
 
 
