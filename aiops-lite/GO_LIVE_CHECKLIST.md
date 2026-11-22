@@ -33,6 +33,35 @@ es:
   logIndex: "factory-logs-*"            # 步驟 1-2
 ```
 
+### 白話版：這 9 個值其實只有 3 類
+
+你不是在設定基礎設施，只是在填一張「通訊錄（去哪找 Grafana、去哪找 LLM）」加上「兩組自己訂的密碼」。
+
+| 區塊 | 填什麼 | 白話用途 |
+| --- | --- | --- |
+| `grafana` ＋ `es`（4 個值） | Grafana 網址、Token、ES 資料源編號、日誌的 index 名稱 | **去哪裡看監控與撈日誌**：讓程式找得到公司 Grafana，並知道透過它去翻哪一份日誌 |
+| `llm`（3 個值） | 內部 LLM 的網址、API Key、模型名稱 | **找哪個 AI 幫忙分析**：公司內部 AI 服務的連線位置 |
+| `webhook` ＋ `postgres`（2 個值） | 兩組自己訂的英數字密碼 | **系統自己的門鎖**：一組防別人亂發假告警，一組給自帶的事故小帳本用 |
+
+**為什麼要 `webhook.token`（門鎖暗號）**
+
+aiops-lite 有一個收告警的網址（`http://<release>.<namespace>.svc:8080/webhook`）。沒有暗號的話，叢集內任何人或任何測試腳本打這個網址，
+只要內容長得像告警，aiops-lite 就會開一張事故、去問 LLM。所以這個值是**必填**，沒填服務起不來。
+
+- 自己產生一串**夠長、猜不到**的英數字（例如用 `openssl rand -hex 16` 產生），不要用好猜的字。
+- 之後在公司 Grafana 設 Webhook 通知時，把**同一串**貼進 Authorization 的 credentials；兩邊對得上才收。
+
+**ES 到底要填什麼（只是指路，不是設定 ES）**
+
+這個檔案裡**不用也不會去設定公司的 ES**。這兩個值只是告訴 aiops-lite「借道 Grafana 查日誌時，要翻哪一份」：
+
+- `es.datasourceUid`：公司 Grafana 裡已經接好的那個 ES 資料源的編號（Grafana 網頁點開該資料源，網址列最後那一段）。
+- `es.logIndex`：工廠日誌在 ES 裡的 index 名稱（同一個頁面看得到，例如 `factory-logs-*`）。
+
+要注意：這只是 aiops-lite 這一側。ES 那一側仍然有別人要做的事（先套用 index template、各系統把日誌照統一欄位送進來），在第 3 節。
+
+**要花多久**：Token、LLM 的連線資訊都拿到手之後，填這個檔案只要幾分鐘；花時間的是去要這些東西（開單請 Grafana 管理員建帳號、問到內部 LLM 的端點）。
+
 ### 1-1 Grafana Token
 
 - [ ] Grafana 左側選單 **Administration → Users and access → Service accounts**
