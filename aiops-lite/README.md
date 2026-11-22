@@ -89,7 +89,7 @@ edges:
 
 系統沒有 Metrics（老舊的 CIM、AMHS、MQ）時怎麼把日誌或資料庫紀錄變成告警規則，見 **`FACTORY_METRICS.md`**。
 Fluent Bit 的設定範例在 `deploy/fluent-bit/`。
-Demo 的 Grafana 實際畫面（六張，含說明）在 **`demo/README.md`**。
+Demo 的 Grafana 實際畫面（依「降噪、找源頭、鎖定機台批號、自動結案」四個重點排列，含說明）在 **`demo/README.md`**。
 
 ## Grafana 要做的設定
 
