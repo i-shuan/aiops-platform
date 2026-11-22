@@ -205,6 +205,10 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 - chart 沒有部署到叢集、映像檔沒有實際 build 過（這個環境沒有 Docker 與叢集）。
 - 只測過 Grafana 13.0.7。
 
+## 上線
+
+上線前要填哪些設定、公司 Grafana 與 ES 要配合什麼、還有哪些事沒驗證過，照 **`GO_LIVE_CHECKLIST.md`** 由上往下做。
+
 ## 下一階段（只有設計，尚未實作）
 
 輕量級 Learning Loop：工程師在 Grafana 替結案的註記加 `rca-ok`／`rca-wrong` 標籤，之後類似的事故把確認過的舊案給 LLM 參考；
