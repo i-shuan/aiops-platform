@@ -205,6 +205,11 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 - chart 沒有部署到叢集、映像檔沒有實際 build 過（這個環境沒有 Docker 與叢集）。
 - 只測過 Grafana 13.0.7。
 
+## 下一階段（只有設計，尚未實作）
+
+輕量級 Learning Loop：工程師在 Grafana 替結案的註記加 `rca-ok`／`rca-wrong` 標籤，之後類似的事故把確認過的舊案給 LLM 參考；
+不微調模型、不自動改 Grafana 規則、不對外開放新入口。設計、兩個防呆與量測方式見 **`PHASE2_LEARNING_LOOP.md`**。
+
 ## 已知限制
 
 - **沒有 Webhook 就什麼都不會發生**。Contact Point 送不到、路由沒設對、Grafana 自己掛了，平台都不會知道（`/healthz` 只管 Pod 自己）；
