@@ -113,3 +113,31 @@ def test_auth_failure_is_reported_and_transient_errors_are_retried(monkeypatch):
     assert len(search(client(flaky))["logs"]) == 6 and len(attempts) == 3
     with pytest.raises(GrafanaError, match="重試後仍失敗"):
         search(client(lambda r: httpx.Response(503)))
+
+
+def annotation_ids_by_tag(fake, tag):
+    return [x["id"] for x in fake.handle(httpx.Request("GET", "http://x/api/annotations", params={"tags": tag})).json()]
+
+
+def test_changed_tags_replace_the_annotation_because_grafana_keeps_finding_it_by_the_old_tags(fake):
+    """Grafana 13.0.7 實測：PATCH／PUT 改了註記的標籤之後，用舊標籤查還是查得到（標籤索引沒更新）。
+    直接 PATCH 的話，儀表板的「進行中」清單會一直列著已結案的事故。"""
+    g = Grafana("http://grafana.test", "t", transport=fake.transport)
+    opened = {"time": 1, "timeEnd": 2, "tags": ["aiops", "aiops-incident:abc", "P1", "open"], "text": "x"}
+    first = g.upsert_annotation(None, "aiops-incident:abc", opened)
+    closed = g.upsert_annotation(first, "aiops-incident:abc", {**opened, "tags": ["aiops", "aiops-incident:abc", "P1", "closed"]})
+    assert closed != first and list(fake.annotations) == [closed]
+    assert annotation_ids_by_tag(fake, "open") == [] and annotation_ids_by_tag(fake, "closed") == [closed]
+    escalated = g.upsert_annotation(closed, "aiops-incident:abc", {**opened, "tags": ["aiops", "aiops-incident:abc", "P0", "closed"]})
+    assert annotation_ids_by_tag(fake, "P1") == [] and annotation_ids_by_tag(fake, "P0") == [escalated]
+
+
+def test_same_tags_are_patched_in_place_and_a_deleted_annotation_is_recreated(fake):
+    g = Grafana("http://grafana.test", "t", transport=fake.transport)
+    body = {"time": 1, "timeEnd": 2, "tags": ["aiops", "aiops-incident:abc", "open"], "text": "x"}
+    first = g.upsert_annotation(None, "aiops-incident:abc", body)
+    assert g.upsert_annotation(first, "aiops-incident:abc", {**body, "text": "更新了摘要", "timeEnd": 9}) == first
+    assert fake.annotations[first]["text"] == "更新了摘要" and ("DELETE", f"/api/annotations/{first}") not in fake.calls
+    del fake.annotations[first], fake.tag_index[first]              # 被人在 Grafana 上刪掉了（Grafana 對不存在的 id 回 403）
+    again = g.upsert_annotation(first, "aiops-incident:abc", body)
+    assert again != first and list(fake.annotations) == [again]

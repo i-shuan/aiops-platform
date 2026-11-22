@@ -133,7 +133,7 @@ def test_burst_of_webhooks_is_stored_at_once_and_processed_in_one_round_after_th
     done = len(live.summaries)
     time.sleep(2.5)
     assert len(live.summaries) == done and table(live.settings, dbmod.incidents)[0]["status"] == "closed"
-    assert len(live.fake.annotations) == 1 and "closed" in live.fake.annotations[1]["tags"]
+    assert len(live.fake.annotations) == 1 and "closed" in next(iter(live.fake.annotations.values()))["tags"]
 
 
 def test_requests_without_the_right_token_or_format_are_rejected_and_never_trigger_a_round(live):

@@ -99,9 +99,13 @@ def test_cascade_becomes_one_incident_one_llm_call_one_annotation_then_closes(wo
     last = w.run(550)                                 # 滿 300 秒：結案
     [closed] = rows(w, dbmod.incidents)
     assert closed["status"] == "closed" and last["open_incidents"] == 0 and last["needs_followup"] is False
-    note = w.fake.annotations[inc["annotation_id"]]
-    assert len(w.fake.annotations) == 1 and "closed" in note["tags"] and "【P1・已結案】" in note["text"]
+    # 結案時標籤變了（open → closed）：Grafana 的標籤索引不會跟著更新，所以是「刪掉舊的、建新的」，id 會換，但仍然只有一筆
+    assert closed["annotation_id"] != inc["annotation_id"] and list(w.fake.annotations) == [closed["annotation_id"]]
+    note = w.fake.annotations[closed["annotation_id"]]
+    assert "closed" in note["tags"] and "【P1・已結案】" in note["text"]
     assert "10:41 ～ 2026-11-21 10:42（台灣時間）" in note["text"]  # 結束時間 = 最後一筆告警的 endsAt
+    by_tag = lambda tag: w.fake.handle(httpx.Request("GET", "http://x/api/annotations", params={"tags": tag})).json()
+    assert by_tag("open") == [] and len(by_tag("closed")) == 1   # 儀表板的「進行中」清單不會再列到這一張
     assert "[LLM 推論]" in note["text"] and len(w.llm_calls) == 1  # 結案不再問 LLM
     assert {r["status"] for r in rows(w, dbmod.rounds)} == {"ok"} and len(rows(w, dbmod.rounds)) == 6
 

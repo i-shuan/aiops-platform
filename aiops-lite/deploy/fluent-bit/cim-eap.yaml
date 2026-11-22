@@ -1,0 +1,73 @@
+# Fluent Bit 設定範例：CIM-EAP 的文字日誌 → 拆欄位 → Elasticsearch（裝在每一台 EAP 伺服器上，只讀日誌檔）
+#
+# 只做「單行拆欄位」，不算次數、不判斷門檻（那是 Grafana 規則的事）。輸出的欄位照 FACTORY_METRICS.md 的統一欄位規範。
+# 範例假設日誌長這樣（格式是假設的，請照現場的日誌改 parsers 裡的 regex）：
+#   2026-11-21 10:41:07 [ERROR] EQP-CVD-07 HSMS T3 Timeout on LOT-9921 carrier FOUP0912
+#   2026-11-21 10:41:09 [INFO] EQP-CVD-03 lot track-in complete on LOT-9940
+#
+# 用 Fluent Bit 5.2.0 + Elasticsearch 8.19.23 實測過（見 FACTORY_METRICS.md）。需要支援 YAML 設定與 parsers 區段的版本（3.2 以上）。
+# 啟動：fluent-bit -c cim-eap.yaml
+
+service:
+  flush: 5
+  log_level: info
+
+parsers:
+  - name: eap_log
+    format: regex
+    # 時間、等級、機台是必有的；批號與載具有才拆
+    regex: '^(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(?<level>[A-Z]+)\] (?<eqp_id>EQP-[A-Z0-9-]+) (?<message>.*?)(?: on (?<lot_id>LOT-?[A-Z0-9]+))?(?: carrier (?<carrier_id>FOUP[0-9]+))?$'
+    time_key: time
+    time_format: '%Y-%m-%d %H:%M:%S'
+    time_offset: '+0800'          # 日誌寫的是台灣時間；不設的話會被當成 UTC，事故時間窗會差 8 小時
+
+pipeline:
+  inputs:
+    - name: tail
+      tag: eap
+      path: /var/log/eap/*.log
+      parser: eap_log
+      key: message                # 拆不開的行整行放進 message（不要用預設的 log：會跟 log.level 這個欄位衝突，ES 會拒收）
+      db: /var/lib/fluent-bit/eap.db   # 記住讀到哪裡，重啟不重送、不漏送
+      read_from_head: false       # 第一次啟動只收新的行；要補舊資料才改 true
+      skip_long_lines: on
+      mem_buf_limit: 20MB         # ES 連不上時最多在記憶體裡暫存這麼多，超過就暫停讀檔（不會吃光產線伺服器的記憶體）
+      refresh_interval: 10
+
+  filters:
+    # 補上系統名稱、把 level 搬到 log.level（統一欄位規範的必要欄位）
+    - name: modify
+      match: eap
+      add: service.name cim-eap   # 要跟 Grafana 規則的 service 標籤、aiops-lite 的 edges 完全一樣
+      rename: level log.level
+
+    # 依訊息內容補 error_type（Grafana 規則用它算筆數）。一種錯誤一段；沒對到的行就沒有 error_type
+    - name: modify
+      match: eap
+      condition: Key_value_matches message (?i)T3\s*time-?out
+      add: error_type T3_TIMEOUT
+    - name: modify
+      match: eap
+      condition: Key_value_matches message (?i)disconnect|NOT\sSELECTED   # 條件裡不能有空白（會被當成參數分隔），用 \s
+      add: error_type DISCONNECT
+    - name: modify
+      match: eap
+      condition: Key_value_matches message (?i)lot\s*hold
+      add: error_type LOT_HOLD
+
+    # ES 空間不夠時再打開：只送 WARN 以上（aiops-lite 只撈錯誤等級的日誌，證據不受影響；但「日誌總量」的心跳規則要改看別的）
+    # - name: grep
+    #   match: eap
+    #   regex: log.level ^(ERROR|WARN|FATAL|CRITICAL)$
+
+  outputs:
+    - name: es
+      match: eap
+      host: es.corp.example
+      port: 9200
+      index: factory-logs-cim     # aiops-lite 的 es.log_index 填 factory-logs-*
+      suppress_type_name: on      # Elasticsearch 8 必要
+      tls: on
+      http_user: fluent-bit-writer
+      http_passwd: ${ES_PASSWORD} # 從環境變數帶，不要寫在檔案裡
+      retry_limit: 5

@@ -124,7 +124,7 @@ class Grafana:
     def close(self) -> None:
         self._http.close()
 
-    def _request(self, method: str, path: str, *, accept: tuple[int, ...] = (), **kw: Any) -> Any:
+    def _request(self, method: str, path: str, *, accept: tuple[int, ...] = (), with_status: bool = False, **kw: Any) -> Any:
         """短暫抖動（連線失敗、逾時、429／502／503／504）重試 retries 次（預設 2），每次多等 retry_backoff_seconds；
         其他錯誤直接丟 GrafanaError。"""
         last = ""
@@ -142,9 +142,10 @@ class Grafana:
             if r.status_code >= 400 and r.status_code not in accept:
                 raise GrafanaError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:300]}")
             try:
-                return r.json()
+                data = r.json()
             except ValueError as e:
                 raise GrafanaError(f"{method} {path} 回的不是 JSON：{r.text[:200]}") from e
+            return (r.status_code, data) if with_status else data
         raise GrafanaError(f"{method} {path} 重試後仍失敗：{last}")
 
     # ── 日誌與 Trace（經 Grafana 的 ES 資料源代理）──
@@ -189,12 +190,22 @@ class Grafana:
     # ── 註記 ──
 
     def upsert_annotation(self, annotation_id: int | None, uid_tag: str, body: dict[str, Any]) -> int:
-        """建立或更新一筆註記，回傳它的 id。沒有 id 時先用事故標籤找（上一輪建立成功、但 id 沒存到的情況不會重複建）。"""
+        """建立或更新一筆註記，回傳它的 id。沒有 id 時先用事故標籤找（上一輪建立成功、但 id 沒存到的情況不會重複建）。
+
+        標籤有變（open→closed、嚴重度升級、新系統加入）就**刪掉舊的、建一筆新的**，不用 PATCH：Grafana 13.0.7 實測，
+        更新註記的標籤之後，用「舊標籤」查還是查得到它（標籤索引沒有跟著更新），儀表板的「進行中」清單會一直列著已結案的事故。
+        只有文字、時間變（標籤相同）才原地 PATCH。"""
         if annotation_id is None:
             found = self._request("GET", "/api/annotations", params={"tags": uid_tag, "limit": 1})
             if isinstance(found, list) and found:
                 annotation_id = int(found[0]["id"])
-        if annotation_id is None:
-            return int(self._request("POST", "/api/annotations", json=body)["id"])
-        self._request("PATCH", f"/api/annotations/{annotation_id}", json=body)
-        return annotation_id
+        if annotation_id is not None:
+            status, current = self._request("GET", f"/api/annotations/{annotation_id}", accept=(403, 404), with_status=True)
+            if status in (403, 404):
+                annotation_id = None  # 被人刪掉了（Grafana 對不存在的 id 有時回 403，有時回 404）：重建；真的沒權限的話下面建立時會報錯
+            elif set(current.get("tags") or []) == set(body["tags"]):
+                self._request("PATCH", f"/api/annotations/{annotation_id}", json=body)
+                return annotation_id
+            else:
+                self._request("DELETE", f"/api/annotations/{annotation_id}", accept=(403, 404))
+        return int(self._request("POST", "/api/annotations", json=body)["id"])
