@@ -40,6 +40,12 @@ class FakeGrafana:
         self.fail: set[str] = set()   # 路徑開頭在這裡面的請求回 500
         self.es = recorded("es_proxy_logs_traces")["response"]
         self.es_requests: list[str] = []
+        self.error_searches = 0        # 撈錯誤日誌的次數（= 做了幾次證據收集）
+        self.timeline_requests: list[list[dict]] = []
+        self.timeline_docs: dict[str, list[dict]] | None = None   # None = 從錯誤日誌樣本裡挑同一個識別碼的紀錄
+        self.tempo_search = recorded("tempo_search")["response"]
+        self.tempo_traces = {"11111111111111111111111111111111": recorded("tempo_trace")["response"]}
+        self.tempo_requests: list[httpx.Request] = []
         self.transport = httpx.MockTransport(self.handle)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -48,8 +54,14 @@ class FakeGrafana:
         if any(path.startswith(p) for p in self.fail):
             return httpx.Response(500, json={"message": "boom"})
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/_msearch"):
-            self.es_requests.append(request.content.decode())
-            return httpx.Response(200, json=self.es)
+            return self.msearch(request.content.decode())
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/search"):
+            self.tempo_requests.append(request)
+            return httpx.Response(200, json=self.tempo_search)
+        if path.startswith("/api/datasources/proxy/uid/") and "/api/traces/" in path:
+            self.tempo_requests.append(request)
+            trace = self.tempo_traces.get(path.rsplit("/", 1)[1])
+            return httpx.Response(200, json=trace) if trace else httpx.Response(404)   # Tempo 的 404 沒有內容
         if path == "/api/annotations" and request.method == "POST":
             self.next_id = getattr(self, "next_id", 0) + 1
             new_id = self.next_id
@@ -74,6 +86,32 @@ class FakeGrafana:
                 del self.annotations[ann_id], self.tag_index[ann_id]
                 return httpx.Response(200, json={"message": "Annotation deleted"})
         return httpx.Response(404, json={"message": "Not found"})
+
+
+def _msearch(self: FakeGrafana, body: str) -> httpx.Response:
+    """ES 代理。撈錯誤日誌的查詢有三個條件（時間、系統、等級）→ 回錄下來的真實回應；
+    關聯時間線的查詢只有兩個條件（時間、某個識別碼）→ 回帶那個識別碼的紀錄，由舊到新。"""
+    lines = [json.loads(line) for line in body.splitlines() if line.strip()]
+    queries = lines[1::2]
+    if any(len(q["query"]["bool"]["filter"]) == 3 for q in queries):
+        self.es_requests.append(body)
+        self.error_searches += 1
+        return httpx.Response(200, json=self.es)
+    self.timeline_requests.append(queries)
+    responses = []
+    for q in queries:
+        (field, values), = q["query"]["bool"]["filter"][1]["bool"]["should"][0]["terms"].items()
+        if self.timeline_docs is not None:
+            docs = self.timeline_docs.get(values[0], [])
+        else:
+            docs = sorted((h["_source"] for h in self.es["responses"][0]["hits"]["hits"] if h["_source"].get(field) == values[0]),
+                          key=lambda d: str(d.get(next(iter(q["sort"][0])), "")))
+        shown = docs[:q["size"]]
+        responses.append({"hits": {"total": {"value": len(docs), "relation": "eq"}, "hits": [{"_source": d} for d in shown]}})
+    return httpx.Response(200, json={"responses": responses})
+
+
+FakeGrafana.msearch = _msearch
 
 
 @pytest.fixture

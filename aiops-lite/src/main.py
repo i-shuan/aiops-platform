@@ -63,6 +63,7 @@ class Settings:
     llm_retry_initial_seconds: int = 60
     llm_retry_max_seconds: int = 1800
     es_datasource_uid: str = ""
+    tempo_datasource_uid: str = ""             # Grafana 上 Tempo 資料源的 uid；空的 = 沒有呼叫鏈證據
     log_index: str = "*"
     trace_index: str = ""
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
@@ -90,7 +91,7 @@ class Settings:
     @classmethod
     def from_dict(cls, raw: dict[str, Any], base_dir: Path | None = None) -> "Settings":
         """base_dir：llm.system_prompt_file 寫相對路徑時相對於哪裡（= 設定檔所在的資料夾）。"""
-        known = {"grafana", "webhook", "database", "llm", "es", "labels", "healthcheck", "annotation", "timezone",
+        known = {"grafana", "webhook", "database", "llm", "es", "tempo", "labels", "healthcheck", "annotation", "timezone",
                  "log_level", "edges", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
         check_keys(raw, known, "")
         grafana = section(raw, "grafana", {"url", "token", "timeout_seconds", "retries", "retry_backoff_seconds"})
@@ -98,9 +99,12 @@ class Settings:
         database = section(raw, "database", {"url"})
         llm = section(raw, "llm", {"url", "api_key", "model", "temperature", "timeout_seconds", "retry_initial_seconds",
                                    "retry_max_seconds", "max_log_samples", "max_trace_samples", "max_message_chars",
-                                   "top_ids", "max_summary_chars", "system_prompt_file", "id_pattern"})
+                                   "top_ids", "max_summary_chars", "system_prompt_file", "id_pattern",
+                                   "max_timeline_ids", "max_timeline_events"})
         es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields",
-                                 "error_levels", "error_statuses", "max_hits", "window_padding_minutes"})
+                                 "error_levels", "error_statuses", "max_hits", "window_padding_minutes",
+                                 "timeline_fields"})
+        tempo = section(raw, "tempo", {"datasource_uid", "max_traces", "max_spans", "trace_id_field"})
         labels = section(raw, "labels", {"detect", "severity", "service", "default_severity"})
         health = section(raw, "healthcheck", {"stuck_seconds"})
         annotation = section(raw, "annotation", {"max_rule_links"})
@@ -139,6 +143,16 @@ class Settings:
         ids = es.get("id_fields", list(cls.id_fields))
         if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids):
             raise ConfigError("es.id_fields 要是非空的欄位名稱清單")
+        ids = [i.strip() for i in ids]
+        timeline = es.get("timeline_fields")
+        if timeline is None:
+            timeline = [f for f in d_ev.timeline_fields if f in ids]   # 預設：lot_id、carrier_id 裡有在統計的那幾個
+        if not isinstance(timeline, list) or not all(isinstance(i, str) and i.strip() for i in timeline):
+            raise ConfigError("es.timeline_fields 要是欄位名稱清單（空清單 = 不做關聯時間線）")
+        timeline = [i.strip() for i in timeline]
+        strangers = [f for f in timeline if f not in ids]
+        if strangers:
+            raise ConfigError(f"es.timeline_fields 的 {strangers} 不在 es.id_fields 裡：時間線只能用有在統計的識別碼")
         return cls(
             grafana_url=text(grafana, "url", "", "grafana."), grafana_token=text(grafana, "token", "", "grafana."),
             grafana_timeout_seconds=number(grafana, "timeout_seconds", cls.grafana_timeout_seconds, 1, 600, "grafana."),
@@ -160,7 +174,8 @@ class Settings:
                 id_pattern=id_pattern),
             llm_retry_initial_seconds=retry_initial, llm_retry_max_seconds=retry_max,
             es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es.") or "*",
-            trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(i.strip() for i in ids),
+            trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(ids),
+            tempo_datasource_uid=text(tempo, "datasource_uid", "", "tempo."),
             log_fields=field_map(es, "log_fields", LogFields), trace_fields=field_map(es, "trace_fields", TraceFields),
             evidence=rca.EvidenceLimits(
                 max_hits=integer(es, "max_hits", d_ev.max_hits, 1, 10000, "es."),
@@ -169,7 +184,13 @@ class Settings:
                 max_log_samples=integer(llm, "max_log_samples", d_ev.max_log_samples, 0, prefix="llm."),
                 max_trace_samples=integer(llm, "max_trace_samples", d_ev.max_trace_samples, 0, prefix="llm."),
                 max_message_chars=integer(llm, "max_message_chars", d_ev.max_message_chars, 20, prefix="llm."),
-                top_ids=integer(llm, "top_ids", d_ev.top_ids, 1, prefix="llm.")),
+                top_ids=integer(llm, "top_ids", d_ev.top_ids, 1, prefix="llm."),
+                timeline_fields=tuple(timeline),
+                max_timeline_ids=integer(llm, "max_timeline_ids", d_ev.max_timeline_ids, 0, 20, "llm."),
+                max_timeline_events=integer(llm, "max_timeline_events", d_ev.max_timeline_events, 1, 500, "llm."),
+                trace_id_field=text(tempo, "trace_id_field", d_ev.trace_id_field, "tempo."),
+                max_traces=integer(tempo, "max_traces", d_ev.max_traces, 0, 20, "tempo."),
+                max_trace_spans=integer(tempo, "max_spans", d_ev.max_trace_spans, 1, 500, "tempo.")),
             labels=names, tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])),
             retry_failed_round_seconds=integer(raw, "retry_failed_round_seconds", cls.retry_failed_round_seconds, 1),
             healthcheck_stuck_seconds=integer(health, "stuck_seconds", cls.healthcheck_stuck_seconds, 30, prefix="healthcheck."),
@@ -341,7 +362,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             evidence = rca.collect_evidence(
                 inc, edges, grafana, es_datasource_uid=settings.es_datasource_uid, log_index=settings.log_index,
                 trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
-                log_fields=settings.log_fields, trace_fields=settings.trace_fields, limits=settings.evidence)
+                log_fields=settings.log_fields, trace_fields=settings.trace_fields, limits=settings.evidence,
+                    tempo_datasource_uid=settings.tempo_datasource_uid)
             before = (inc.summary, inc.analyzed)
             inc.summary, inc.analyzed, reason = rca.analyze(
                 inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,

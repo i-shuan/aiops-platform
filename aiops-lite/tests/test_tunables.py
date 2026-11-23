@@ -34,11 +34,15 @@ llm:
   max_summary_chars: 80
   system_prompt_file: prompt.txt
   id_pattern: "EQP-[A-Z]+-[0-9]+"
+  max_timeline_ids: 4
+  max_timeline_events: 50
 es:
   error_levels: [E, SEVERE]
   error_statuses: [FAILED]
   max_hits: 500
   window_padding_minutes: 30
+  timeline_fields: [carrier_id]
+tempo: {datasource_uid: tempo-1, max_traces: 5, max_spans: 60}
 labels: {detect: managed_by_aiops, severity: priority, service: system, default_severity: p2}
 healthcheck: {stuck_seconds: 1200}
 annotation: {max_rule_links: 2}
@@ -80,6 +84,8 @@ def test_every_optional_setting_is_read_from_the_file(tmp_path):
     e = s.evidence
     assert (e.max_log_samples, e.max_trace_samples, e.max_message_chars, e.top_ids) == (5, 2, 120, 3)
     assert (e.error_levels, e.error_statuses, e.max_hits, e.window_padding_minutes) == (("E", "SEVERE"), ("FAILED",), 500, 30)
+    assert (e.timeline_fields, e.max_timeline_ids, e.max_timeline_events) == (("carrier_id",), 4, 50)
+    assert (s.tempo_datasource_uid, e.max_traces, e.max_trace_spans) == ("tempo-1", 5, 60)
     assert s.labels == LabelNames("managed_by_aiops", "priority", "system", "P2")
     assert (s.healthcheck_stuck_seconds, s.annotation_max_rule_links) == (1200, 2)
     assert (s.retry_failed_round_seconds, s.rounds_retention_days) == (10, 30)
@@ -96,6 +102,8 @@ def test_without_the_optional_settings_everything_keeps_its_old_value(tmp_path):
     assert (e.max_hits, e.window_padding_minutes, e.max_log_samples, e.max_trace_samples, e.max_message_chars, e.top_ids) == (100, 10, 20, 10, 300, 10)
     assert e.error_levels == ("ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical")
     assert e.error_statuses == ("error", "ERROR", "Error", "STATUS_CODE_ERROR")
+    assert (e.timeline_fields, e.max_timeline_ids, e.max_timeline_events) == (("lot_id", "carrier_id"), 2, 30)
+    assert (s.tempo_datasource_uid, e.max_traces, e.max_trace_spans) == ("", 3, 30)
     assert s.labels == LabelNames("aiops_detect", "aiops_severity", "service", "P3")
     assert (s.healthcheck_stuck_seconds, s.annotation_max_rule_links, s.retry_failed_round_seconds, s.rounds_retention_days) == (600, 5, 30, 90)
 
@@ -154,7 +162,8 @@ def test_every_optional_setting_is_documented_in_the_example_file():
                 "max_trace_samples", "max_message_chars", "top_ids", "max_summary_chars", "system_prompt_file",
                 "id_pattern", "error_levels", "error_statuses", "max_hits", "window_padding_minutes", "labels:",
                 "default_severity", "stuck_seconds", "max_rule_links", "retry_failed_round_seconds",
-                "rounds_retention_days", "temperature"):
+                "rounds_retention_days", "temperature", "timeline_fields", "max_timeline_ids",
+                "max_timeline_events", "tempo:", "max_traces", "max_spans"):
         assert key in text, f"config.example.yaml 沒有提到 {key}"
 
 

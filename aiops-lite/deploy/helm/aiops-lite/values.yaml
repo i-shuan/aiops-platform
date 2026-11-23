@@ -10,7 +10,7 @@
 
 image:
   repository: aiops-lite
-  tag: "0.3.0"
+  tag: "0.4.0"
   pullPolicy: IfNotPresent
 
 grafana:
@@ -53,6 +53,9 @@ es:              # datasourceUid 留空 = RCA 沒有日誌證據
   idFields: [eqp_id, lot_id, carrier_id]
   logFields: {time: "@timestamp", service: service.name, level: log.level, message: message}
   traceFields: {time: "@timestamp", service: service.name, span: span.name, trace_id: trace.id, status: status.code, error: error.message}
+
+tempo:           # datasourceUid 留空 = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
+  datasourceUid: ""    # Grafana 上 Tempo 資料源的 uid（取得方式跟 ES 的一樣）
 
 timezone: Asia/Taipei
 logLevel: INFO

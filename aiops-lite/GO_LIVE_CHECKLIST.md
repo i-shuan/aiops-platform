@@ -87,6 +87,9 @@ aiops-lite 有一個收告警的網址（`http://<release>.<namespace>.svc:8080/
 
 `es.datasourceUid` 不填也能跑，只是 RCA 沒有日誌證據，LLM 只能看告警本身。
 
+**有 Tempo 的話（IT 服務的 Trace）**：用同樣的方式找到 Tempo 資料源的 uid，在 `secrets.values.yaml` 加一行
+`tempo: {datasourceUid: xxxxxxxx}`。不填就沒有呼叫鏈證據，其他照常。Token 另外需要能經資料源代理查 Tempo。
+
 ### 1-3 內部 LLM
 
 - [ ] 填公司內部 LLM 的端點（OpenAI 相容，網址到 `/v1` 為止）、API Key、模型名稱
