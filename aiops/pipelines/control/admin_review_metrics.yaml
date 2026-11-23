@@ -1,0 +1,5 @@
+name: admin_review_metrics
+description: "手動動作：事故卡分項覆核統計（收斂、RCA、結案、嚴重度各看過幾張、錯在哪；只是報表）"
+nodes:
+  - name: review_metrics
+    operator: admin.review_metrics

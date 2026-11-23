@@ -19,7 +19,7 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
 )
-from aiops.control_plane.learning import golden, snr_feedback, threshold, tuning_rules
+from aiops.control_plane.learning import golden, review, snr_feedback, threshold, tuning_rules
 from aiops.control_plane.learning.segment import snr_nodes
 from aiops.control_plane.learning.replay import incident_series
 from aiops.control_plane.learning.replay import workflow_layers as _workflow_layers
@@ -254,6 +254,7 @@ class FeedbackSubmitOp(BaseOperator):
         feedback = Feedbacks.create({
             "incident_uid": req.incident_uid, "verdict": req.verdict, "detector_name": req.detector,
             "text": req.text, "author": req.author, "proposal_id": None,
+            "review": review.stored(req.review, incident) if req.review is not None and incident is not None else {},
             "pipeline": req.pipeline or (incident["pipeline"] if incident else None),
             "entity": req.entity, "time_start": tr.start if tr else None, "time_end": tr.end if tr else None})
         ctx.result = {"feedback": feedback}

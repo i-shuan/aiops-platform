@@ -84,9 +84,10 @@ class Incidents:
         return crud.update(IncidentRow, incident_id, incident=incident, severity=severity)
 
     @staticmethod
-    def record_rca(incident_id: int, conclusion_type: str, concluded_at: datetime) -> Row:
-        """這個事件群最近一次 RCA 的結論等級（重跑就覆蓋）。"""
-        return crud.update(IncidentRow, incident_id, rca_conclusion_type=conclusion_type, rca_concluded_at=concluded_at)
+    def record_rca(incident_id: int, conclusion_type: str, concluded_at: datetime, root_entity: str = "") -> Row:
+        """這個事件群最近一次 RCA 的結論等級與第一候選（重跑就覆蓋；沒有候選是 ''）。"""
+        return crud.update(IncidentRow, incident_id, rca_conclusion_type=conclusion_type, rca_concluded_at=concluded_at,
+                           rca_root_entity=root_entity)
 
     @staticmethod
     def mark_resolved(incident_id: int, resolved_at: datetime) -> Row:

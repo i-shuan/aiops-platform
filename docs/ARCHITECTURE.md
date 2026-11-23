@@ -121,7 +121,8 @@ RCA 管線
 - `enrichment.llm_briefing`：產生給值班人員的簡短戰情摘要。
 
 第 11 層　學習回饋（手動動作）
-- `admin.feedback_submit`：收下值班人員的回饋（誤報、漏報、正確）。
+- `admin.feedback_submit`：收下值班人員的回饋（誤報、漏報、正確），可以附分項覆核（收斂、RCA、結案、嚴重度各自對不對），連同平台當時的說法一起存。
+- `admin.review_metrics`：分項覆核的統計（每一項看過幾張、錯在哪、指向哪個設定）。只是報表，不產生提案、不改設定。
 - `admin.feedback_propose`：把累積的誤報回饋轉成調參提案。
 - `admin.proposal_backtest`：拿歷史資料回測提案；會讓已確認的真實事故漏掉的提案直接擋下。
 - `admin.proposal_approve`：人工核准後才生效；YAML 寫死的參數不會被覆蓋。
