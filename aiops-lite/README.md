@@ -40,6 +40,33 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 
 設定：`es.timeline_fields`、`tempo.datasource_uid` 等，見 `CONFIG.md` 的「關聯證據」。Loki、Jaeger 沒有接。
 
+## 整合的單位：以 `service` 為準，一個 Grafana 一份
+
+**事故以 `service`（系統名稱）為單位收斂，不是以 cluster、namespace、pod 或機台。**
+收斂只看三樣東西：告警上的 `service` 標籤、設定檔的 `edges`、目前有沒有進行中的事故。告警上其他的標籤收斂時都不看；
+機台、批號、pod 這類識別碼只出現在日誌裡，用來統計與做時間線，不影響事故怎麼分。
+
+| 情況 | 結果 |
+| --- | --- |
+| 兩個 cluster 都有叫 `mes-api` 的服務，各自告警 | **併成同一張事故**（`service` 的值一樣） |
+| 同一個服務有幾十個 pod 各自告警 | 併成一張，pod 不會獨立成事故 |
+| 同一個系統底下好幾台機台各自告警 | 併成一張，機台只出現在日誌統計裡 |
+
+**部署單位**：一個 aiops-lite 對一個 Grafana，只用一把 Grafana Token、收該 Grafana 送來的 Webhook，而且只能跑 1 個副本。
+不是一個 cluster 一份，也不是一個服務一份。有多個廠區或 cluster 各有自己的 Grafana 時，要各部署一份。
+
+**多個 cluster 或廠區共用同一個 Grafana 時**，有三種做法：
+
+1. **把 cluster 寫進 `service` 的值**（例如 `prod-a/mes-api`）：不用改程式；代價是 `edges` 也要照這個名稱寫，邊會變多，日誌的 `service.name` 也要一致。
+2. **每個 cluster 各部署一份 aiops-lite**，各自用該 cluster 的告警路由（通知路由的條件要多一個 cluster 標籤）：隔離最乾淨，要多維護幾份。
+3. **讓收斂把 cluster 標籤也算進去**：要改程式，**目前沒有做**。
+
+要在上線前決定用哪一種，因為選了之後 `service` 的命名與 `edges` 都要照著寫。
+
+**沒有驗證的**：多個 Grafana 組織（org）的情況。Token 是某個組織底下的服務帳號，推測它收不到其他組織的註記與資料源，
+Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafana 的一般行為推測，沒有在多組織環境實測過。
+另外兩個 cluster 同名服務會併成一張，這點是依收斂邏輯與測試確認的，沒有用真實多 cluster 資料跑過。
+
 ## 為什麼要等（debounce）
 
 收到 Webhook 的第 0 秒就分析，LLM 拿到的是殘缺的證據：
