@@ -101,6 +101,7 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | 各設定值的合法範圍、log 等級的可選值 | `src/main.py` | 驗證規則 |
 | Webhook 的必要欄位（`status`、`fingerprint`、`startsAt`、`labels`、`ruleUID`、`values`） | `src/grafana.py` 的 `parse_webhook` | Grafana 的 webhook 格式，不是我們定的 |
 | 向 Tempo 搜尋時一次要 20 條、再挑最近的 | `src/rca.py` 的 `TRACE_SEARCH_LIMIT` | Tempo 的搜尋不保證先回最新的；要調的是最後取幾條（`tempo.max_traces`） |
+| Tempo 查詢用 `resource.service.name` 比對分析單位 | `src/grafana.py` 的 `search_error_traces` | OTel 的標準屬性。把 `labels.service` 換成 function 或 cluster 時呼叫鏈會撈不到（見 README「改用別的單位分析」） |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |
 | 嚴重度的判定方式 | — | 程式沒有「判定規則」：嚴重度直接讀告警的標籤，事故取成員裡最高的，只升不降 |

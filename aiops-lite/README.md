@@ -67,6 +67,33 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafana 的一般行為推測，沒有在多組織環境實測過。
 另外兩個 cluster 同名服務會併成一張，這點是依收斂邏輯與測試確認的，沒有用真實多 cluster 資料跑過。
 
+### 改用別的單位分析（function、cluster）
+
+分析單位其實是「告警上的某一個標籤」，程式讀進來之後一路叫它 `service`。綁定的位置只有這幾處：
+
+| 位置 | 作用 |
+| --- | --- |
+| `config.yaml` 的 `labels.service` | 指定用哪個告警標籤當分析單位（預設 `service`） |
+| `src/grafana.py` 的 `parse_webhook` | 從告警讀出這個標籤，放進 `Alert.service` |
+| `src/grouping.py` 的 `group_alerts`、`converge` | 以這個值收斂（同值合併、有關係邊就併） |
+| `src/grafana.py` 的 `search_errors`、`search_timeline`、`search_error_traces` | 用這個值去 ES、Tempo 撈證據 |
+
+**只換收斂單位：改設定就可以，不用改程式。** 把 `labels.service` 改成 `function` 或 `cluster`，
+告警貼上對應的標籤，`edges` 也用同一層的名稱寫。同一個 function 或 cluster 的告警就會併成一張事故。
+
+**證據要跟著對得上，否則會撈不到：**
+
+| 證據 | 換單位之後 | 怎麼處理 |
+| --- | --- | --- |
+| 錯誤日誌、識別碼統計、批號時間線（ES） | 程式拿分析單位的值去比對日誌的 `es.log_fields.service` 欄位（預設 `service.name`） | 日誌裡有 `function` 或 `cluster` 欄位的話，把 `es.log_fields.service` 改成那個欄位 |
+| ES 裡的 Trace 錯誤片段 | 同上，欄位是 `es.trace_fields.service` | 同上 |
+| Tempo 呼叫鏈 | 查詢寫死 `resource.service.name`，設定改不了 | **目前做不到**：這包證據會是空的，其他證據與 RCA 照常 |
+
+**限制：一次只能有一層。** 一張事故只記一個維度的名單，沒辦法「以 service 收斂、同時再往上看 function 或 cluster」。
+要多層同時分析得改程式（告警多帶幾個維度、收斂鍵可選、事故記錄各層名單，會動到 `grouping.py`、`db.py`、`report.py`），**目前沒有做**。
+
+**沒有驗證的**：以上是依程式的寫法整理的，改用 function 或 cluster 當單位的設定沒有實際跑過。
+
 ## 為什麼要等（debounce）
 
 收到 Webhook 的第 0 秒就分析，LLM 拿到的是殘缺的證據：
