@@ -342,7 +342,8 @@ def llm_down():
 
 
 def es_calls(w):
-    return sum(1 for _m, path in w.fake.calls if path.endswith("/_msearch"))
+    """做了幾次證據收集（每次收集是一次錯誤日誌查詢，後面可能再跟一次關聯時間線的查詢）。"""
+    return w.fake.error_searches
 
 
 def annotation_calls(w):
@@ -498,3 +499,16 @@ def test_configured_temperature_reaches_the_llm_request(world):
     from src.rca import LlmOptions
     w.run(64, settings=replace(w.settings, llm=LlmOptions(temperature=0.3)))
     assert w.llm_calls[0]["temperature"] == 0.3
+
+
+def test_round_with_tempo_configured_sends_timelines_and_call_chains_to_the_llm(world):
+    from dataclasses import replace
+    w = world
+    w.receive("firing_mq", "firing_cim")
+    out = w.run(64, settings=replace(w.settings, tempo_datasource_uid="tempo-uid"))
+    assert out["status"] == "ok" and len(w.llm_calls) == 1
+    prompt = w.llm_calls[0]["messages"][1]["content"]
+    assert "【5. 關聯時間線" in prompt and "【6. 呼叫鏈" in prompt and "connection refused: mes-db:5432" in prompt
+    assert es_calls(w) == 1 and len(w.fake.timeline_requests) == 2 and len(w.fake.tempo_requests) == 3
+    w.run(124)                                                           # 沒有變化的續跑：不重查 ES、Tempo，也不重問 LLM
+    assert es_calls(w) == 1 and len(w.fake.tempo_requests) == 3 and len(w.llm_calls) == 1

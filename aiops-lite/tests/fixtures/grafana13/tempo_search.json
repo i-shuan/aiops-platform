@@ -1,0 +1,308 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/api/datasources/proxy/uid/<uid>/api/search",
+  "params": {
+   "q": "{ resource.service.name =~ \"web-portal|mes-api|mes-db\" && status = error }",
+   "start": 1795429323,
+   "end": 1795431183,
+   "limit": 20
+  }
+ },
+ "status": 200,
+ "response": {
+  "traces": [
+   {
+    "traceID": "22222222222222222222222222222222",
+    "rootServiceName": "web-portal",
+    "rootTraceName": "POST /lots/track-in",
+    "startTimeUnixNano": "1795431041152284230",
+    "durationMs": 5010,
+    "spanSet": {
+     "spans": [
+      {
+       "spanID": "a1a1a1a1a1a1a1a1",
+       "startTimeUnixNano": "1795431041152284230",
+       "durationNanos": "5010000000",
+       "attributes": [
+        {
+         "key": "service.name",
+         "value": {
+          "stringValue": "web-portal"
+         }
+        },
+        {
+         "key": "status",
+         "value": {
+          "stringValue": "error"
+         }
+        }
+       ]
+      },
+      {
+       "spanID": "a2a2a2a2a2a2a2a2",
+       "startTimeUnixNano": "1795431041155284230",
+       "durationNanos": "5000000000",
+       "attributes": [
+        {
+         "key": "service.name",
+         "value": {
+          "stringValue": "web-portal"
+         }
+        },
+        {
+         "key": "status",
+         "value": {
+          "stringValue": "error"
+         }
+        }
+       ]
+      },
+      {
+       "spanID": "b1b1b1b1b1b1b1b1",
+       "startTimeUnixNano": "1795431041157284230",
+       "durationNanos": "4990000000",
+       "attributes": [
+        {
+         "key": "service.name",
+         "value": {
+          "stringValue": "mes-api"
+         }
+        },
+        {
+         "key": "status",
+         "value": {
+          "stringValue": "error"
+         }
+        }
+       ]
+      }
+     ],
+     "matched": 4
+    },
+    "spanSets": [
+     {
+      "spans": [
+       {
+        "spanID": "a1a1a1a1a1a1a1a1",
+        "startTimeUnixNano": "1795431041152284230",
+        "durationNanos": "5010000000",
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "web-portal"
+          }
+         },
+         {
+          "key": "status",
+          "value": {
+           "stringValue": "error"
+          }
+         }
+        ]
+       },
+       {
+        "spanID": "a2a2a2a2a2a2a2a2",
+        "startTimeUnixNano": "1795431041155284230",
+        "durationNanos": "5000000000",
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "web-portal"
+          }
+         },
+         {
+          "key": "status",
+          "value": {
+           "stringValue": "error"
+          }
+         }
+        ]
+       },
+       {
+        "spanID": "b1b1b1b1b1b1b1b1",
+        "startTimeUnixNano": "1795431041157284230",
+        "durationNanos": "4990000000",
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "mes-api"
+          }
+         },
+         {
+          "key": "status",
+          "value": {
+           "stringValue": "error"
+          }
+         }
+        ]
+       }
+      ],
+      "matched": 4
+     }
+    ],
+    "serviceStats": {
+     "mes-api": {
+      "spanCount": 2,
+      "errorCount": 2
+     },
+     "web-portal": {
+      "spanCount": 2,
+      "errorCount": 2
+     }
+    }
+   },
+   {
+    "traceID": "11111111111111111111111111111111",
+    "rootServiceName": "web-portal",
+    "rootTraceName": "POST /lots/track-in",
+    "startTimeUnixNano": "1795431039152284230",
+    "durationMs": 5010,
+    "spanSet": {
+     "spans": [
+      {
+       "spanID": "a1a1a1a1a1a1a1a1",
+       "startTimeUnixNano": "1795431039152284230",
+       "durationNanos": "5010000000",
+       "attributes": [
+        {
+         "key": "service.name",
+         "value": {
+          "stringValue": "web-portal"
+         }
+        },
+        {
+         "key": "status",
+         "value": {
+          "stringValue": "error"
+         }
+        }
+       ]
+      },
+      {
+       "spanID": "a2a2a2a2a2a2a2a2",
+       "startTimeUnixNano": "1795431039155284230",
+       "durationNanos": "5000000000",
+       "attributes": [
+        {
+         "key": "service.name",
+         "value": {
+          "stringValue": "web-portal"
+         }
+        },
+        {
+         "key": "status",
+         "value": {
+          "stringValue": "error"
+         }
+        }
+       ]
+      },
+      {
+       "spanID": "b1b1b1b1b1b1b1b1",
+       "startTimeUnixNano": "1795431039157284230",
+       "durationNanos": "4990000000",
+       "attributes": [
+        {
+         "key": "service.name",
+         "value": {
+          "stringValue": "mes-api"
+         }
+        },
+        {
+         "key": "status",
+         "value": {
+          "stringValue": "error"
+         }
+        }
+       ]
+      }
+     ],
+     "matched": 4
+    },
+    "spanSets": [
+     {
+      "spans": [
+       {
+        "spanID": "a1a1a1a1a1a1a1a1",
+        "startTimeUnixNano": "1795431039152284230",
+        "durationNanos": "5010000000",
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "web-portal"
+          }
+         },
+         {
+          "key": "status",
+          "value": {
+           "stringValue": "error"
+          }
+         }
+        ]
+       },
+       {
+        "spanID": "a2a2a2a2a2a2a2a2",
+        "startTimeUnixNano": "1795431039155284230",
+        "durationNanos": "5000000000",
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "web-portal"
+          }
+         },
+         {
+          "key": "status",
+          "value": {
+           "stringValue": "error"
+          }
+         }
+        ]
+       },
+       {
+        "spanID": "b1b1b1b1b1b1b1b1",
+        "startTimeUnixNano": "1795431039157284230",
+        "durationNanos": "4990000000",
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "mes-api"
+          }
+         },
+         {
+          "key": "status",
+          "value": {
+           "stringValue": "error"
+          }
+         }
+        ]
+       }
+      ],
+      "matched": 4
+     }
+    ],
+    "serviceStats": {
+     "mes-api": {
+      "spanCount": 2,
+      "errorCount": 2
+     },
+     "web-portal": {
+      "spanCount": 2,
+      "errorCount": 2
+     }
+    }
+   }
+  ],
+  "metrics": {
+   "inspectedBytes": "19627",
+   "completedJobs": 3,
+   "totalJobs": 3
+  }
+ }
+}

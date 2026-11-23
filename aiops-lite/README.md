@@ -21,6 +21,25 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 
 **什麼算異常由各系統自己的 Grafana 告警規則決定**：規則 firing 就是異常，平台不重放查詢、不自己判數值（原本的 5 個偵測器已拿掉）。
 
+## 工廠與傳統可觀測性一起用
+
+三種訊號各走各的路，最後合成同一份證據交給 LLM：
+
+| 訊號 | 工廠（老舊系統、沒有埋點） | IT 服務（有埋點） | aiops-lite 怎麼用 |
+| --- | --- | --- | --- |
+| 指標 | 日誌轉指標（Grafana 規則對 ES 算次數） | 原生 metrics（Prometheus、VictoriaMetrics） | 兩者都是 Grafana 告警，Webhook 進來的格式一樣 |
+| 關聯 | **批號／載具**把各系統的日誌串成時間線 | **trace id** 向 Tempo 取回呼叫鏈 | 證據第 5 包（時間線）、第 6 包（呼叫鏈） |
+| 日誌 | ES | ES | 證據第 3、4 包（錯誤日誌樣本、識別碼出現次數） |
+
+- **批號時間線**：從錯誤日誌裡挑出現最多次的批號與載具，回 ES 把它們在各系統的紀錄（不限等級、不限系統）照時間排出來。
+  它只說明先後，不說明因果；靠各系統的時間戳排序，系統之間時鐘差幾秒，順序就可能是錯的。
+- **Tempo 呼叫鏈**：經 Grafana 的 Tempo 資料源取回失敗請求的整條呼叫路徑，標出「底下沒有其他失敗呼叫」的那個失敗點。
+  錯誤日誌帶 trace id（`tempo.trace_id_field`）時直接用編號取；沒有才用 TraceQL 搜尋。
+- **同一張事故**：工廠與 IT 服務的告警只要關係邊連得起來（例如 `[mes-api, cim-eap]`）就併成一張。兩邊的日誌要用同一套欄位名稱。
+- **呼叫鏈裡出現的系統算有憑據**：例如呼叫鏈指到一個沒有告警、也不在關係邊裡的資料庫，LLM 可以點名它；憑空編的系統照樣被擋。
+
+設定：`es.timeline_fields`、`tempo.datasource_uid` 等，見 `CONFIG.md` 的「關聯證據」。Loki、Jaeger 沒有接。
+
 ## 為什麼要等（debounce）
 
 收到 Webhook 的第 0 秒就分析，LLM 拿到的是殘缺的證據：
@@ -71,14 +90,14 @@ edges:
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
 | `src/server.py` | 218 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 425 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
-| `src/grafana.py` | 200 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/main.py` | 447 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
+| `src/grafana.py` | 270 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
 | `src/grouping.py` | 166 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/rca.py` | 206 | 不寫推理演算法：收集 4 包證據、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/rca.py` | 356 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
 | `src/report.py` | 59 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
 | `src/db.py` | 183 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
 
-合計約 1,457 行。
+合計約 1,699 行。
 
 ## 各系統要做的事（平台零直連）
 
@@ -177,7 +196,7 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 ## 驗證狀態（照實寫）
 
 做過的：
-- 164 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
+- 190 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
   常駐服務的測試真的起 HTTP 服務、連發 Webhook。
 - 對真的 Grafana 13.0.7 + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本控制的**）：
   三條規則各隔 20 秒越線，Grafana 在 43 秒內陸續推了 3 個 Webhook；aiops-lite 在第一個 Webhook 後整整 60 秒才跑第一輪，
@@ -196,6 +215,15 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
   收斂成 1 張 P1 事故，真 LLM 指出 mq-broker 無消費者為可能源頭、異常集中在 EQP-CVD-07 等；恢復後結案。截圖（Grafana 告警規則、規則細節、
   指標曲線疊事故區間、事件總覽）是這次實跑的真實畫面。這次抓到註記標籤更新後舊標籤仍查得到的問題（見上面「註記標籤變了就刪掉重建」），已修正並重跑確認。
   那次的第三個告警（AMHS）比第一輪分析晚了幾秒才到，併入同一張事故後重新分析：進行中畫面先是 2 個系統，結案時是 3 個。
+- **關聯證據（批號時間線、Tempo 呼叫鏈）用真的元件實測**（2026-11-23，本機：Grafana 13.0.7、ES 8.19.23、Tempo 2.9.0、Editor Token，模擬資料）。
+  混合情境：IT 的 `mes-db` 連不上 → `mes-api`、`web-portal` 失敗 → 工廠的 `cim-eap` 逾時 → `amhs-mcs` 搬運中止。
+  - 四個告警經關係邊收成 1 張 P1 事故；批號 `LOT24A0031` 的時間線跨 `cim-eap`、`amhs-mcs`、`mes-api` 三個系統，含出事前的正常紀錄。
+  - 呼叫鏈取回 `web-portal → mes-api →（連不上 mes-db）`，失敗點標在 `mes-api` 的資料庫查詢。
+  - 真的 LLM（OpenAI `gpt-6-luna`）各問一次：日誌本身就寫了「connection refused mes-db」時，有沒有新證據結論都一樣（都指 mes-db）；
+    **把日誌改成只寫「upstream error」、關係邊也拿掉 mes-db 之後，沒有呼叫鏈的回「證據不足」，有呼叫鏈的指出 mes-db**。
+    也就是說，呼叫鏈在「日誌沒講清楚」時才有差別；每種情況只問了一次，沒有重複量測。
+  - 實測發現並處理的兩件事：Tempo 的搜尋不保證先回最新的（改成多搜再挑最近的）；剛收到的 Trace 要 8～40 秒以上才搜尋得到
+    （改成優先用日誌裡的 trace id 直接取，實測送出 3 秒後就取得到）。
 - Helm chart 用 `helm lint` 與 `helm template` 檢查過；產生的 Secret 裡的 `config.yaml` 用程式的 `Settings.from_dict` 讀過；
   Deployment 沒有任何 `env`。
 
@@ -222,6 +250,9 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
   平台不猜「應該已經好了」。
 - **只能跑 1 個副本**：debounce 的計時在記憶體裡（告警本身有落地）。chart 固定 1 個副本、Recreate 升級。
 - **送給 LLM 的日誌樣本沒有遮罩**。日誌裡的敏感資訊要在產生端去識別化，或把 `llm.url` 指到公司內部的模型。
+- 關聯時間線靠各系統日誌的時間戳排序：系統之間沒有對時的話，先後順序可能是錯的，LLM 會被誤導。
+- 呼叫鏈只看得到有埋點、沒被取樣掉的請求；日誌沒帶 trace id 時要靠 Tempo 搜尋，剛發生的 Trace 可能還搜不到。
+- 時間線與呼叫鏈會讓送給 LLM 的內容變長（每個事故多 1～2 次 ES 查詢、最多 4 次 Tempo 查詢）；一樣沒有遮罩。
 - 幻覺檢查只擋「名稱不存在」，擋不了「存在的系統被講錯因果」；所以第 2 行固定標 `[LLM 推論]`。
 - 沒有 Trace 時「集中在哪台機台／批號」只是錯誤日誌的計數，不是因果證據。
 - 上游沒有告警規則（或沒越線）時平台看不到它：只會看到下游的告警，不會替上游補洞。

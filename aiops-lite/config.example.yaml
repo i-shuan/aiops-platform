@@ -35,6 +35,8 @@ llm:                                     # 整段可以不寫：沒設 url 與 m
   # max_trace_samples: 10                # 給 LLM 看幾筆 Trace 錯誤片段
   # max_message_chars: 300               # 單筆日誌訊息截斷長度
   # top_ids: 10                          # 每種識別碼（機台、批號…）只列出現次數前幾名
+  # max_timeline_ids: 2                  # 最多替幾個批號／載具做關聯時間線；0 = 不做
+  # max_timeline_events: 30              # 每條時間線最多幾筆紀錄
   # max_summary_chars: 300               # LLM 摘要超過這個長度就截斷（註記第 2 行）
   # system_prompt_file: system_prompt.txt  # 自訂系統提示詞的檔案（相對路徑 = 相對於這份設定檔）；
   #                                        # 必須保留「只輸出含 summary、systems、ids 的 JSON」，不然啟動時報錯
@@ -63,6 +65,15 @@ es:                                      # 整段可以不寫：沒設 datasourc
   # error_statuses: [error, ERROR, Error, STATUS_CODE_ERROR]               # span 狀態是這些值才算錯誤
   # max_hits: 100                        # 每次查詢最多撈幾筆；識別碼的出現次數只統計這幾筆
   # window_padding_minutes: 10           # 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現）
+  # timeline_fields: [lot_id, carrier_id]  # 關聯時間線：哪些識別碼要把跨系統的日誌串起來（要在 id_fields 裡）；[] = 不做。
+  #                                        # 工廠沒有 trace id，批號與載具就是關聯碼；只代表先後，不代表因果
+
+tempo:                                   # 整段可以不寫：沒設 datasource_uid = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
+  datasource_uid: ""                     # Grafana 上 Tempo 資料源的 uid
+  # trace_id_field: trace.id             # 錯誤日誌裡記 trace id 的欄位：有的話直接用編號取 Trace（立即取得到）；
+  #                                        # 沒有才用搜尋（Tempo 收到後要幾十秒才搜尋得到）。"" = 不用日誌裡的 id
+  # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace
+  # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
 
 # labels:                                # 告警規則上的標籤名稱；改了要同步通知各系統團隊與 Grafana 的通知路由
 #   detect: aiops_detect                 # 值是 true 才納管

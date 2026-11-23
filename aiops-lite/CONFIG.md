@@ -24,6 +24,7 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `llm.retry_max_seconds` | 1800 | 退避上限（每失敗一次加倍，成功歸零） |
 | `es.datasource_uid` | 空 | Grafana 上 ES 資料源的 uid；空 = 沒有日誌證據 |
 | `es.log_index`、`es.trace_index` | `*`、空 | 日誌與 Trace 的 index；trace_index 空 = 不查 Trace |
+| `tempo.datasource_uid` | 空 | Grafana 上 Tempo 資料源的 uid；空 = 沒有呼叫鏈證據 |
 | `es.id_fields` | `[eqp_id, lot_id, carrier_id]` | 錯誤日誌裡要統計出現次數的識別碼欄位 |
 | `es.log_fields` | `time: @timestamp`、`service: service.name`、`level: log.level`、`message: message` | 日誌文件的欄位名稱 |
 | `es.trace_fields` | `time: @timestamp`、`service: service.name`、`span: span.name`、`trace_id: trace.id`、`status: status.code`、`error: error.message` | Trace 文件的欄位名稱 |
@@ -61,6 +62,17 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | 21 | `rounds_retention_days` | 90 | 1 以上 | 每輪執行紀錄（`rounds` 表）保留幾天 |
 | 22 | `annotation.max_rule_links` | 5 | 0 以上 | 註記第 3 行最多列幾條「調整優先權」的規則連結 |
 
+### 關聯證據（批號時間線、Tempo 呼叫鏈）
+
+| 鍵 | 預設值 | 範圍 | 用途／什麼時候要調 |
+| --- | --- | --- | --- |
+| `es.timeline_fields` | `id_fields` 裡的 `lot_id`、`carrier_id` | `id_fields` 的子集；`[]` = 不做 | 哪些識別碼要把跨系統的日誌串成時間線。工廠沒有 trace id，批號與載具就是關聯碼 |
+| `llm.max_timeline_ids` | 2 | 0～20 | 最多替幾個關聯碼做時間線（取錯誤日誌裡出現最多次的）；0 = 不做 |
+| `llm.max_timeline_events` | 30 | 1～500 | 每條時間線最多幾筆紀錄（由舊到新；超過會標示被截斷） |
+| `tempo.trace_id_field` | `trace.id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號向 Tempo 取（立即取得到），不夠才用搜尋補 |
+| `tempo.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取 |
+| `tempo.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
+
 #### 第 12 項的副作用（已知限制）
 
 預設樣式是「字母開頭、夾數字的字」，本意是抓 `EQP-CVD-07`、`LOT24A0031` 這種編號。但模型如果在摘要裡寫了 `HTTP2`、`v2`、`S3`
@@ -88,6 +100,8 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | 設定檔路徑 `/etc/aiops/config.yaml` 與唯一的環境變數 `AIOPS_CONFIG_FILE` | `src/main.py` | 設定的唯一入口，本身不能再放進設定檔 |
 | 各設定值的合法範圍、log 等級的可選值 | `src/main.py` | 驗證規則 |
 | Webhook 的必要欄位（`status`、`fingerprint`、`startsAt`、`labels`、`ruleUID`、`values`） | `src/grafana.py` 的 `parse_webhook` | Grafana 的 webhook 格式，不是我們定的 |
+| 向 Tempo 搜尋時一次要 20 條、再挑最近的 | `src/rca.py` 的 `TRACE_SEARCH_LIMIT` | Tempo 的搜尋不保證先回最新的；要調的是最後取幾條（`tempo.max_traces`） |
+| 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |
 | 嚴重度的判定方式 | — | 程式沒有「判定規則」：嚴重度直接讀告警的標籤，事故取成員裡最高的，只升不降 |
 

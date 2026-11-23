@@ -9,6 +9,8 @@
 | `webhook_resolved_mq／cim／amhs.json` | 同三筆告警恢復時推出來的內容（同一個 fingerprint，有 `endsAt`） | `record_webhooks.py` |
 | `es_proxy_logs_traces.json` | `POST /api/datasources/proxy/uid/<uid>/_msearch`：錯誤日誌 + 錯誤 span（Editor Token） | `record.py` |
 | `annotation_create／patch／list.json` | 註記的建立、更新、依標籤查回（Editor Token） | `record.py` |
+| `tempo_search.json`、`tempo_trace.json` | 經 Grafana 代理查 Tempo 2.9.0：TraceQL 搜尋錯誤 Trace、用 trace id 取整條 Trace（Editor Token） | `record_tempo.py` |
+| `tempo_trace_missing.json`、`tempo_search_bad_query.json` | Tempo 沒有這條 Trace（404、沒有內容）；TraceQL 寫錯（400） | `record_tempo.py` |
 | `meta.json` | Grafana 版本、錄製時間、資料源 uid | `record.py` |
 
 webhook 檔是 `{"headers", "body"}`（body 就是 Grafana 送的 JSON）；其他是 `{"request", "status", "response"}`。
