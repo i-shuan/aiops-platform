@@ -9,6 +9,8 @@
 - **它自帶的 PostgreSQL 只是事故的小帳本**：記「收到哪些告警、開了哪些事故、每一輪跑得如何」三張表。
   用 Helm 部署時會自動建立這個 PostgreSQL，表也是程式啟動時自動建，不用任何人先建資料庫或跑腳本。
 - **你要填的是「聯絡方式」，不是架設基礎設施**：Grafana 在哪、用哪把 Token、LLM 在哪、日誌在 Grafana 的哪個資料源。
+- **一個 aiops-lite 對一個 Grafana**（用一個組織底下的一把 Token），只能跑 1 個副本；事故以 `service` 為單位收斂，
+  不看 cluster、namespace、pod 的標籤。有多個 cluster 或廠區時怎麼做，見 `README.md` 的「整合的單位」。
 - 本機測試可以不要 PostgreSQL，改用單一檔案的 SQLite（設定檔的 `database.url` 不寫就是）。
   **Helm chart 一律用 PostgreSQL**，沒有 SQLite 的選項，所以 `postgres.password` 一定要填。
 
@@ -195,6 +197,9 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 
 - [ ] **統一欄位規範**（`FACTORY_METRICS.md`）：三個系統的日誌欄位名稱要一樣，aiops-lite 的欄位對照只有一組
 - [ ] **`service` 的值三處一致**：告警規則的標籤、`edges`、ES 日誌的 `service.name`
+- [ ] **整合的單位與命名**：aiops-lite 以 `service` 為單位收斂，一個 Grafana 對一份、只能 1 個副本。
+      多個 cluster 或廠區共用同一個 Grafana 的話，先決定做法（`service` 帶 cluster 名、或各部署一份），因為 `service` 的命名與 `edges` 都要照著寫；
+      兩個 cluster 有同名的 `service` 會被併成同一張事故（說明見 `README.md` 的「整合的單位」）
 - [ ] **每個系統收哪些值、門檻多少**：由各系統團隊決定，平台不管
 - [ ] **日誌裡的機台、批號能不能送給 LLM**
 - [ ] **試行範圍與成功標準**：先選一條產線或一個系統，訂好看什麼數字算成功
