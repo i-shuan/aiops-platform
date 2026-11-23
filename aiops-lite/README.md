@@ -76,7 +76,7 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 | `config.yaml` 的 `labels.service` | 指定用哪個告警標籤當分析單位（預設 `service`） |
 | `src/grafana.py` 的 `parse_webhook` | 從告警讀出這個標籤，放進 `Alert.service` |
 | `src/grouping.py` 的 `group_alerts`、`converge` | 以這個值收斂（同值合併、有關係邊就併） |
-| `src/grafana.py` 的 `search_errors`、`search_timeline`、`search_error_traces` | 用這個值去 ES、Tempo 撈證據 |
+| `src/grafana.py` 的 `search_errors`、`search_error_traces` | 用這個值去 ES、Tempo 撈證據 |
 
 **只換收斂單位：改設定就可以，不用改程式。** 把 `labels.service` 改成 `function` 或 `cluster`，
 告警貼上對應的標籤，`edges` 也用同一層的名稱寫。同一個 function 或 cluster 的告警就會併成一張事故。
@@ -85,7 +85,8 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 
 | 證據 | 換單位之後 | 怎麼處理 |
 | --- | --- | --- |
-| 錯誤日誌、識別碼統計、批號時間線（ES） | 程式拿分析單位的值去比對日誌的 `es.log_fields.service` 欄位（預設 `service.name`） | 日誌裡有 `function` 或 `cluster` 欄位的話，把 `es.log_fields.service` 改成那個欄位 |
+| 錯誤日誌、識別碼統計（ES） | 程式拿分析單位的值去比對日誌的 `es.log_fields.service` 欄位（預設 `service.name`） | 日誌裡有 `function` 或 `cluster` 欄位的話，把 `es.log_fields.service` 改成那個欄位 |
+| 批號／載具時間線（ES） | 用批號、載具編號查，不用分析單位篩選；但批號是從上一列的錯誤日誌裡挑的，而且每筆事件顯示的「系統」也讀 `es.log_fields.service` | 上一列對得上，這包就有；改了欄位後時間線顯示的會是 function 或 cluster 名稱 |
 | ES 裡的 Trace 錯誤片段 | 同上，欄位是 `es.trace_fields.service` | 同上 |
 | Tempo 呼叫鏈 | 查詢寫死 `resource.service.name`，設定改不了 | **目前做不到**：這包證據會是空的，其他證據與 RCA 照常 |
 
