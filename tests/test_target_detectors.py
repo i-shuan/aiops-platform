@@ -1,5 +1,13 @@
 """每個 target 自己宣告要跑哪些偵測器（detectors 白名單）、節點層 include／exclude_entities、
-target overrides、裁決的真實分母（棄權不算）、載入期防呆。"""
+target overrides、哪些節點真的跑了（被跳過、沒資料的節點不進 detector_runs）、載入期防呆。
+
+原本的載具是 detector.zscore／mad／quantile_drift 與 detector.ensemble（布林多數決），都已移除：
+  - zscore 節點換成 detector.hourly_baseline。訓練段只有 100 分鐘（不到 min_weeks 週），它整條退回全段平均與標準差，
+    分數跟 zscore 同一條式子，所以 threshold 2／5 與抓到的點（SMALL、BIG）都沒變。
+  - 「另一種算子」（原本的 mad、quantile_drift）換成 detector.residual_shift／residual_chronic。
+  - 裁決節點（後來的 detector.soft_vote）也在 2026-11-20 移除：沒有表決，每個節點的事件各自成立。
+    「誰算參與者」的管線測試改成「誰真的跑了、事件是誰的」；冷啟動棄權（min_train_points）那個測試跟著機制刪掉。
+"""
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -11,14 +19,14 @@ from aiops.engine.errors import BadRequest, WorkflowError
 from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import NodeSpec, NullHooks, Pipeline, TargetSpec, Workflow, load_workflow
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.types import AnomalyEvent
-from aiops.stages.detectors.base import DetectorOperator
-from aiops.stages.ensemble.ensemble import EnsembleOperator
+from aiops.stages.detectors.base import DetectorOperator, gaussian_threshold
 
 NOW = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
 START = NOW - timedelta(minutes=100)
-# 測試段：0 為主，第 50 點 2.5、第 70 點 8。訓練段 ±1 交錯 -> 平均 0、標準差 1，z 分數就是值本身
+# 測試段：0 為主，第 50 點 2.5、第 70 點 8。訓練段 ±1 交錯 -> 平均 0、標準差 1，
+# hourly_baseline 退回全段統計時的分數（|值 − 平均| ÷ 標準差）就是值本身
 SMALL, BIG = 50, 70
+SMALL_VALUE, BIG_VALUE = 2.5, 8.0
 
 
 @OperatorRegistry.register("test.frame")
@@ -31,7 +39,7 @@ class _Frame(BaseOperator):
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         ts = pd.date_range(START, periods=100, freq="60s")
         values = [0.0] * 100
-        values[SMALL], values[BIG] = 2.5, 8.0
+        values[SMALL], values[BIG] = SMALL_VALUE, BIG_VALUE
         ctx.train_df = pd.DataFrame({"ts": ts - timedelta(days=1), "value": [(-1.0) ** i for i in range(100)]})
         ctx.raw_df = pd.DataFrame({"ts": ts, "value": values})
         if ctx.target.entity in self.empty_for:
@@ -46,13 +54,18 @@ def _wf(*nodes, targets=None, frame=None):
     return Workflow(name="t", nodes=specs, targets=[TargetSpec(**t) for t in targets])
 
 
-Z_LOW = ("z_low", "detector.zscore", {"threshold": 2.0})   # 抓 SMALL、BIG
-Z_HIGH = ("z_high", "detector.zscore", {"threshold": 5.0})  # 只抓 BIG
-MAD = ("mad", "detector.mad", {})
+Z_LOW = ("z_low", "detector.hourly_baseline", {"threshold": 2.0})   # 抓 SMALL、BIG
+Z_HIGH = ("z_high", "detector.hourly_baseline", {"threshold": 5.0})  # 只抓 BIG
+RSHIFT = ("rshift", "detector.residual_shift", {})                   # 另一種算子
 
 
 def _minutes(events):
     return sorted({int((e.ts - START).total_seconds() // 60) for e in events})
+
+
+def _at(events, minute):
+    (event,) = [e for e in events if e.ts == START + timedelta(minutes=minute)]
+    return event
 
 
 def _run(*nodes, **kw):
@@ -81,10 +94,10 @@ def _per_target(pipe: Pipeline, **run_kw):
 
 
 def test_without_detectors_every_detector_node_runs_like_before():
-    rec = _run(Z_LOW, Z_HIGH, MAD)
+    rec = _run(Z_LOW, Z_HIGH, RSHIFT)
     ctx = rec.contexts["a"]
-    assert ctx.detector_runs == ["z_low", "z_high", "mad"]
-    assert rec.loaded["a"] == ["z_low", "z_high", "mad"]
+    assert ctx.detector_runs == ["z_low", "z_high", "rshift"]
+    assert rec.loaded["a"] == ["z_low", "z_high", "rshift"]
     assert not [line for line in ctx.audit if ":skipped:" in line]
     assert {(e.detector_node, m) for e in ctx.anomalies for m in _minutes([e])} >= {("z_low", SMALL), ("z_high", BIG)}
 
@@ -100,116 +113,79 @@ def test_whitelist_by_node_name_runs_only_that_node_of_the_same_operator():
 
 
 def test_whitelist_by_operator_name_selects_all_nodes_of_that_operator():
-    rec = _run(Z_LOW, Z_HIGH, MAD, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["detector.zscore"]}])
+    rec = _run(Z_LOW, Z_HIGH, RSHIFT,
+               targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["detector.hourly_baseline"]}])
     assert rec.contexts["a"].detector_runs == ["z_low", "z_high"]
 
 
 def test_exclude_beats_include_and_whitelist_and_include_limits_entities():
-    excluded = ("z_low", "detector.zscore", {"threshold": 2.0, "include_entities": ["a", "b"], "exclude_entities": ["a"]})
-    only_b = ("z_high", "detector.zscore", {"threshold": 5.0, "include_entities": ["b"]})
-    rec = _run(excluded, only_b, MAD,
-               targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_low", "z_high", "mad"]},
+    excluded = ("z_low", "detector.hourly_baseline",
+                {"threshold": 2.0, "include_entities": ["a", "b"], "exclude_entities": ["a"]})
+    only_b = ("z_high", "detector.hourly_baseline", {"threshold": 5.0, "include_entities": ["b"]})
+    rec = _run(excluded, only_b, RSHIFT,
+               targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_low", "z_high", "rshift"]},
                         {"source_type": "mock", "query": "b", "entity": "b"}])
     a, b = rec.contexts["a"], rec.contexts["b"]
-    assert a.detector_runs == ["mad"]
+    assert a.detector_runs == ["rshift"]
     assert "z_low:skipped:excluded" in a.audit and "z_high:skipped:not-included" in a.audit
-    assert b.detector_runs == ["z_low", "z_high", "mad"]
+    assert b.detector_runs == ["z_low", "z_high", "rshift"]
 
 
 def test_routing_params_never_reach_the_algorithm_or_tuning():
-    op = OperatorRegistry.create("detector.zscore", {"threshold": 2.0, "exclude_entities": ["x"]})
+    op = OperatorRegistry.create("detector.hourly_baseline", {"threshold": 2.0, "exclude_entities": ["x"]})
     assert op.params == {"threshold": 2.0} and op.exclude_entities == {"x"} and op.include_entities is None
     with pytest.raises(BadRequest, match="路由參數"):
-        _check_params("detector.zscore", {"exclude_entities": ["x"]})
+        _check_params("detector.hourly_baseline", {"exclude_entities": ["x"]})
     with pytest.raises(WorkflowError, match="清單"):
-        OperatorRegistry.create("detector.zscore", {"include_entities": "a"})  # 字串不是清單（會被拆成字元）
+        OperatorRegistry.create("detector.hourly_baseline", {"include_entities": "a"})  # 字串不是清單（會被拆成字元）
 
 
-# ── 裁決的真實分母 ──
+# ── 哪些節點真的跑了 ──
+
+SNR = {"p_fa": 0.001}
+TAU = gaussian_threshold(0.001)  # 3.29：開 snr 的節點門檻由 p_fa 換算（取代 threshold）
+V1 = ("v1", "detector.hourly_baseline", {"snr": SNR})
+V2 = ("v2", "detector.hourly_baseline", {"snr": SNR})
+V3 = ("v3", "detector.residual_shift", {"snr": SNR})
+FRESH = ("fresh", "detector.new_only", {})  # 不是偵測節點（沒有基準線）
 
 
-def _vote(events, runs, **params):
-    ctx = PipelineContext(pipeline="p", now=NOW, target=Target("mock", "m", "e"))
-    ctx.anomalies, ctx.detector_runs = list(events), list(runs)
-    op = EnsembleOperator(**params)
-    op.node_name = "vote"
-    return op.execute(ctx)
+def _by_node(events, minute):
+    return sorted(e.detector_node for e in events if e.ts == START + timedelta(minutes=minute))
 
 
-def _ev(node, minute):
-    return AnomalyEvent("e", "m", START + timedelta(minutes=minute), 3.0, {}, 1.0, "detector.x", node)
-
-
-def test_ensemble_denominator_counts_only_nodes_that_evaluated():
-    events = [_ev("a", 1), _ev("b", 2)]
-    # 3 個參與者、各 1 票：多數決要 2 票，全部擋掉（沒抓到的節點 = 反對票）
-    assert _vote(events, ["a", "b", "c"], strategy="majority").anomalies == []
-    # c 沒評估（沒資料／被跳過）：分母 2，strict 仍要 2 票
-    assert _vote(events, ["a", "b"], strategy="majority").anomalies == []
-    # 指定了 nodes，但 b、c 沒跑：分母只剩 a，1 個參與者 = 它抓到就通過
-    ctx = _vote([_ev("a", 1)], ["a"], strategy="majority", nodes=["a", "b", "c"])
-    assert _minutes(ctx.anomalies) == [1] and "ensemble:vote:abstained:b,c" in ctx.audit
-    assert any("voters=1:need=1" in line for line in ctx.audit)
-
-
-def test_ensemble_tie_breaker():
-    events = [_ev("a", 1), _ev("a", 3), _ev("b", 3)]
-    assert _minutes(_vote(events, ["a", "b"], strategy="majority").anomalies) == [3]
-    assert _minutes(_vote(events, ["a", "b"], strategy="majority", tie_breaker="loose").anomalies) == [1, 3]
-    # 奇數參與者沒有平手，loose 不影響
-    assert _minutes(_vote(events, ["a", "b", "c"], strategy="majority", tie_breaker="loose").anomalies) == [3]
-    with pytest.raises(WorkflowError, match="tie_breaker"):
-        OperatorRegistry.create("detector.ensemble", {"tie_breaker": "maybe"})
-
-
-def test_at_least_is_capped_by_participants():
-    assert _minutes(_vote([_ev("a", 1)], ["a"], strategy="at_least", min_votes=2).anomalies) == [1]
-
-
-VOTE = ("vote", "detector.ensemble", {"strategy": "majority"})
-
-
-def test_ensemble_in_pipeline_skipped_and_empty_nodes_abstain():
-    # 三個節點：z_low 抓 SMALL+BIG、z_high 只抓 BIG、mad（訓練段 MAD=1，修正 z 1.69 < 3.5）只抓 BIG
-    rec = _run(Z_LOW, Z_HIGH, MAD, VOTE,
+def test_skipped_and_empty_nodes_do_not_run_and_each_node_stands_alone():
+    """原本後面接 detector.soft_vote，斷言「參與者是誰、裁決事件由誰投的」。表決移除後每個節點的事件各自成立：
+    斷言改成 detector_runs 與事件來自哪些節點。v1、v2 的分數就是值本身：SMALL 2.5 < 門檻 3.29 不報、BIG 8 報。"""
+    assert SMALL_VALUE < TAU < BIG_VALUE
+    rec = _run(V1, V2, V3,
                targets=[{"source_type": "mock", "query": "a", "entity": "a"},
-                        {"source_type": "mock", "query": "b", "entity": "b", "detectors": ["z_high"]},
+                        {"source_type": "mock", "query": "b", "entity": "b", "detectors": ["v2"]},
                         {"source_type": "mock", "query": "c", "entity": "c"}],
                frame={"empty_for": ["c"]})
     a, b, c = rec.contexts["a"], rec.contexts["b"], rec.contexts["c"]
-    assert any("voters=3:need=2" in line for line in a.audit)
-    assert _minutes(a.anomalies) == [BIG]  # SMALL 只有 1/3 票
-    # b 只選 z_high：另外兩個沒跑、不算反對票，分母 1
-    assert any("voters=1:need=1" in line for line in b.audit) and _minutes(b.anomalies) == [BIG]
-    assert [e.voted_by for e in b.anomalies] == [("z_high",)]
-    # c 沒資料：沒有任何節點評估，也就沒有參與者
+    assert a.detector_runs == ["v1", "v2", "v3"]
+    assert {"v1", "v2"} <= set(_by_node(a.anomalies, BIG)) and _by_node(a.anomalies, SMALL) == []
+    # b 只選 v2：另外兩個沒跑；v2 自己的事件單獨成立
+    assert b.detector_runs == ["v2"]
+    assert _minutes(b.anomalies) == [BIG] and [e.detector_node for e in b.anomalies] == ["v2"]
+    # c 沒資料：沒有任何節點評估，沒有事件
     assert c.detector_runs == [] and c.anomalies == []
-
-
-def test_ran_but_found_nothing_is_a_no_vote():
-    rec = _run(Z_LOW, Z_HIGH, ("vote", "detector.ensemble", {"strategy": "intersection"}))
-    assert _minutes(rec.contexts["a"].anomalies) == [BIG]  # SMALL 只有 z_low 抓到，z_high 有評估、投反對
-
-
-def test_two_participants_tie_breaker_in_pipeline():
-    strict = _run(Z_LOW, Z_HIGH, VOTE)
-    loose = _run(Z_LOW, Z_HIGH, ("vote", "detector.ensemble", {"strategy": "majority", "tie_breaker": "loose"}))
-    assert _minutes(strict.contexts["a"].anomalies) == [BIG]
-    assert _minutes(loose.contexts["a"].anomalies) == [SMALL, BIG]
 
 
 # ── overrides ──
 
 
 def test_override_precedence_default_tuned_yaml_target():
-    op = OperatorRegistry.create("detector.quantile_drift", {"window": 40})
+    op = OperatorRegistry.create("detector.residual_chronic", {"window": 40})
     op.node_name = "q"
     ctx = PipelineContext(pipeline="p", now=NOW, target=Target("mock", "m", "e"))
-    ctx.detector_params = {"q": {"window": 20, "threshold": 4.0, "quantile": 0.9}}
-    assert op.effective_params(ctx) == {"window": 40, "threshold": 4.0, "quantile": 0.9}  # YAML 鎖 window
-    ctx.target.overrides = {"q": {"window": 60, "quantile": 0.8}}
-    assert op.effective_params(ctx) == {"window": 60, "threshold": 4.0, "quantile": 0.8}  # target 最優先
-    assert "params:q:target-override:quantile,window" in ctx.audit
+    # 第三個鍵原本用 fpr（已移除），換成 min_slot_points；優先序的斷言不變
+    ctx.detector_params = {"q": {"window": 20, "threshold": 4.0, "min_slot_points": 40}}
+    assert op.effective_params(ctx) == {"window": 40, "threshold": 4.0, "min_slot_points": 40}  # YAML 鎖 window
+    ctx.target.overrides = {"q": {"window": 60, "min_slot_points": 50}}
+    assert op.effective_params(ctx) == {"window": 60, "threshold": 4.0, "min_slot_points": 50}  # target 最優先
+    assert "params:q:target-override:min_slot_points,window" in ctx.audit
 
 
 def test_override_changes_what_the_node_flags():
@@ -240,32 +216,35 @@ def test_override_for_a_node_the_target_did_not_select_is_rejected():
 
 
 def test_unknown_detector_name_fails_at_load_and_lists_available_nodes():
-    with pytest.raises(WorkflowError, match=r"z_lw.*z_low（detector.zscore）"):
-        Pipeline(_wf(Z_LOW, VOTE, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_lw"]}]))
-    with pytest.raises(WorkflowError):  # 裁決節點不是偵測節點
-        Pipeline(_wf(Z_LOW, VOTE, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["vote"]}]))
+    z_low = ("z_low", "detector.hourly_baseline", {"snr": SNR})
+    Pipeline(_wf(z_low, FRESH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_low"]}]))
+    with pytest.raises(WorkflowError, match=r"z_lw.*z_low（detector.hourly_baseline）"):
+        Pipeline(_wf(z_low, FRESH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["z_lw"]}]))
+    # 沒有基準線的節點不是偵測節點（原本用裁決節點 vote 當例子，已移除，換成 detector.new_only）
+    with pytest.raises(WorkflowError, match=r"fresh.*z_low（detector.hourly_baseline）"):
+        Pipeline(_wf(z_low, FRESH, targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["fresh"]}]))
 
 
 def test_api_targets_get_the_same_checks():
     pipe = Pipeline(_wf(Z_LOW, targets=[]))
     with pytest.raises(WorkflowError, match="z_lw"):
         pipe.run(now=NOW, targets=[TargetSpec(source_type="mock", query="a", detectors=["z_lw"])])
-    rec = _per_target(pipe, targets=[TargetSpec(source_type="mock", query="a", detectors=["detector.zscore"])])
+    rec = _per_target(pipe, targets=[TargetSpec(source_type="mock", query="a", detectors=["detector.hourly_baseline"])])
     assert rec.contexts["a"].detector_runs == ["z_low"]
 
 
 def test_routing_entities_must_exist_in_the_workflow_targets():
     with pytest.raises(WorkflowError, match=r"exclude_entities.*\['paymnt'\]"):
-        Pipeline(_wf(("z", "detector.zscore", {"exclude_entities": ["paymnt"]})))
+        Pipeline(_wf(("z", "detector.hourly_baseline", {"exclude_entities": ["paymnt"]})))
     # workflow 沒宣告 targets（全部由 API 傳入）時無從比對，不擋
-    Pipeline(_wf(("z", "detector.zscore", {"exclude_entities": ["paymnt"]}), targets=[]))
+    Pipeline(_wf(("z", "detector.hourly_baseline", {"exclude_entities": ["paymnt"]}), targets=[]))
 
 
 def test_misspelled_target_field_and_empty_whitelist_fail(tmp_path):
     path = tmp_path / "wf.yaml"
     path.write_text("""name: t
 nodes:
-  - {name: z, operator: detector.zscore}
+  - {name: z, operator: detector.hourly_baseline}
 targets:
   - {source_type: mock, query: a, detector: [z]}
 """, encoding="utf-8")
@@ -278,24 +257,6 @@ targets:
     with pytest.raises(ValidationError) as e:
         TargetSpec(source_type="mock", query="a", detectors=[])
     assert [(err["loc"], err["type"]) for err in e.value.errors()] == [(("detectors",), "too_short")]
-
-
-# ── 稽核 Q5：冷啟動棄權、白名單跳過，只剩一個參與者時任何策略都是 pass-through ──
-
-
-@pytest.mark.parametrize("strategy", [{"strategy": "intersection"}, {"strategy": "majority"},
-                                      {"strategy": "at_least", "min_votes": 3}])
-def test_cold_start_and_skipped_nodes_leave_one_voter_who_decides_alone(strategy):
-    n_skip = ("n_skip", "detector.zscore", {"threshold": 2.0})            # 會抓 SMALL＋BIG，但 target 沒選它
-    n_cold = ("n_cold", "detector.mad", {"min_train_points": 10_000})     # 訓練段 100 點 < 10000：冷啟動棄權
-    n_ok = ("n_ok", "detector.zscore", {"threshold": 5.0})                # 只抓 BIG
-    rec = _run(n_skip, n_cold, n_ok, ("vote", "detector.ensemble", strategy),
-               targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["n_cold", "n_ok"]}])
-    a = rec.contexts["a"]
-    assert a.detector_runs == ["n_ok"]
-    assert "n_skip:skipped:not-selected" in a.audit and any(l.startswith("train:n_cold:too-few-points") for l in a.audit)
-    assert any("voters=1:need=1" in line for line in a.audit)
-    assert _minutes(a.anomalies) == [BIG] and [(e.detector_node, e.voted_by) for e in a.anomalies] == [("vote", ("n_ok",))]
 
 
 # ── 稽核 Q13：路由順序（exclude → include → detectors）與被跳過的節點零開銷 ──
@@ -315,9 +276,9 @@ def test_routing_order_is_visible_in_the_skip_reason_and_skipped_nodes_load_noth
                         staticmethod(lambda p, e, q, op, node: (models_get.append((e, node)), real_get(p, e, q, op, node))[1]))
     monkeypatch.setattr(repository.ActiveConfigs, "candidates",
                         staticmethod(lambda op, p, e: (candidates.append((e, op)), real_cand(op, p, e))[1]))
-    wf = _wf(("both", "detector.zscore", {"include_entities": ["b"], "exclude_entities": ["a"]}),
-             ("inc_b", "detector.mad", {"include_entities": ["b"]}),
-             ("sel", "detector.quantile_drift", {"window": 20}),
+    wf = _wf(("both", "detector.hourly_baseline", {"include_entities": ["b"], "exclude_entities": ["a"]}),
+             ("inc_b", "detector.residual_shift", {"include_entities": ["b"]}),
+             ("sel", "detector.residual_chronic", {"window": 20}),
              targets=[{"source_type": "mock", "query": "a", "entity": "a", "detectors": ["both", "inc_b", "sel"]},
                       {"source_type": "mock", "query": "b", "entity": "b", "detectors": ["both"]}])
     ctx = Pipeline(wf, StorageHooks()).run(now=NOW)
@@ -325,7 +286,7 @@ def test_routing_order_is_visible_in_the_skip_reason_and_skipped_nodes_load_noth
     assert skips == ["both:skipped:excluded", "inc_b:skipped:not-included", "inc_b:skipped:not-selected",
                      "sel:skipped:not-selected"]
     assert sorted(models_get) == [("a", "sel"), ("b", "both")]
-    assert sorted(candidates) == [("a", "detector.quantile_drift"), ("b", "detector.zscore")]
+    assert sorted(candidates) == [("a", "detector.residual_chronic"), ("b", "detector.hourly_baseline")]
     assert sorted((r["entity"], r["node"]) for r in crud.find(DetectorModelRow)) == [("a", "sel"), ("b", "both")]
 
 

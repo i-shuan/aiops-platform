@@ -16,10 +16,11 @@ from aiops.engine.errors import BadRequest
 from aiops.engine.requests import MappingSubmit
 from aiops.interfaces.runner import run
 from aiops.sources.base import InvalidQueryError, as_utc_datetime
-from aiops.sources.elasticsearch import ElasticsearchSpec, _span
+from aiops.sources.grafana import _span
 from aiops.sources.es_models import DATA_MODEL_ENV, ELASTIC_APM, OTEL, current_model, get_path, otel_sampling_weight
 from aiops.stages.ingestion.fetch import IncidentTracesFetch
 from aiops.stages.rca import spans as rca_spans
+from grafana_fake import grafana_spec
 
 FIXTURES = Path(__file__).parent / "fixtures" / "otel_es"
 
@@ -203,7 +204,7 @@ def test_otel_log_query_keeps_only_errors_because_the_stream_mixes_all_levels(mo
         hits = [{"_source": d, "sort": [i]} for i, d in enumerate(keep)] if "search_after" not in body else []
         return httpx.Response(200, json={"hits": {"total": {"value": len(keep)}, "hits": hits}})
 
-    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    spec = grafana_spec(handler)[0]
     t = datetime(2026, 11, 12, tzinfo=timezone.utc)
     logs, cut = spec.fetch_logs(t, t + timedelta(hours=1), ["cart-api"])
     assert len(logs) == 5 and not cut
@@ -226,7 +227,7 @@ def test_otel_span_query_uses_otel_ids_for_sort_and_trace_lookups(monkeypatch):
         hits = [] if "search_after" in body else [{"_source": d, "sort": [i]} for i, d in enumerate(OTEL_SPANS)]
         return httpx.Response(200, json={"hits": {"total": {"value": len(OTEL_SPANS)}, "hits": hits}})
 
-    spec = ElasticsearchSpec("http://es", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    spec = grafana_spec(handler)[0]
     t = datetime(2026, 11, 12, tzinfo=timezone.utc)
     spans, cut = spec.fetch_spans(t, t + timedelta(hours=1))
     assert len(spans) == 57 and not cut
@@ -300,9 +301,9 @@ def test_unit_weights_leave_every_statistic_exactly_as_before():
 
 def test_mapping_submit_rejects_standard_fields_nobody_reads():
     with pytest.raises(BadRequest, match="span.peer_servic"):
-        run("admin_mapping_submit", request=MappingSubmit(source_type="elasticsearch",
+        run("admin_mapping_submit", request=MappingSubmit(source_type="grafana",
                                                           fields={"attributes.backend": "span.peer_servic"}, submitter="amy"))
-    ok = run("admin_mapping_submit", request=MappingSubmit(source_type="elasticsearch",
+    ok = run("admin_mapping_submit", request=MappingSubmit(source_type="grafana",
                                                            fields={"attributes.backend": "span.peer_service",
                                                                    "@timestamp": "ts"}, submitter="amy"))
     assert ok["mapping"]["status"] == "pending"

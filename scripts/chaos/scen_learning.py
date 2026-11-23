@@ -1,4 +1,4 @@
-"""場景 6～10：LLM 幻覺守門、分位數門檻、黃金事故防護罩、ACF 與假日、PostgreSQL JSONB 併發。"""
+"""場景 6、8～10：LLM 幻覺守門、黃金事故防護罩、ACF 與假日、PostgreSQL JSONB 併發（場景 7 分位數門檻已移除）。"""
 from __future__ import annotations
 
 import json
@@ -6,8 +6,6 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
-
-import numpy as np
 
 from scripts.chaos import harness as H
 from scripts.chaos.world import Call, Svc, World
@@ -123,75 +121,8 @@ def scenario_6() -> H.Result:
     return r
 
 
-# ───────────────────────── 場景 7：極端毛刺 × 分位數反推門檻 ─────────────────────────
-def _s7_run(spike_minutes: int) -> dict:
-    """世界 40 天；在 INC+10min 起注入 spike_minutes 分鐘的瞬間抖動（每分鐘的 mad 分數 ~80）；偵測 → 標誤報 → 反推門檻。"""
-    from aiops.engine.requests import FeedbackPropose, FeedbackSubmit
-    from aiops.interfaces.runner import run
-
-    t0 = INC - timedelta(days=40)
-    end = INC + timedelta(minutes=40)
-    w = World(t0, _mins(t0, end + timedelta(minutes=10)), [Svc("bill-svc", "POST /bills", 30.0, [Call("billing-db", 1.0, "db", "postgresql", 10.0)])],
-              {"bill-svc": 25.0}, seed=11)
-    w.build()
-    m0 = w.m(INC + timedelta(minutes=10))
-    train = (w.sum_ok["bill-svc"] + w.sum_fail["bill-svc"])[m0 - 10080:m0]
-    med = float(np.median(train))
-    mad = float(np.median(np.abs(train - med)))
-    val = med + 80.0 * mad / 0.6745
-    for k in range(spike_minutes):
-        w.sum_ok["bill-svc"][m0 + k], w.n_ok["bill-svc"][m0 + k] = val, max(int(w.n_ok["bill-svc"][m0 + k]), 1)
-        w.n_fail["bill-svc"][m0 + k], w.sum_fail["bill-svc"][m0 + k] = 0, 0.0
-    H.fresh_db()
-    out: dict = {"median": med, "mad": mad, "value": val}
-    with H.es_for(w) as es:
-        wf = H.detection_workflow("sample_it_otel", H.targets(["bill-svc"]))
-        rp = H.replay(wf, INC, end)
-        incs = H.incidents()
-        out["incidents"] = [(i["id"], i["incident"]["start"][11:16], i["incident"]["end"][11:16]) for i in incs]
-        out["detect"] = f"{rp.rounds} 輪、異常 {rp.anomalies}、errors {rp.errors[:2]}"
-        inc = H.pick(incs, "bill-svc", INC)
-        out["inc"] = inc
-        if not inc:
-            return out
-        fb = run("admin_feedback_submit", request=FeedbackSubmit(incident_uid=inc["uid"], verdict="false_positive", detector="detector.mad",
-                                                                text="瞬間網路抖動，不是事故", author="chaos"))["feedback"]
-        n_before = len(es.requests)
-        res = run("admin_feedback_propose", request=FeedbackPropose(feedback_id=fb["id"], proposer="chaos", detector="detector.mad", scope="entity"))
-        out["proposal"] = res["proposal"]
-        out["generated_by"] = res.get("generated_by")
-        # 反推門檻時對 ES 發的查詢：誤報時窗的終點（lt）有沒有涵蓋事件群的最後一個點
-        lts = []
-        for path, body in es.requests[n_before:]:
-            for f in body.get("query", {}).get("bool", {}).get("filter", []):
-                if "range" in f and "lt" in f["range"].get("@timestamp", {}):
-                    lts.append(f["range"]["@timestamp"]["lt"])
-        out["queried_lt_max_near_incident"] = sorted({x for x in lts if x[:10] == inc["incident"]["end"][:10]})[-3:]
-        out["incident_end"] = inc["incident"]["end"]
-    return out
-
-
-def scenario_7() -> H.Result:
-    r = H.Result(7, "極端毛刺干擾下的分位數反推門檻",
-                 "bill-svc 平時穩定；注入瞬間抖動讓 mad 分數每分鐘 ~80（極端離群值），維運標記該事件為 false_positive。分兩組：(a) 1 分鐘單點毛刺、(b) 3 分鐘毛刺")
-    for label, minutes in (("a", 1), ("b", 3)):
-        o = _s7_run(minutes)
-        r.notes.append(f"({label}) 世界：mad 訓練窗 median={o['median']:.0f}、MAD={o['mad']:.0f}（µs/分）；注入值 {o['value']:.0f}（理論 mad 分數 80）；"
-                       f"偵測 {o['detect']}；事件群 {o['incidents']}")
-        if not r.check(f"({label}) 毛刺被偵測成事件群", "有", bool(o.get("inc")), bool(o.get("inc"))):
-            continue
-        p = o["proposal"]
-        th = (p["params"] or {}).get("threshold")
-        reason = p["reason"]
-        r.notes.append(f"({label}) 提案 threshold={th}；generated_by={o['generated_by']}；事件群結束={o['incident_end']}；"
-                       f"反推時對 ES 的查詢終點(lt)={o['queried_lt_max_near_incident']}；reason={reason[:420]}")
-        r.check(f"({label}) 門檻沒有被帶偏到 80", "< 80", th, th is not None and th < 80)
-        r.check(f"({label}) 單次調整 ≤ +50%（3.5 → ≤ 5.25）且方向向上", "3.5 < threshold ≤ 5.25", th, th is not None and 3.5 < th <= 5.25 + 1e-9)
-        quant = "分位數" in reason or "S_max" in reason or "Q" in reason.split("：")[-1][:4]
-        r.check(f"({label}) 走分位數反推（不是退回固定規則 ×1.2）", "reason 不含『固定規則』", reason[:90], "固定規則" not in reason)
-        trunc = "固定規則" not in reason and any(k in reason for k in ("步進截斷", "還差", "單次"))
-        r.check(f"({label}) reason 註明目標過大、執行步進截斷", "reason 含截斷說明", reason[:90], trunc)
-    return r
+# 場景 7（極端毛刺 × 分位數反推門檻）已於 2026-11-20 移除：誤報回饋不再自動產生把門檻調高的提案（admin.feedback_propose 回 400），
+# 分位數反推（control_plane/learning/threshold.py）跟著刪掉，這個場景沒有東西可驗。編號 7 留空，其他場景編號不動。
 
 
 # ───────────────────────── 場景 8：黃金事故防護罩一票否決 ─────────────────────────
@@ -221,11 +152,11 @@ def scenario_8() -> H.Result:
         rf = client.post("/api/v1/tuning/feedback", json={"incident_uid": inc["uid"], "verdict": "true_positive", "text": "確認為真事故（P0）",
                                                          "author": "chaos", "root_cause": "billing-db 變慢", "resolution": "擴充連線池"})
         r.check("確認為真事故，進黃金庫（HTTP 200）", "200", rf.status_code, rf.status_code == 200)
-        metric = {"source_type": "elasticsearch", "query": H.metric_query("bill-svc")}
+        metric = {"source_type": H.METRIC_SOURCE, "query": H.metric_query("bill-svc")}
         tr = {"start": (INC - timedelta(hours=6)).isoformat(), "end": (INC - timedelta(hours=1)).isoformat(), "step_seconds": 60}
 
         def create(threshold):
-            return client.post("/api/v1/tuning/proposals", json={"source": "manual", "detector": "detector.zscore", "params": {"threshold": threshold},
+            return client.post("/api/v1/tuning/proposals", json={"source": "manual", "detector": "detector.hourly_baseline", "params": {"threshold": threshold},
                                                                  "proposer": "chaos", "pipeline": "sample_it_apm", "entity": "bill-svc", "reason": "chaos"})
 
         p25 = create(25.0)
@@ -280,7 +211,7 @@ def scenario_9() -> H.Result:
     H.fresh_db()
 
     def profile(world, at: datetime, q: str | None = None):
-        req = SeriesProfile(metric=MetricIn(source_type="elasticsearch", query=q or qps_q), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=at)
+        req = SeriesProfile(metric=MetricIn(source_type=H.METRIC_SOURCE, query=q or qps_q), pipeline="sample_it_otel", entity="bill-svc", days=14, step_seconds=300, end=at)
         with H.es_for(world):
             return run("admin_series_profile", request=req, targets=req.to_targets(), now=at)
 
@@ -301,8 +232,11 @@ def scenario_9() -> H.Result:
     r.check("含連假窗口：仍有日夜週期，不得提議拔除 hourly_baseline", "proposal=None", f"proposal={with_h.get('proposal') is not None}；{with_h.get('advice', '')[:80]}", with_h.get("proposal") is None)
     r.check("168h 配對不足（avg 聚合）：明確標記資料不足、維持既有算子", "r168h=None、advice 說資料不足、proposal=None",
             f"r168h={c['r_168h']}；advice={short.get('advice', '')[:60]}；proposal={short.get('proposal')}", c["r_168h"] is None and "資料不足" in short.get("advice", "") and short.get("proposal") is None)
+    # 已知死區（2026-11-20 起）：這條以前靠 admin.series_profile 對 Elasticsearch 另外查文件數（doc_counts）認出補零的空桶。
+    # 平台不再直連 Elasticsearch、doc_counts 已刪除；會把空桶補成 0 的資料源（這裡的 chaos_metrics 模擬 ES 的 sum）沒有人替它遮罩
+    r.notes.append("sum 聚合補零的空桶：doc_counts 已隨直連 ES 移除，這一條標成已知死區（改接 Grafana 指標時要重新處理空桶）")
     r.check("同一份只有 7.5 天的資料改用 sum 聚合：同樣要標記資料不足", "r168h=None、advice 說資料不足", f"r168h={d['r_168h']}；advice={short_sum.get('advice', '')[:60]}",
-            d["r_168h"] is None and "資料不足" in short_sum.get("advice", ""))
+            d["r_168h"] is None and "資料不足" in short_sum.get("advice", ""), dead=True)
     advisory = Proposals.with_status("detector.hourly_baseline", "sample_it_otel", "bill-svc", ["advisory"])
     r.check("三次體檢後資料庫沒有任何 advisory 提案", "0 筆", f"{len(advisory)} 筆", not advisory)
     return r

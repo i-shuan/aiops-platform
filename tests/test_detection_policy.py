@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SHIPPED = ROOT / "aiops" / "pipelines"
 USER_PIPELINES = sorted((SHIPPED / "detection").glob("*.yaml"))
 WATCHDOG_DIR = SHIPPED / "watchdog"
+GRAFANA_DIR = SHIPPED / "grafana"
 
 
 def _operators(path: Path) -> list[str]:
@@ -42,13 +43,24 @@ def test_user_pipelines_only_take_external_alerts(path):
     assert all(getattr(op, "scope", "target") != "target" for _, op in pipeline.nodes)
 
 
-def test_detector_nodes_only_appear_in_platform_watchdog_pipelines():
-    """出貨的 YAML 裡，偵測器節點只准在 pipelines/watchdog/（監控 AIOps 平台自己）。"""
+def test_detector_nodes_only_appear_in_watchdog_and_grafana_rule_pipelines():
+    """出貨的 YAML 裡，偵測器節點只准在 pipelines/watchdog/（監控 AIOps 平台自己）與 pipelines/grafana/
+    （2026-11-20 起：偵測對象由使用者在 Grafana 告警規則上貼 aiops_detect 標籤決定）。
+    pipelines/detection/ 的使用者管線仍然只吃外部推進來的告警。"""
     detectors = set(OperatorRegistry.names("detector."))
-    assert detectors  # 偵測演算法本身還在（給看門狗用），只是不准掛在別的管線
+    assert detectors
     offenders = [f"{p.relative_to(SHIPPED).as_posix()}: {op}" for p in SHIPPED.rglob("*.yaml")
-                 if WATCHDOG_DIR not in p.parents for op in _operators(p) if op in detectors]
+                 if WATCHDOG_DIR not in p.parents and GRAFANA_DIR not in p.parents for op in _operators(p) if op in detectors]
     assert not offenders, offenders
+
+
+def test_grafana_rule_pipelines_take_their_targets_from_grafana_and_nowhere_else():
+    """pipelines/grafana/ 的管線不准自己寫 targets：對象與嚴重度都在使用者的 Grafana 上，這個檔只描述流程。"""
+    files = sorted(GRAFANA_DIR.glob("*.yaml"))
+    assert files
+    for path in files:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert raw.get("targets_from") == "grafana" and not raw.get("targets"), path.name
 
 
 def test_detection_samples_live_outside_the_platform_package_and_image():

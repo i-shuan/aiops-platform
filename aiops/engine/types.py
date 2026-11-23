@@ -29,8 +29,8 @@ WARNING = "warning"
 
 @dataclass(frozen=True)
 class AnomalyEvent:
-    """一筆異常。建立後不可修改（frozen）：偵測器名稱、分數一旦產生，下游（收斂、計分、裁決）只能讀、不能改，
-    要調整就產生新的事件（例如 detector.ensemble 產生的裁決事件）。"""
+    """一筆異常。建立後不可修改（frozen）：偵測器名稱、分數一旦產生，下游（收斂、計分）只能讀、不能改，
+    要調整就產生新的事件。"""
 
     entity: str
     metric: str
@@ -43,7 +43,8 @@ class AnomalyEvent:
     detector_node: str = ""
     # 從哪個資料源來（RCA 重抓時序用）。外部匯入的異常留空
     source_type: str = ""
-    # 裁決事件（detector.ensemble）由哪些節點投票通過；一般偵測事件留空
+    # 舊版表決節點（已移除的 detector.ensemble／soft_vote）的裁決事件由哪些節點投票通過。現在沒有任何算子會填，
+    # 欄位留著只為了讀得回資料庫裡舊的事件群快照
     voted_by: tuple[str, ...] = ()
     # anomaly（越過門檻）或 warning（接近門檻的預警，偵測節點設了 warning_ratio 才會有）
     level: str = ANOMALY
@@ -72,7 +73,7 @@ class AnomalyEvent:
                    tuple(d.get("voted_by", ())), d.get("level", ANOMALY))
 
 
-# 嚴重度門檻的預設值（分數 >= 門檻就是該等級）：alert.notify_payload 定嚴重度、alert.fatal_floor 換算地板分數都用這一份
+# 嚴重度門檻的預設值（分數 >= 門檻就是該等級）：alert.notify_payload 定嚴重度用這一份
 DEFAULT_SEVERITY = {"P0": 10.0, "P1": 6.0, "P2": 3.0, "P3": 0.0}
 
 

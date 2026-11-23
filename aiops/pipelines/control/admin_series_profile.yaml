@@ -5,5 +5,5 @@ nodes:
     operator: admin.series_profile
     # r(24h) 與 r(168h) 都低於 min_acf 才建議排除時段基準線。
     # min_coverage：窗口裡有資料的時段比例不到這個值就寫「資料不足」、不算週期、不給建議
-    # （sum／count 聚合對沒資料的桶回 0.0，看起來像流量為 0；Elasticsearch 來源會另外用文件數分辨空桶）
+    # （有些資料源的 sum／count 聚合對沒資料的桶回 0.0，看起來像流量為 0；目前沒有資料源另外提供文件數來分辨空桶）
     params: {min_acf: 0.3, min_coverage: 0.5}

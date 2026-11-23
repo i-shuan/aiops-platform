@@ -3,8 +3,6 @@
 兩種錯：
 1. 值不合理——`threshold: -3`、`window_minutes: 0`、`cooldown_minutes: -5`：算子的 __init__ 檢查，引擎轉成 WorkflowError。
 2. 欄位打錯——`param:`（少了 s）、`windw_days:`、`fliter:`：Pydantic 模型一律 extra="forbid"。
-
-本檔沒有涵蓋、照實說的界線見最下面的 test_known_limits_*。
 """
 import inspect
 import textwrap
@@ -17,7 +15,6 @@ from aiops.engine.errors import BadRequest, WorkflowError
 from aiops.engine.pipeline import NodeSpec, PeerGroupSpec, PeerSpec, Pipeline, TargetSpec, Workflow, load_workflow
 from aiops.engine.registry import OperatorRegistry
 from aiops.interfaces.runner import WORKFLOW_DIR, build_pipeline
-from aiops.sources.query.elasticsearch import EsMetricQuery, parse_es_query
 from aiops.stages.detectors.base import DetectorOperator
 
 
@@ -41,16 +38,16 @@ def test_negative_threshold_in_yaml_fails_when_the_workflow_is_loaded(tmp_path):
         name: bad
         nodes:
           - {name: fetch, operator: ingestion.fetch}
-          - {name: detect, operator: detector.mad, params: {threshold: -3}}
+          - {name: detect, operator: detector.hourly_baseline, params: {threshold: -3}}
         targets:
           - {source_type: mock, query: a, entity: a}
     """)
-    with pytest.raises(WorkflowError, match=r"detector\.mad.*threshold=-3 超出範圍"):
+    with pytest.raises(WorkflowError, match=r"detector\.hourly_baseline.*threshold=-3 超出範圍"):
         build_pipeline(str(path), allow_file=True)
 
 
 def test_negative_threshold_in_target_overrides_fails_when_the_pipeline_is_built():
-    wf = _wf(("detect", "detector.mad", {}),
+    wf = _wf(("detect", "detector.hourly_baseline", {}),
              targets=[TargetSpec(source_type="mock", query="a", entity="a", overrides={"detect": {"threshold": -3}})])
     with pytest.raises(WorkflowError, match="threshold=-3 超出範圍"):
         Pipeline(wf)
@@ -76,8 +73,13 @@ TUNABLE_CASES = _tunable_cases()
 
 def test_the_sweep_really_covers_every_tunable_detector():
     covered = {c.values[0] for c in TUNABLE_CASES}
-    assert {"detector.mad", "detector.zscore", "detector.hourly_baseline", "detector.quantile_drift"} <= covered
-    assert len(TUNABLE_CASES) >= 100
+    assert {"detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic", "detector.sparse_count"} <= covered
+    # 4 個偵測器共 9 個可調參數 × 5 種壞值 = 45。2026-11-20 以前是 16 個（>= 80）：min_scale、min_scale_ratio、fpr、
+    # max_tail_factor 這 10 個（跨三個偵測器）隨分母底噪與尾巴校正移除，剩 6 個（30）；同一天 min_scale_ratio 放回
+    # hourly_baseline、residual_shift、residual_chronic 三個偵測器（+3 個參數），所以 30 -> 45。掃描本身沒有變
+    assert len(TUNABLE_CASES) == 45
+    with_ratio = {c.values[0] for c in TUNABLE_CASES if c.values[1] == "min_scale_ratio"}
+    assert with_ratio == {"detector.hourly_baseline", "detector.residual_shift", "detector.residual_chronic"}
 
 
 @pytest.mark.parametrize("operator,key,value", TUNABLE_CASES)
@@ -116,13 +118,6 @@ def test_every_tunable_of_every_detector_is_range_checked_at_load(operator, key,
     ("alert.notify_payload", {"severity_thresholds": {"P0": 10, "SEV1": 5}}, "SEV1"),
     ("alert.notify_payload", {"severity_thresholds": {}}, "severity_thresholds"),
     ("alert.notify_payload", {"severity_thresholds": {"P0": "high"}}, "必須是有限的數值"),
-    ("detector.ensemble", {"strategy": "at_least", "min_votes": 0}, "min_votes 必須是 >= 1 的整數"),
-    ("detector.ensemble", {"strategy": "majority", "min_votes": 2}, "min_votes"),
-    ("detector.rules", {"upper": 5, "lower": 9}, "lower"),
-    ("detector.rules", {"upper": "high"}, "upper 必須是有限的數值"),
-    ("detector.rules", {"upper": 5, "consecutive": 0}, "consecutive 必須 >= 1 的整數"),
-    ("detector.hard_limit", {"fatal_ceiling": 5, "consecutive": 0}, "consecutive 必須是 >= 1 的整數"),
-    ("detector.hard_limit", {"max_rise": 0}, "max_rise 必須 > 0"),
     ("rca.section.similar_cases", {"w_entities": -1}, "w_entities 不能小於 0"),
     ("rca.section.similar_cases", {"w_entities": 0, "w_metrics": 0, "w_signals": 0}, "不能全是 0"),
 ])
@@ -135,18 +130,15 @@ def test_unknown_operator_param_fails_when_the_pipeline_is_built():
     with pytest.raises(WorkflowError, match="windw_minutes"):
         Pipeline(_wf(("group", "alert.same_entity", {"windw_minutes": 15})))
     with pytest.raises(WorkflowError, match="treshold"):
-        Pipeline(_wf(("detect", "detector.mad", {"treshold": 3.5})))
+        Pipeline(_wf(("detect", "detector.hourly_baseline", {"treshold": 3.5})))
 
 
 def test_values_that_look_odd_but_are_legitimate_still_load():
-    """防線不能誤傷：致命界線可以是負數（溫度、餘額）、權重可以關成 0、非正整數的窗口可以是小數。"""
-    pipe = Pipeline(_wf(("fatal", "detector.hard_limit", {"fatal_lower": -3, "fatal_ceiling": 0}),
-                        ("vote", "detector.ensemble", {"bypass": ["fatal"]}),
-                        ("rules", "detector.rules", {"lower": -3, "upper": -1}),
-                        ("group", "alert.same_entity", {"window_minutes": 0.5}),
+    """防線不能誤傷：權重可以關成 0、非正整數的窗口可以是小數、最低一級的嚴重度門檻可以是 0。"""
+    pipe = Pipeline(_wf(("group", "alert.same_entity", {"window_minutes": 0.5}),
                         ("payload", "alert.notify_payload", {"severity_thresholds": {"P0": 10, "P3": 0}}),
                         ("similar", "rca.section.similar_cases", {"w_signals": 0, "same_pipeline_bonus": 0})))
-    assert [n.name for n, _ in pipe.nodes] == ["fetch", "fatal", "vote", "rules", "group", "payload", "similar"]
+    assert [n.name for n, _ in pipe.nodes] == ["fetch", "group", "payload", "similar"]
 
 
 # ── 未知欄位：workflow YAML ───────────────────────────────────────────────────────────────
@@ -159,7 +151,7 @@ def test_values_that_look_odd_but_are_legitimate_still_load():
      """, "node_list"),
     ("""
         name: bad
-        nodes: [{name: detect, operator: detector.mad, param: {threshold: 9}}]
+        nodes: [{name: detect, operator: detector.hourly_baseline, param: {threshold: 9}}]
      """, "param"),
     ("""
         name: bad
@@ -187,7 +179,7 @@ def test_unknown_fields_in_workflow_yaml_fail_at_load(tmp_path, body, field):
         load_workflow(_yaml(tmp_path, body))
 
 
-@pytest.mark.parametrize("model", [Workflow, NodeSpec, TargetSpec, PeerSpec, PeerGroupSpec, EsMetricQuery])
+@pytest.mark.parametrize("model", [Workflow, NodeSpec, TargetSpec, PeerSpec, PeerGroupSpec])
 def test_workflow_and_query_models_forbid_unknown_fields(model):
     assert model.model_config.get("extra") == "forbid"
 
@@ -239,11 +231,7 @@ def test_api_rejects_a_bad_override_value_with_400_not_500(client):
     assert "threshold=-3" in res.text
 
 
-def test_typo_in_elasticsearch_query_is_an_error_not_a_silently_wider_query():
-    """`fliter` 被丟掉 = 沒有過濾條件 = 整個 index 的平均：數字照出、沒人發現。"""
-    with pytest.raises(ValueError, match="fliter"):
-        parse_es_query('{"index": "metrics-*", "value_field": "v", "fliter": {"term": {"service.name": "cart-api"}}}')
-    assert parse_es_query('{"index": "metrics-*", "value_field": "v", "filter": {"term": {"a": "b"}}}').filter
+
 
 
 # ── 啟動期：出貨的 workflow 全部建得起來；直接 create 的錯誤型別 ───────────────────────────
@@ -262,12 +250,3 @@ def test_param_errors_are_workflow_errors_and_still_value_errors():
         OperatorRegistry.create("alert.suppress_dedup", {"cooldown_minutes": -30})
     assert isinstance(e.value, ValueError) and isinstance(e.value, BadRequest)
     assert e.value.status_code == 400
-
-
-# ── 照實說的界線 ─────────────────────────────────────────────────────────────────────────
-
-def test_known_limit_rules_without_any_rule_loads_and_abstains_instead_of_failing():
-    """detector.rules 節點不寫 upper／lower 是合法的（規則可以只寫在某幾條 target 的 overrides），
-    所以「完全沒規則」不是載入錯誤：那條序列的節點棄權（can_evaluate False），不進多數決分母。"""
-    pipe = Pipeline(_wf(("rules", "detector.rules", {})))
-    assert pipe.nodes[1][1].has_rule is False

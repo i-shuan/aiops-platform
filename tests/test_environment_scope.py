@@ -274,11 +274,11 @@ def test_in_environment_is_strict_only_when_the_source_reports_an_environment():
 @pytest.mark.parametrize("model, field", [("elastic_apm", "service.environment"),
                                           ("otel", "resource.attributes.deployment.environment.name")])
 def test_es_pushes_the_environment_into_the_query_so_other_environments_do_not_use_up_the_span_budget(monkeypatch, model, field):
-    from aiops.sources.elasticsearch import ElasticsearchSpec
+    from aiops.sources.grafana import GrafanaSpec
     monkeypatch.setenv("AIOPS_ES_DATA_MODEL", model)
     bodies = []
-    spec = ElasticsearchSpec.__new__(ElasticsearchSpec)
-    monkeypatch.setattr(spec, "_search", lambda index, body, what: bodies.append(body) or {"hits": {"hits": [], "total": {"value": 0}}},
+    spec = GrafanaSpec.__new__(GrafanaSpec)
+    monkeypatch.setattr(spec, "_search", lambda signal, index, body, what: bodies.append(body) or {"hits": {"hits": [], "total": {"value": 0}}},
                         raising=False)
     spec.fetch_spans(NOW - timedelta(minutes=5), NOW, None, 100, environment="prod")
     spec.fetch_logs(NOW - timedelta(minutes=5), NOW, None, 100, environment="prod")
@@ -306,8 +306,8 @@ def test_rca_fetch_asks_for_the_incidents_environment():
     from aiops.engine.context import PipelineContext
     from aiops.stages.ingestion.fetch import _rca_environment, _scope_kw
     ctx = PipelineContext("rca", NOW, environment="staging")
-    assert _scope_kw(ctx, "elasticsearch") == {"environment": "staging"}
+    assert _scope_kw(ctx, "grafana") == {"environment": "staging"}
     ctx.incident_environment = "prod"  # 事件群是 prod 的：照事件群，不照 RCA 管線自己的設定
     assert _rca_environment(ctx) == "prod"
-    assert _scope_kw(PipelineContext("rca", NOW), "elasticsearch") == {}  # 不分環境：不帶參數，舊簽名的資料源照樣能用
+    assert _scope_kw(PipelineContext("rca", NOW), "grafana") == {}  # 不分環境：不帶參數，舊簽名的資料源照樣能用
 

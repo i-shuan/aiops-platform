@@ -1,12 +1,10 @@
-"""有日夜／週末週期的流量序列：週期基準線單獨判，比 mad／quantile_drift 的多數決可靠（docs/SEASONAL_TRAFFIC_BACKTEST.md）。
+"""有日夜／週末週期的流量序列：週期基準線（detector.hourly_baseline）單獨判（docs/SEASONAL_TRAFFIC_BACKTEST.md）。
 
 資料是合成的，形狀照 ES 裡 mes-api 實際的每小時均值：上班時段（台北 09:00–18:59）平日 290、其餘 135，週末 145／75，
-分鐘雜訊 std 約 9。把回測看到的現象固定下來：多數決在這種序列上會誤報整個上班時段；週期基準線單獨判
-（threshold 5）不誤報，而且抓得到尖峰時段流量掉到三成。
+分鐘雜訊 std 約 9。把回測看到的現象固定下來：週期基準線單獨判（threshold 5）不誤報，而且抓得到尖峰時段流量掉到三成。
 
-死區（照實寫，不粉飾）：這個現象跟波形有關。非週期偵測器靠「整段資料的中位數與 MAD」判斷；上班時段／非上班時段
-這種兩階梯波形，中位數落在低階、MAD 很小，高階整段被判異常。換成平滑、振幅很大的正弦（夜間 15%、尖峰 100%）時，
-MAD 被撐得很寬，mad 與 quantile_drift 整週一次都沒標過，連尖峰掉流量也抓不到（見回測文件的合成資料實驗）。
+原本還有一個對照測試：非週期偵測器（detector.mad／quantile_drift，拿整段資料的中位數與 MAD 當基準）在這種兩階梯波形上
+把平日上班時段整段判成異常，多數決（detector.ensemble）跟著誤報。那三個算子都已移除，對照測試跟著刪掉。
 """
 import warnings
 
@@ -49,10 +47,7 @@ def world():
     df, split = _series()
     train, test = df[df["ts"] < split], df[df["ts"] >= split].reset_index(drop=True)
     hourly = OperatorRegistry.create("detector.hourly_baseline", {"tz": TZ, "min_weeks": 1, "threshold": 5})
-    mad = OperatorRegistry.create("detector.mad", {})
-    qdrift = OperatorRegistry.create("detector.quantile_drift", {})
-    for d in (hourly, mad, qdrift):
-        d.fit(train)
+    hourly.fit(train)
     local = test["ts"].dt.tz_convert(TZ)
     # 週二 12:00 起 20 分鐘，流量掉到三成
     start = int(np.flatnonzero(((local.dt.dayofweek == 1) & (local.dt.hour == 12) & (local.dt.minute == 0)).to_numpy())[0])
@@ -60,16 +55,7 @@ def world():
     dropped.loc[start:start + 19, "value"] *= 0.3
     win = np.zeros(len(test), bool)
     win[start:start + 20] = True
-    return {"dets": {"hourly": hourly, "mad": mad, "qdrift": qdrift}, "test": test, "dropped": dropped, "win": win}
-
-
-def test_majority_of_non_seasonal_detectors_flags_every_weekday_peak(world):
-    """回測看到的現象：mad、quantile_drift 拿整段資料當基準，平日尖峰時段整段被判異常，多數決跟著誤報。"""
-    f = _flags(world["dets"], world["test"])
-    majority = (f["hourly"].astype(int) + f["mad"] + f["qdrift"]) >= 2
-    assert f["mad"].sum() > 1500 and f["qdrift"].sum() > 1500   # 5 個平日各有幾百分鐘
-    assert majority.sum() > 1500                                  # 多數決並沒有擋掉：兩個非週期偵測器同時誤報
-    assert f["hourly"].sum() < 60                                 # 週期基準線自己沒這個問題
+    return {"dets": {"hourly": hourly}, "test": test, "dropped": dropped, "win": win}
 
 
 def test_seasonal_baseline_alone_has_almost_no_false_alarms_with_threshold_5(world):

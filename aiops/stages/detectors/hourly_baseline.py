@@ -3,7 +3,7 @@
 適合有明顯日週期／週末效應的指標（流量、交易量、登入數）：週一早上九點跟週日凌晨三點不該用同一條基準線。
 時段依 tz 參數換算成當地時間（預設 UTC；台灣請設 Asia/Taipei，不然「上班時間」會偏 8 小時）。
 
-冷啟動與資料不足時的安全回退（退回「全段的平均與標準差」，等同 detector.zscore，不會比 zscore 更吵）：
+冷啟動與資料不足時的安全回退（退回「全段的平均與標準差」，就是一般的 z-score）：
 - 某個時段的訓練點太少（< min_points）
 - 某個時段只看過不到 min_weeks 次（預設 2 次）：每個「週幾幾點」只看過一次的話，標準差只反映那一小時內的雜訊，
   不含週與週之間的變化，會被低估，平常的波動就會被當成異常。真實資料回放（7 天訓練）就是這樣吵起來的。
@@ -21,7 +21,7 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, DetectorOperator, is_integer_series, scale_floor
+from aiops.stages.detectors.base import MIN_SCALE_RATIO_TUNABLE, DetectorOperator, floored_scale
 
 HOURS_PER_WEEK = 168
 
@@ -29,15 +29,13 @@ HOURS_PER_WEEK = 168
 @OperatorRegistry.register("detector.hourly_baseline")
 class HourlyBaselineDetector(DetectorOperator):
     """params: threshold（偏離幾個該時段標準差）、tz（時區，預設 UTC）、
-    min_points（時段最少訓練點，預設 3）、min_weeks（時段至少要看過幾次完整的一週，預設 2）、
-    min_scale／min_scale_ratio（分母底噪，見 base.scale_floor）。
+    min_points（時段最少訓練點，預設 3）、min_weeks（時段至少要看過幾次完整的一週，預設 2）。
 
-    每個時段的標準差下限 = max(全段 std × 0.1, 底噪)；底噪的中心用該時段的平均。
-    全段 std 為 0（訓練期完全不變）時以前分數全 0（永遠不報），現在分母退到底噪。"""
+    分母：時段 std 不是正數就用全段 std，而且不小於該時段平均的 min_scale_ratio（預設 1%，base.floored_scale）。"""
 
     algorithm = "hourly_baseline"
     whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
-    tunable = {"threshold": (3.0, 1.0, 10.0), **SCALE_FLOOR_TUNABLE}
+    tunable = {"threshold": (3.0, 1.0, 10.0), **MIN_SCALE_RATIO_TUNABLE}
     other_params = frozenset({"tz", "min_points", "min_weeks"})
 
     def __init__(self, **params: Any):
@@ -78,7 +76,6 @@ class HourlyBaselineDetector(DetectorOperator):
                          for b, r in agg.iterrows()}
         values = frame["v"]
         self.global_ = (float(values.mean()), float(values.std(ddof=0)))
-        self.integer_ = is_integer_series(values)
         self.fitted = True
         return self
 
@@ -90,29 +87,27 @@ class HourlyBaselineDetector(DetectorOperator):
     def get_state(self) -> dict:
         self._require_fitted()
         return {"buckets": {str(b): list(v) for b, v in self.buckets_.items()}, "global": list(self.global_),
-                "tz": str(self.tz), "buckets_ready": self.buckets_ready, "min_weeks": self.min_weeks,
-                "integer": self.integer_}
+                "tz": str(self.tz), "buckets_ready": self.buckets_ready, "min_weeks": self.min_weeks}
 
     def load_state(self, state: dict) -> HourlyBaselineDetector:
-        # 舊版存的每個時段只有 (平均, 標準差, 點數)，沒有「看過幾週」：保守當成 1 週，會退回全段統計
+        # 舊版存的每個時段只有 (平均, 標準差, 點數)，沒有「看過幾週」：保守當成 1 週，會退回全段統計。
+        # 舊基準線多帶的 integer 鍵（已移除的整數序列底噪）不讀
         self.buckets_ = {int(b): (float(v[0]), float(v[1]), int(v[2]), float(v[3]) if len(v) > 3 else 1.0)
                          for b, v in state["buckets"].items()}
         self.global_ = (float(state["global"][0]), float(state["global"][1]))
-        self.integer_ = bool(state.get("integer", False))
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
         g_mean, g_std = self.global_
-        min_scale, ratio = self.param("min_scale"), self.param("min_scale_ratio")
         means, stds = [], []
         for b in self._bucket(df["ts"]):
             m, s, n, occ = self.buckets_.get(int(b), (g_mean, g_std, 0, 0.0))
             if not self._ready(n, occ):
-                m, s = g_mean, g_std  # 回退：等同 zscore
+                m, s = g_mean, g_std  # 回退：全段 z-score
             means.append(m)
-            # 某時段剛好完全不變時，避免除以 0 把小雜訊放大成異常：全段 std 的一成、再不夠就底噪
-            stds.append(max(s, g_std * 0.1, scale_floor(0.0, None, min_scale, ratio, center=m, integer=self.integer_)))
+            # 時段 std -> 全段 std；再不小於該時段平均的 min_scale_ratio（預設 1%）；都是 0 才 1.0
+            stds.append(floored_scale(m, self.param("min_scale_ratio"), s, g_std))
         scores = ((df["value"].astype(float) - np.array(means)) / np.array(stds)).abs()
         return self._result(df, scores, scores > self.param("threshold"))

@@ -68,7 +68,10 @@ def test_optional_summary_in_rca_report_workflow_is_marked_optional():
     # 兩個 LLM 旁路節點（summary／claims 總結、三行止血摘要）都是 optional：沒金鑰、連不上、驗證不過都不能擋報告
     assert {n.name: n.optional for n in wf.nodes} == {"fetch_traces": False, "build_topology": False,
                                                        "fetch_logs": False, "root_cause": False, "report": False,
-                                                       "summary": True, "briefing": True}
+                                                       "summary": True, "briefing": True,
+                                                       # 2026-11-20 加的 Grafana 註記節點：不標 optional，它自己接住寫失敗
+                                                       # （記進 errors、報告照出；tests/test_grafana_annotations.py）
+                                                       "annotate": False}
 
 
 # ── 偵測器基準線：樂觀鎖 ──
@@ -103,7 +106,7 @@ def test_pipeline_rerun_after_training_bumps_the_version_only_when_it_retrains(n
     from aiops.interfaces.runner import run_context
 
     run_context("sample_metrics_only", now=now, strict=False)
-    row = DetectorModels.get("sample_metrics_only", "cpu", "cpu", "detector.zscore") or next(iter(_all_models()), None)
+    row = DetectorModels.get("sample_metrics_only", "cpu", "cpu", "detector.hourly_baseline") or next(iter(_all_models()), None)
     assert row is not None and row["version"] == 1
     run_context("sample_metrics_only", now=now, strict=False)  # 基準線沒過期：不重訓、不寫、版本不變
     assert _all_models()[0]["version"] == 1
@@ -119,7 +122,7 @@ def test_concurrent_first_training_in_the_pipeline_logs_a_conflict_and_keeps_the
         real_load(self, ctx, detector_nodes)
         ctx.detector_states.clear()  # 這個 worker 讀的時候還沒有
         if not _all_models():
-            DetectorModels.save(ctx.pipeline, ctx.target.entity, ctx.target.query, "detector.zscore", {"winner": True},
+            DetectorModels.save(ctx.pipeline, ctx.target.entity, ctx.target.query, "detector.hourly_baseline", {"winner": True},
                                 T0, T0, 1, expected_version=0, node="detect")  # 另一個 worker 在這個 worker 寫入前先寫了
 
     monkeypatch.setattr(hooks.StorageHooks, "load_target", load_then_other_worker_wins)
@@ -140,7 +143,7 @@ def test_concurrent_approvals_only_one_wins(now):
 
     def propose(threshold):
         pid = run("admin_proposal_create", request=ProposalCreate(
-            source="manual", detector="detector.zscore", params={"threshold": threshold}, proposer="a"))["proposal"]["id"]
+            source="manual", detector="detector.hourly_baseline", params={"threshold": threshold}, proposer="a"))["proposal"]["id"]
         req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, time_range={
             "start": now.replace(hour=0), "end": now, "step_seconds": 60})
         run("admin_proposal_backtest", request=req, targets=req.to_targets(), now=now)
@@ -150,7 +153,7 @@ def test_concurrent_approvals_only_one_wins(now):
     run("admin_proposal_approve", request=ProposalApprove(proposal_id=first, approver="b"))
     with pytest.raises(Conflict, match="已作廢"):
         run("admin_proposal_approve", request=ProposalApprove(proposal_id=second, approver="b"))
-    assert ActiveConfigs.get("detector.zscore")["params"] == {"threshold": 2.0}
+    assert ActiveConfigs.get("detector.hourly_baseline")["params"] == {"threshold": 2.0}
     assert Proposals.get(second)["status"] == "stale"
 
 

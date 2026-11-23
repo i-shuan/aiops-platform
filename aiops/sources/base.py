@@ -75,6 +75,11 @@ class BaseDataSourceSpec(ABC):
         預設不支援；支援多序列查詢的資料源（Prometheus 系列）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援動態同儕（peer_group），請改用 peers 寫死名單")
 
+    @classmethod
+    def provides(cls, signal: str) -> bool:
+        """這個資料源目前的設定有沒有提供某一種資料（traces／logs）。預設都有；要另外設定才有的覆寫它。"""
+        return True
+
     def fetch_spans(self, start: datetime, end: datetime, services: list[str] | None = None,
                     max_spans: int = 20000, field_map: dict[str, str] | None = None,
                     environment: str | None = None) -> tuple[list[dict[str, Any]], bool]:
@@ -89,7 +94,7 @@ class BaseDataSourceSpec(ABC):
         field_map：已核准的欄位對照（標準欄 span.* 蓋過資料源預設的來源欄；只有真的有對照時呼叫端才會帶）。
         environment：只撈這個部署環境的（管線設了 Workflow.environment 時呼叫端才會帶）；每筆回傳的 dict 帶
         environment 鍵（該筆的環境，沒有就是空字串），呼叫端會用 in_environment 再濾一次。
-        預設不支援；存 trace 的資料源（Elasticsearch：Elastic APM 或 OTel，見 sources/es_models.py）覆寫它。"""
+        預設不支援；存 trace 的資料源（grafana：後面的 Elasticsearch 存 Elastic APM 或 OTel 文件，見 sources/es_models.py）覆寫它。"""
         raise InvalidQueryError(f"{self.source_type or type(self).__name__} 不支援撈 trace")
 
     def fetch_linked_spans(self, trace_ids: list[str], start: datetime, end: datetime,

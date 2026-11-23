@@ -1,16 +1,13 @@
 """真實資料源 Spec：用 httpx.MockTransport 模擬伺服器，涵蓋成功與各種錯誤的分工。"""
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
 from aiops.sources import check_sources, get_datasource_spec
 from aiops.sources.base import InvalidQueryError, NoDataError
-from aiops.sources.elasticsearch import ElasticsearchSpec
 from aiops.sources.prometheus import PrometheusSpec, VictoriaMetricsSpec
 from aiops.engine.errors import InfrastructureError
-from aiops.sources.query.elasticsearch import parse_es_query
 from aiops.sources.query.promql import validate_promql
 from aiops.sources.query.window import align_window
 
@@ -42,12 +39,6 @@ def test_promql_rejects_obvious_mistakes(bad):
 
 def test_promql_accepts_normal_queries():
     assert validate_promql(' sum by (svc) (rate(http_requests_total{code=~"5.."}[5m])) ').startswith("sum")
-
-
-def test_es_query_needs_value_field_unless_count():
-    with pytest.raises(ValueError):
-        parse_es_query('{"index": "m-*", "agg": "avg"}')
-    assert parse_es_query('{"index": "m-*", "agg": "count"}').agg == "count"
 
 
 # ── Prometheus／VictoriaMetrics ──
@@ -113,70 +104,6 @@ def test_victoriametrics_uses_its_own_health_path():
     assert paths == ["/health"]
 
 
-# ── Elasticsearch ──
-
-
-ES_QUERY = json.dumps({"index": "metrics-*", "value_field": "cpu.pct", "agg": "avg",
-                       "filter": {"term": {"service.name": "cart"}}})
-
-
-def test_es_date_histogram_to_dataframe():
-    seen = {}
-
-    def handler(req):
-        seen.update(path=req.url.path, body=json.loads(req.content), auth=req.headers.get("authorization"))
-        return httpx.Response(200, json={"aggregations": {"series": {"buckets": [
-            {"key": 1762560000000, "doc_count": 3, "v": {"value": 0.5}},
-            {"key": 1762560060000, "doc_count": 0, "v": {"value": None}},
-            {"key": 1762560120000, "doc_count": 2, "v": {"value": 0.9}},
-        ]}}})
-
-    df = ElasticsearchSpec("http://es:9200", api_key="k", client=_client(handler)).fetch_data(ES_QUERY, START, END, 60)
-    assert seen["path"] == "/metrics-*/_search" and seen["auth"] == "ApiKey k"
-    assert seen["body"]["aggs"]["series"]["date_histogram"]["fixed_interval"] == "60s"
-    assert {"term": {"service.name": "cart"}} in seen["body"]["query"]["bool"]["filter"]
-    assert df["value"].tolist() == [0.5, 0.9]  # 空格子丟掉
-
-
-def test_es_padded_buckets_stay_inside_the_range_so_sum_never_gets_a_fake_trailing_zero():
-    """range 是 [start, end)：extended_bounds 補桶只能補到 end − step。以前補到 end，那一桶一定在 range 外、一定是空的，
-    sum／count 回 0——每分鐘請求數這類序列每一輪最後一點都是假的「掉到 0」（ES 回放 pay-api：每輪一筆誤報）。"""
-    seen = {}
-
-    def handler(req):
-        seen.update(body=json.loads(req.content))
-        return httpx.Response(200, json={"aggregations": {"series": {"buckets": [
-            {"key": 1762560000000, "doc_count": 1, "v": {"value": 21.0}}]}}})
-
-    q = json.dumps({"index": "m", "agg": "sum", "value_field": "transaction.duration.summary.value_count"})
-    ElasticsearchSpec("http://es", client=_client(handler)).fetch_data(q, START, END, 60)
-    hist = seen["body"]["aggs"]["series"]["date_histogram"]
-    rng = next(f["range"]["@timestamp"] for f in seen["body"]["query"]["bool"]["filter"] if "range" in f)
-    end = datetime.fromisoformat(rng["lt"])
-    assert datetime.fromisoformat(hist["extended_bounds"]["max"]) == end - timedelta(seconds=60)
-    assert datetime.fromisoformat(hist["extended_bounds"]["min"]) == datetime.fromisoformat(rng["gte"])
-
-
-def test_es_count_and_percentile():
-    buckets = [{"key": 1762560000000, "doc_count": 7, "v": {"values": {"95.0": 120.0}}}]
-    spec = ElasticsearchSpec("http://es", client=_client(lambda r: httpx.Response(
-        200, json={"aggregations": {"series": {"buckets": buckets}}})))
-    assert spec.fetch_data('{"index": "m", "agg": "count"}', START, END, 60)["value"].tolist() == [7.0]
-    assert spec.fetch_data('{"index": "m", "agg": "p95", "value_field": "d"}', START, END, 60)["value"].tolist() == [120.0]
-
-
-def test_es_missing_index_is_invalid_query():
-    resp = httpx.Response(404, json={"error": {"type": "index_not_found_exception", "reason": "no such index [x]"}})
-    spec = ElasticsearchSpec("http://es", client=_client(lambda r: resp))
-    with pytest.raises(InvalidQueryError, match="no such index"):
-        spec.fetch_data('{"index": "x", "agg": "count"}', START, END, 60)
-
-
-def test_es_bad_query_json_is_invalid_query():
-    with pytest.raises(InvalidQueryError):
-        ElasticsearchSpec("http://es", client=_client(lambda r: None)).fetch_data("not json", START, END, 60)
-
-
 # ── 設定與自我檢查 ──
 
 
@@ -187,21 +114,25 @@ def test_missing_url_is_infrastructure_error(monkeypatch):
 
 
 def test_check_sources_marks_unconfigured(monkeypatch):
-    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_ES_URL"):
+    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_GRAFANA_URL"):
         monkeypatch.delenv(var, raising=False)
     by_type = {r["source_type"]: r for r in check_sources()}
     assert by_type["mock"]["ok"] is True
     assert by_type["prometheus"]["configured"] is False and by_type["prometheus"]["ok"] is None
+    assert by_type["grafana"]["configured"] is False and by_type["grafana"]["ok"] is None
+    assert "elasticsearch" not in by_type  # 平台不再直連 Elasticsearch，這個資料源型別已移除
 
 
 def test_check_sources_reports_unreachable(monkeypatch):
-    monkeypatch.setenv("AIOPS_ES_URL", "http://127.0.0.1:1")  # 不會有人在聽
-    es = next(r for r in check_sources() if r["source_type"] == "elasticsearch")
-    assert es["configured"] is True and es["ok"] is False
+    from grafana_fake import set_grafana_env
+
+    set_grafana_env(monkeypatch, "http://127.0.0.1:1")  # 不會有人在聽
+    grafana = next(r for r in check_sources() if r["source_type"] == "grafana")
+    assert grafana["configured"] is True and grafana["ok"] is False
 
 
 def test_source_check_api_and_unconfigured_source_returns_503(client, monkeypatch):
-    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_ES_URL"):
+    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_GRAFANA_URL"):
         monkeypatch.delenv(var, raising=False)
     assert client.get("/api/v1/ingestion/sources/check").json()["result"]["ok"] is True
 

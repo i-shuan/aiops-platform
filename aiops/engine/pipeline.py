@@ -20,7 +20,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from aiops.engine.context import LotEdge, PeerGroup, PeerRef, PipelineContext, Target, TargetError
-from aiops.engine.graph import Edge, EdgeKind, contradictions
+from aiops.engine.graph import ORIGIN_WORKFLOW, Edge, EdgeKind, Provenance, contradictions
 from aiops.engine.errors import InfrastructureError, NoDataError, PlatformError, WorkflowError
 from aiops.engine.health import StreamCheck, run_status, stream_status
 from aiops.engine.operator import NodeInfo
@@ -83,7 +83,7 @@ class GraphEdgeSpec(StrictModel):
     weight: float = Field(1.0, gt=0, allow_inf_nan=False)
 
     def to_edge(self) -> Edge:
-        return Edge(self.source, self.target, EdgeKind(self.kind), float(self.weight))
+        return Edge(self.source, self.target, EdgeKind(self.kind), float(self.weight), Provenance(ORIGIN_WORKFLOW))
 
 
 def check_declared(edges: list[Edge]) -> None:
@@ -139,6 +139,10 @@ class Workflow(StrictModel):
     description: str = ""
     nodes: list[NodeSpec] = Field(min_length=1)
     targets: list[TargetSpec] = Field(default_factory=list)
+    # 偵測對象從哪裡來：grafana = 每一輪從 Grafana 讀標了 aiops_detect: <這條管線名稱> 的告警規則（一條規則一個對象，
+    # 嚴重度也在規則的標籤上；sources/grafana_rules.py）。對象在使用者的 Grafana 上增減，這個檔不用改。
+    # 寫了它就不能再寫 targets（兩個來源誰算數會說不清）。解析在組裝點 interfaces/runner.resolve_targets。
+    targets_from: Literal["grafana"] | None = None
     # 明確指定拓撲／Lot 流向時優先於從 trace、Lot 履歷自動推導的結果；給空清單代表「不要用」
     topology: list[tuple[str, str]] | None = None
     lot_edges: list[dict[str, Any]] | None = None
@@ -167,6 +171,8 @@ class Workflow(StrictModel):
         if len(names) != len(set(names)):
             raise ValueError(f"節點名稱不可重複：{names}")
         check_declared([e.to_edge() for e in self.graph])
+        if self.targets_from and self.targets:
+            raise ValueError("targets_from 與 targets 只能擇一：偵測對象要嘛寫在這個檔，要嘛從 Grafana 的告警規則讀")
         return self
 
 
@@ -255,7 +261,7 @@ class Pipeline:
             raise WorkflowError(f"Workflow {workflow.name}：未知的節點 scope {unknown}")
         if [order[s] for s in scopes] != sorted(order[s] for s in scopes):
             raise WorkflowError(f"Workflow {workflow.name}：節點順序必須是 scope=target → batch → after_persist → after_finalize")
-        # 跨節點的設定（裁決的 bypass、致命地板要認哪些節點…）由算子自己檢查，引擎只負責把整條 workflow 交給它
+        # 跨節點的設定（引用的節點存不存在、前後順序…）由算子自己檢查，引擎只負責把整條 workflow 交給它
         infos = [NodeInfo(n.name, n.operator, dict(n.params), op) for n, op in self.nodes]
         for n, op in self.nodes:
             check = getattr(op, "check_workflow", None)
@@ -272,7 +278,7 @@ class Pipeline:
         # 「已通知」與結案也記完之後才跑（自我健康心跳）：這一輪每一步都成功了才算活著
         self.after_finalize_nodes = [(n, op) for (n, op), s in zip(self.nodes, scopes) if s == "after_finalize"]
         # (節點名稱, 算子名稱)：基準線與調參都以節點區分，同一個演算法掛兩次也不會互相覆蓋
-        # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only、ensemble 這類不需要）
+        # 只有會存基準線的節點才需要載入狀態與調參（算子自己宣告 has_baseline；new_only 這類不需要）
         self.detector_nodes = [(n.name, n.operator) for n, op in self.target_nodes if getattr(op, "has_baseline", False)]
         self._detectors = {n.name: (n.operator, op) for n, op in self.target_nodes if getattr(op, "has_baseline", False)}
         self._check_targets_are_used(workflow.targets, f"Workflow {workflow.name} 的 targets")
@@ -362,9 +368,13 @@ class Pipeline:
                                 environment=self.workflow.environment)
         if self.workflow.topology is not None:
             batch.topology, batch.topology_explicit = list(self.workflow.topology), True
+            batch.edge_provenance.update({(EdgeKind.CALL.value, str(a), str(b)): Provenance(ORIGIN_WORKFLOW)
+                                          for a, b in batch.topology})
         if self.workflow.lot_edges is not None:
             batch.lot_edges = [LotEdge(e["from"], e["to"], int(e.get("lots", 1))) for e in self.workflow.lot_edges]
             batch.lot_edges_explicit = True
+            batch.edge_provenance.update({(EdgeKind.FLOW.value, e.upstream, e.downstream): Provenance(ORIGIN_WORKFLOW)
+                                          for e in batch.lot_edges})
         batch.declared_edges = [e.to_edge() for e in self.workflow.graph]
         # 資料健康度只記排程的輪次（strict=False、不是針對某個事件群、也不是帶請求的手動動作）：手動動作與 RCA 的失敗直接回給呼叫的人。
         # 沒有逐序列節點的管線（只吃外部告警）也記：每一輪一列，證明平台那時候有在跑——告警沒來時分得出是對方沒推還是平台沒跑
@@ -402,14 +412,11 @@ class Pipeline:
                 skipped = {name: reason for name in self._detectors
                            if (reason := self._skip_reason(name, ctx.target)) is not None}
                 active = [d for d in self.detector_nodes if d[0] not in skipped]
-                # fetch 看這個決定要不要抓訓練窗。不需要歷史資料的節點（requires_training = False：人訂的上下限）不算：
-                # 它棄權的那幾輪不會存基準線，算進來的話 fetch 會每一輪都抓訓練窗、其他節點每一輪都重訓，
-                # 把正在發生的事故學成常態（11/3 真實資料回放：75 個異常點掉到 51 個）
-                ctx.baseline_nodes = [name for name, _ in active
-                                      if getattr(self._detectors[name][1], "requires_training", True)]
+                # fetch 看這個決定要不要抓訓練窗（其中有節點還沒有基準線或到期才抓）
+                ctx.baseline_nodes = [name for name, _ in active]
                 loaded = False  # 這條序列的輸入載入完了：之後的錯才算在「抓這條資料流」頭上（載入失敗是資料庫的事）
                 try:
-                    # 被跳過的節點不載基準線與調參；也不會進 detector_runs，裁決時不算參與者
+                    # 被跳過的節點不載基準線與調參；也不會進 detector_runs
                     self.hooks.load_target(ctx, active)
                     loaded = True
                     for node, op in self.target_nodes:

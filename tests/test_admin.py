@@ -30,7 +30,7 @@ def _backtest_req(pid, now, train_ratio=0.3):
         "start": now.replace(hour=0), "end": now, "step_seconds": 60})
 
 
-def _propose(detector="detector.zscore", params=None, source="auto"):
+def _propose(detector="detector.hourly_baseline", params=None, source="auto"):
     return run("admin_proposal_create", request=ProposalCreate(
         source=source, detector=detector, params=params if params is not None else {"threshold": 2.5}, proposer="amy"))["proposal"]["id"]
 
@@ -104,7 +104,7 @@ def test_a_stale_proposal_cannot_overwrite_a_newer_config(now):
     _backtest(auto, now)
     with pytest.raises(Conflict, match="已作廢"):
         _approve(auto)
-    assert Proposals.get(auto)["status"] == "stale" and ActiveConfigs.get("detector.zscore")["params"] == {"threshold": 4.0}
+    assert Proposals.get(auto)["status"] == "stale" and ActiveConfigs.get("detector.hourly_baseline")["params"] == {"threshold": 4.0}
 
 
 def test_approved_params_are_used_by_the_next_detection_run(now):
@@ -141,9 +141,11 @@ def uid(now):
     return run_context("sample_metrics_only", now=now, strict=False).incidents[0].uid
 
 
-def _feedback(uid, verdict="false_positive", detector="detector.zscore"):
+def _feedback(uid, verdict="missed", detector="detector.hourly_baseline"):
+    # 預設 verdict 從 false_positive 改成 missed：誤報回饋不再產生提案（2026-11-20），下面測「回饋 -> 提案」機制的測試
+    # 改走還在的漏報路徑（固定規則 ×0.8）
     return run("admin_feedback_submit", request=FeedbackSubmit(
-        incident_uid=uid, verdict=verdict, detector=detector, text="半夜誤報，門檻太敏感", author="amy"))["feedback"]["id"]
+        incident_uid=uid, verdict=verdict, detector=detector, text="這段前面其實更早就壞了，門檻太鈍", author="amy"))["feedback"]["id"]
 
 
 def _propose_from(fid):
@@ -155,20 +157,39 @@ def test_feedback_needs_a_real_incident_and_detector():
         run("admin_feedback_submit", request=FeedbackSubmit(incident_uid="inc-nope", verdict="missed", text="x", author="a"))
 
 
-def test_template_rule_raises_threshold_on_false_positive_and_only_once(uid):
+def test_template_rule_lowers_threshold_on_missed_and_only_once(uid):
+    """原本測的是誤報 -> 3.0 × 1.2 = 3.6；那條路已移除，改測漏報 -> 3.0 × 0.8 = 2.4（「只能轉一次」的斷言不變）。"""
     fid = _feedback(uid)
     out = _propose_from(fid)
-    assert out["generated_by"] == "template" and out["proposal"]["params"] == {"threshold": 3.6}
+    assert out["generated_by"] == "template" and out["proposal"]["params"] == {"threshold": 2.4}
     assert out["proposal"]["status"] == "pending"
     with pytest.raises(Conflict, match="已轉成提案"):
         _propose_from(fid)
 
 
-def test_true_positive_and_untunable_detectors_do_not_propose(uid):
+def test_false_positive_feedback_is_recorded_but_never_becomes_a_proposal(uid):
+    """誤報回饋不再自動產生把門檻調高的提案：明確拒絕，訊息說明人還可以走人工提案。可以重複問，不會留下提案。"""
+    fid = _feedback(uid, verdict="false_positive")
+    for _ in range(2):
+        with pytest.raises(BadRequest, match="誤報回饋不再自動產生.*admin.proposal_create"):
+            _propose_from(fid)
+    pid = _propose(params={"threshold": 3.6}, source="manual")  # 人工提案照舊
+    assert run("admin_proposal_get", request=IdRef(id=pid))["proposal"]["status"] == "pending"
+
+
+def test_true_positive_and_untunable_detectors_do_not_propose(uid, monkeypatch):
     with pytest.raises(Conflict, match="真異常"):
         _propose_from(_feedback(uid, verdict="true_positive"))
+
+    # 出貨的偵測器現在都有可調參數（原本用的 detector.rules 已移除）：用測試專用的空 tunable 偵測器走這條路
+    class Untunable(peer_probe.PeerProbe):
+        tunable = {}
+
+    from aiops.engine.registry import OperatorRegistry
+
+    monkeypatch.setitem(OperatorRegistry._items, "test.untunable_probe", Untunable)
     with pytest.raises(BadRequest, match="沒有可自動調整"):
-        _propose_from(_feedback(uid, detector="detector.rules"))
+        _propose_from(_feedback(uid, detector="test.untunable_probe"))
 
 
 class _Fake(BaseLLM):
@@ -196,15 +217,16 @@ def _llm_propose(monkeypatch, uid, reply=None, error=None):
 
 
 def test_valid_llm_rule_becomes_an_llm_proposal(monkeypatch, uid):
-    out = _llm_propose(monkeypatch, uid, {"params": {"threshold": 4.0}, "reason": "夜間誤報多"})
-    assert out["generated_by"] == "llm" and out["proposal"]["source"] == "llm" and out["proposal"]["params"] == {"threshold": 4.0}
+    out = _llm_propose(monkeypatch, uid, {"params": {"threshold": 2.5}, "reason": "夜間漏報"})
+    assert out["generated_by"] == "llm" and out["proposal"]["source"] == "llm" and out["proposal"]["params"] == {"threshold": 2.5}
 
 
-@pytest.mark.parametrize("params, reason", [({"threshold": 2.0}, "方向與回饋相反"), ({"threshold": 9.0}, "變動超過"),
+# 回饋改成 missed 之後：方向相反 = 調高（4.0；原本誤報是調低 2.0）、變動超過 50% = 1.2（原本 9.0）；退回的固定規則是 2.4（原本 3.6）
+@pytest.mark.parametrize("params, reason", [({"threshold": 4.0}, "方向與回饋相反"), ({"threshold": 1.2}, "變動超過"),
                                             ({"window": 5}, "不是可調參數"), ({"threshold": 50}, "超出範圍")])
 def test_invalid_llm_rules_fall_back_to_the_template(monkeypatch, uid, params, reason):
     out = _llm_propose(monkeypatch, uid, {"params": params, "reason": "r"})
-    assert out["generated_by"] == "template" and reason in out["rejected"] and out["proposal"]["params"] == {"threshold": 3.6}
+    assert out["generated_by"] == "template" and reason in out["rejected"] and out["proposal"]["params"] == {"threshold": 2.4}
 
 
 def test_llm_outage_falls_back_to_the_template(monkeypatch, uid):
@@ -227,7 +249,8 @@ def test_silence_window_must_be_ordered(now):
 
 
 def test_sources_check_without_any_configured_source_is_ok(monkeypatch):
-    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_ES_URL"):
+    for var in ("AIOPS_PROMETHEUS_URL", "AIOPS_VICTORIAMETRICS_URL", "AIOPS_GRAFANA_URL"):
         monkeypatch.delenv(var, raising=False)
     out = run("admin_sources_check")
-    assert out["ok"] is True and {s["source_type"] for s in out["sources"]} >= {"mock", "prometheus", "elasticsearch"}
+    assert out["ok"] is True and {s["source_type"] for s in out["sources"]} >= {"mock", "prometheus", "grafana"}
+    assert "elasticsearch" not in {s["source_type"] for s in out["sources"]}  # 平台不再直連 Elasticsearch

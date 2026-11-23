@@ -4,14 +4,14 @@ nodes:
   # 撈取三段與證據層：跟 rca_report.yaml 吃同一份原始資料（trace、日誌）
   - name: fetch_traces
     operator: ingestion.incident_traces
-    params: {source_type: elasticsearch, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
+    params: {source_type: grafana, before_minutes: 15, after_minutes: 0, max_spans: 20000, max_before_minutes: 60,
              follow_messaging: true, max_lag_minutes: 120}
   - name: build_topology
     operator: rca.build_dynamic_topology
     params: {mode: merge, min_calls: 1}
   - name: fetch_logs
     operator: ingestion.incident_logs
-    params: {source_type: elasticsearch, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
+    params: {source_type: grafana, before_minutes: 5, after_minutes: 5, baseline_minutes: 60, max_logs: 5000}
   - name: facts
     operator: rca.facts
   - name: extract_evidence
@@ -26,7 +26,7 @@ nodes:
     operator: rca.report
     params:
       sections: [summary, timeline, affected_entities, golden_signals, root_cause_candidates,
-                 propagation_path, facts, trace_evidence, log_patterns, similar_cases, suggested_actions]
+                 propagation_path, graph_basis, facts, trace_evidence, log_patterns, similar_cases, suggested_actions]
       section_params: {trace_evidence: {traces_datasource: apm-traces}}
   # 戰情摘要：只吃已判好的候選、事實與證據；驗證不過退模板，旁路不影響根因結論
   - name: narrator
@@ -37,3 +37,6 @@ nodes:
     operator: enrichment.llm_briefing
     optional: true
     params: {provider: noop}
+  # 把結論補到 Grafana 圖表時間軸上那一筆事件群的註記（Grafana 沒設定就不做；寫失敗只記錯誤，報告照出）
+  - name: annotate
+    operator: notifier.grafana_annotations

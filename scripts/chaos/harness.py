@@ -1,6 +1,10 @@
-"""場景共用的接線：真實 PostgreSQL（建表 + migration 0005）、把替身 ES 裝進平台的資料源註冊表、偵測回放、RCA。
+"""場景共用的接線：真實 PostgreSQL（建表 + migration 0005）、把替身資料源裝進平台的資料源註冊表、偵測回放、RCA。
 
-平台程式一行不改：只是把 aiops.sources._SPECS["elasticsearch"] 換成「讀記憶體世界」的子類。
+平台程式一行不改：aiops.sources._SPECS["grafana"] 換成接到假 Grafana（後面是記憶體世界）的子類，trace／日誌照平台真的
+GrafanaSpec 送查詢；指標另外註冊模擬器自己的資料源 chaos_metrics（平台不再直連 Elasticsearch，沒有平台資料源能問世界的指標）。
+
+2026-11-20 改接 Grafana 資料源之後**還沒有重跑過任何場景**（要真實 PostgreSQL）；只確認過可以 import、
+chaos_metrics 回的序列跟改之前的 ElasticsearchSpec.fetch_data 逐點相同。
 """
 from __future__ import annotations
 
@@ -29,12 +33,12 @@ from aiops.interfaces.runner import load_all, workflow_path  # noqa: E402
 from scripts.sample_pipelines import use_sample_pipelines  # noqa: E402
 
 use_sample_pipelines()  # 偵測回放用 scripts/pipelines/sample_*（出貨的使用者管線不跑偵測器）
-from aiops.sources.elasticsearch import ElasticsearchSpec  # noqa: E402
+from aiops.sources.grafana import GrafanaSpec  # noqa: E402
 from aiops.storage import db, models  # noqa: E402
 from aiops.storage.hooks import StorageHooks  # noqa: E402
 from aiops.storage.repository import Incidents  # noqa: E402
 
-from scripts.chaos.es import ChaosES  # noqa: E402
+from scripts.chaos.es import METRIC_SOURCE, ChaosES  # noqa: E402
 from scripts.chaos.world import World  # noqa: E402
 
 load_all()
@@ -54,31 +58,34 @@ def fresh_db(apply_migration: bool = True) -> str:
 
 @contextmanager
 def es_for(world: World, trace_lo: datetime | None = None, trace_hi: datetime | None = None):
-    """把平台的 elasticsearch 資料源指到這個世界。"""
+    """把平台的 grafana 資料源（trace／日誌）與模擬器的 chaos_metrics（指標）指到這個世界。名字沿用 es_for：場景檔不用改。"""
     import aiops.sources as sources
+    from grafana_fake import TOKEN, UIDS, FakeGrafana  # tests/ 已由 scripts.chaos.es 放進 sys.path
 
     es = ChaosES(world, trace_lo, trace_hi)
-    client = httpx.Client(transport=httpx.MockTransport(es.handler))
+    client = httpx.Client(transport=httpx.MockTransport(FakeGrafana(es.handler).handler))
 
-    class _Spec(ElasticsearchSpec):
+    class _Spec(GrafanaSpec):
         @classmethod
         def from_env(cls):
-            return cls("http://chaos-es", client=client)
+            return cls("http://chaos-grafana", TOKEN, dict(UIDS), client=client)
 
         @classmethod
         def configured(cls):
             return True
 
-    original = sources._SPECS["elasticsearch"]
-    sources._SPECS["elasticsearch"] = _Spec
+    original = dict(sources._SPECS)
+    sources._SPECS["grafana"] = _Spec
+    sources._SPECS[METRIC_SOURCE] = es.metric_spec()
     try:
         yield es
     finally:
-        sources._SPECS["elasticsearch"] = original
+        sources._SPECS.clear()
+        sources._SPECS.update(original)
 
 
 def metric_query(svc: str, kind: str = "latency") -> str:
-    """kind=latency：每分鐘 summary.sum 的平均（跟真實 ES target 一樣）；errors：每分鐘失敗請求數；
+    """查詢語法見 scripts/chaos/metric_query.py（資料源 chaos_metrics）。kind=latency：每分鐘 summary.sum 的平均（跟真實 ES target 一樣）；errors：每分鐘失敗請求數；
     latency_mean：Σsummary.sum ÷ Σvalue_count = 每筆請求的平均延遲（µs）。summary.sum 是當分鐘總耗時，數值跟請求數成正比，
     每分鐘 0～3 筆的低流量服務某分鐘多來幾筆就被當成延遲暴增（場景 2 注入前的誤報），低流量 target 要用 latency_mean。"""
     if kind == "errors":
@@ -92,7 +99,7 @@ def metric_query(svc: str, kind: str = "latency") -> str:
 
 
 def targets(names: list[str], signal: str = "latency", kind: str = "latency") -> list[TargetSpec]:
-    return [TargetSpec(source_type="elasticsearch", query=metric_query(n, kind), entity=n, attrs={"dept": "payments", "signal": signal})
+    return [TargetSpec(source_type=METRIC_SOURCE, query=metric_query(n, kind), entity=n, attrs={"dept": "payments", "signal": signal})
             for n in names]
 
 

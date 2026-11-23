@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -118,7 +118,7 @@ class TraceMerge(StrictModel):
 class TopologyRefresh(StrictModel):
     """admin.topology_refresh：從 trace 來源撈 [end − lookback_minutes, end] 的 span，把服務呼叫邊沉澱進 service_edges。"""
 
-    source_type: SourceType = "elasticsearch"
+    source_type: SourceType = "grafana"
     lookback_minutes: int = Field(60, gt=0, le=24 * 60)
     max_spans: int = Field(20000, gt=0, le=200000)
     prune_days: int = Field(7, gt=0)  # last_seen 早於「現在 − prune_days」的邊移除
@@ -198,7 +198,7 @@ class GrafanaAlertIngest(StrictModel):
 
 class ProposalCreate(StrictModel):
     source: Literal["auto", "llm", "manual"]
-    detector: str  # 算子名，例如 detector.zscore
+    detector: str  # 算子名，例如 detector.hourly_baseline
     params: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
     proposer: str
@@ -231,6 +231,42 @@ class ProposalApprove(StrictModel):
     approver: str
 
 
+class ReviewIn(StrictModel):
+    """對一張事故卡的分項覆核：平台做的四件事（收斂、RCA、結案、嚴重度）各自對不對。
+
+    每一項都是選填：None = 這一項沒看（不算進分母），"ok" = 看過、是對的。「沒填」跟「對」分開記，
+    之後算準確率才有分母（只收「錯了」的話，沒人抱怨跟沒人看分不出來）。
+    細節欄位只能跟對應的判定一起給（寫了 unrelated_entities 卻沒說 grouping=merged_wrong 是填錯，直接拒絕）。
+    這裡只收資料：任何一項都不會自動改設定（control_plane/learning/review.py）。"""
+
+    # 收斂：merged_wrong = 不相干的告警被併進這張卡；split_wrong = 同一件事被拆成好幾張卡
+    grouping: Literal["ok", "merged_wrong", "split_wrong"] | None = None
+    # RCA：wrong_root = 指錯根因；missed_root = 平台說無法判定（或只給症狀位置），但其實找得到
+    rca: Literal["ok", "wrong_root", "missed_root"] | None = None
+    # 結案：early = 故障還在卡就結案了
+    resolve: Literal["ok", "early"] | None = None
+    severity: Literal["ok", "too_high", "too_low"] | None = None
+    unrelated_entities: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(default_factory=list, max_length=50)
+    same_as: list[Annotated[str, Field(min_length=1, max_length=40)]] = Field(default_factory=list, max_length=50)
+    actual_root_entity: str | None = Field(None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def _shape(self):
+        if not any((self.grouping, self.rca, self.resolve, self.severity)):
+            raise ValueError("review 至少要填一項（grouping、rca、resolve、severity）；都沒看就不要帶 review")
+        if self.unrelated_entities and self.grouping != "merged_wrong":
+            raise ValueError("unrelated_entities（不該併進來的實體）只能跟 grouping=merged_wrong 一起給")
+        if self.same_as and self.grouping != "split_wrong":
+            raise ValueError("same_as（其實是同一件事的其他事件群）只能跟 grouping=split_wrong 一起給")
+        if self.actual_root_entity and self.rca not in ("wrong_root", "missed_root"):
+            raise ValueError("actual_root_entity（實際的根因）只能跟 rca=wrong_root 或 missed_root 一起給")
+        return self
+
+    def to_dict(self) -> dict[str, Any]:
+        """只留有填的項目（沒看的不存成 null：之後查「有沒有看過這一項」就是鍵在不在）。"""
+        return {k: v for k, v in self.model_dump().items() if v not in (None, [])}
+
+
 class FeedbackSubmit(StrictModel):
     """兩種回饋：
     - 針對某個事件群：給 incident_uid（誤報、確認、或「有告警但太晚／太輕」的漏報）
@@ -252,6 +288,8 @@ class FeedbackSubmit(StrictModel):
     root_cause: str | None = Field(None, max_length=1000)
     # true_positive 的擴充資訊（根因下鑽、範例 trace id、主要錯誤、tags），存進經驗庫的 context
     context: dict[str, Any] = Field(default_factory=dict)
+    # 分項覆核（收斂、RCA、結案、嚴重度各自對不對）：只能針對事件群
+    review: ReviewIn | None = None
 
     @model_validator(mode="after")
     def _shape(self):
@@ -266,6 +304,8 @@ class FeedbackSubmit(StrictModel):
             raise ValueError("寫了 root_cause 也要寫 resolution，經驗庫才有處置可以參考")
         if self.context and (self.verdict != "true_positive" or self.incident_uid is None):
             raise ValueError("context 只能寫在針對事件群、確認為真異常（true_positive）的回饋上")
+        if self.review is not None and self.incident_uid is None:
+            raise ValueError("review（分項覆核）只能寫在針對事件群的回饋上：漏報補錄沒有事故卡可以覆核")
         return self
 
 
@@ -303,11 +343,8 @@ class TuningMetricsQuery(StrictModel):
     lookback_days: int = Field(90, ge=1, le=365)
 
 
-class RulePromote(StrictModel):
-    """規則升級：同一層（偵測器 × 管線 × 實體）在 window_days 天內被核准調參 >= min_approvals 次，
-    就用它目前的基準線產生一個 detector.rules 靜態規則的提案（仍要回測、核准才生效）。"""
+class ReviewMetricsQuery(StrictModel):
+    """覆核統計：最近 lookback_days 天收到的分項覆核，每一項看過幾張、對幾張、錯在哪。pipeline 不給 = 全部。"""
 
-    min_approvals: int = Field(3, ge=2, le=50)
-    window_days: int = Field(30, ge=1, le=365)
-    consecutive: int = Field(3, ge=1, le=60)
-    proposer: str = "rule_promoter"
+    lookback_days: int = Field(90, ge=1, le=365)
+    pipeline: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]+$", max_length=128)

@@ -6,21 +6,101 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "editable": false,
   "time": {
-    "from": "now-6h",
+    "from": "now-24h",
     "to": "now"
   },
-  "description": "平台偵測到的異常（收斂後的事件群）怎麼在 Grafana 看。資料來自 aiops-alertmanager，只顯示、不發通知。",
+  "description": "平台判出的異常與 RCA 結論，直接在 Grafana 看：資料是平台寫進 Grafana 的註記（標籤 aiops），不讀平台的資料庫。下方保留送到 aiops-alertmanager 的事件群說明。",
   "panels": [
+    {
+      "id": 2,
+      "type": "annolist",
+      "title": "P0（停線級）",
+      "description": "平台把每個事件群寫成一筆 Grafana 註記（標籤 aiops）：嚴重度、摘要、連回告警規則的連結；跑過 RCA 的會多一段根因。點一筆會把時間範圍跳到那場事故前後 15 分鐘。",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "options": {
+        "tags": [
+          "aiops",
+          "severity:P0"
+        ],
+        "limit": 100,
+        "onlyFromThisDashboard": false,
+        "onlyInTimeRange": true,
+        "showTags": true,
+        "showTime": true,
+        "showUser": false,
+        "navigateBefore": "15m",
+        "navigateAfter": "15m",
+        "navigateToPanel": false
+      }
+    },
+    {
+      "id": 3,
+      "type": "annolist",
+      "title": "P1",
+      "description": "平台把每個事件群寫成一筆 Grafana 註記（標籤 aiops）：嚴重度、摘要、連回告警規則的連結；跑過 RCA 的會多一段根因。點一筆會把時間範圍跳到那場事故前後 15 分鐘。",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "options": {
+        "tags": [
+          "aiops",
+          "severity:P1"
+        ],
+        "limit": 100,
+        "onlyFromThisDashboard": false,
+        "onlyInTimeRange": true,
+        "showTags": true,
+        "showTime": true,
+        "showUser": false,
+        "navigateBefore": "15m",
+        "navigateAfter": "15m",
+        "navigateToPanel": false
+      }
+    },
+    {
+      "id": 4,
+      "type": "annolist",
+      "title": "平台判出的所有異常與根因",
+      "description": "平台把每個事件群寫成一筆 Grafana 註記（標籤 aiops）：嚴重度、摘要、連回告警規則的連結；跑過 RCA 的會多一段根因。點一筆會把時間範圍跳到那場事故前後 15 分鐘。 嚴重度由告警規則的 aiops_severity（或 severity）標籤決定，沒貼是 P1；要改就點註記裡的連結回到那條規則。",
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 14
+      },
+      "options": {
+        "tags": [
+          "aiops"
+        ],
+        "limit": 100,
+        "onlyFromThisDashboard": false,
+        "onlyInTimeRange": true,
+        "showTags": true,
+        "showTime": true,
+        "showUser": false,
+        "navigateBefore": "15m",
+        "navigateAfter": "15m",
+        "navigateToPanel": false
+      }
+    },
     {
       "id": 1,
       "type": "text",
       "title": "事件群在哪裡看",
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 23,
         "w": 24,
         "h": 11
       },
@@ -29,5 +109,26 @@
         "content": "### 平台推送的異常告警（事件群）\n\n平台偵測到異常後，把**收斂成一張的事件群**推給 `aiops-alertmanager`；Grafana 只負責顯示，不發通知。\n\n**看的地方：[Alerting → Active notifications（aiops-alertmanager）](/alerting/groups?alertmanager=aiops-alertmanager)**\n\n每張事件群卡片有：\n\n- 標籤：`incident_uid`、`dept`、`severity`（P0 最嚴重）、`alertname`\n- 說明（description）：初發時間、最近一筆、起跳值 → 峰值 → 最新值、收斂方式\n- 持續分鐘數、累計異常筆數、涉及的實體\n- 深度連結：`grafana_dashboard_url`（APM 總覽，鎖定事故的服務與時間）、`grafana_traces_url`、`grafana_logs_url`（Explore 的 trace、log 查詢）\n\n**事故的 metrics、trace、log 看：[APM 總覽](/d/apm-overview)**\n\n> 為什麼不是一個面板列表：Grafana 的「Alert list」面板只列 Grafana 自己管理的規則，讀不到外部 Alertmanager 的告警。"
       }
     }
-  ]
+  ],
+  "annotations": {
+    "list": [
+      {
+        "name": "AIOps 事件群",
+        "enable": true,
+        "iconColor": "red",
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "target": {
+          "type": "tags",
+          "tags": [
+            "aiops"
+          ],
+          "matchAny": false,
+          "limit": 200
+        }
+      }
+    ]
+  }
 }

@@ -69,8 +69,33 @@ def test_dev_postgres_wires_database_url_automatically():
 def test_the_platform_watchdog_has_its_own_cronjob():
     """看門狗（偵測演算法監控平台自己）有自己的排程；使用者告警管線那個 CronJob 不變。"""
     crons = {c["metadata"]["name"]: c for c in _render("existingSecret=s")["CronJob"]}
-    assert set(crons) == {"p-tasks", "p-watchdog"}
+    assert set(crons) == {"p-tasks", "p-watchdog", "p-topology"}  # p-topology：從 trace 沉澱關係圖的排程（下面那個測試）
     args = crons["p-watchdog"]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"]
     assert args == ["python", "-m", "aiops.interfaces.cli", "run-once", "-w", "platform_watchdog"]
     assert crons["p-watchdog"]["spec"]["concurrencyPolicy"] == "Forbid"
-    assert [c["metadata"]["name"] for c in _render("existingSecret=s", "watchdog.enabled=false")["CronJob"]] == ["p-tasks"]
+    assert [c["metadata"]["name"] for c in _render("existingSecret=s", "watchdog.enabled=false")["CronJob"]] == ["p-tasks", "p-topology"]
+
+
+def test_the_trace_half_of_the_graph_is_refreshed_on_a_schedule():
+    """關係圖的 trace 那一半要有人定期沉澱：沒有這個排程又沒人宣告依賴時，圖是空的、連鎖告警不會併成一張卡
+    （端到端演練抓到：照 chart 部署後 service_edges 是 0 列，docs/E2E_DRILL.md 問題 8）。
+    每小時一次配動作預設的回看 60 分鐘，窗口相接不重疊。"""
+    crons = {c["metadata"]["name"]: c for c in _render("existingSecret=s")["CronJob"]}
+    spec = crons["p-topology"]["spec"]
+    assert spec["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"] == [
+        "python", "-m", "aiops.interfaces.cli", "run-once", "-w", "admin_topology_refresh"]
+    assert spec["schedule"] == "7 * * * *" and spec["concurrencyPolicy"] == "Forbid"
+    off = [c["metadata"]["name"] for c in _render("existingSecret=s", "topology.enabled=false")["CronJob"]]
+    assert off == ["p-tasks", "p-watchdog"]
+
+
+def test_grafana_rule_detection_is_its_own_cronjob_and_off_until_grafana_is_configured():
+    """演算法偵測（對象來自 Grafana 規則的標籤）是另一個 CronJob，預設關：沒設 Grafana 連線就開，會每一輪失敗。"""
+    assert "p-detect" not in [c["metadata"]["name"] for c in _render("existingSecret=s")["CronJob"]]
+    crons = {c["metadata"]["name"]: c for c in _render("existingSecret=s", "grafanaDetect.enabled=true")["CronJob"]}
+    spec = crons["p-detect"]["spec"]
+    assert spec["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"] == [
+        "python", "-m", "aiops.interfaces.cli", "run-once", "-w", "grafana_detect"]
+    assert spec["schedule"] == "*/5 * * * *" and spec["concurrencyPolicy"] == "Forbid"
+    assert set(crons) == {"p-tasks", "p-watchdog", "p-topology", "p-detect"}
+

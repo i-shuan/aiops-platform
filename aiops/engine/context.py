@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel
 
-from aiops.engine.graph import Edge, ServiceGraph
+from aiops.engine.graph import Edge, Provenance, ServiceGraph
 from aiops.engine.health import RunCheck, StreamCheck
 from aiops.engine.rca_types import ConclusionType, EvidenceItem, Fact, RcaStatus
 from aiops.engine.types import AnomalyEvent, GrafanaLinks, Incident, Notification
@@ -75,22 +75,6 @@ class AnomalyResult:
     def to_dict(self) -> dict[str, Any]:
         return {"algorithm": self.algorithm, "timestamps": self.timestamps, "values": self.values,
                 "scores": self.scores, "is_anomaly": self.is_anomaly, "anomaly_count": self.count}
-
-
-@dataclass
-class DetectorEvidence:
-    """偵測節點開了 snr（節點參數）時交出的逐點證據：給 detector.soft_vote 軟投票、之後也能當連續證據餵給機率模型。
-
-    snr[i] = 這個節點的統計量在第 i 點的偏離 / 該統計量的雜訊尺度（也就是節點自己的分數，連續值、不是布林）。
-    threshold 跟 snr 同單位：由目標虛警率 p_fa 換算（threshold_source 說是怎麼換的，見 stages/detectors/base.snr_threshold）。
-    series_snr_db：序列層 SNR（訓練期 168 格季節基準的變異數 / 殘差雜訊變異數），資料不足時是 None。"""
-
-    timestamps: list[str]
-    snr: list[float]
-    threshold: float
-    threshold_source: str  # gaussian／empirical／fallback
-    p_fa: float
-    series_snr_db: float | None = None
 
 
 @dataclass
@@ -332,6 +316,9 @@ class PipelineContext:
     # 跟上面三個欄位一樣只是載入與存檔的格式，算子一律問 ctx.graph
     declared_edges: list[Edge] = field(default_factory=list)
     imported_edges: list[Edge] = field(default_factory=list)
+    # 上面三個載入格式（topology／lot_edges／async_edges）放不下出處，另外記：(型別的值, source, target) -> 出處。
+    # 載入端與寫入端（StorageHooks、引擎、rca.build_dynamic_topology）填，算子一樣問 ctx.graph（Edge.provenance）
+    edge_provenance: dict[tuple[str, str, str], Provenance] = field(default_factory=dict)
     topology_explicit: bool = False
     lot_edges_explicit: bool = False
     external_anomaly_ids: list[int] = field(default_factory=list)  # 這一輪處理掉的外部匯入異常
@@ -344,10 +331,8 @@ class PipelineContext:
     raw_df: pd.DataFrame | None = None
     train_df: pd.DataFrame | None = None
     peer_members: list[str] = field(default_factory=list)  # 動態同儕：peer_0、peer_1… 依序是哪些成員
-    detector_runs: list[str] = field(default_factory=list)  # 這條序列跑過的偵測節點（裁決算子用來知道誰沒投票）
+    detector_runs: list[str] = field(default_factory=list)  # 這條序列這一輪真的評估過資料的偵測節點
     anomaly_result: AnomalyResult | None = None
-    # 開了 snr 的偵測節點交出的逐點證據（節點名稱 -> 證據）；沒開的節點不會出現在這裡
-    detector_evidence: dict[str, DetectorEvidence] = field(default_factory=dict)
     new_detector_states: dict[str, DetectorState] = field(default_factory=dict)  # 節點名稱 -> 這次新訓練的，最後才存
     anomalies: list[AnomalyEvent] = field(default_factory=list)
     # 這一輪各序列偵測出來、要寫進資料庫的異常（由引擎彙整；不含從資料庫載入的外部匯入異常，那些另有自己的表）。
@@ -431,7 +416,7 @@ class PipelineContext:
         """實體關係圖（engine/graph.py）。每次從當下的 topology／lot_edges／async_edges 現算、不快取：
         rca.build_dynamic_topology 會在一輪中途改 topology，快取會讓後面的節點讀到舊圖。"""
         return ServiceGraph.from_parts(self.topology, self.lot_edges, self.async_edges,
-                                       [*self.declared_edges, *self.imported_edges])
+                                       [*self.declared_edges, *self.imported_edges], self.edge_provenance)
 
     @property
     def is_suppressed(self) -> bool:

@@ -3,7 +3,7 @@
 ## 0. 核心設計哲學 (Core Philosophy)
 本平台採用 **「Pipeline 管線調度 + 可插拔算子 (Operator / Plugin)」** 架構：
 - **Pipeline 是固定骨架**：資料由記憶體內的 `PipelineContext` 順序流動（Pull -> Detect -> Group/Suppress -> RCA -> Notify -> Persist）。
-- **Operator 是可抽換零件**：演算法（MAD、Z-Score、Isolation Forest）與 LLM 供應商均為純算子，透過 `@OperatorRegistry.register` 登記，由 YAML 設定檔動態選用。
+- **Operator 是可抽換零件**：演算法（時段基準線、殘差突變、殘差漂移、稀疏計數）與 LLM 供應商均為純算子，透過 `@OperatorRegistry.register` 登記，由 YAML 設定檔動態選用。
 - **資料庫只記最終結果**：節點之間嚴禁透過資料庫傳遞資料（徹底廢除 `*ReadDAO` 模式），DB 只負責寫入最終生成的 Incident、Audit Log 與模型持久化狀態。
 
 ---
@@ -15,9 +15,9 @@
 | **資料流載體** | `engine/context.py` | 貫穿整條 Pipeline 的強型別 `PipelineContext` | 嚴禁在節點間傳遞鬆散無型別的 `dict` |
 | **管線引擎** | `engine/pipeline.py` | 讀取工作定義，按序實例化算子並調用 `.execute(ctx)` | 嚴禁在引擎內 hardcode 具體算子邏輯 |
 | **算子註冊** | `engine/registry.py` | 算子註冊中心 (`OperatorRegistry`)，負責動態發現與驗證 | — |
-| **管線算子** | `stages/*` | 依執行順序分段：ingestion → detectors → ensemble → grouping → scoring → suppression → rca → enrichment（LLM）→ notification | 嚴禁 import 具體資料表 ORM 與 `storage`；嚴禁碰外網（`enrichment/`、`notification/notifiers.py`、`notification/transport.py` 除外；只有 `ingestion/fetch.py` 能用 `sources`） |
+| **管線算子** | `stages/*` | 依執行順序分段：ingestion → detectors → grouping → scoring → suppression → rca → enrichment（LLM）→ notification | 嚴禁 import 具體資料表 ORM 與 `storage`；嚴禁碰外網（`enrichment/`、`notification/notifiers.py`、`notification/transport.py` 除外；只有 `ingestion/fetch.py` 能用 `sources`） |
 | **控制面** | `control_plane/*` | 手動動作（`admin.*`）：`learning/`（調參、回饋、成效報表、規則升級）、`operations/`（靜音、欄位對照、事件群、匯入、資料源檢查） | 唯一可以 import `storage` 的算子（目前都只透過 `storage/repository.py`）；也可以連外 |
-| **外部源適配** | `sources/*`（查詢語法解析在 `sources/query/`） | 外部資料庫語法轉換與連線（Prometheus, ES, OTel），輸出 DataFrame | 嚴禁 import `models`、`stages`、`control_plane` |
+| **外部源適配** | `sources/*`（查詢語法解析在 `sources/query/`） | 外部資料源的語法轉換與連線（Prometheus／VictoriaMetrics；trace 與日誌經 Grafana：`sources/grafana.py`），輸出 DataFrame | 嚴禁 import `models`、`stages`、`control_plane`；**嚴禁直連 Elasticsearch**（平台只持有 Grafana 的網址與 token，經資料源 proxy 的 `_msearch` 只讀；ES 文件形狀在 `sources/es_models.py`） |
 | **持久化層** | `storage/*` | 資料庫模型定義（SQLAlchemy）與 Repository | 嚴禁業務判斷邏輯 |
 | **管線 YAML** | `pipelines/*` | `detection/`（偵測告警）、`rca/`（RCA 診斷）、`control/`（`admin_*` 手動動作）；以名稱載入，名稱全域唯一 | 嚴禁在 YAML 以外的地方寫死流程 |
 | **排程入口** | `interfaces/cli/*` | 呼叫 Pipeline 執行（支援 K8s CronJob 或定時 Loop） | 嚴禁直接在排程中操作底層運算 |
@@ -29,7 +29,7 @@
 3. **LLM 的位置（告警路徑零依賴、RCA 路徑必要）**：告警路徑（偵測 → 收斂 → 計分 → 抑制 → 通知，`pipelines/detection/`）**嚴禁依賴 LLM**——那些 YAML 不准掛 `enrichment.*` 節點，`stages/` 除了 `enrichment/` 本身都不准 import `aiops.stages.enrichment`。RCA 路徑的 LLM 是**必要元件**（`enrichment.extract_evidence` 抽證據、`enrichment.rca_narrator` 寫摘要，沒有 `noop`）：沒設定、連不上、逾時、格式不合、驗證全數被拒、或根本沒有事實與證據可判（`no_evidence`）時報告照出，`ctx.rca_status = "undetermined"` 並在 `rca_undetermined_reason` 寫代碼與原因，不整份失敗、不退回舊規則硬猜、不無限重試。舊引擎的 `enrichment.llm_summary`／`llm_briefing` 保留 `provider: noop`（預設），完全不連外、直接用模板。
 4. **模型序列化安全**：整個 `aiops/` 嚴禁 import `pickle`／`joblib`／`dill`／`cloudpickle`／`shelve`／`marshal`，也不准出現 `allow_pickle=True`。非 JSON 的模型本體只能用 npz（`pack_arrays`／`unpack_arrays`）。
 5. **RCA 不寫死**：報告段落是 `rca.section.*`、根因演算法是 `rca.root_cause.*`，都走 `OperatorRegistry`；`stages/rca/report.py` 不得 import 具體段落或演算法。
-6. **關係圖只有一個查詢入口**：實體之間的關係（同步呼叫、訊息佇列、Lot 流向）一律問 `ctx.graph`（`engine/graph.py` 的 `ServiceGraph`）。`stages/`、`control_plane/` 不准讀 `ctx.topology`／`ctx.lot_edges`／`ctx.async_edges`／`ctx.declared_edges`／`ctx.imported_edges` 自己拼圖，也不准直接用 `propagation_edges`；那三個欄位只是載入與存檔的格式（寫入不擋：`rca.build_dynamic_topology`）。每條邊帶語意型別（`EdgeKind`），「異常往哪個方向傳」寫在 `KINDS` 一張表，新增邊的型別就是加一格，不准在算子裡自己翻方向。圖可以有環，不要假設它是 DAG。人宣告的邊（Workflow 的 `graph`、`admin.graph_import`）每條必寫 `kind`（`call`／`supply`／`flow`／`async`），沒有預設值；`call A -> B` 與 `supply B -> A` 是同一個依賴關係（`dependencies()`），不同型別把同一對實體宣告成相反方向在載入期報錯（`docs/DECLARED_GRAPH.md`）。
+6. **關係圖只有一個查詢入口**：實體之間的關係（同步呼叫、訊息佇列、Lot 流向）一律問 `ctx.graph`（`engine/graph.py` 的 `ServiceGraph`）。`stages/`、`control_plane/` 不准讀 `ctx.topology`／`ctx.lot_edges`／`ctx.async_edges`／`ctx.declared_edges`／`ctx.imported_edges` 自己拼圖，也不准直接用 `propagation_edges`；那三個欄位只是載入與存檔的格式（寫入不擋：`rca.build_dynamic_topology`）。每條邊帶語意型別（`EdgeKind`），「異常往哪個方向傳」寫在 `KINDS` 一張表，新增邊的型別就是加一格，不准在算子裡自己翻方向。圖可以有環，不要假設它是 DAG。每條邊帶出處（`Provenance`：來源、細節、最後觀測時間），只用來在 RCA 報告交代這條邊憑什麼存在（`rca.section.graph_basis`），不參與相等、方向與收斂的判斷；新增載入邊的地方要一起填出處，不知道就留空（報告會寫「來源未記錄」），不准拿別的時間充數。人宣告的邊（Workflow 的 `graph`、`admin.graph_import`）每條必寫 `kind`（`call`／`supply`／`flow`／`async`），沒有預設值；`call A -> B` 與 `supply B -> A` 是同一個依賴關係（`dependencies()`），不同型別把同一對實體宣告成相反方向在載入期報錯（`docs/DECLARED_GRAPH.md`）。
 
 ### 1.1 權責邊界與架構隔離（平台管到哪裡為止）
 
@@ -48,7 +48,7 @@
 
 8. **資料有沒有進來，平台留底**：排程模式的每一輪，引擎記下每條資料流（管線 × 實體 × 查詢）有沒有抓到資料、以及整輪的執行結果，存在平台自己的資料庫的三張表（`migrations/postgres/0011`）：`data_stream_health`（資料流的狀態區間，狀態沒變只把最後確認時間往後推）、`pipeline_runs`（管線每一輪一列）、`data_stream_first_seen`（每條資料流第一次收到資料的時間）。資料流分得出 `ok`／`no_data`（有過資料之後斷流）／`never_seen`（從未有過資料）／`config_error`（查詢寫錯、欄位不存在）／`unreachable`／`error`；管線每一輪是 `ok`／`degraded`／`failed`，失敗類型分得出 `infrastructure_error`（整輪失敗）／`workflow_error`（YAML 載入失敗，那一輪根本沒跑）／`error`。保留期限是管線 YAML 的 `health_retention_days`（預設 180 天）：每輪寫入時順手清掉這條管線更舊的紀錄（跟拓撲刷新寫完就 prune 同一個做法），每條資料流目前的狀態與第一次收到資料的紀錄不清。分工：怎麼判是引擎的純函式（`engine/health.py`），結果掛在這一輪的 `ctx.stream_checks`／`ctx.run_check`，寫入只有 `StorageHooks.record_health`（整輪失敗也會呼叫；排程的載入失敗由排程入口用的 `interfaces/runner.run_scheduled` 補記；API 與手動動作的設定錯誤不記，維持「報錯之前不碰資料庫」），`stages/` 不知道這件事、也不准碰。查詢走 `GET /api/v1/data-health/streams`、`/runs`、`/first-seen` 與 Grafana「資料健康度」儀表板（唯讀帳號，只有 `data_stream_health`、`pipeline_runs` 的 `SELECT`）。Grafana 是每次開頁、每次重新整理都下 SQL：儀表板的每個查詢（含下拉選單）都要限制在畫面的時間範圍內，查詢用到的欄位要有索引（測試會擋）。**沒有被任何區間蓋到的時段 = 平台沒有檢查到，不是正常；那個時間沒有 `pipeline_runs` 的列 = 那一輪沒有跑**；資料庫連不上時健康度也寫不進去（只留一行 log，不改變那一輪原本的結果）。這是紀錄，不是補洞：不准因為「沒資料」就在引擎裡猜值或換查詢（第 4 點）。狀態定義、已知限制與驗證狀態見 `docs/DATA_HEALTH.md`。
 
-9. **偵測演算法只當平台自己的看門狗，不給使用者用**（使用者決定，2026-11-15）：什麼算異常由各團隊在**他們自己的**監控系統／Grafana 設告警規則決定，經 webhook 推進平台（`POST /api/v1/ingestion/grafana-alerts?pipeline=&source=`，轉接在 `control_plane/operations/grafana_alerts.py`，欄位與嚴重度對照在 `pipelines/control/admin_ingest_grafana_alerts.yaml`，給團隊的規範在 `docs/EXTERNAL_ALERTS.md`）；平台只用關係圖收斂、出 RCA 建議（帶第 7 點的結論等級）。對方沒推告警，平台就不產生任何東西。所以出貨的使用者管線（`pipelines/detection/`）**不准有抓資料或偵測器的節點、不准有 targets**（帶 targets 在載入期與 API 都回 400）；偵測器節點只准出現在 `pipelines/watchdog/`（監控 AIOps 平台自己：`platform_watchdog.yaml`，aiops-platform chart 有自己的 CronJob）。看門狗只讀平台自己的紀錄（`source_type: platform`，查詢 `runs/<管線>/<rounds|failed|not_ok>`、`alerts/<來源>/<alerts|heartbeats|pushes>`，`engine/platform_series.py`）：`sources/` 不准碰 `storage`，所以跟 `trace` 一樣由 `StorageHooks.load_target` 載原始紀錄、`ingestion.fetch` 換成每格筆數。團隊 Grafana 的心跳告警（標籤 `aiops_heartbeat=true`）存成 `status = heartbeat`，不進任何管線，只給看門狗數，用來分「對方沒事」跟「對方的告警管道斷了」。**偵測入口政策**：會拿偵測器跑呼叫端序列的入口——`POST /api/v1/runs` 帶 targets、調參回測、序列畫像——只准 `pipelines/watchdog/` 的管線與 `platform` 資料源，其他一律 **403**（`engine/errors.Forbidden`；檢查在組裝點 `interfaces/runner.check_detection_entry`，政策是 `runner.DETECTION_SCOPES`）。門檻與稀疏計數的驗證狀態照實寫在 `docs/WATCHDOG.md`、`docs/SPARSE_COUNT.md`（只在模擬紀錄上回放過，沒有真實紀錄）。原本帶偵測器的四條改名 `sample_*` 放在 `scripts/pipelines/`，只給測試、回測、混沌腳本用（`scripts/sample_pipelines.py` 讓它們用名稱載入得到；不在 `aiops/`、不進映像檔）。我們自己的 `aiops-grafana` 仍只顯示（第 5 節不變）。
+9. **偵測演算法可以跑兩種對象：平台自己的紀錄（看門狗），以及使用者在 Grafana 告警規則上貼標籤交出來的序列**（使用者決定，2026-11-20，取代 2026-11-15 的「只當看門狗」）。後者：規則貼 `aiops_detect: <管線名稱>` = 交給那條管線的演算法看，`severity: P0～P3` = 判出異常時的嚴重度（不貼 = P1），`service` = 實體；管線放 `pipelines/grafana/`、寫 `targets_from: grafana`、不准自己寫 targets，每一輪由組裝點 `interfaces/runner.resolve_targets` 經 `sources/grafana.py` 讀規則、拿規則自己的查詢向 Grafana 要資料（平台不組任何後端的查詢語法，也不存這份設定；告警卡的 `grafana_rule_url` 連回那條規則）。Grafana 讀不到規則時整輪失敗，不當成沒有對象。`runner.DETECTION_SCOPES` = `{watchdog: {platform}, grafana: {grafana}}`。以下是原本就有、仍然成立的部分——什麼算異常由各團隊在**他們自己的**監控系統／Grafana 設告警規則決定，經 webhook 推進平台（`POST /api/v1/ingestion/grafana-alerts?pipeline=&source=`，轉接在 `control_plane/operations/grafana_alerts.py`，欄位與嚴重度對照在 `pipelines/control/admin_ingest_grafana_alerts.yaml`，給團隊的規範在 `docs/EXTERNAL_ALERTS.md`）；平台只用關係圖收斂、出 RCA 建議（帶第 7 點的結論等級）。對方沒推告警，平台就不產生任何東西。所以出貨的使用者管線（`pipelines/detection/`）**不准有抓資料或偵測器的節點、不准有 targets**（帶 targets 在載入期與 API 都回 400）；偵測器節點只准出現在 `pipelines/watchdog/`（監控 AIOps 平台自己：`platform_watchdog.yaml`，aiops-platform chart 有自己的 CronJob）。看門狗只讀平台自己的紀錄（`source_type: platform`，查詢 `runs/<管線>/<rounds|failed|not_ok>`、`alerts/<來源>/<alerts|heartbeats|pushes>`，`engine/platform_series.py`）：`sources/` 不准碰 `storage`，所以跟 `trace` 一樣由 `StorageHooks.load_target` 載原始紀錄、`ingestion.fetch` 換成每格筆數。團隊 Grafana 的心跳告警（標籤 `aiops_heartbeat=true`）存成 `status = heartbeat`，不進任何管線，只給看門狗數，用來分「對方沒事」跟「對方的告警管道斷了」。**偵測入口政策**：會拿偵測器跑呼叫端序列的入口——`POST /api/v1/runs` 帶 targets、調參回測、序列畫像——只准 `pipelines/watchdog/` 的管線與 `platform` 資料源，其他一律 **403**（`engine/errors.Forbidden`；檢查在組裝點 `interfaces/runner.check_detection_entry`，政策是 `runner.DETECTION_SCOPES`）。門檻與稀疏計數的驗證狀態照實寫在 `docs/WATCHDOG.md`、`docs/SPARSE_COUNT.md`（只在模擬紀錄上回放過，沒有真實紀錄）。原本帶偵測器的四條改名 `sample_*` 放在 `scripts/pipelines/`，只給測試、回測、混沌腳本用（`scripts/sample_pipelines.py` 讓它們用名稱載入得到；不在 `aiops/`、不進映像檔）。我們自己的 `aiops-grafana` 仍只顯示（第 5 節不變）。
 
 自動檢查（`tests/test_architecture.py`）：`test_pipeline_layers_never_import_the_control_plane`、`test_platform_imports_nothing_from_outside_its_own_package`、`test_platform_never_executes_commands_or_remediation`，加上既有的 `test_algorithms_do_not_special_case_entities_or_lengths`、LLM 出口與 `hard_limit` 調參的測試。第 7 點在 `tests/test_rca_conclusion_type.py`（三個等級各一個端到端測試、演算法沒宣告等級不能定義、報告與引擎不准出現根因算子名稱）。第 8 點在 `tests/test_data_health.py`（各種狀態、整輪失敗與載入失敗都留下紀錄、保留期限、寫不進去不影響那一輪、狀態不跨輪殘留、儀表板每條 SQL 對實際的表執行而且都有時間條件）與 `tests/test_helm_grafana.py`（平台資料庫的資料源只用唯讀帳號、只有資料健康度儀表板讀它、只讀那兩張表）。第 9 點在 `tests/test_detection_policy.py`（使用者管線沒有偵測節點與 targets、偵測器只准在 `pipelines/watchdog/`、樣本不在 `aiops/`、API 帶 targets 被拒）、`tests/test_watchdog.py`（平台自身資料源、看門狗抓得到排程停擺／失敗暴增／心跳斷掉、心跳不進管線、`/runs`／回測／畫像的 403 政策與出貨的政策值）與 `tests/test_grafana_alerts.py`（用 Grafana 13.0.7 實際送出的 webhook 內容測轉接與端到端）。第 4 點「有沒有替外部補洞」與第 5 點「通知裡有沒有原文」機器只能擋一部分，靠 code review。
 
@@ -77,17 +77,19 @@ class BaseOperator(ABC):
    * 基準線與異常血緣以 **Workflow 節點名稱**（`self.state_key`）為準，同一個演算法可以在同一條管線掛多次。後台核准的調參目前只分 (演算法, 管線, 實體)、沒有節點這一層：`ctx.detector_params` 雖然以節點名稱為 key，同一條管線裡同一個演算法的多個節點拿到的是同一份調參（要各自不同就寫在節點 YAML `params` 或 target `overrides`）。
    * 需要「往前 N 分鐘的自己」（同比、環比）時覆寫 `required_lags() -> list[int]`；fetch 要在 YAML 設對應的 `lags_minutes`，df 會多 `lag_<分鐘>` 欄位，回測也照這個抓。
    * 模型有非 JSON 的本體時覆寫 `get_artifact() -> (格式, bytes)` 與 `load_artifact(格式, bytes)`，格式只能是 `npz`。
-   * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only`、`detector.ensemble` 這類不學習的算子不繼承它。
-   * `AnomalyEvent` 是 frozen：建立後不准改分數或偵測器名稱。要合併多個偵測器的判斷，用 `detector.ensemble` 產生新的裁決事件。
+   * 繼承 `DetectorOperator` 的算子自動 `has_baseline = True`，引擎才會替它載入基準線與調參；`detector.new_only` 這類不學習的算子不繼承它。
+   * `AnomalyEvent` 是 frozen：建立後不准改分數或偵測器名稱。**偵測段沒有表決**（使用者決定，2026-11-20：`detector.soft_vote` 移除）：每個偵測節點的事件各自成立、原樣往下游走，任何一個節點越線就是一筆異常；多個節點指到同一件事由收斂（Grouper）合成一張卡，不准在偵測段加回「要幾票才算」的節點。
    * **每條 target 跑哪些偵測節點由引擎決定**（`engine/pipeline.py`），順序：節點 `params.exclude_entities` → `params.include_entities` → target 的 `detectors`（節點名稱或算子名稱，不寫 = 全部）。被跳過的節點不載基準線與調參、不進 `ctx.detector_runs`。引擎把真的會跑、會存基準線的節點名稱放進 `ctx.baseline_nodes`，`ingestion.fetch` 只在其中有節點還沒有基準線或到期時才抓訓練窗（全被跳過的序列不抓）。演算法裡不准自己判斷「這個實體要不要跑」。
    * `include_entities`／`exclude_entities` 是基底層的路由參數（`ROUTING_PARAMS`）：不進 `self.params`、不傳給演算法、調參提案帶它們會被拒絕。
    * 參數優先序：演算法預設值 ← 後台核准調參（`ctx.detector_params`）← 節點 YAML `params` ← target `overrides[節點名稱]`（`effective_params`，逐鍵 `deep_merge`）。overrides 在載入期用 `check_override` 檢查參數名與範圍。合併邏輯只有一份：`stages/detectors/base.layer_params`，偵測與回測（`admin.proposal_backtest`）都用它——回測會讀提案所屬管線的 YAML 疊上節點 `params` 與該實體 target 的 `overrides`，YAML 鎖住的鍵提案改了也不會生效，結果的 `workflow.locked` 會列出來。
-   * `ctx.detector_runs` 只記「真的評估過資料」的節點（沒資料就 return 的不算）。`detector.ensemble` 的分母 = 參與者數；棄權不是反對票。`hourly_baseline` 資料不足時退回全段統計，仍算參與者——新偵測器若「這一輪算不出分數就不判」，覆寫 `can_evaluate(df) -> bool` 回 False（基底在加入 `detector_runs` 之前棄權；`rules` 沒規則、`quantile_drift`／`chronic` 滾動窗比資料長都這樣做），不要在 `detect` 裡回全 0。`requires_peers` 的算子在 `raw_df` 沒有 `peer_*` 欄位時（`peer_group` 只撈到自己）由基底棄權，`ingestion.fetch` 把它記成那條序列的錯誤。
-   * 冷啟動門檻數的是 `training_points(train) -> int`（預設列數；`dod`／`wow` 只算 lag 欄位有值的列、`peer` 只算同儕有值的列），`DetectorState.points` 也記這個數。基準線到期重訓但訓練窗點數不足時，沿用資料庫裡的舊基準線照判（log `keep-old-baseline`），不留偵測盲區；完全沒有舊基準線才不判。
+   * `ctx.detector_runs` 只記「真的評估過資料」的節點（沒資料就 return 的不算）。`hourly_baseline` 時段資料不足時退回全段統計，照樣評估——新偵測器若「這一輪算不出分數就不判」，覆寫 `can_evaluate(df) -> bool` 回 False（基底在加入 `detector_runs` 之前棄權；`residual_chronic` 滾動窗比資料長、`sparse_count` 湊不滿一個窗口都這樣做），不要在 `detect` 裡回全 0。`requires_peers` 的算子在 `raw_df` 沒有 `peer_*` 欄位時（`peer_group` 只撈到自己）由基底棄權，`ingestion.fetch` 把它記成那條序列的錯誤。
+   * `DetectorState.points` 記的是 `training_points(train) -> int`（預設列數；需要 lag 或同儕欄位的演算法只算那些欄位有值的列）。**沒有最少訓練點數的門檻**（`min_train_points` 冷啟動棄權與「訓練窗點數不足就沿用舊基準線」已於 2026-11-20 移除）：拿到幾個點就學幾個點、照判；基準線到期就用新的訓練窗重訓。代價照實寫：服務一上線就壞，壞的狀態會被學成正常。
    * target 的 `detectors`／`overrides` 寫錯、節點的 include／exclude 寫了 workflow targets 裡沒有的實體，都在 `Pipeline.__init__`（API 傳入的 targets 在 `run()` 開頭）丟 `WorkflowError`，不准延到執行期。
-   * `exclude_incidents`（預設 true）、`warning_ratio`（預設關）、`min_train_points`（預設 60）是基底層的節點行為參數（`NODE_PARAMS`）：同樣不進 `self.params`、target `overrides` 不能寫。訓練點數不到 `min_train_points` 的節點不學、不判、不進 `detector_runs`（冷啟動時幾十個點學到的基準線不可信）；不需要歷史資料的算子（`detector.rules`）設 `requires_training = False` 不受此限，剛上線的服務靠它兜底。訓練排除窗由 `StorageHooks` 放進 `ctx.training_exclusions`，基底 `_training_frame` 統一套用——演算法的 `fit` 不准自己去查事故或維護窗。
+   * `exclude_incidents`（預設 true）、`warning_ratio`（預設關）、`snr`（預設關：`{p_fa, tz, min_slot_points}`，節點門檻改由目標逐點虛警率 `p_fa` 換算、取代 `threshold`；它只是門檻的另一種寫法，不壓制任何事件）是基底層的節點行為參數（`NODE_PARAMS`）：同樣不進 `self.params`、target `overrides` 不能寫。訓練排除窗由 `StorageHooks` 放進 `ctx.training_exclusions`，基底 `_training_frame` 統一套用——演算法的 `fit` 不准自己去查事故或維護窗。
    * 事件等級只有 `ANOMALY`／`WARNING`（`engine/types.py`）。warning 由基底依 `threshold × warning_ratio` 產生，演算法只管回傳分數與越線旗標。
-   * **雙軌制**（`docs/DUAL_TRACK_DESIGN.md`）：統計軌是 `detector.ensemble` 多數決；致命軌是 `detector.hard_limit`（`votes = False`、`accepts_tuning = False`、`requires_training = False`），單點踩線就成立。不投票的偵測節點必須列進 ensemble 的 `bypass`（事件原樣留下、不進分母），由 `alert.fatal_floor` 把分數拉到 payload 的 P0 門檻並打上 `fatal:<節點>` 標籤。致命界線只認 YAML（節點 `params` 或 target `overrides`）：後台調參、規則升級器的提案一律拒絕。新增「不交給多數決」的偵測器照這個做，不准在 ensemble 或引擎裡寫死算子名稱。
+   * **人訂的靜態門檻不做在平台**：上下限、致命界線這類「踩到就是出事」的規則一律是 Grafana 告警規則，經 webhook 推進來（`docs/EXTERNAL_ALERTS.md`）；平台沒有靜態規則偵測器，也不准加回來。平台只留需要統計的演算法：`hourly_baseline`、`residual_shift`、`residual_chronic`、`sparse_count`，加上不判異常、只濾掉舊點的 `new_only`。
+   * **偵測段不放減少誤報的機制**（使用者決定，2026-11-20：偵測要最敏感）。已移除、不准加回偵測段的：多票表決（`detector.soft_vote`、`votes`／`bypass`）、連續越線才算（`residual_chronic` 的 `min_run`）、把門檻往上乘的調參（`threshold_scale`）與誤報回饋自動提「調鈍」的提案、尾巴校正（`fpr`／`max_tail_factor`）、分母下限（`min_scale`／`min_scale_ratio`、整數序列至少 1、`hourly_baseline` 的全段 std 一成）、冷啟動棄權（`min_train_points`）、`sparse_count` 的 `min_events`。殘差偵測器的分母就是 σ = 1.4826 × MAD；分母唯一的保底是 `base.guard_scale`（量到的尺度有限而且 > 0 就照用，否則 1.0），只防除以 0。要少吵，做在收斂、抑制、通知（`stages/grouping`、`stages/suppression`、`stages/notification`）或由人改 YAML 的 `threshold`／`p_fa`、走 `admin.proposal_create` 人工提案；`admin.feedback_propose` 只處理漏報（把門檻調低），誤報回饋回 400。資料庫裡舊基準線、舊調參帶著的已移除鍵一律略過（`tuning_keys`、各偵測器的 `load_state`），不准因此報錯。移除後的吵雜程度只在合成資料上量過（`tests/test_residual_ensemble.py` 的正常週分鐘數），沒有用真實資料重跑。
+   * **唯一放回來的一個：相對底噪**（使用者決定，2026-11-20，同一天）：`hourly_baseline`、`residual_shift`、`residual_chronic` 的分母不小於「序列水位 × `min_scale_ratio`」，預設 1%（`base.floored_scale`；YAML 可調，0 = 關掉）。原因是實測：沒有它時，故障移除後正常值（延遲 0.0988 秒）在很穩定的序列上得到一萬多分，每一輪都有新異常，事件群不會結案。其他已移除的機制沒有放回來，也不准因為這一條就順手加回去；要再放回任何一個，先有真實資料上的證據、再問使用者。
    * 需要看整條 workflow 才能驗的接線（引用的節點存不存在、前後順序）寫在算子的 `check_workflow(nodes: list[NodeInfo])`，引擎在 `Pipeline.__init__` 逐一呼叫，`TypeError`／`ValueError` 轉成 `WorkflowError`；不准延到 `execute` 才發現。
  * **節點 scope**：`target`（逐序列）→ `batch`（所有序列合併後）→ `after_persist`（資料庫寫入成功後才跑：所有 `notifier.*`）→ `after_finalize`（「已通知」與結案也寫成功後才跑：只有 `notifier.watchdog` 心跳，這一輪每一步都成功才續命）。順序錯在 `Pipeline.__init__` 報錯。
    * 寫入順序鐵律：異常點、事件群在 `hooks.persist_batch` 的**單一交易**落地（資料庫短暫斷線整筆回復後重試，`storage/db.run_in_transaction`），然後才送通知；通知都送出去了，引擎才呼叫 `hooks.finalize_batch` 記「已通知」與結案。推送失敗時事件群留在進行中，下一輪 `alert.heartbeat` 用同一組標籤補送（含 `endsAt`）。任何算子都不准在寫入前送出外部通知。
@@ -104,7 +106,7 @@ class BaseOperator(ABC):
  * **Grouper（事件收斂）**：
    * 接收 `ctx.anomalies`，輸出收斂後的 `ctx.incidents`。
    * 進行中事件群（`ctx.open_incidents`）由 `alert.absorb_open` 吸收新異常：一場事故從初發到結案只有一個 `incident_uid`。`ensure_incidents` 只建一次（`ctx.incidents_built`），清單被吸收光之後不准重建。
-   * 順序鐵律：收斂 → 計分（`alert.fatal_floor` 在這一段，必須在 `absorb_open` 之前）→ `absorb_open` → 抑制 → `notify_payload` → `heartbeat` → `notifier.*`。升級（嚴重度只升不降）改了 labels 時，`heartbeat` 負責對舊 labels 送 `endsAt` 再送新的；Alertmanager 用整組 labels 辨識告警。
+   * 順序鐵律：收斂 → 計分（必須在 `absorb_open` 之前）→ `absorb_open` → 抑制 → `notify_payload` → `heartbeat` → `notifier.*`。升級（嚴重度只升不降）改了 labels 時，`heartbeat` 負責對舊 labels 送 `endsAt` 再送新的；Alertmanager 用整組 labels 辨識告警。
  * **Suppressor（告警抑制）**：
    * 檢查靜音窗口（維護期）、冷卻時間（Dedup）、同根因；被抑制事件必須打上 `ctx.is_suppressed = True` 與具體原因。
  * **LLM Provider（智慧診斷）**：
@@ -115,57 +117,84 @@ class BaseOperator(ABC):
 
 ## 3. 標準算子實作範例
 
-兩個範例都是可以直接執行的真實程式碼；`tests/test_claude_md_examples.py` 會檢查範例一跟 `aiops/stages/detectors/mad.py` 逐字相同、範例二能在乾淨的行程裡跑起來，範例過期測試就會紅。
+兩個範例都是可以直接執行的真實程式碼；`tests/test_claude_md_examples.py` 會檢查範例一跟 `aiops/stages/detectors/residual_shift.py` 逐字相同、範例二能在乾淨的行程裡跑起來，範例過期測試就會紅。
 
-### 範例一：偵測器（`stages/detectors/mad.py`，原檔全文）
+### 範例一：偵測器（`stages/detectors/residual_shift.py`，原檔全文）
 
 偵測器繼承 `DetectorOperator`，只寫演算法的四個方法；`execute`（載入或訓練基準線、套用調參與 overrides、產生 `AnomalyEvent`、warning 兩級、訓練排除事故窗）全部由基底處理，演算法不要自己寫 `execute`。
 
 ```python
+"""殘差突變票：看「扣掉週期基準後的殘差」的相鄰差。
+
+原始值的相鄰差（已移除的 detector.shift）每天 09:00／19:00 的流量階梯切換都會舉牌；這裡先白化（base.fit_seasonal_profile：
+原值 − 該 週幾×小時 的訓練平均），每天固定的切換在殘差裡相鄰差接近 0，只有「這個時段不該有的斷崖」才會跳。
+分數 = |Δe| / σ，σ = 1.4826 × 訓練期 Δe 的 MAD（base.noise_stats）；分母不小於序列水位的 min_scale_ratio（預設 1%）；σ 與水位都是 0 才退到 1.0（base.floored_scale）。
+跳上去之後是新水位，不再報（持續偏離交給 residual_chronic）。
+"""
+from __future__ import annotations
+
+from typing import Any
+
 import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import SCALE_FLOOR_TUNABLE, DetectorOperator, is_integer_series, scale_floor
+from aiops.stages.detectors.base import (DetectorOperator, MIN_SCALE_RATIO_TUNABLE, fit_seasonal_profile, floored_scale, noise_stats, parse_tz,
+                                         seasonal_residual)
 
-_CONSISTENCY = 0.6745  # 讓 MAD 在常態分布下跟標準差同尺度的常數
 
+@OperatorRegistry.register("detector.residual_shift")
+class ResidualShiftDetector(DetectorOperator):
+    """params: threshold（預設 4，tunable）；tz（時段用的時區，比照 hourly_baseline，預設 UTC）、
+    min_slot_points（時段至少幾個訓練點才用它，預設 30）、ref_points（跟前幾點的中位數比，預設 1）。"""
 
-@OperatorRegistry.register("detector.mad")
-class MADDetector(DetectorOperator):
-    """Modified Z-Score（中位數與 MAD）：離群值不會把基準線拉歪，比 zscore 耐尖峰。
-    params: threshold、min_scale／min_scale_ratio（分母底噪，見 base.scale_floor）。
+    algorithm = "residual_shift"
+    whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
+    tunable = {"threshold": (4.0, 1.0, 20.0), **MIN_SCALE_RATIO_TUNABLE}
+    other_params = frozenset({"tz", "min_slot_points", "ref_points"})
 
-    跟 zscore 一樣先 fit 再 detect：基準線來自訓練期，而不是這一輪資料自己（否則異常本身會被當成常態）。
-    基準線存原始 MAD，底噪在 detect 時才套：後台調了 min_scale 不用等重訓就生效。
-    """
+    def __init__(self, **params: Any):
+        super().__init__(**params)
+        self.tz = parse_tz(params.get("tz", "UTC"), "detector.residual_shift")
+        self.min_slot_points = int(params.get("min_slot_points", 30))
+        if self.min_slot_points < 2:
+            raise TypeError("detector.residual_shift 的 min_slot_points 至少要 2")
+        self.ref_points = int(params.get("ref_points", 1))
+        if not 1 <= self.ref_points <= 60:
+            raise TypeError("detector.residual_shift 的 ref_points 要在 1 到 60 之間（1 = 只跟前一分鐘比）")
 
-    algorithm = "mad"
-    tunable = {"threshold": (3.5, 1.0, 20.0), **SCALE_FLOOR_TUNABLE}
+    def _jump(self, resid) -> pd.Series:
+        """殘差減「前 ref_points 點殘差的中位數」。ref_points=1 就是相鄰差；用中位數當參考水位，
+        前面有一個雜訊點不會讓下一點看起來像跳變，斷崖後前幾分鐘（參考窗還沒被新水位佔過半）都會舉牌。"""
+        e = pd.Series(resid, dtype=float)
+        ref = e.shift(1).rolling(self.ref_points, min_periods=1).median()
+        return (e - ref).fillna(0.0)
 
-    def fit(self, df: pd.DataFrame) -> "MADDetector":
-        values = df["value"]
-        self.median_ = float(values.median())
-        self.mad_ = float((values - self.median_).abs().median())
-        self.integer_ = is_integer_series(values)  # 失敗數這類計數序列：分母至少 1 筆
+    def fit(self, df: pd.DataFrame) -> ResidualShiftDetector:
+        self.profile_, resid = fit_seasonal_profile(df, self.tz, self.min_slot_points)
+        self.noise_ = noise_stats(self._jump(resid).to_numpy()[1:])
+        self.level_ = float(df["value"].median())  # 序列水位：相對底噪用（base.floored_scale）
         self.fitted = True
         return self
 
     def get_state(self) -> dict:
         self._require_fitted()
-        return {"median": self.median_, "mad": self.mad_, "integer": self.integer_}
+        return {"profile": self.profile_, "noise": self.noise_, "level": self.level_}
 
-    def load_state(self, state: dict) -> "MADDetector":
-        self.median_, self.mad_ = float(state["median"]), float(state["mad"])
-        self.integer_ = bool(state.get("integer", False))  # 舊版基準線沒記：只套絕對與相對下限
+    def load_state(self, state: dict) -> ResidualShiftDetector:
+        # 舊基準線多帶的 integer 與 noise 裡的 tail_q、fpr（已移除的整數底噪與尾巴校正）不讀
+        self.profile_, self.noise_ = dict(state["profile"]), {"noise": float(state["noise"]["noise"])}
+        # 沒記水位的基準線（放回相對底噪之前存的）：level 是 None，相對底噪等下次重訓才有
+        self.level_ = float(state["level"]) if state.get("level") is not None else None
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
-        scale = scale_floor(self.mad_, None, self.param("min_scale"), self.param("min_scale_ratio"),
-                            center=self.median_, integer=self.integer_)
-        scores = _CONSISTENCY * (df["value"] - self.median_).abs() / scale
+        scale = floored_scale(self.level_, self.param("min_scale_ratio"), self.noise_["noise"])
+        jump = self._jump(seasonal_residual(df, self.profile_))
+        jump.index = df.index
+        scores = jump.abs() / scale
         return self._result(df, scores, scores > self.param("threshold"))
 ```
 
@@ -208,19 +237,19 @@ assert build("noop", "", "", None) is None  # noop 完全不連外
 
 ```yaml
 name: factory_lot_detection_pipeline
-description: "工廠履歷時序檢測流程 (自由抽換 MAD 與關閉 LLM)"
+description: "工廠履歷時序檢測流程 (自由抽換偵測器與關閉 LLM)"
 nodes:
   # 1. 抓取指標
   - name: fetch_step
-    operator: ingestion.elasticsearch
+    operator: ingestion.fetch
     params:
-      index: "factory-metrics-*"
+      lookback_minutes: 60
 
-  # 2. 異常檢測 (隨時切換 detector.zscore / detector.mad / detector.isolation_forest)
+  # 2. 異常檢測 (隨時切換 detector.residual_shift / detector.residual_chronic / detector.sparse_count)
   - name: detect_step
-    operator: detector.mad
+    operator: detector.residual_shift
     params:
-      threshold: 3.5
+      threshold: 4
 
   # 3. 告警收斂
   - name: group_step
@@ -256,8 +285,8 @@ nodes:
 
 **寫錯就在載入期報錯**（`tests/test_load_time_validation.py`）：
  * 值不合理（`threshold: -3`、`window_minutes: 0`、`cooldown_minutes: -5`）由算子的 `__init__` 檢查，用 `engine/params` 的 `number`／`positive`／`whole` 丟 `ValueError`；`OperatorRegistry.create` 轉成 `WorkflowParamError`（是 `WorkflowError` 也是 `ValueError`）。新算子的窗口、冷卻、門檻、權重參數一律在 `__init__` 檢查，不准拖到 `execute`。
- * 偵測器的 `tunable` 範圍由基底 `DetectorOperator.__init__` 的 `check_ranges()` 檢查（節點 YAML、target `overrides`、執行期合併後的參數都會經過）；需要額外檢查就覆寫 `check_ranges`，「合併後才知道齊不齊」的檢查（`detector.rules` 至少要有一條規則）才放 `validate_params`。
- * 欄位打錯（`param:`、`optionl:`、`windw_days:`、ES 查詢的 `fliter`）：`aiops/engine`、`aiops/sources` 的 Pydantic 模型一律繼承 `engine/pipeline.StrictModel`（或自己設 `extra="forbid"`），測試會掃。
+ * 偵測器的 `tunable` 範圍由基底 `DetectorOperator.__init__` 的 `check_ranges()` 檢查（節點 YAML、target `overrides`、執行期合併後的參數都會經過）；需要額外檢查就覆寫 `check_ranges`，「合併後才知道齊不齊」的檢查（參數要等調參與 overrides 都疊完才齊的那種）才放 `validate_params`。
+ * 欄位打錯（`param:`、`optionl:`、`windw_days:`）：`aiops/engine`、`aiops/sources` 的 Pydantic 模型一律繼承 `engine/pipeline.StrictModel`（或自己設 `extra="forbid"`），測試會掃。
 
 **並發安全**：偵測器基準線（`detector_models`）與現行參數（`active_detector_configs`）用 `version` 欄位做樂觀鎖，寫入必須帶讀取當時的版本；版本已被別人推進就不覆蓋（基準線記在 audit，調參核准回 409 並把提案標成 stale）。
 
@@ -266,7 +295,7 @@ nodes:
 ## 5. 檔案歸屬決策樹 (Where Does New Code Go?)
 
  * **要寫新的異常檢測演算法（如 Isolation Forest）？**
-   👉 寫入 `aiops/stages/detectors/<name>.py`，掛上 `@OperatorRegistry.register("detector.<name>")`。只准掛在監控平台自己的管線（`pipelines/watchdog/`），不准掛到使用者管線（§1.1 第 9 點）；端到端測試用 `scripts/pipelines/sample_*`。
+   👉 寫入 `aiops/stages/detectors/<name>.py`，掛上 `@OperatorRegistry.register("detector.<name>")`。只准掛在 `pipelines/watchdog/`（監控平台自己）與 `pipelines/grafana/`（對象由 Grafana 規則的標籤決定），不准掛到只吃外部告警的 `pipelines/detection/`（§1.1 第 9 點）；端到端測試用 `scripts/pipelines/sample_*`。
  * **看門狗要多看平台的什麼？**
    👉 不寫程式：在 `pipelines/watchdog/platform_watchdog.yaml` 加一條 `source_type: platform` 的 target（查詢語法見 `engine/platform_series.py`）。要看平台新的一種紀錄，才在 `engine/platform_series.py` 加欄位、在 `storage/hooks._load_platform_rows` 載入。
  * **要讓某個團隊的告警進平台？**
@@ -307,7 +336,7 @@ nodes:
 | **自研平台**（`aiops/`，映像檔 `aiops-platform`） | 程式碼、映像檔、`deploy/helm/aiops-platform` | — |
 | **Grafana**（`deploy/helm/aiops-grafana`） | chart 的 `files/`、templates、values | 嚴禁改官方映像檔、自製或 fork 外掛、進 pod 手動改設定；嚴禁放告警規則、Contact Point、業務邏輯（只顯示） |
 | **Alertmanager**（`deploy/helm/aiops-alertmanager`） | chart 的 values（路由、receiver） | 嚴禁改官方映像檔 |
-| **Elasticsearch**（開發叢集 `es-test`） | 這個 repo 沒有它的 chart；要調整就先把 chart 找回來或整理進 `deploy/helm/` 再改 | 嚴禁改映像檔；平台與 Grafana 對它**只讀**（`tests/test_architecture.py`），寫入合成資料只能由人跑 `scripts/synth_generator/es_writer` |
+| **Elasticsearch**（開發叢集 `es-test`） | 這個 repo 沒有它的 chart；要調整就先把 chart 找回來或整理進 `deploy/helm/` 再改 | 嚴禁改映像檔；**平台完全不連它**（不准出現 ES 的網址、金鑰或直連的程式），要讀就經 Grafana 的資料源 proxy、只讀（`aiops/sources/grafana.py`，`tests/test_grafana_source.py`）；Grafana 對它只讀；repo 裡沒有任何寫入 ES 的程式 |
 
  1. **需求先問「chart 做不做得到」**：做得到就只改 chart；做不到（要新頁面、新 API、新資料）就做在自研平台，周邊元件只加設定或連結。不准為了一個功能去換周邊元件的映像檔。
  2. **所有改動都要回到 repo**：不准只在叢集上 `kubectl edit`／在 Grafana UI 手改而沒有對應的 chart 變更；部署一律 `helm upgrade`。
@@ -340,7 +369,7 @@ nodes:
 
 2. **驗證優先於單元測試 (Real Data Over Unit Tests)**：
    - 「合成資料測試全過」不等於演算法完成。
-   - 任何演算法（基準線、RCA、同儕）實作完成後，**必須拿現存的真實資料（ES/Prometheus）進行回放對比驗收**。
+   - 任何演算法（基準線、RCA、同儕）實作完成後，**必須拿現存的真實資料（Prometheus／VictoriaMetrics，trace 與日誌經 Grafana）進行回放對比驗收**。
    - 提交報告時，**禁止只回報「通過 N 個測試」**，必須直接貼出「真實指標回放數據、誤報數、檢出率、根因判斷結果」。
 
 3. **禁止防衛性推拖 (Direct Action Only)**：

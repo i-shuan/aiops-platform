@@ -1,7 +1,7 @@
 """rca.root_cause.evidence 的強斷言驗收（CLAUDE.md 第 99、100 節）。
 
 資料：scripts/synth_generator/scenarios/ 底下的正式劇本，只把時間窗縮短到事故當天（11/3 11:00–17:00Z）讓測試跑得動，
-並換 3 個 seed 重產，確認不是單一隨機樣本的運氣。span 一律用平台讀 ES 的同一個函式（aiops.sources.elasticsearch._span）
+並換 3 個 seed 重產，確認不是單一隨機樣本的運氣。span 一律用平台讀 ES 的同一個函式（aiops.sources.grafana._span）
 從產生器的原始 APM 文件解析，不手工捏造。完整 2 週劇本走真的 rca_report workflow 的結果記在 README「RCA」一節。
 
 斷言：
@@ -19,7 +19,7 @@ import yaml
 from aiops.engine.context import PipelineContext, SpanRecord
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import AnomalyEvent, Incident
-from aiops.sources.elasticsearch import _span
+from aiops.sources.grafana import _span
 from scripts.synth_generator.faults import scenario_from_dict
 from scripts.synth_generator.generate import generate
 

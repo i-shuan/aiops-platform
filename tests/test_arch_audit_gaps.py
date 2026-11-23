@@ -43,10 +43,12 @@ class _Frame(BaseOperator):
         return ctx
 
 
-def _vote(nodes, strategy="majority"):
+_SNR = {"snr": {"p_fa": 0.001}}
+
+
+def _detect(nodes):
     wf = Workflow(name="gap", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
-        NodeSpec(name="fetch", operator="audit_gap.frame"), *nodes,
-        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": strategy})])
+        NodeSpec(name="fetch", operator="audit_gap.frame"), *nodes])
     return Pipeline(wf).run(now=T0)
 
 
@@ -99,42 +101,25 @@ def test_import_guards_catch_indirect_imports(tmp_path, monkeypatch, rel, body, 
 # ── Q4：資料血緣 ──
 
 
-@pytest.mark.xfail(strict=True, reason="Q4 缺口：anomalies 表沒有 voted_by 欄位；detector.ensemble 的裁決事件落地後，"
-                   "只剩事件群快照記得是哪些節點投的票（keep_members=false 時成員事件也不寫）")
-def test_anomalies_table_keeps_who_voted():
-    wf = Workflow(name="gap_q4", targets=[TargetSpec(source_type="mock", query="q", entity="svc")], nodes=[
-        NodeSpec(name="fetch", operator="audit_gap.frame"),
-        NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="m", operator="detector.mad"),
-        NodeSpec(name="vote", operator="detector.ensemble", params={"strategy": "union"}),
-        NodeSpec(name="group", operator="alert.same_entity")])
-    Pipeline(wf, StorageHooks()).run(now=T0)
-    with db.read_session() as s:
-        rows = s.query(models.AnomalyRow).all()
-    assert rows and all(sorted(getattr(r, "voted_by", None) or []) == ["m", "z"] for r in rows)
-
-
 @pytest.mark.xfail(strict=True, reason="Q4 缺口：AnomalyEvent 是 frozen，但 attrs 是普通 dict，下游可以原地改（淺層凍結）")
 def test_anomaly_event_attrs_cannot_be_mutated_in_place():
-    e = AnomalyEvent("svc", "q", T0, 9.0, {"dept": "it"}, detector="detector.zscore", detector_node="z")
+    e = AnomalyEvent("svc", "q", T0, 9.0, {"dept": "it"}, detector="detector.hourly_baseline", detector_node="z")
     with pytest.raises(TypeError):
         e.attrs["dept"] = "changed"
 
 
-# ── Q5：裁決分母 ──
+# ── Q5：棄權 ──
 
 
-def test_rules_without_a_rule_abstains_instead_of_vetoing():
-    """G6（已修）：detector.rules 沒有規則時 can_evaluate=False -> 棄權，不進 detector_runs、不投反對票。"""
-    ctx = _vote([NodeSpec(name="z", operator="detector.zscore"),
-                 NodeSpec(name="r", operator="detector.rules", params={"require_rule": False})])
-    assert [a.voted_by for a in ctx.anomalies] == [("z",)]
-
-
-@pytest.mark.parametrize("op", ["detector.quantile_drift", "detector.residual_chronic"])
+@pytest.mark.parametrize("op", ["detector.residual_chronic"])
 def test_window_longer_than_the_data_abstains(op):
-    """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權。"""
-    ctx = _vote([NodeSpec(name="z", operator="detector.zscore"), NodeSpec(name="w", operator=op, params={"window": 600})])
-    assert [a.voted_by for a in ctx.anomalies] == [("z",)]
+    """G6（已修）：滾動窗比這一輪資料長 -> can_evaluate=False -> 棄權，z 的事件不受影響。
+    原本後面接表決節點（detector.ensemble、後來 soft_vote），驗的是棄權者不算參與者；表決節點已移除，
+    改成直接看基底留下的棄權紀錄，與事件只來自 z（斷言 voted_by == ("z",) 改成 detector_node == "z"）。"""
+    ctx = _detect([NodeSpec(name="z", operator="detector.hourly_baseline", params=_SNR),
+                   NodeSpec(name="w", operator=op, params={"window": 600, **_SNR})])
+    assert [a.detector_node for a in ctx.anomalies] == ["z"]
+    assert "detect:w:cannot-evaluate:abstain" in ctx.audit and "detect:z:cannot-evaluate:abstain" not in ctx.audit
 
 
 # ── Q6：入口 span 的定義 ──
@@ -231,9 +216,10 @@ def _ctx(raw, train=None, state=None):
     return c
 
 
-def test_cold_start_gate_counts_usable_points_for_peer_detectors():
-    """G11（已修）：冷啟動門檻數的是 training_points（lag／同儕有值的列），100 列只有 2 列有同儕的值 -> 不學、不判。
-    （原本用同比偵測器的 lag 欄位，它已移除；改用測試專用的同儕偵測器，同一條基底路徑）"""
+def test_baseline_records_usable_training_points_for_peer_detectors():
+    """G11：DetectorState.points 記的是 training_points（lag／同儕有值的列），不是列數：100 列只有 2 列有同儕的值 -> 2。
+    原本這裡驗的是冷啟動門檻（2 < min_train_points 60 -> 不學、不判，detector_runs == []）；min_train_points 已於
+    2026-11-20 移除，現在 2 個點也照學照判，所以斷言改成「有跑、記下來的點數是 2」。"""
     train = _frame(100)
     train["peer_0"] = float("nan")
     train.loc[98:, "peer_0"] = [50.0, 51.0]
@@ -243,17 +229,20 @@ def test_cold_start_gate_counts_usable_points_for_peer_detectors():
     op.node_name = "n"
     ctx = _ctx(raw, train)
     ctx.target = Target("mock", "q", "svc", {}, [PeerRef("mock", "p0")])
-    assert op.execute(ctx).detector_runs == []
+    out = op.execute(ctx)
+    assert out.detector_runs == ["n"] and out.new_detector_states["n"].points == 2
 
 
-def test_retrain_with_too_few_points_keeps_using_the_old_baseline():
-    """G12（已修）：到期重訓但訓練窗資料不足時，沿用資料庫裡的舊基準線照判，不留偵測盲區。"""
-    old = DetectorState({"mean": 50.0, "std": 1.0}, T0 - timedelta(days=2), points=1440, version=3,
-                        detector="detector.zscore")
-    op = OperatorRegistry.create("detector.zscore")
+def test_retrain_with_few_points_replaces_the_old_baseline():
+    """原本是 G12「到期重訓但訓練窗資料不足（20 點 < min_train_points）時沿用舊基準線」；min_train_points 與那條
+    沿用舊基準線的路已移除：20 個點也照樣重訓，新基準線取代舊的（照判，沒有偵測盲區這點不變）。"""
+    old = DetectorState({"buckets": {}, "global": [50.0, 1.0]}, T0 - timedelta(days=2), points=1440, version=3,
+                        detector="detector.hourly_baseline")  # 沒有時段資料：每個點都用全段的 (平均 50, 標準差 1)
+    op = OperatorRegistry.create("detector.hourly_baseline")
     op.node_name = "n"
     ctx = op.execute(_ctx(_frame(30, 500.0), train=_frame(20), state=old))
     assert ctx.detector_runs == ["n"] and ctx.anomalies
+    assert ctx.new_detector_states["n"].points == 20 and not any("keep-old-baseline" in line for line in ctx.audit)
 
 
 # ── Q12：結案寫入失敗 ──
@@ -305,7 +294,7 @@ def test_target_whose_detectors_are_all_skipped_does_not_fetch_training_data(mon
     p = Pipeline(Workflow(name="gap_q13", targets=targets, nodes=[
         NodeSpec(name="fetch", operator="ingestion.fetch",
                  params={"lookback_minutes": 60, "train_lookback_minutes": 1440, "retrain_minutes": 1440}),
-        NodeSpec(name="z", operator="detector.zscore", params={"include_entities": ["a"]})]), StorageHooks())
+        NodeSpec(name="z", operator="detector.hourly_baseline", params={"include_entities": ["a"]})]), StorageHooks())
     p.run(now=T0, targets=[targets[1]])
     assert len(calls) == 1  # 只抓偵測窗
 
@@ -322,10 +311,10 @@ def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monke
     shutil.copytree(runner.WORKFLOW_DIR, tmp_path, dirs_exist_ok=True)  # 內建的 admin_* 也要找得到
     (tmp_path / "detection" / "locked.yaml").write_text(
         "name: locked\nnodes:\n  - {name: fetch, operator: ingestion.fetch}\n"
-        "  - {name: detect, operator: detector.zscore, params: {threshold: 9.0}}\n", encoding="utf-8")
+        "  - {name: detect, operator: detector.hourly_baseline, params: {threshold: 9.0}}\n", encoding="utf-8")
     monkeypatch.setattr(runner, "WORKFLOW_DIR", tmp_path)
     pid = runner.run("admin_proposal_create", request=ProposalCreate(
-        source="manual", detector="detector.zscore", params={"threshold": 1.5}, proposer="amy",
+        source="manual", detector="detector.hourly_baseline", params={"threshold": 1.5}, proposer="amy",
         pipeline="locked"))["proposal"]["id"]
     req = ProposalBacktest(proposal_id=pid, metric={"source_type": "mock", "query": "cpu"}, train_ratio=0.3,
                            time_range={"start": now.replace(hour=0), "end": now, "step_seconds": 60})
@@ -338,49 +327,19 @@ def test_backtest_uses_the_same_effective_params_as_the_pipeline(tmp_path, monke
 # ── Q8 追加：資料源回 HTTP 200 但內容是 NaN／Inf 或格式不對 ──
 
 
-def _es_client(buckets):
-    import json as _json
-
-    import httpx
-    body = _json.dumps({"aggregations": {"series": {"buckets": buckets}}}, allow_nan=True).encode()
-    return httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))
-
-
-_ES_QUERY = '{"index": "metrics-*", "value_field": "cpu.pct", "agg": "avg"}'
-
-
-def _ms(i):
-    return int((T0 - timedelta(minutes=60 - i)).timestamp() * 1000)
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
-def test_elasticsearch_all_nan_or_inf_is_no_data(value):
-    """G17（已修）：ES 每桶都是 NaN／Inf 跟 Prometheus 一樣算沒資料（NoDataError），不會學成 {'mean': nan}。"""
-    from aiops.sources.base import NoDataError
-    from aiops.sources.elasticsearch import ElasticsearchSpec
-    spec = ElasticsearchSpec("http://es", client=_es_client([{"key": _ms(i), "v": {"value": value}} for i in range(60)]))
-    with pytest.raises(NoDataError):
-        spec.fetch_data(_ES_QUERY, T0 - timedelta(minutes=60), T0, 60)
-
-
-@pytest.mark.parametrize("case", ["es-missing-key", "es-string-value", "prom-string-value"])
-def test_malformed_source_response_is_a_platform_error(case):
+def test_malformed_source_response_is_a_platform_error():
     """G18（已修）：資料源回 200 但格式不對 -> InvalidQueryError（PlatformError），記成那條序列的錯誤。"""
     import json as _json
 
     import httpx
 
     from aiops.engine.errors import PlatformError
-    from aiops.sources.elasticsearch import ElasticsearchSpec
     from aiops.sources.prometheus import PrometheusSpec
     start = T0 - timedelta(minutes=60)
-    if case == "es-missing-key":
-        spec, q = ElasticsearchSpec("http://es", client=_es_client([{"v": {"value": 1.0}}] * 3)), _ES_QUERY
-    elif case == "es-string-value":
-        spec, q = ElasticsearchSpec("http://es", client=_es_client([{"key": _ms(i), "v": {"value": "abc"}} for i in range(3)])), _ES_QUERY
-    else:
-        body = _json.dumps({"status": "success", "data": {"result": [{"metric": {}, "values": [[T0.timestamp(), "abc"]]}]}}).encode()
-        spec, q = PrometheusSpec("http://p", client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))), "up"
+    # Elasticsearch 指標查詢的兩個案例（桶沒有 key、value 是字串）隨 ElasticsearchSpec.fetch_data 一起刪除；
+    # Grafana 資料源回應格式不對的案例在 tests/test_grafana_source.py
+    body = _json.dumps({"status": "success", "data": {"result": [{"metric": {}, "values": [[T0.timestamp(), "abc"]]}]}}).encode()
+    spec, q = PrometheusSpec("http://p", client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body)))), "up"
     with pytest.raises(PlatformError):
         spec.fetch_data(q, start, T0, 60)
 

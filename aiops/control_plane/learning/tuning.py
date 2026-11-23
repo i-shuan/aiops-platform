@@ -1,4 +1,4 @@
-"""調參唯一收口：自動 tune、LLM 從回饋抽規則、人工調整，三條路都只能產出提案。
+"""調參唯一收口：漏報回饋的規則式提案、LLM 從漏報回饋抽規則、人工調整，三條路都只能產出提案。
 
 提案 -> 回測 -> 核准，才會寫入現行參數。核准時檢查樂觀鎖：提案建立後若現行參數已被別的提案改過
 （例如人工剛調好），舊提案一律作廢重提，避免「人工剛調好，半夜被自動 tune 蓋掉」。
@@ -19,7 +19,7 @@ from aiops.engine.requests import (
     ProposalBacktest,
     ProposalCreate,
 )
-from aiops.control_plane.learning import golden, snr_feedback, threshold, tuning_rules
+from aiops.control_plane.learning import golden, review, segment, tuning_rules
 from aiops.control_plane.learning.segment import snr_nodes
 from aiops.control_plane.learning.replay import incident_series
 from aiops.control_plane.learning.replay import workflow_layers as _workflow_layers
@@ -40,7 +40,7 @@ def _detector_cls(name: str) -> type[DetectorOperator]:
 
 
 def _require_tunable(name: str) -> None:
-    """不收調參的偵測器（致命硬上限）：界線只認 workflow YAML，任何來源的提案（人工、自動、LLM、規則升級器）都拒絕。"""
+    """不收調參的偵測器（accepts_tuning = False）：參數只認 workflow YAML，任何來源的提案（人工、自動、LLM）都拒絕。"""
     if not _detector_cls(name).accepts_tuning:
         raise BadRequest(f"{name} 不接受調參提案：它的界線只能寫在 workflow YAML（節點 params 或 target overrides）")
 
@@ -140,8 +140,8 @@ class ProposalBacktestOp(BaseOperator):
             raise Conflict(f"提案狀態為 {row['status']}，不能再回測")
         cls = _detector_cls(row["detector_name"])
         if snr_nodes(row["pipeline"], row["detector_name"]):
-            # R+SNR 節點（開了 snr、軟投票）：整段偵測重跑，單一偵測器的回測量不準（control_plane/learning/snr_feedback.py）
-            backtest = snr_feedback.backtest(ctx, row, req)
+            # 節點開了 snr（門檻由 p_fa 換算）：整段偵測重跑，單一偵測器的回測量不準（control_plane/learning/segment.py）
+            backtest = segment.backtest(ctx, row, req)
             status = "backtested" if backtest["safety"]["passed"] else "rejected"
             ctx.result = {"proposal": Proposals.update(req.proposal_id, status=status, backtest=backtest)}
             return ctx
@@ -254,6 +254,7 @@ class FeedbackSubmitOp(BaseOperator):
         feedback = Feedbacks.create({
             "incident_uid": req.incident_uid, "verdict": req.verdict, "detector_name": req.detector,
             "text": req.text, "author": req.author, "proposal_id": None,
+            "review": review.stored(req.review, incident) if req.review is not None and incident is not None else {},
             "pipeline": req.pipeline or (incident["pipeline"] if incident else None),
             "entity": req.entity, "time_start": tr.start if tr else None, "time_end": tr.end if tr else None})
         ctx.result = {"feedback": feedback}
@@ -282,20 +283,14 @@ class FeedbackSubmitOp(BaseOperator):
 
 @OperatorRegistry.register("admin.feedback_propose")
 class FeedbackProposeOp(BaseOperator):
-    """回饋 -> 調參提案。provider 不是 noop 時讓 LLM 抽規則並驗證；沒設定、失敗、驗證不過都退回規則式提案。
-    結果只是提案，仍要回測與核准才生效。
+    """漏報回饋 -> 調參提案（把門檻調低）。provider 不是 noop 時讓 LLM 抽規則並驗證；沒設定、失敗、驗證不過都退回固定規則
+    （threshold ×0.8，夾在範圍內）。結果只是提案，仍要回測與核准才生效。
 
-    規則式提案：
-    - 誤報（false_positive）、提案層級是單一實體（scope=entity）、偵測器有 threshold：分位數反推
-      （control_plane/learning/threshold.py）：新門檻 = max(S_max × 1.05, 過去 30 天分數的 99.9% 分位數)，
-      資料源與查詢取自事件群裡的異常事件，不用呼叫端填。
-      * 只在 scope=entity 做：S_max 與分位數是「這一條序列」的分數分佈，拿它去定整條管線或全平台的門檻，
-        等於用一個服務的分佈去調其他所有服務；管線／全域層級維持固定規則。
-      * 單次變動上限 50%（tuning_rules 的規則）：目標超過就這次先調到 +50%，reason 寫明目標值與還差多少。
-        不切成多個提案：同一層的提案共用同一個基準版本，第一個核准後其他的一定變 stale，多步提案核准不了。
-      * S_max 不高於現行門檻（誤報不是這個偵測器的分數造成的，例如是多數決裡別的節點）、資料撈不到：
-        退回固定規則，原因寫在 reason 與結果的 quantile 欄位。
-    - 其他情況（漏報、管線／全域層級）：固定規則，誤報 ×1.2、漏報 ×0.8。"""
+    誤報（false_positive）回饋不產生提案（2026-11-20 起）：以前會自動提「把門檻調高／門檻倍率」的提案（分位數反推、
+    整段重跑二分搜、固定 ×1.2），等於讓偵測越用越鈍，已移除。回饋照樣記錄（admin.feedback_submit），
+    真的要調鈍由人走 admin.proposal_create 手動提案，一樣要回測、過黃金事故防護罩、核准。
+
+    節點開了 snr 的偵測器：門檻由 YAML 的 snr.p_fa 換算，調參改 threshold 不會生效，所以這裡直接拒絕、請人改 YAML。"""
 
     scope = "batch"
 
@@ -358,22 +353,26 @@ class FeedbackProposeOp(BaseOperator):
             raise Conflict(f"回饋 {req.feedback_id} 已轉成提案 {fb['proposal_id']}")
         if fb["verdict"] == "true_positive":
             raise Conflict("這筆回饋確認是真異常，不需要調參")
+        if fb["verdict"] == "false_positive":
+            raise BadRequest("誤報回饋不再自動產生把偵測調鈍的提案（2026-11-20 起；回饋本身已記錄）。"
+                             "確定要調高門檻請走人工提案 admin.proposal_create（POST /api/v1/tuning/proposals），"
+                             "一樣要回測、通過黃金事故防護罩、核准才生效")
         detector = req.detector or fb["detector_name"]
         pipeline, entity = self._scope(req, fb)
-        if pipeline != ANY and (snr_nodes(pipeline, detector) if detector else snr_feedback.has_snr(pipeline)):
-            return self._propose_snr(ctx, req, fb, detector, pipeline, entity)
         if not detector:
             raise BadRequest("請指定偵測器")
+        if snr_nodes(pipeline, detector):
+            raise BadRequest(f"{pipeline} 的 {detector} 節點門檻由 YAML 的 snr.p_fa 換算，調參改 threshold 不會生效；"
+                             "漏報請調大 YAML 的 p_fa（或拿掉 snr 改寫 threshold）")
         tunable = _detector_cls(detector).tunable
         if not tunable:
             raise BadRequest(f"{detector} 沒有可自動調整的參數，請走人工提案")
 
         active = (_effective_row(detector, pipeline, entity) or {}).get("params", {})
         current = {k: float(active.get(k, default)) for k, (default, _lo, _hi) in tunable.items()}
-        details: dict = {}
 
         def rule():
-            return self._rule(ctx, fb, detector, tunable, current, active, pipeline, entity, details)
+            return (*tuning_rules.template(fb["verdict"], tunable, current), "template")
 
         changes, reason, generated_by, rejected = self._extract(fb, detector, tunable, current, rule)
         proposal = _create_proposal("llm" if generated_by == "llm" else "auto", detector, {**active, **changes},
@@ -381,57 +380,4 @@ class FeedbackProposeOp(BaseOperator):
                                     pipeline, entity)
         Feedbacks.link_proposal(fb["id"], proposal["id"])
         ctx.result = {"proposal": proposal, "generated_by": generated_by, "rejected": rejected}
-        if details:
-            ctx.result["quantile"] = details
         return ctx
-
-    @staticmethod
-    def _propose_snr(ctx: PipelineContext, req: FeedbackPropose, fb: dict, detector: str | None, pipeline: str,
-                     entity: str) -> PipelineContext:
-        """R+SNR 管線：誤報 -> 門檻倍率提案（整段重跑二分搜，黃金事故當上限）；漏報不在這裡（倍率下限 1，見 snr_feedback）。"""
-        if fb["verdict"] != "false_positive":
-            raise BadRequest(f"{pipeline} 是 R+SNR 管線：回饋閉環只處理誤報（門檻倍率只能往少誤報調）；"
-                             "漏報請改 YAML 的 p_fa／min_run，或對調過倍率的偵測器人工提案調回")
-        det, params, reason, details = snr_feedback.propose_scale(ctx, fb, detector, pipeline, entity)
-        _check_params(det, params)
-        proposal = _create_proposal("auto", det, params, f"來自回饋 #{fb['id']}（{fb['verdict']}）：{reason}",
-                                    req.proposer, pipeline, entity)
-        Feedbacks.link_proposal(fb["id"], proposal["id"])
-        ctx.result = {"proposal": proposal, "generated_by": "segment_bisect", "rejected": None, "snr": details}
-        return ctx
-
-    @staticmethod
-    def _rule(ctx: PipelineContext, fb: dict, detector: str, tunable: dict, current: dict[str, float],
-              active: dict, pipeline: str, entity: str, details: dict) -> tuple[dict, str, str]:
-        """規則式提案：能做分位數反推就做（條件見類別說明），否則固定規則。details 填入反推的中間數字給呼叫端看。"""
-        template = tuning_rules.template(fb["verdict"], tunable, current)
-        if not (fb["verdict"] == "false_positive" and fb["incident_uid"] and entity != ANY and "threshold" in tunable):
-            return (*template, "template")
-        incident = Incidents.get_by_uid(fb["incident_uid"])
-        series = incident_series(incident["incident"], entity) if incident else []
-        fell_back = None
-        if not series:
-            fell_back = "事件群裡沒有這個實體的資料源與查詢"
-        else:
-            cls = _detector_cls(detector)
-            yaml_params, overrides, _info = _workflow_layers(ctx, detector, pipeline, entity)
-            params = layer_params(cls, active, yaml_params, overrides)  # 算分數用正式偵測實際生效的參數
-            inc = Incident.from_dict(incident["incident"], uid=incident["uid"])
-            got = threshold.infer(ctx, cls, params, series, pipeline, entity, as_utc(inc.start), as_utc(inc.end))
-            if isinstance(got, str):
-                fell_back = f"撈不到資料（{got}）"
-            else:
-                details.update(got)
-                proposal, note = tuning_rules.quantile_step(got["target"], tunable, current)
-                if proposal is None:
-                    fell_back = note
-                else:
-                    details["proposed"] = proposal["threshold"]
-                    reason = (f"分位數反推：誤報時窗最高分 S_max={got['s_max']}，過去 {got['lookback_days']} 天"
-                              f"（實際有分數 {got['q_days']} 天、{got['q_points']} 點，排除 {got['excluded_windows']} 個事故／維護／黃金時窗）"
-                              f"99.9% 分位數 Q={got['q']}；目標 max(S_max×{got['margin']}, Q)={got['target']}。{note}")
-                    if got.get("note"):
-                        reason += f"（{got['note']}）"
-                    return proposal, reason, "quantile"
-        details["fallback"] = fell_back
-        return template[0], f"{template[1]}（沒用分位數反推：{fell_back}）", "template"

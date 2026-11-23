@@ -18,7 +18,7 @@ from aiops.storage.hooks import StorageHooks
 
 T0 = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
 
-GOOD = ("name: good\nnodes:\n  - {name: fetch, operator: ingestion.fetch}\n  - {name: detect, operator: detector.zscore}\n"
+GOOD = ("name: good\nnodes:\n  - {name: fetch, operator: ingestion.fetch}\n  - {name: detect, operator: detector.hourly_baseline}\n"
         "  - {name: group, operator: alert.same_entity}\n  - {name: notify, operator: notifier.log}\n"
         "targets:\n  - {source_type: mock, query: q, entity: e}\n")
 BROKEN = {
@@ -26,10 +26,10 @@ BROKEN = {
     "bad_operator": "name: bad_operator\nnodes:\n  - {name: x, operator: detector.nope}\n",
     "bad_scope_order": "name: bad_scope_order\nnodes:\n  - {name: n, operator: notifier.log}\n  - {name: fetch, operator: ingestion.fetch}\n",
     "bad_detectors": ("name: bad_detectors\nnodes:\n  - {name: fetch, operator: ingestion.fetch}\n"
-                      "  - {name: detect, operator: detector.zscore}\n"
+                      "  - {name: detect, operator: detector.hourly_baseline}\n"
                       "targets:\n  - {source_type: mock, query: q, entity: e, detectors: [detcet]}\n"),
     "bad_target_field": ("name: bad_target_field\nnodes:\n  - {name: fetch, operator: ingestion.fetch}\n"
-                         "  - {name: detect, operator: detector.zscore}\n"
+                         "  - {name: detect, operator: detector.hourly_baseline}\n"
                          "targets:\n  - {source_type: mock, query: q, entity: e, detector: [detect]}\n"),
     "good": GOOD,
 }

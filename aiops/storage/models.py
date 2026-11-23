@@ -56,6 +56,9 @@ class IncidentRow(Base):
     # 每次重跑 RCA 覆蓋。migrations/postgres/0010
     rca_conclusion_type: Mapped[str] = mapped_column(String(32), default="", server_default="")
     rca_concluded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 最近一次 RCA 排第一的候選（'' = 沒有候選或還沒跑過）。覆核 RCA 時要知道「平台當時指的是誰」，
+    # 報告本身不落地、重跑會變，所以記在這裡。migrations/postgres/0013
+    rca_root_entity: Mapped[str] = mapped_column(String(256), default="", server_default="")
 
 
 class SilenceRow(Base):
@@ -85,7 +88,6 @@ class NotificationRow(Base):
 
 class AnomalyRow(Base):
     """偵測結果（只增不改）。由 hooks.persist_batch 跟事件群在同一筆交易寫入（不是 persist_target）。
-    detector.ensemble 的裁決事件只存裁決節點（detector_node = 裁決節點名稱），投票者 voted_by 只在事件群快照裡。
 
     唯一鍵：一個偵測節點對一條序列的一個時間點只有一筆。同一輪被重跑時 Anomalies.create_many 撞到就跳過（留先寫的），
     不會寫出兩份。既有的 PostgreSQL 靠 migrations/postgres/0008 補這個鍵。"""
@@ -99,7 +101,7 @@ class AnomalyRow(Base):
     ts: Mapped[datetime] = mapped_column(DateTime)
     value: Mapped[float] = mapped_column(Float)
     score: Mapped[float] = mapped_column(Float)
-    detector_name: Mapped[str] = mapped_column(String(64))  # 算子名，例如 detector.zscore（外部匯入的異常不經這裡）
+    detector_name: Mapped[str] = mapped_column(String(64))  # 算子名，例如 detector.hourly_baseline（外部匯入的異常不經這裡）
     detector_node: Mapped[str] = mapped_column(String(128), default="", server_default="")  # Workflow 節點名稱
     # anomaly（越過門檻）或 warning（接近門檻的預警）
     level: Mapped[str] = mapped_column(String(16), default="anomaly", server_default="anomaly")
@@ -296,6 +298,9 @@ class FeedbackRow(Base):
     author: Mapped[str] = mapped_column(String(128))
     proposal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    # 分項覆核（engine/requests.ReviewIn 有填的項目）＋ "platform"：送出當下平台對這張卡的說法
+    # （嚴重度、狀態、實體、RCA 結論等級與第一候選）。{} = 沒有分項覆核（含加欄位之前的舊列）。migrations/postgres/0013
+    review: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
 
 
 class ActiveDetectorConfigRow(Base):

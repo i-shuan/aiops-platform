@@ -250,13 +250,21 @@ class IncidentSeriesFetch(BaseOperator):
         return ctx
 
 
+# 事件時間點的桶寬：一個點代表它起算的這一分鐘（跟 stages/rca 的事件期間 [start, end + 1 分鐘) 同一個定義；ingestion 不 import rca）
+EVENT_BUCKET = timedelta(minutes=1)
+
+
 @OperatorRegistry.register("ingestion.incident_traces")
 class IncidentTracesFetch(BaseOperator):
-    """RCA 用：隨需撈 [事件開始 - before, 事件結束 + after] 的 span 放進 ctx.rca_spans。
+    """RCA 用：隨需撈 [事件開始 - before, 事件最後一點那一分鐘的結尾 + after] 的 span 放進 ctx.rca_spans。
+
+    事件的時間點是分鐘桶的起點：最後一點 03:04 代表 [03:04, 03:05)。根因演算法與 facts 的「事件期間」是
+    [開始, 結束 + 1 分鐘)，撈取要蓋到同一個結尾。以前只撈到最後一點的起點，最後一分鐘沒撈；外部告警的事故卡
+    開始＝結束（只有一個點），事件期間就一筆 span 都沒有（docs/E2E_DRILL.md 問題 6）。
 
     只在跑 RCA 報告時執行，日常偵測不碰 trace。這是旁路佐證，撈不到不該讓整份報告失敗：
     資料源沒設定 -> 略過（記在 audit）；連不上、查詢錯 -> 記進 errors 並略過，報告照出（拓撲就只用既有的）。
-    params: source_type（預設 elasticsearch）、before_minutes（預設 15）、after_minutes（預設 0）、
+    params: source_type（預設 grafana）、before_minutes（預設 15）、after_minutes（預設 0）、
             max_spans（上限，預設 20000，超過就截斷並註記）、only_incident_services（預設 false：撈這段時間所有服務，
             才看得到事件實體跟沒出事的服務之間的關係；true 只撈事件裡的服務，量小但可能漏掉中間的服務）、
             max_before_minutes（預設 0 = 不擴展；設了就是基準窗自適應回溯的上限）、
@@ -285,7 +293,7 @@ class IncidentTracesFetch(BaseOperator):
 
     scope = "batch"
 
-    def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 15, after_minutes: int = 0,
+    def __init__(self, source_type: str = "grafana", before_minutes: int = 15, after_minutes: int = 0,
                  max_spans: int = 20000, only_incident_services: bool = False, max_before_minutes: int = 0,
                  min_entry_spans: int = 20, follow_messaging: bool = False, max_lag_minutes: int = 120,
                  max_linked_traces: int = 200, min_consumer_spans: int = 5, mq_pad_minutes: int = 2):
@@ -344,7 +352,7 @@ class IncidentTracesFetch(BaseOperator):
                           services: list[str] | None, inc_start: datetime, start: datetime, end: datetime,
                           used: timedelta) -> tuple[list[SpanRecord], dict]:
         """訊息佇列跨時窗（見類別說明）。回 (併好補撈結果的 span, 寫進 trace_fetch.mq 的摘要)。"""
-        hi = end + timedelta(minutes=1)
+        hi = end  # execute 已經把最後一點那一分鐘算進 end
         consumers = consumer_entries(spans, entities, inc_start, hi)
         info: dict = {"consumers": len(consumers), "linked_traces": 0, "extra_spans": 0, "queries": 0, "edges": 0}
         if len(consumers) < self.min_consumer_spans:
@@ -404,10 +412,10 @@ class IncidentTracesFetch(BaseOperator):
         if not ctx.incidents:
             raise NotFound("沒有可以撈 trace 的事件群")
         incident = ctx.incidents[0]
-        if not is_configured(self.source_type):
-            return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
+        if not is_configured(self.source_type, "traces"):
+            return self._skip(ctx, f"{self.source_type} 沒有設定 trace 來源", as_error=False)
         inc_start = as_utc(incident.start)
-        start, end = inc_start - self.before, as_utc(incident.end) + self.after
+        start, end = inc_start - self.before, as_utc(incident.end) + EVENT_BUCKET + self.after
         services = sorted(set(incident.entities)) if self.only_incident_services else None
         entities = sorted(set(incident.entities))
         spell = _spelled_like_entities(incident.entities)
@@ -473,13 +481,13 @@ class IncidentLogsFetch(BaseOperator):
     事件期間 = [事件開始 - before, 事件結束 + after]；正常期間 = 事件期間開始前 baseline_minutes 分鐘（不重疊）。
     只撈事件裡的服務（日誌量大，撈全部沒意義）。跟 incident_traces 一樣是旁路佐證：
     資料源沒設定 -> 略過；連不上、查詢錯 -> 記進 errors 並略過，報告照出。
-    params: source_type（預設 elasticsearch）、before_minutes（預設 5）、after_minutes（預設 5）、
+    params: source_type（預設 grafana）、before_minutes（預設 5）、after_minutes（預設 5）、
             baseline_minutes（預設 60）、max_logs（每段上限，預設 5000）。
     """
 
     scope = "batch"
 
-    def __init__(self, source_type: str = "elasticsearch", before_minutes: int = 5, after_minutes: int = 5,
+    def __init__(self, source_type: str = "grafana", before_minutes: int = 5, after_minutes: int = 5,
                  baseline_minutes: int = 60, max_logs: int = 5000):
         if min(before_minutes, after_minutes) < 0 or baseline_minutes <= 0 or max_logs <= 0:
             raise ValueError("before／after_minutes 不能小於 0；baseline_minutes、max_logs 必須大於 0")
@@ -499,8 +507,8 @@ class IncidentLogsFetch(BaseOperator):
         if not ctx.incidents:
             raise NotFound("沒有可以撈日誌的事件群")
         incident = ctx.incidents[0]
-        if not is_configured(self.source_type):
-            return self._skip(ctx, f"{self.source_type} 沒有設定", as_error=False)
+        if not is_configured(self.source_type, "logs"):
+            return self._skip(ctx, f"{self.source_type} 沒有設定日誌來源", as_error=False)
         start, end = as_utc(incident.start) - self.before, as_utc(incident.end) + self.after
         base_start = start - self.baseline
         services = sorted(set(incident.entities))
@@ -533,3 +541,10 @@ class IncidentLogsFetch(BaseOperator):
                                    "baseline_window": [base_start.isoformat(), start.isoformat()]}
         ctx.log(f"incident_logs:{len(ctx.rca_logs)}+{len(ctx.rca_logs_baseline)}baseline")
         return ctx
+
+
+def grafana_targets(pipeline: str) -> list[dict[str, Any]]:
+    """Workflow.targets_from: grafana 的偵測對象：Grafana 上標了 aiops_detect: <pipeline> 的告警規則。
+    回傳 TargetSpec 的欄位（由組裝點 interfaces/runner 建成 TargetSpec）。Grafana 沒設定或連不上丟 InfrastructureError：
+    不知道要看哪些序列時，這一輪要失敗給人看，不能當成「沒有對象、沒事」。"""
+    return get_datasource_spec("grafana").detection_targets(pipeline)

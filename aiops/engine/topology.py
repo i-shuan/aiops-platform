@@ -26,6 +26,22 @@ def service_edges(spans: Iterable[Any]) -> Counter:
                    and not getattr(s, "consumer", False))
 
 
+def service_edge_last_seen(spans: Iterable[Any]) -> dict[tuple[str, str], Any]:
+    """每條服務呼叫邊 (caller, callee) 最後一筆跨服務呼叫的時間（被呼叫端那個 span 的 ts）。邊的定義跟 service_edges 同一個；
+    span 沒有 ts 的不算。給關係圖的出處用（engine/graph.Provenance.last_seen）。"""
+    spans = list(spans)
+    service_of = {s.span_id: s.service for s in spans if s.span_id}
+    out: dict[tuple[str, str], Any] = {}
+    for s in spans:
+        ts = getattr(s, "ts", None)
+        if ts is None or s.parent_id not in service_of or service_of[s.parent_id] == s.service or getattr(s, "consumer", False):
+            continue
+        pair = (service_of[s.parent_id], s.service)
+        if pair not in out or ts > out[pair]:
+            out[pair] = ts
+    return out
+
+
 def lot_edges_from_paths(paths: list[list[str]]) -> list[LotEdge]:
     """Lot 路徑 -> 機台流向：每條相鄰的 (上游, 下游) 被幾個不同的 Lot 走過。"""
     lots_per_edge: dict[tuple[str, str], int] = {}

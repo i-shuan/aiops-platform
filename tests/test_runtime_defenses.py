@@ -59,7 +59,7 @@ def test_from_dict_goes_through_the_same_gate(now):
 def test_a_detector_that_scores_infinity_fails_that_series_instead_of_emitting_an_event(now, sent, monkeypatch):
     """偵測器算出 Inf（分母是 0 這類 bug）且判成異常：排程（strict=False）把每條序列記成錯誤、沒有事件也不落地；
     手動（strict=True）直接丟 ValueError。以前 Inf 分數會一路進事件群（嚴重度直接 P0）並寫進資料庫。"""
-    from aiops.stages.detectors.zscore import ZScoreDetector
+    from aiops.stages.detectors.hourly_baseline import HourlyBaselineDetector
 
     def broken(self, df: pd.DataFrame) -> AnomalyResult:
         scores = pd.Series(np.inf, index=df.index)
@@ -70,7 +70,7 @@ def test_a_detector_that_scores_infinity_fails_that_series_instead_of_emitting_a
     with db.read_session() as s:
         before = s.scalar(select(func.count()).select_from(AnomalyRow))
 
-    monkeypatch.setattr(ZScoreDetector, "detect", broken)
+    monkeypatch.setattr(HourlyBaselineDetector, "detect", broken)
     ctx = run_context("sample_metrics_only", now=now + timedelta(hours=2), strict=False)
     assert ctx.errors and all("ValueError" in e.message and "AnomalyEvent.score" in e.message and "inf" in e.message
                               for e in ctx.errors)
@@ -243,7 +243,7 @@ def test_ten_concurrent_rca_requests_for_one_incident_hit_the_data_source_and_th
 
     spec, llm = _CountingSpec(), _CountingLLM()
     monkeypatch.setattr(fetch, "get_datasource_spec", lambda _t: spec)
-    monkeypatch.setattr(fetch, "is_configured", lambda _t: True)
+    monkeypatch.setattr(fetch, "is_configured", lambda *_: True)
     monkeypatch.setattr("aiops.stages.enrichment.summarizer.build_llm", lambda *a, **k: llm)
     original = runner.load_workflow
 

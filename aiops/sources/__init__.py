@@ -7,13 +7,13 @@ from typing import Any
 
 from aiops.engine.errors import BadRequest, InfrastructureError
 from aiops.sources.base import BaseDataSourceSpec
-from aiops.sources.elasticsearch import ElasticsearchSpec
+from aiops.sources.grafana import GrafanaSpec
 from aiops.sources.mock import MockSpec
 from aiops.sources.prometheus import PrometheusSpec, VictoriaMetricsSpec
 
 # 新增資料源 = 寫一個 Spec 並加進這裡
 _SPECS: dict[str, type[BaseDataSourceSpec]] = {
-    spec.source_type: spec for spec in (MockSpec, PrometheusSpec, VictoriaMetricsSpec, ElasticsearchSpec)
+    spec.source_type: spec for spec in (MockSpec, PrometheusSpec, VictoriaMetricsSpec, GrafanaSpec)
 }
 
 
@@ -21,9 +21,11 @@ def source_types() -> list[str]:
     return sorted(_SPECS)
 
 
-def is_configured(source_type: str) -> bool:
-    """這個資料源有沒有設定（例如 AIOPS_ES_URL）。未知的資料源回 False。"""
-    return source_type in _SPECS and _SPECS[source_type].configured()
+def is_configured(source_type: str, signal: str | None = None) -> bool:
+    """這個資料源有沒有設定（例如 AIOPS_GRAFANA_URL＋AIOPS_GRAFANA_TOKEN）。未知的資料源回 False。
+    signal（traces／logs）有給：還要這個資料源有提供那一種資料（grafana：有設那一種的資料源 UID）。
+    沒有 trace 的環境（純指標的產線）不設 trace 的 UID 是正常的設定，不是故障。"""
+    return source_type in _SPECS and _SPECS[source_type].configured() and (signal is None or _SPECS[source_type].provides(signal))
 
 
 def get_datasource_spec(source_type: str) -> BaseDataSourceSpec:

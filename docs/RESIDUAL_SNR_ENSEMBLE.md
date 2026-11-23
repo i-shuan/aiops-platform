@@ -1,5 +1,40 @@
 # 殘差白化＋自適應門檻＋SNR 軟投票（it_otel 的偵測段：R+SNR）
 
+> **2026-11-20：本文件描述的減少誤報機制已全部移除，下面的量測數字不再描述現行行為，而且沒有重新量測。**
+> 使用者決定偵測階段要最敏感，同一天移除了：
+> - **軟投票** `detector.soft_vote`（含 `bypass`、旁路漂移票 `detect_drift_solo`）——現在三個偵測節點各自成立，任何一個越線就是一筆異常；
+> - **`min_run`**（`residual_chronic` 連續越線幾點才成立）；
+> - **門檻倍率 `threshold_scale`** 與「誤報回饋 → 自動提調鈍的提案」整條路（`snr_feedback.py`、分位數反推 `threshold.py`、
+>   `scripts/backtest/feedback_e2e.py`）：`admin.feedback_propose` 對誤報回饋回 400，要調鈍只能由人走人工提案；
+> - **尾巴校正** `fpr`／`max_tail_factor`（`calibrated_scale`）：殘差偵測器的分母就是 σ = 1.4826 × MAD；
+> - 分母底噪 `min_scale`／`min_scale_ratio`／整數序列至少 1、冷啟動棄權 `min_train_points`。
+>
+> 節點參數 `snr: {p_fa: ...}` 還在，只用來把節點門檻換算成 z_{1−p_fa/2}；序列 SNR 仍記在基準線裡當診斷值。逐點證據
+> `ctx.detector_evidence` 已刪。
+>
+> 所以本文件「做法」第 2、5 節、「回測」「四組比較」「採用」「誤報走回饋閉環」「混沌回歸」各節的敘述與數字（誤報分鐘、18 格檢出、
+> 倍率提案的前後對照）都是**移除前**的程式量的，原樣保留當歷史紀錄。**移除之後沒有用 ES 序列重跑，也沒有重跑混沌場景**；
+> `scripts/backtest/residual_ensemble.py` 已改成「任何節點越線就算告警」，可以直接重跑。
+> 移除後只在合成序列上量過（`tests/test_residual_ensemble.py::test_normal_week_alert_minutes_after_removing_the_false_alarm_mechanisms`，
+> 沒有注入的一週 = 10080 分鐘，三個節點門檻 3.29，任何一個越線的分鐘數；「移除前」是同一份資料上用軟投票 ∪ 旁路漂移票重算的）：
+>
+> | 合成序列 | 移除前 | 移除後 | 移除後各節點（hourly／突變／漂移） |
+> |---|---|---|---|
+> | 291／135 筆、雜訊 9，訓練 14 天 | 29 分鐘 | 31 分鐘 | 20／12／2 |
+> | 低流量 Poisson 40／15 筆，訓練 14 天 | 20 分鐘 | 133 分鐘 | 20／72／46 |
+> | 291／135 筆、雜訊 9，訓練 7 天 | 93 分鐘 | 290 分鐘 | 19／6／268 |
+> | 低流量 Poisson，訓練 7 天 | 110 分鐘 | 681 分鐘 | 17／108／579 |
+>
+> 這四條是測試裡現成的合成序列，不是留出驗證，也不是真實流量；真實序列尾巴更肥，預期更吵，沒有量。
+
+> **歷史紀錄（2026-11-20 註）**：本文件拿來比較的偵測器與裁決——`detector.mad`、`detector.quantile_drift`、`detector.zscore`、
+> `detector.rules`、`detector.hard_limit`（連同 `alert.fatal_floor` 與「致命軌」旁路）、布林多數決 `detector.ensemble`——已於 2026-11-20 移除，
+> `scripts/backtest/variants.py` 的對照變體 R、A、A+SNR 也跟著拿掉，只剩 R+SNR。下面的數字與敘述原樣保留，當作現行組合
+> （`hourly_baseline`＋`residual_shift`＋`residual_chronic`＋`detector.soft_vote`，旁路 `detect_drift_solo`）怎麼選出來的紀錄；
+> 文中的四組比較已經無法用現在的程式重跑。現行的偵測段在 `scripts/pipelines/sample_it_otel.yaml`（出貨的 `it_otel.yaml` 自 2026-11-15 起不跑偵測器），
+> 沒有 `fatal`（hard_limit）旁路。`sample_factory` 也改成同一組三票＋`soft_vote`（沒有在機台感測值上驗證過），
+> `sample_it_apm`／`sample_metrics_only` 改成 `hourly_baseline`。人訂的靜態門檻改由 Grafana 告警規則推進來，不在平台裡做。
+
 > **現況（`feat/adopt-r-snr`）**：it_otel 已採用 R+SNR；誤報走回饋閉環（門檻倍率提案、整段回測、黃金事故防護罩、人核准），
 > 見「採用」「誤報走回饋閉環」兩節。下面的回測數字是演進過程（R -> R+SNR）量的，各節註明 commit。
 
@@ -109,7 +144,7 @@
 
 ## 回測
 
-工具：`scripts/backtest/residual_ensemble.py`（序列撈取在 `scripts/backtest/es_series.py`，唯讀 API key、只打 `_search`，
+工具：`scripts/backtest/residual_ensemble.py`（序列撈取當時在 `scripts/backtest/es_series.py`——2026-11-20 已隨平台不再直連 Elasticsearch 刪除，腳本現在只讀既有的 CSV 快取——唯讀 API key、只打 `_search`，
 CSV 快取在 repo 外）。
 
 ```bash
@@ -401,7 +436,7 @@ residual_shift ×1.29（176 -> 170）；第四輪沒有偵測器能再讓誤報�
 
 ## ES 資料源補桶 bug（`0a3379a` 已修）
 
-`aiops/sources/query/elasticsearch.py` 的 date_histogram：range 是 `[start, end)`，`extended_bounds.max` 卻是 `end`，最後補出來的那一桶
+`aiops/sources/query/elasticsearch.py`（2026-11-20 已移出平台，現為 `scripts/chaos/metric_query.py`）的 date_histogram：range 是 `[start, end)`，`extended_bounds.max` 卻是 `end`，最後補出來的那一桶
 一定在 range 外、一定是空的。avg 回 null 會被丟掉；**sum／count 回 0**——每分鐘請求數這類序列每一輪偵測的最後一點都是假的掉到 0，
 pay-api 線上每 5 分鐘一輪因此每輪一筆誤報（每週約 1951 分鐘）。修法：補桶只補到 `end − step`。離線回測工具直接查 ES、
 沒走平台的資料源，所以先前的回測數字不受影響；延遲（avg、sum÷筆數）序列不受影響。

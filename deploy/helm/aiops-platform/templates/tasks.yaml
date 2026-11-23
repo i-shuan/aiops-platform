@@ -1,5 +1,5 @@
-{{- /* 排程的 CronJob：tasks = 使用者告警管線（外部告警的收斂與事故卡），watchdog = 平台看門狗（偵測演算法監控平台自己）。
-       兩個用同一份定義，只差名稱、排程與管線。*/ -}}
+{{- /* 排程的 CronJob：tasks = 使用者告警管線（外部告警的收斂與事故卡），watchdog = 平台看門狗（偵測演算法監控平台自己），
+       topology = 從 trace 沉澱關係圖。三個用同一份定義，只差名稱、排程與管線。*/ -}}
 {{- define "aiops.cronjob" -}}
 {{- $root := index . 0 -}}
 {{- $name := index . 1 -}}
@@ -46,4 +46,12 @@ spec:
 {{- if .Values.watchdog.enabled }}
 ---
 {{ include "aiops.cronjob" (list . "watchdog" .Values.watchdog) }}
+{{- end }}
+{{- if .Values.topology.enabled }}
+---
+{{ include "aiops.cronjob" (list . "topology" .Values.topology) }}
+{{- end }}
+{{- if .Values.grafanaDetect.enabled }}
+---
+{{ include "aiops.cronjob" (list . "detect" .Values.grafanaDetect) }}
 {{- end }}

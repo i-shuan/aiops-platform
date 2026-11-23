@@ -10,7 +10,7 @@ from datetime import timedelta
 
 from aiops.engine.registry import OperatorRegistry
 from aiops.engine.types import as_utc
-from aiops.stages.notification.links import explore_url, grafana_base_url
+from aiops.stages.notification.links import explore_url, grafana_base_url, traces_datasource_uid
 from aiops.stages.rca.base import RcaSection
 from aiops.stages.rca.mq import edge_line, producer_windows
 from aiops.stages.rca.spans import (call_chain, is_resource_leaf, resource_kinds, resource_label, sample_trace,
@@ -122,7 +122,7 @@ class TraceEvidence(RcaSection):
 
     def build(self, incident, ctx):
         if ctx.rca_spans:
-            return _from_spans(incident, ctx, self.traces_datasource)
+            return _from_spans(incident, ctx, traces_datasource_uid(self.traces_datasource))
         by_service: dict[str, list] = {}
         for r in _trace_rows(incident, ctx):
             by_service.setdefault(r.service, []).append(r)

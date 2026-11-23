@@ -1,6 +1,6 @@
 # 測試用的偵測管線樣本：這是 metrics_only.yaml 在「偵測演算法只給 AIOps 平台自己當看門狗」這個決定之前的內容（2026-11-15），
 # 只有 name 改成 sample_metrics_only。出貨的 metrics_only.yaml 現在只吃各團隊推進來的外部告警、不跑偵測器（docs/EXTERNAL_ALERTS.md）；
-# 偵測機制（抓資料、偵測器、多數決、致命軌、基準線、調參回測）的端到端測試、回測與混沌腳本改用這個檔。
+# 偵測機制（抓資料、偵測器、投票、基準線、調參回測）的端到端測試、回測與混沌腳本改用這個檔。
 # 不在 aiops/ 裡、不進映像檔（Dockerfile 只 COPY aiops）；只有 tests/ 與 scripts/ 透過 scripts/sample_pipelines.py 載入得到。
 name: sample_metrics_only
 description: "只有時序指標，沒有 trace 與拓撲"
@@ -12,9 +12,10 @@ nodes:
     operator: ingestion.fetch
     params: {lookback_minutes: 60, train_lookback_minutes: 1440, retrain_minutes: 1440}
 
-  # 異常檢測：隨時換成 detector.mad / detector.quantile_drift / detector.hourly_baseline / detector.rules
+  # 異常檢測：168 時段基準線。訓練窗不到 min_weeks 週時整條退回全段平均與標準差。
+  # 要換成殘差組（hourly_baseline＋residual_shift＋residual_chronic）照 sample_it_otel 的寫法。
   - name: detect
-    operator: detector.zscore
+    operator: detector.hourly_baseline
   - name: new_only
     operator: detector.new_only
 

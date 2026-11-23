@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import numpy as np
 import pandas as pd
 
-from aiops.engine.context import AnomalyResult, DetectorEvidence, DetectorState, PipelineContext, TargetError
+from aiops.engine.context import AnomalyResult, DetectorState, PipelineContext, TargetError
 from aiops.engine.errors import BadRequest
 from aiops.engine.params import deep_merge
 from aiops.engine.types import ANOMALY, WARNING, AnomalyEvent, as_utc
@@ -23,21 +23,16 @@ from aiops.engine.operator import BaseOperator
 
 class DetectorOperator(BaseOperator):
     scope: ClassVar[str] = "target"
-    # 引擎看到這個才會替節點載入基準線與調參（new_only、ensemble 這類沒有基準線的算子不設）
+    # 引擎看到這個才會替節點載入基準線與調參（new_only 這類沒有基準線的算子不設）
     has_baseline: ClassVar[bool] = True
     algorithm: ClassVar[str] = ""
     # True：df 除了 ts、value 還必須有 peer_* 欄位
     requires_peers: ClassVar[bool] = False
-    # False：不需要歷史資料學基準線（靜態規則），訓練點數再少也照判。True 的演算法訓練點數 < min_train_points 就不學、不判
-    requires_training: ClassVar[bool] = True
     # 可調參數：名稱 -> (預設值, 最小值, 最大值)。調參（含 LLM 抽規則）只能改這些，且不能超出範圍
     tunable: ClassVar[dict[str, tuple[float, float, float]]] = {}
-    # 不開放自動調參、但合法的參數（例如靜態規則的上下限）
+    # 不開放自動調參、但合法的參數（例如時區、時段最少訓練點數）
     other_params: ClassVar[frozenset[str]] = frozenset()
-    # False：這個節點的事件不交給 detector.ensemble 表決（致命硬上限：單點踩線就成立，不能被統計多數決否決）。
-    # 排在 ensemble 前面的非投票節點必須列在 ensemble 的 bypass，載入期檢查；不然它會默默變成分母的一員
-    votes: ClassVar[bool] = True
-    # False：參數只認 YAML 與 target overrides，後台調參（含 LLM 抽規則、規則升級器）一律不套用、提案直接拒絕
+    # False：參數只認 YAML 與 target overrides，後台調參（含 LLM 抽規則）一律不套用、提案直接拒絕
     accepts_tuning: ClassVar[bool] = True
     # True：分數是對「時段（週幾×小時）基準」算的，季節訊號已經扣掉，分數單位就是雜訊尺度（hourly_baseline、residual_*）。
     # 開 snr 時決定門檻怎麼從 p_fa 換算（見 snr_threshold）；不開 snr 時沒有任何作用
@@ -46,7 +41,6 @@ class DetectorOperator(BaseOperator):
     def __init__(self, **params: Any):
         routing = {k: params.pop(k) for k in ROUTING_PARAMS & set(params)}
         behaviour = {k: params.pop(k) for k in NODE_PARAMS & set(params)}
-        scale = params.pop(THRESHOLD_SCALE, None)
         unknown = set(params) - set(self.tunable) - set(self.other_params)
         if unknown:
             allowed = sorted({*self.tunable, *self.other_params, *ROUTING_PARAMS, *NODE_PARAMS})
@@ -64,11 +58,7 @@ class DetectorOperator(BaseOperator):
             if "threshold" not in self.tunable:
                 raise TypeError(f"{self.operator_name or type(self).__name__} 沒有 threshold，不能設 warning_ratio")
         self.warning_ratio = ratio
-        self.min_train_points = int(behaviour.get("min_train_points", DEFAULT_MIN_TRAIN_POINTS))
-        if self.min_train_points < 1:
-            raise TypeError("min_train_points 至少 1")
         self.snr = _snr_config(behaviour.get("snr"), self.tunable, self.operator_name or type(self).__name__)
-        self.threshold_scale = _threshold_scale(scale, self.tunable, self.operator_name or type(self).__name__)
         self.params = params
         # 建立時就檢查寫了的值在不在範圍內：節點 YAML 寫 threshold: -3 在載入 workflow 時就報錯，不是等到第一輪偵測
         self.check_ranges()
@@ -143,11 +133,11 @@ class DetectorOperator(BaseOperator):
             raise BadRequest(f"{self.operator_name} 前面需要先有 ingestion.fetch（ctx.raw_df 是空的）")
         key = self.state_key
         if ctx.raw_df.empty:
-            return ctx  # 沒資料、沒評估：不算參與投票（棄權），不是投反對票
+            return ctx  # 沒資料、沒評估：不進 detector_runs
         if self.requires_peers and not (target.peers or target.peer_group):
             raise BadRequest(f"{self.operator_name} 需要同儕序列（target 的 peers 或 peer_group）")
         if self.requires_peers and not any(str(c).startswith("peer_") for c in ctx.raw_df.columns):
-            ctx.log(f"detect:{key}:no-peers:abstain")  # peer_group 只撈到自己：沒得比就棄權，不投反對票
+            ctx.log(f"detect:{key}:no-peers:abstain")  # peer_group 只撈到自己：沒得比就棄權
             return ctx
 
         try:
@@ -161,26 +151,16 @@ class DetectorOperator(BaseOperator):
 
         df = ctx.raw_df
         if not algo.can_evaluate(df):
-            # 這一輪的資料算不出任何分數（滾動窗比資料長、沒有規則可套）：棄權，不進 detector_runs，不投反對票
+            # 這一輪的資料算不出任何分數（滾動窗比資料長）：棄權，不進 detector_runs
             ctx.log(f"detect:{key}:cannot-evaluate:abstain")
             return ctx
         state = ctx.detector_states.get(key)
         base_version = state.version if state else 0  # 寫回時帶上，資料庫才能偵測並發覆蓋
         train: pd.DataFrame | None = None
         if ctx.train_df is not None or state is None:
-            # 批次訓練（基準線過期或還沒有）；完全沒有訓練窗（第一次、沒設 train_lookback）就用這一輪的資料
-            candidate = self._training_frame(ctx, ctx.train_df if ctx.train_df is not None else df)
-            points = algo.training_points(candidate)  # 演算法真正學得到的點（lag／同儕有值的列），不是列數
-            if type(self).requires_training and points < self.min_train_points:
-                if state is None:
-                    # 冷啟動／資料太少：不學、不判、不投票（不進 detector_runs），下一輪資料夠了再學。
-                    # 幾十個點學到的基準線不可信；服務一上線就壞的話，還會把壞的狀態學成正常
-                    ctx.log(f"train:{key}:too-few-points:{points}<{self.min_train_points}")
-                    return ctx
-                # 基準線到期要重訓、但這次訓練窗資料不足（資料斷了一天剛恢復）：舊基準線還能用，先用它判
-                ctx.log(f"train:{key}:too-few-points:{points}<{self.min_train_points}:keep-old-baseline")
-            else:
-                train = candidate
+            # 批次訓練（基準線過期或還沒有）；完全沒有訓練窗（第一次、沒設 train_lookback）就用這一輪的資料。
+            # 沒有最少點數的門檻：拿到幾個點就學幾個點（冷啟動棄權 min_train_points 已於 2026-11-20 移除）
+            train = self._training_frame(ctx, ctx.train_df if ctx.train_df is not None else df)
         snr_stats: dict[str, Any] | None = None
         if train is not None:
             algo.fit(train)
@@ -199,22 +179,14 @@ class DetectorOperator(BaseOperator):
         if self.snr is not None:
             threshold, source = (float(snr_stats["threshold"]), str(snr_stats["threshold_source"])) if snr_stats \
                 else (algo.param("threshold"), "fallback")  # 舊基準線沒有 SNR 統計：照原本的 threshold，下次重訓才有
-            algo.params = {**algo.params, "threshold": threshold * algo.threshold_scale}
+            algo.params = {**algo.params, "threshold": threshold}
             db = snr_stats.get("snr_db") if snr_stats else None
-            ctx.log(f"snr:{key}:db={'n/a' if db is None else round(db, 2)}:threshold={round(threshold, 3)}:{source}"
-                    + (f":x{algo.threshold_scale:g}" if algo.threshold_scale != 1.0 else ""))
-        elif algo.threshold_scale != 1.0:
-            algo.params = {**algo.params, "threshold": algo.param("threshold") * algo.threshold_scale}
-            ctx.log(f"threshold-scale:{key}:x{algo.threshold_scale:g}")
+            ctx.log(f"snr:{key}:db={'n/a' if db is None else round(db, 2)}:threshold={round(threshold, 3)}:{source}")
 
-        ctx.detector_runs.append(key)  # 真的評估過這段資料才算參與（沒抓到異常 = 反對票）
+        ctx.detector_runs.append(key)  # 真的評估過這段資料才記
         # 多個偵測器串在一起時，anomaly_result 只留最後一個（給除錯看）；真正的結果是 anomalies 的聯集，
-        # 每一筆都帶著自己是哪個演算法、哪個節點抓到的（要交集／多數決就接 detector.ensemble）
+        # 每一筆都帶著自己是哪個演算法、哪個節點抓到的。沒有表決：任何一個節點越線，事件就原樣往下游走
         result = ctx.anomaly_result = algo.detect(df)
-        if self.snr is not None:
-            ctx.detector_evidence[key] = DetectorEvidence(result.timestamps, list(result.scores), algo.param("threshold"),
-                                                          source, float(self.snr["p_fa"]),
-                                                          snr_stats.get("snr_db") if snr_stats else None)
         for note in algo.notes:  # 壞資料這類「沒判、但要有人知道」的事：進 audit 也進 errors，不默默吞掉
             ctx.log(f"{algo.algorithm}:{key}:{note}")
             ctx.errors.append(TargetError(target.entity, f"{algo.algorithm}:{key}:{note}"))
@@ -233,7 +205,7 @@ class DetectorOperator(BaseOperator):
 
     def _training_frame(self, ctx: PipelineContext, df: pd.DataFrame) -> pd.DataFrame:
         """訓練前拿掉這個實體的歷史事故與維護窗（ctx.training_exclusions），避免基準線被當機污染。
-        拿掉後剩不到原本一半、或不到 MIN_TRAIN_POINTS 點，就退回用全部資料並記錄（資料太少時有偏的基準線好過沒有）。"""
+        拿掉後剩不到原本一半、或不到 EXCLUSION_MIN_KEEP 點，就退回用全部資料並記錄（資料太少時有偏的基準線好過沒有）。"""
         if not self.exclude_incidents or not ctx.training_exclusions or df.empty:
             return df
         ts = pd.to_datetime(df["ts"], utc=True)
@@ -262,11 +234,11 @@ class DetectorOperator(BaseOperator):
     # ── 演算法可以覆寫的「我這一輪能不能判」與「我真正學到幾個點」 ──
 
     def can_evaluate(self, df: pd.DataFrame) -> bool:
-        """這一輪的資料算得出分數嗎？算不出來（滾動窗比資料長、沒有規則）就棄權：不進 detector_runs、不投反對票。"""
+        """這一輪的資料算得出分數嗎？算不出來（滾動窗比資料長）就棄權：不進 detector_runs。"""
         return True
 
     def training_points(self, df: pd.DataFrame) -> int:
-        """訓練資料裡演算法真正用得到的點數（冷啟動門檻與 DetectorState.points 用）。
+        """訓練資料裡演算法真正用得到的點數（記在 DetectorState.points）。
         預設是列數；需要 lag 或同儕欄位的演算法只算那些欄位有值的列。"""
         return len(df)
 
@@ -326,34 +298,19 @@ ROUTING_PARAMS = frozenset({"include_entities", "exclude_entities"})
 # 每個偵測節點都能寫的行為參數：
 #   exclude_incidents（預設 true）：訓練基準線時排除這個實體的歷史事故與維護窗
 #   warning_ratio（預設不開）：分數超過「門檻 × 這個比例」但還沒越線時記成 warning（預警），例如 0.8
-#   min_train_points（預設 60 = 每分鐘一點的 1 小時）：訓練點數不到就不學、不判；requires_training=False 的算子不受影響
-#   snr（預設不開）：{p_fa: 目標逐點虛警率, tz: 時段時區, min_slot_points: 時段最少點數}。開了就算序列 SNR、
-#     門檻改由 p_fa 換算（取代 threshold）、並把逐點證據交給 ctx.detector_evidence（給 detector.soft_vote）
-NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio", "min_train_points", "snr"})
+#   snr（預設不開）：{p_fa: 目標逐點虛警率, tz: 時段時區, min_slot_points: 時段最少點數}。開了就算序列 SNR（記在基準線裡，
+#     只當診斷）、節點門檻改由 p_fa 換算（取代 threshold）。它只是「門檻怎麼訂」的另一種寫法，不壓制任何事件
+NODE_PARAMS = frozenset({"exclude_incidents", "warning_ratio", "snr"})
 SNR_STATE_KEY = "_snr"
-# 門檻倍率（調參用，回饋閉環的誤報提案改的就是它）：節點實際門檻 = (snr 換算的門檻，或沒開 snr 時的 threshold) × 倍率。
-# 範圍下限 1：調參只能讓節點變鈍（少誤報），不能比 YAML／p_fa 定的門檻更敏感——「可以誤報、不能漏報」，靈敏度的底線由 YAML 決定。
-# 有 threshold 的偵測器都收；寫在節點 YAML 或 target overrides 就跟其他鍵一樣鎖定、調參改不到。
-THRESHOLD_SCALE = "threshold_scale"
-THRESHOLD_SCALE_RANGE = (1.0, 1.0, 10.0)
 
 
 def tuning_keys(cls: type[DetectorOperator]) -> set[str]:
-    """調參（ctx.detector_params／核准的提案）可以帶哪些鍵：tunable、other_params，有 threshold 的再加門檻倍率。"""
-    keys = {*cls.tunable, *cls.other_params}
-    return keys | {THRESHOLD_SCALE} if "threshold" in cls.tunable else keys
+    """調參（ctx.detector_params／核准的提案）可以帶哪些鍵：tunable 與 other_params。
+    資料庫裡舊調參帶的其他鍵（2026-11-20 移除的 threshold_scale、min_scale、fpr、max_tail_factor）
+    不在這裡面：effective_params／layer_params 直接略過並記 log，不會讓序列失敗。"""
+    return {*cls.tunable, *cls.other_params}
 
 
-def _threshold_scale(raw: Any, tunable: dict[str, Any], name: str) -> float:
-    if raw is None:
-        return 1.0
-    if "threshold" not in tunable:
-        raise TypeError(f"{name} 沒有 threshold，不能設 {THRESHOLD_SCALE}")
-    _default, low, high = THRESHOLD_SCALE_RANGE
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or not low <= raw <= high:
-        raise ValueError(f"{name}.{THRESHOLD_SCALE}={raw!r} 超出範圍 [{low}, {high}]（只能 >= 1：調參只准往少誤報的方向）")
-    return float(raw)
-DEFAULT_MIN_TRAIN_POINTS = 60
 # 訓練排除事故窗後至少要剩這麼多點（或原本的一半），不然退回用全部資料
 EXCLUSION_MIN_KEEP = 30
 
@@ -368,57 +325,47 @@ def layer_params(cls: type[DetectorOperator], tuned: dict[str, Any], yaml_params
     return deep_merge(deep_merge({k: v for k, v in tuned.items() if k in allowed}, yaml_params), override)
 
 
-# 分母底噪的兩個 tunable（mad、zscore、hourly_baseline、quantile_drift 都有）：
-#   min_scale：絕對下限，單位跟指標一樣（失敗數填 0.5、延遲 µs 填 5000）；0 = 不用
-#   min_scale_ratio：相對下限，|中心值| × 這個比例（預設 1%：延遲 1,000,000 µs 的序列分母至少 10,000）
-SCALE_FLOOR_TUNABLE: dict[str, tuple[float, float, float]] = {
-    "min_scale": (0.0, 0.0, 1e12),
-    "min_scale_ratio": (0.01, 0.0, 1.0),
-}
-
-
 def is_integer_series(values: pd.Series | np.ndarray) -> bool:
     """全部是整數值（失敗數、請求數這類計數）。空序列或有 NaN／無限大都不算。"""
     arr = np.asarray(values, dtype=float)
     return bool(arr.size) and bool(np.isfinite(arr).all()) and bool((arr == np.round(arr)).all())
 
 
-def scale_floor(scale: float, values: pd.Series | np.ndarray | None = None, min_scale: float = 0.0,
-                min_scale_ratio: float = 0.01, *, center: float | None = None, integer: bool | None = None) -> float:
-    """分母的保底：max(算出來的 scale, 絕對下限 min_scale, |中心| × min_scale_ratio, 整數序列的 1 個單位)。
+def guard_scale(*candidates: float | None) -> float:
+    """分母唯一的保底，只防除以 0：依序取第一個「有限而且 > 0」的尺度，都沒有就 1.0。
+    量到的尺度多小都照用，不墊高。演算法實際用的是 floored_scale：在這之上只多一個相對底噪（水位的 1%）。
+    其他分母下限（min_scale、整數序列至少 1、時段 std 至少全段的一成）已於 2026-11-20 移除，沒有放回來。"""
+    for c in candidates:
+        if c is not None and math.isfinite(c) and c > 0:
+            return float(c)
+    return 1.0
 
-    整數序列（失敗數、請求數）MAD 常常是 0：1 筆就是最小有意義的變動，分母至少 1——不然 2 筆失敗會變成百萬分。
-    中心與「是不是整數」預設從 values（訓練資料）算：中心取中位數；偵測時沒有訓練資料，就由 center／integer 傳進來
-    （演算法在 fit 時記在基準線裡）。
-    三個下限都是 0（min_scale=0、min_scale_ratio=0、中心為 0 或非整數）時退回 1.0，跟 quantile_drift
-    既有的最後一層一致：寧可分數偏鈍，也不要除以趨近 0 的數把雜訊放大成異常。
-    底噪只在 scale 小於它時起作用；正常波動的序列 scale 遠大於中心的 1%，分數一分不變。
-    """
-    if center is None:
-        center = float(np.nanmedian(np.asarray(values, dtype=float))) if values is not None and len(values) else 0.0
-    if integer is None:
-        integer = values is not None and is_integer_series(values)
-    floor = max(float(min_scale), abs(float(center)) * float(min_scale_ratio), 1.0 if integer else 0.0)
-    out = max(float(scale) if np.isfinite(scale) else 0.0, floor)
+
+# 相對底噪：分母至少是「序列水位 × min_scale_ratio」，預設 1%。
+# 來源：這是 2026-11-20 之前就有的預設值（當時跟絕對下限、整數下限、尾巴校正一起被移除），同一天依實測結果只放回這一個。
+# 驗證的資料（演練叢集，真實服務指標經 Grafana 取得）：沒有它的時候，故障移除後 20 分鐘，rca-mes-api 的 p95 延遲
+#   0.0988 秒（正常值）在 residual_chronic 得到 11,247 分、模擬產線的佇列深度 35（正常值）得到 182 分，每一輪都有新異常，
+#   事件群不會結案——很穩定的序列量到的雜訊尺度趨近 0，任何一點偏差除下去都是幾千分。
+# 留出驗證：沒有。1% 沒有在其他序列上比較過別的值（0.5%、2%），只確認了放回去之後上面那兩條序列在故障後回到門檻以下。
+# 代價與已知的邊界（tests/test_hardening_noise_floor.py 釘著）：
+#   - 很穩定的序列上，看不到的範圍是「門檻 × 1%」：偏離水位 3%（hourly、chronic）或 4%（shift）以內不會報，不只是 1%。
+#   - 訓練期完全不動的序列（σ = 0）分母從以前的 1.0 變成水位的 1%：水位小於 100 的反而比沒放回來之前更敏感
+#     （固定是 5 的序列，5→6 現在是 20 分）。
+#   - 水位接近 0 的序列（稀疏計數、平常是 0 的值）底噪也接近 0，等於沒有。
+#   - 兩個殘差偵測器用整段訓練的中位數當水位，不分時段；hourly 用該時段的平均。日夜差很大的序列，白天的實際底噪不到 1%。
+#   - 沒記水位的舊基準線（放回之前存的）沒有底噪，要等重訓。
+# 要更靈敏就在節點 YAML 把 min_scale_ratio 調小，0 = 關掉。
+MIN_SCALE_RATIO_TUNABLE: dict[str, tuple[float, float, float]] = {"min_scale_ratio": (0.01, 0.0, 1.0)}
+
+
+def floored_scale(level: float | None, ratio: float, *candidates: float | None) -> float:
+    """分母 = max(量到的尺度, |水位| × ratio)。量到的尺度依序取第一個有限而且 > 0 的（同 guard_scale）；
+    兩者都是 0（沒量到尺度、水位也是 0 或不知道）才退回 1.0，只防除以 0。
+    level 是 None（基準線是放回相對底噪之前存的，沒記水位）時沒有相對底噪，等下次重訓。"""
+    measured = next((float(c) for c in candidates if c is not None and math.isfinite(c) and c > 0), 0.0)
+    floor = abs(float(level)) * float(ratio) if level is not None and math.isfinite(level) else 0.0
+    out = max(measured, floor)
     return out if out > 0 else 1.0
-
-
-def limit_breach(values: pd.Series, upper: float | None, lower: float | None,
-                 consecutive: int = 1) -> tuple[pd.Series, pd.Series]:
-    """靜態上下限的越線判斷（detector.rules 與 detector.hard_limit 共用；偵測器之間不准互相 import）。
-    回傳 (分數, 是否成立)：超過 upper 或低於 lower 算違規，連續違規段長度 >= consecutive 的點才成立；
-    成立點的分數 = 1 + 超出比例（相對於那條界線），其餘 0。NaN 不算違規，也會把連續段切斷。"""
-    v = values
-    excess = pd.Series(0.0, index=v.index)
-    if upper is not None:
-        excess = excess.where(~(v > upper), (v - upper) / max(abs(float(upper)), 1e-9))
-    if lower is not None:
-        excess = excess.where(~(v < lower), (lower - v) / max(abs(float(lower)), 1e-9))
-    breach = excess > 0
-    # 連續違規的長度：遇到沒違規就歸零
-    run = breach.groupby((~breach).cumsum()).cumsum()
-    flagged = run >= int(consecutive)
-    return (excess + breach.astype(float)).where(flagged, 0.0), flagged
 
 
 def _entity_set(routing: dict[str, Any], key: str) -> frozenset[str] | None:
@@ -532,44 +479,24 @@ def seasonal_residual(df: pd.DataFrame, profile: dict[str, Any]) -> np.ndarray:
     return df["value"].astype(float).to_numpy() - seasonal_baseline(df["ts"], profile)
 
 
-# ── 自適應尺度（殘差偵測器共用）──
-# 分數 = |統計量| / 尺度，統計量 > threshold 就舉牌。threshold 的意義跟其他偵測器一樣（分數門檻、warning_ratio
-# 也照它算），自適應的是分母：
-#   1. 雜訊尺度 σ = 1.4826 × MAD(訓練期統計量)：常態下等於標準差，但不會被訓練期的尖峰拉大（MAD 為 0 就是 0，交給底噪）。
-#   2. 尾巴校正：σ* = max(σ, Q_{1−fpr}(|訓練期統計量|) / threshold)，上限 σ × max_tail_factor。
-#      意思是「訓練期最多只有 fpr 比例的點會超過門檻」：雜訊近似常態的序列 Q/threshold < σ，σ* = σ，分數就是穩健 z；
-#      尾巴比常態肥（流量切換點、每週不完全一樣）的序列分母自動放大，不用每條手調 threshold。
-#      上限是防「訓練期混進沒被排除的事故」：尾巴被事故撐大到 σ 的好幾倍時，寧可吵一點也不要整條序列失明。
-#   3. 底噪：再跟 scale_floor（min_scale、|序列水位| × min_scale_ratio、整數序列 1）取大，跟其他偵測器同一套。
+# ── 雜訊尺度（殘差偵測器共用）──
+# 分數 = |統計量| / σ，分數 > threshold 就舉牌。σ = 1.4826 × MAD(訓練期統計量)：常態下等於標準差，不會被訓練期的尖峰拉大。
 # 統計量的分布直接在訓練期殘差上量（滾動平均就量滾動平均），所以殘差的自相關、時段基準的週間誤差都已經算進去，
 # 不用 std/√window 那種「點與點獨立」的假設。
+# 沒有尾巴校正、沒有絕對底噪（fpr／max_tail_factor／min_scale 已於 2026-11-20 移除；相對底噪 min_scale_ratio 同日放回，見 floored_scale）：尾巴比常態肥的序列會比常態假設吵。
+# σ 為 0（訓練期幾乎不動）時分母是水位的 min_scale_ratio；水位也是 0 才退到 1.0（floored_scale）。
 
-RESIDUAL_TUNABLE: dict[str, tuple[float, float, float]] = {
-    "fpr": (0.001, 1e-5, 0.1),            # 訓練期允許超過門檻的點比例（逐點虛警率目標）
-    "max_tail_factor": (3.0, 1.0, 20.0),  # 尾巴校正最多把 σ 放大幾倍
-}
 _MAD_TO_STD_RES = 1.4826
 
 
-def noise_stats(stat: np.ndarray, fpr: float) -> dict[str, float]:
-    """fit 時量訓練期統計量：σ（1.4826 × MAD）與 |統計量| 的 1−fpr 分位數。存進基準線。
-    MAD 為 0（訓練期幾乎不動）時不退標準差：標準差會被訓練期裡那幾個跳點自己撐大，等於把異常學成雜訊；
-    σ = 0 時 calibrated_scale 的上限也是 0，直接落到底噪（跟 detector.mad 的 MAD=0 一樣）。
-    fpr 改了要等下次重訓才生效（分位數是在訓練資料上量的）；threshold、max_tail_factor、底噪在 detect 時才套，改了立刻生效。"""
+def noise_stats(stat: np.ndarray) -> dict[str, float]:
+    """fit 時量訓練期統計量的 σ（1.4826 × MAD），存進基準線。
+    MAD 為 0 時不退標準差：標準差會被訓練期裡那幾個跳點自己撐大，等於把異常學成雜訊。"""
     raw = np.asarray(stat, dtype=float)
     raw = raw[np.isfinite(raw)]
     if not len(raw):
-        return {"noise": 0.0, "tail_q": 0.0, "fpr": float(fpr), "points": 0}
-    noise = float(np.median(np.abs(raw - np.median(raw))) * _MAD_TO_STD_RES)
-    return {"noise": noise, "tail_q": float(np.quantile(np.abs(raw), 1.0 - fpr)), "fpr": float(fpr), "points": int(len(raw))}
-
-
-def calibrated_scale(stats: dict[str, float], threshold: float, max_tail_factor: float, *, min_scale: float,
-                     min_scale_ratio: float, level: float, integer: bool) -> float:
-    """σ* = clip(Q_{1−fpr} / threshold, 下限 σ, 上限 σ × max_tail_factor)，再套 scale_floor 底噪。"""
-    noise, tail = float(stats["noise"]), float(stats["tail_q"]) / threshold
-    calibrated = min(max(noise, tail), noise * max_tail_factor)
-    return scale_floor(calibrated, None, min_scale, min_scale_ratio, center=level, integer=integer)
+        return {"noise": 0.0, "points": 0}
+    return {"noise": float(np.median(np.abs(raw - np.median(raw))) * _MAD_TO_STD_RES), "points": int(len(raw))}
 
 
 # ── 序列 SNR 與「由 p_fa 換算門檻」（節點參數 snr 開了才用）──
@@ -578,7 +505,7 @@ def calibrated_scale(stats: dict[str, float], threshold: float, max_tail_factor:
 #   signal = 訓練期每個點對應的 168 格（週幾×小時）季節基準的變異數（點數加權；時段不足的點照 seasonal_baseline 的退回）
 #   noise  = (1.4826 × MAD(殘差))²，殘差 = 原值 − 季節基準（留一週算，見 fit_seasonal_profile）
 #   SNR_dB = 10·log10(signal / noise)
-#   noise 為 0（殘差幾乎不動）：σ 改用 scale_floor 的底噪（|水位| × 1%、整數序列 1，都沒有就 1.0），noise_floored = True，不除以 0。
+#   noise 為 0（殘差幾乎不動）：σ 用 guard_scale 的 1.0，noise_floored = True，不除以 0。
 #   資料不足（168 格一格都不夠 min_slot_points）：status = insufficient，snr_db = None；signal 為 0（時段基準全一樣）：
 #   status = flat，snr_db = None。兩種情況門檻照常算（門檻不依賴序列 SNR，見下）。
 #
@@ -586,7 +513,7 @@ def calibrated_scale(stats: dict[str, float], threshold: float, max_tail_factor:
 #   whitened 節點（分數已經是「偏離 / 雜訊尺度」）：threshold = z_{1−p_fa/2}，常態雙尾分位數（p_fa = 0.001 -> 3.29）。
 #     Neyman–Pearson：固定虛警率時門檻只由雜訊分布決定；SNR 決定的是抓不抓得到（檢出率），不是門檻該放哪。
 #     序列 SNR 在這裡不進門檻，照實不硬塞。
-#   沒白化的節點（mad、quantile_drift、zscore…）：理論上它們「看到的雜訊」= 雜訊 + 沒扣掉的季節訊號，
+#   沒白化的節點（whitened = False 的演算法）：理論上它們「看到的雜訊」= 雜訊 + 沒扣掉的季節訊號，
 #     帶寬應該是 z·σ_n·√(1+SNR)；但它們的分數單位不是 σ_n（mad 的分母是原值的 MAD），這條式子換不到它們的單位。
 #     替代：threshold = max(z_{1−p_fa/2}, 訓練期該節點分數的 1−p_fa 經驗分位數)——同一個 p_fa、直接量季節訊號撐大了多少，
 #     效果就是 √(1+SNR) 那一項的實測版。
@@ -620,14 +547,12 @@ def gaussian_threshold(p_fa: float) -> float:
 def series_snr(df: pd.DataFrame, tz: ZoneInfo, min_slot_points: int) -> dict[str, Any]:
     """序列層 SNR（定義見上面的註解）。回傳可 JSON 序列化的 dict。"""
     profile, resid = fit_seasonal_profile(df, tz, min_slot_points)
-    values = df["value"].astype(float)
     baseline = seasonal_baseline(df["ts"], profile)
     signal = float(np.var(baseline)) if len(baseline) else 0.0
     r = resid[np.isfinite(resid)]
     sigma = float(np.median(np.abs(r - np.median(r))) * _MAD_TO_STD_RES) if len(r) else 0.0
     floored = sigma <= 0
-    if floored:
-        sigma = scale_floor(0.0, values)
+    sigma = guard_scale(sigma)
     out = {"signal_var": signal, "noise_sigma": sigma, "noise_floored": floored,
            "slots_ready": int(profile["slots_ready"]), "lowo_share": profile["lowo_share"], "points": int(len(df))}
     if profile["slots_ready"] == 0:

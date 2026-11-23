@@ -42,7 +42,7 @@ def _ctx() -> PipelineContext:
     ctx = PipelineContext(pipeline="rca_report_llm", now=NOW)
     t = NOW - timedelta(minutes=20)
     ctx.incidents = [Incident(events=[
-        AnomalyEvent(entity="ord-svc", metric="errors", ts=t + timedelta(minutes=m), score=8.0, source_type="elasticsearch")
+        AnomalyEvent(entity="ord-svc", metric="errors", ts=t + timedelta(minutes=m), score=8.0, source_type="prometheus")
         for m in range(10)])]
     ctx.topology = [("ord-svc", "pay-api")]
     ctx.rca_facts = [

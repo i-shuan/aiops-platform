@@ -23,8 +23,14 @@ nodes:
     operator: alert.p0_boost
     params: {entities: []}
   # 進行中的事件群吸收這一輪的新異常：一場事故從頭到尾只有一個 incident_uid、一張卡（Grafana 重送還沒結束的告警也併進同一張）
+  # resolve_after_minutes 22 怎麼來的（通用式，docs/EXTERNAL_ALERTS.md「重送間隔」）：
+  #   同一筆告警兩次送達最多隔 repeat interval + group interval（Grafana 每個 group interval 才檢查一次要不要重送），
+  #   告警點的時間取整到分（最多早 1 分鐘），再留 1 分鐘給送達與重試：15 + 5 + 1 + 1 = 22。
+  #   15 = 文件允許的 repeat interval 上限，5 = Grafana 預設的 group interval。absorb_open 與 heartbeat 兩個要一樣。
+  #   代價：告警真的結束後，事故卡要多等 7 分鐘才結案。上一版是 15，重送會晚到、故障還在卡就結案（docs/E2E_DRILL.md 問題 5）
   - name: absorb_open
     operator: alert.absorb_open
+    params: {resolve_after_minutes: 22}
   - name: suppress_window
     operator: alert.suppress_window
   - name: suppress_root_cause
@@ -42,10 +48,10 @@ nodes:
       severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}
       links: {dashboard: d/apm-overview, var: service, pad_minutes: 15, datasources: {traces: apm-traces, logs: apm-logs}}
   # 進行中事件群：用最新內容續命、升級時先關舊標籤再送新的、安靜滿 resolve_after_minutes 才結案（防抖動）。
-  # 各團隊 Grafana 的 repeat interval 要不超過這個分鐘數，不然告警還沒結束事故卡就會先結案（docs/EXTERNAL_ALERTS.md）
+  # 各團隊 Grafana 的 repeat interval + group interval + 2 分鐘不能超過這個分鐘數，不然告警還沒結束事故卡就會先結案（算法見 absorb_open 上面）
   - name: heartbeat
     operator: alert.heartbeat
-    params: {resolve_after_minutes: 15}
+    params: {resolve_after_minutes: 22}
   # 依環境變數 AIOPS_NOTIFIER 選 log 或 alertmanager；要固定就改 notifier.alertmanager
   - name: notify
     operator: notifier.auto

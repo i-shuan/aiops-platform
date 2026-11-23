@@ -20,8 +20,11 @@
    - 內容格式：用 Grafana 預設的 webhook 格式，不要改成自訂模板。
 2. **通知政策（Notification policy）把要送給平台的告警路由到這個通知管道。**
    - 建議**只送給平台、不直接通知人**：平台收斂後送一張事故卡到 Alertmanager，人就不會同時收到原始告警與事故卡兩份。
-   - **Repeat interval 設成 15 分鐘以下**（不能超過那條偵測管線 `alert.heartbeat` 的 `resolve_after_minutes`，內建管線都是 15）。
+   - **Repeat interval 設成 15 分鐘以下，Group interval 維持 5 分鐘以下**（Grafana 預設就是 5 分鐘）。
      平台的事故卡是靠「一直有新的告警點進來」維持開著；Grafana 預設 4 小時才重送一次，平台會在告警還沒結束時就把事故卡結案。
+     條件是 `repeat interval + group interval + 2 分鐘 ≤ resolve_after_minutes`（那條偵測管線 `alert.heartbeat` 的參數，內建管線都是 22）：
+     Grafana 每個 group interval 才檢查一次要不要重送，所以兩次送達最多隔 repeat interval + group interval，不是剛好 repeat interval；
+     另外 2 分鐘是平台把時間取整到分，加上送達與重試。15 + 5 + 2 = 22。要用更長的間隔，先請平台把那條管線的 `resolve_after_minutes` 調大。
 3. **告警規則的標籤照下面的規範加。**
 
 ## 標籤規範
@@ -77,7 +80,8 @@ repeat interval 5～15 分鐘。平台收到後：
    要看平台的 log 或回應內容。之後會補一個查詢。
 2. **時間是平台收到的時間，不是告警真正開始的時間。** 相差 Grafana 的 group wait（預設 30 秒）加網路延遲。告警的 `startsAt` 存在異常的 `attrs` 裡。
 3. **事故卡的結案跟你的告警結案不同步。** 平台不看 `resolved`；你的告警結束後，事故卡要再安靜 `resolve_after_minutes` 才結案。
-   反過來，repeat interval 設太長，事故卡會比告警早結案（見上面第 2 步）。
+   內建管線是 22 分鐘，所以告警結束後事故卡最多再開 22 分鐘。
+   反過來，repeat interval 加 group interval 設太長，事故卡會比告警早結案（見上面第 2 步）。
 4. **token 是平台共用的那一套。** 拿到 token 就能呼叫平台所有 API，不只是這個 webhook。每個團隊給一組、可以單獨換掉，但權限不分。
 5. **Grafana 只有在 alerts 陣列被截斷時才會少送**（`truncatedAlerts` 大於 0）：平台不補，照收到的處理。
 6. **一次最多 5000 筆告警。** 超過整批回 400。

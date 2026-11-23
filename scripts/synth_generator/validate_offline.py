@@ -3,7 +3,7 @@
 python -m scripts.synth_generator.validate_offline synth-out/nov03_cascade [--json 結果.json]
 
 量什麼：
-1. trace 文件交給平台的 aiops.sources.elasticsearch._span 解析 -> SpanRecord -> engine.topology.service_edges，印出邊與次數
+1. trace 文件交給平台的 aiops.sources.grafana._span 解析 -> SpanRecord -> engine.topology.service_edges，印出邊與次數
 2. metrics 依 ES 會做的聚合（Σsummary.sum／Σvalue_count、Σsuccess_count）還原每分鐘延遲、請求數、錯誤率；
    跟同一段時間 trace 的平均耗時對照（同一個狀態函數，應該對得起來）
 3. 偵測器回放（真的 Pipeline + 註冊的偵測算子）：latency 跑 mad、quantile_drift；qps 跑 hourly_baseline（訓練 14 天、min_weeks 2）；
@@ -32,7 +32,7 @@ from aiops.engine.registry import OperatorRegistry
 from aiops.engine.topology import service_edges
 from aiops.engine.types import Incident
 from aiops.interfaces.runner import load_all
-from aiops.sources.elasticsearch import _span
+from aiops.sources.grafana import _span
 from aiops.stages.rca.algorithms.topological import TopologicalRootCause
 
 warnings.filterwarnings("ignore")

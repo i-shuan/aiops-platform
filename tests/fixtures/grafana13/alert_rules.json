@@ -1,0 +1,265 @@
+[
+ {
+  "id": 1,
+  "uid": "drill-mes-latency",
+  "orgID": 1,
+  "folderUID": "eg4ta6n0i88owb",
+  "ruleGroup": "drill",
+  "title": "MesApiLatencyHigh",
+  "condition": "C",
+  "data": [
+   {
+    "refId": "A",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 300,
+     "to": 0
+    },
+    "datasourceUid": "team-prometheus",
+    "model": {
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service=\"rca-mes-api\"}[2m])))",
+     "instant": true,
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "A"
+    }
+   },
+   {
+    "refId": "C",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 0,
+     "to": 0
+    },
+    "datasourceUid": "__expr__",
+    "model": {
+     "conditions": [
+      {
+       "evaluator": {
+        "params": [
+         0.5
+        ],
+        "type": "gt"
+       }
+      }
+     ],
+     "expression": "A",
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "C",
+     "type": "threshold"
+    }
+   }
+  ],
+  "updated": "2026-11-19T22:36:02Z",
+  "noDataState": "OK",
+  "execErrState": "OK",
+  "for": "1m",
+  "keep_firing_for": "0s",
+  "labels": {
+   "service": "rca-mes-api",
+   "severity": "high"
+  },
+  "provenance": "file",
+  "isPaused": false,
+  "notification_settings": null,
+  "record": null
+ },
+ {
+  "id": 2,
+  "uid": "drill-mes-errors",
+  "orgID": 1,
+  "folderUID": "eg4ta6n0i88owb",
+  "ruleGroup": "drill",
+  "title": "MesApiErrorRateHigh",
+  "condition": "C",
+  "data": [
+   {
+    "refId": "A",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 300,
+     "to": 0
+    },
+    "datasourceUid": "team-prometheus",
+    "model": {
+     "expr": "sum(rate(http_server_request_duration_seconds_count{service=\"rca-mes-api\",http_response_status_code=\"500\"}[2m])) / sum(rate(http_server_request_duration_seconds_count{service=\"rca-mes-api\"}[2m]))",
+     "instant": true,
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "A"
+    }
+   },
+   {
+    "refId": "C",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 0,
+     "to": 0
+    },
+    "datasourceUid": "__expr__",
+    "model": {
+     "conditions": [
+      {
+       "evaluator": {
+        "params": [
+         0.05
+        ],
+        "type": "gt"
+       }
+      }
+     ],
+     "expression": "A",
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "C",
+     "type": "threshold"
+    }
+   }
+  ],
+  "updated": "2026-11-19T22:36:02Z",
+  "noDataState": "OK",
+  "execErrState": "OK",
+  "for": "1m",
+  "keep_firing_for": "0s",
+  "labels": {
+   "service": "rca-mes-api",
+   "severity": "critical"
+  },
+  "provenance": "file",
+  "isPaused": false,
+  "notification_settings": null,
+  "record": null
+ },
+ {
+  "id": 3,
+  "uid": "drill-wip-latency",
+  "orgID": 1,
+  "folderUID": "eg4ta6n0i88owb",
+  "ruleGroup": "drill",
+  "title": "WipWorkerProbeSlow",
+  "condition": "C",
+  "data": [
+   {
+    "refId": "A",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 300,
+     "to": 0
+    },
+    "datasourceUid": "team-prometheus",
+    "model": {
+     "expr": "avg_over_time(probe_duration_seconds{service=\"rca-wip-worker\"}[2m])",
+     "instant": true,
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "A"
+    }
+   },
+   {
+    "refId": "C",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 0,
+     "to": 0
+    },
+    "datasourceUid": "__expr__",
+    "model": {
+     "conditions": [
+      {
+       "evaluator": {
+        "params": [
+         0.5
+        ],
+        "type": "gt"
+       }
+      }
+     ],
+     "expression": "A",
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "C",
+     "type": "threshold"
+    }
+   }
+  ],
+  "updated": "2026-11-19T22:36:02Z",
+  "noDataState": "OK",
+  "execErrState": "OK",
+  "for": "1m",
+  "keep_firing_for": "0s",
+  "labels": {
+   "service": "rca-wip-worker",
+   "severity": "high"
+  },
+  "provenance": "file",
+  "isPaused": false,
+  "notification_settings": null,
+  "record": null
+ },
+ {
+  "id": 4,
+  "uid": "drill-heartbeat",
+  "orgID": 1,
+  "folderUID": "eg4ta6n0i88owb",
+  "ruleGroup": "drill",
+  "title": "AiopsHeartbeat",
+  "condition": "C",
+  "data": [
+   {
+    "refId": "A",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 300,
+     "to": 0
+    },
+    "datasourceUid": "team-prometheus",
+    "model": {
+     "expr": "vector(1)",
+     "instant": true,
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "A"
+    }
+   },
+   {
+    "refId": "C",
+    "queryType": "",
+    "relativeTimeRange": {
+     "from": 0,
+     "to": 0
+    },
+    "datasourceUid": "__expr__",
+    "model": {
+     "conditions": [
+      {
+       "evaluator": {
+        "params": [
+         0
+        ],
+        "type": "gt"
+       }
+      }
+     ],
+     "expression": "A",
+     "intervalMs": 1000,
+     "maxDataPoints": 43200,
+     "refId": "C",
+     "type": "threshold"
+    }
+   }
+  ],
+  "updated": "2026-11-19T22:36:02Z",
+  "noDataState": "Alerting",
+  "execErrState": "Alerting",
+  "for": "0s",
+  "keep_firing_for": "0s",
+  "labels": {
+   "aiops_heartbeat": "true"
+  },
+  "provenance": "file",
+  "isPaused": false,
+  "notification_settings": null,
+  "record": null
+ }
+]

@@ -1,10 +1,13 @@
 name: platform_watchdog
-description: "平台看門狗：用平台自己的偵測演算法監控 AIOps 平台自己——排程有沒有在跑、整輪失敗有沒有變多、各團隊的告警管道有沒有斷"
+description: "平台看門狗：用平台自己的偵測演算法監控 AIOps 平台自己——整輪失敗有沒有變多"
 # 這是唯一准許掛偵測器的地方（CLAUDE.md §1.1 第 9 點）：偵測演算法只看平台自己的紀錄（source_type: platform，
 # engine/platform_series.py），不看任何使用者的序列。對外的告警由各團隊在自己的 Grafana 設（docs/EXTERNAL_ALERTS.md）。
 # 驗證狀態與已知限制見 docs/WATCHDOG.md：門檻沒有在真實紀錄上驗證過（平台還沒上線），只在模擬的紀錄上回放過。
 # 這條管線自己有沒有在跑，靠最後的 notifier.watchdog 心跳（排程停了，Alertmanager 那邊 ttl 到期會收到 resolved）。
 rca_workflow: rca_report
+
+# 「排程停了」「團隊的告警管道斷了」這兩條人訂的靜態下限不在這裡：靜態門檻一律是 Grafana 告警規則
+# （detector.rules 已移除）。這條管線只留需要統計的那一票。
 
 nodes:
   # 5 分鐘一格（跟排程間隔一樣）；稀疏計數要訓練期的發生率，抓 14 天。
@@ -13,22 +16,6 @@ nodes:
     operator: ingestion.fetch
     params: {lookback_minutes: 180, step_seconds: 300, train_lookback_minutes: 20160, retrain_minutes: 1440}
 
-  # 排程停了：連續 3 格（15 分鐘）一輪都沒跑。人訂的下限，不用歷史資料（被監控的管線要每 5 分鐘跑一輪）
-  - name: stopped_rounds
-    operator: detector.rules
-    params: {lower: 1, consecutive: 3}
-  # 團隊的告警管道斷了：連續 10 格（50 分鐘）一筆心跳都沒有。
-  # 門檻怎麼來的（通用式，不是挑讓模擬種子不誤報的值；docs/WATCHDOG.md）：容許連續漏掉 N 筆心跳，
-  #   consecutive = (N + 1) × I ÷ 格寬 + 1
-  #   I = 文件允許的最大心跳間隔 15 分鐘（docs/EXTERNAL_ALERTS.md），格寬 5 分鐘；
-  #   漏掉 N 筆時兩筆之間隔 (N+1)×I，再加送達延遲（< 1 格）最多湊出 (N+1)×I÷格寬 格空的，所以要再多 1 格才不會剛好踩線。
-  #   N = 2：漏 1 筆是日常（假設每筆 1% 會掉、一天 96 筆，約每天一次），連漏 2 筆約萬分之一（每個來源約 100 天一次）。
-  #   N = 2、I = 15 -> 3 × 15 ÷ 5 + 1 = 10。上一版是 6 = (1+1)×15÷5，沒有多那 1 格：漏 1 筆加上延遲就會誤報。
-  # 代價：心跳真的停了要 50 分鐘才抓到（上一版 30 分鐘）。心跳比 15 分鐘密的團隊想更快抓到，可以在 target 的 overrides
-  # 用同一個式子代入自己的 I 把 consecutive 調小；比 15 分鐘疏的不符合文件要求，要先改他們的 repeat interval
-  - name: stopped_heartbeats
-    operator: detector.rules
-    params: {lower: 1, consecutive: 10}
   # 整輪失敗變多：稀疏計數票（平常幾乎都是 0 的計數，看最近 window 格一共幾筆是不是比訓練期多太多）。
   # 參數是偵測器的預設值，沒有為看門狗調過（docs/SPARSE_COUNT.md、docs/WATCHDOG.md）
   - name: failures
@@ -48,7 +35,10 @@ nodes:
     params: {cooldown_minutes: 30}
   - name: payload
     operator: alert.notify_payload
-    params: {severity_thresholds: {P0: 10, P1: 6, P2: 3, P3: 0}}
+    # 看門狗的卡最高只到 P2（tests/test_e2e_drill_fixes.py 擋著）：演算法判出來的事件群預設是 P1（detected_severity），
+    # 這裡人工調成 P2；對照表也故意不列 P0、P1，沒有偵測器血緣的事件分數再高也是 P2。要改就改這一行。
+    # 平台自己的問題不該半夜叫人；稀疏計數的分數沒有上限，門檻又只在模擬紀錄上驗過，誤報不能落在 P0／P1
+    params: {detected_severity: P2, severity_thresholds: {P2: 3, P3: 0}}
   - name: heartbeat
     operator: alert.heartbeat
     params: {resolve_after_minutes: 15}
@@ -59,9 +49,6 @@ nodes:
     params: {ttl_minutes: 30}
 
 # 只准 source_type: platform（tests/test_detection_policy.py 會擋）。實體 = 被監控的東西（管線名稱、告警來源代號）。
-# 監控的管線要是真的有排程在跑的（aiops-platform chart 的 tasks.workflow，預設 metrics_only）；沒排程的管線會一直被判「停了」。
-# 每接一個送告警進來的團隊（webhook 網址的 source），就加一條心跳的 target，例如：
-#   - {source_type: platform, query: alerts/team-a/heartbeats, entity: team-a, detectors: [stopped_heartbeats]}
+# 監控的管線要是真的有排程在跑的（aiops-platform chart 的 tasks.workflow，預設 metrics_only）。
 targets:
-  - {source_type: platform, query: runs/metrics_only/rounds, entity: metrics_only, detectors: [stopped_rounds]}
   - {source_type: platform, query: runs/metrics_only/failed, entity: metrics_only, detectors: [failures]}

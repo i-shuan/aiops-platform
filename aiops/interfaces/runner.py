@@ -22,6 +22,7 @@ from aiops.engine.pipeline import Pipeline, TargetSpec, load_workflow
 from aiops.engine.params import ANY
 from aiops.engine.platform_series import PLATFORM_SOURCE
 from aiops.engine.requests import GrafanaAlertIngest, ProposalBacktest, RunWorkflowRequest, SeriesProfile
+from aiops.stages.ingestion.fetch import grafana_targets
 from aiops.storage.hooks import StorageHooks
 from aiops.storage.repository import Incidents, Proposals
 
@@ -35,10 +36,12 @@ WORKFLOW_NAME = r"[A-Za-z0-9_-]+"
 _NAME = re.compile(WORKFLOW_NAME)
 # 事件群查不到所屬管線、或那條管線沒寫 rca_workflow 時用的 RCA 管線：不需要 LLM、沒有 trace 也能退回拓撲推測
 DEFAULT_RCA_WORKFLOW = "rca_report"
-# 偵測入口政策（CLAUDE.md §1.1 第 9 點：偵測演算法只當平台自己的看門狗，不給使用者用）：
-# 哪個管線資料夾可以拿偵測演算法跑「呼叫端給的序列」（/runs 帶 targets、調參回測、序列畫像），以及那些序列只准來自哪些資料源。
-# None = 不限資料源。出貨只有 watchdog 資料夾、只准平台自己的紀錄（source_type = platform）；其他一律 403。
-DETECTION_SCOPES = MappingProxyType({"watchdog": frozenset({PLATFORM_SOURCE})})
+# 偵測入口政策（CLAUDE.md §1.1 第 9 點）：哪個管線資料夾可以拿偵測演算法跑「呼叫端給的序列」
+# （/runs 帶 targets、調參回測、序列畫像），以及那些序列可以來自哪些資料源。None = 不限資料源。
+#   watchdog：監控平台自己，只准平台自己的紀錄（source_type = platform）
+#   grafana ：偵測對象由使用者在 Grafana 告警規則上貼標籤決定（Workflow.targets_from: grafana），只准經 Grafana 查
+# 其他資料夾（detection：只吃外部告警；rca；control）一律 403。
+DETECTION_SCOPES = MappingProxyType({"watchdog": frozenset({PLATFORM_SOURCE}), "grafana": frozenset({"grafana"})})
 
 
 def load_all() -> None:
@@ -115,8 +118,17 @@ def rca_workflow_for(incident_id: int, requested: str | None = None) -> str:
 def run_context(workflow: str, *, request: BaseModel | None = None, incident_id: int | None = None,
                 targets: list[TargetSpec] | None = None, now: datetime | None = None,
                 strict: bool = True, allow_file: bool = False) -> PipelineContext:
-    return build_pipeline(workflow, allow_file=allow_file).run(now=now, targets=targets, incident_id=incident_id,
-                                                               request=request, strict=strict)
+    pipeline = build_pipeline(workflow, allow_file=allow_file)
+    return pipeline.run(now=now, targets=resolve_targets(pipeline, targets), incident_id=incident_id,
+                        request=request, strict=strict)
+
+
+def resolve_targets(pipeline: Pipeline, targets: list[TargetSpec] | None) -> list[TargetSpec] | None:
+    """這一輪的偵測對象。呼叫端有給就用呼叫端的；管線寫了 targets_from: grafana 就去 Grafana 讀
+    （stages/ingestion/fetch.grafana_targets）；其他情況回 None = 用 YAML 的 targets。"""
+    if targets is not None or pipeline.workflow.targets_from != "grafana":
+        return targets
+    return [TargetSpec(**spec) for spec in grafana_targets(pipeline.workflow.name)]
 
 
 def run_scheduled(workflow: str, now: datetime | None = None) -> PipelineContext:
@@ -129,7 +141,7 @@ def run_scheduled(workflow: str, now: datetime | None = None) -> PipelineContext
     except WorkflowError as e:
         record_load_failure(workflow, e, now)
         raise
-    return pipeline.run(now=now, strict=False)
+    return pipeline.run(now=now, targets=resolve_targets(pipeline, None), strict=False)
 
 
 def record_load_failure(workflow: str, error: WorkflowError, now: datetime | None = None) -> None:
@@ -166,12 +178,12 @@ def check_detection_entry(pipeline: str, specs: list[TargetSpec]) -> None:
     else:
         folder = _folder(pipeline)
         if folder not in DETECTION_SCOPES:
-            raise Forbidden(f"{pipeline} 不是平台看門狗管線（pipelines/{'、'.join(sorted(DETECTION_SCOPES))}/）："
-                            "偵測演算法只用來監控 AIOps 平台自己，不跑使用者的序列；使用者的告警請從自己的 Grafana 推進來"
+            raise Forbidden(f"{pipeline} 不是可以跑偵測演算法的管線（pipelines/{'、'.join(sorted(DETECTION_SCOPES))}/）："
+                            "這條管線只吃外部推進來的告警；使用者的告警請從自己的 Grafana 推進來"
                             "（/api/v1/ingestion/grafana-alerts）")
         allowed = DETECTION_SCOPES[folder]
     if allowed is not None and not sources <= allowed:
-        raise Forbidden(f"偵測演算法只跑平台自己的紀錄（source_type：{'、'.join(sorted(allowed))}），"
+        raise Forbidden(f"這條管線的偵測演算法只跑這些資料源的序列（source_type：{'、'.join(sorted(allowed))}），"
                         f"不跑這些資料源的序列：{'、'.join(sorted(sources - allowed))}")
 
 

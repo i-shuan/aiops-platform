@@ -2,8 +2,8 @@
 
 原始值的相鄰差（已移除的 detector.shift）每天 09:00／19:00 的流量階梯切換都會舉牌；這裡先白化（base.fit_seasonal_profile：
 原值 − 該 週幾×小時 的訓練平均），每天固定的切換在殘差裡相鄰差接近 0，只有「這個時段不該有的斷崖」才會跳。
-門檻依序列自己的殘差雜訊伸縮（base.noise_stats／calibrated_scale）：分數 = |Δe| / σ*，σ* 由訓練期 |Δe| 的
-MAD 與 1−fpr 分位數決定，threshold 的意義不變。跳上去之後是新水位，不再報（持續偏離交給 residual_chronic）。
+分數 = |Δe| / σ，σ = 1.4826 × 訓練期 Δe 的 MAD（base.noise_stats）；分母不小於序列水位的 min_scale_ratio（預設 1%）；σ 與水位都是 0 才退到 1.0（base.floored_scale）。
+跳上去之後是新水位，不再報（持續偏離交給 residual_chronic）。
 """
 from __future__ import annotations
 
@@ -13,19 +13,18 @@ import pandas as pd
 
 from aiops.engine.context import AnomalyResult
 from aiops.engine.registry import OperatorRegistry
-from aiops.stages.detectors.base import (RESIDUAL_TUNABLE, SCALE_FLOOR_TUNABLE, DetectorOperator, calibrated_scale,
-                                         fit_seasonal_profile, is_integer_series, noise_stats, parse_tz,
+from aiops.stages.detectors.base import (DetectorOperator, MIN_SCALE_RATIO_TUNABLE, fit_seasonal_profile, floored_scale, noise_stats, parse_tz,
                                          seasonal_residual)
 
 
 @OperatorRegistry.register("detector.residual_shift")
 class ResidualShiftDetector(DetectorOperator):
-    """params: threshold（預設 4）、fpr、max_tail_factor、min_scale／min_scale_ratio（tunable）；
-    tz（時段用的時區，比照 hourly_baseline，預設 UTC）、min_slot_points（時段至少幾個訓練點才用它，預設 30）。"""
+    """params: threshold（預設 4，tunable）；tz（時段用的時區，比照 hourly_baseline，預設 UTC）、
+    min_slot_points（時段至少幾個訓練點才用它，預設 30）、ref_points（跟前幾點的中位數比，預設 1）。"""
 
     algorithm = "residual_shift"
     whitened = True  # 分數對時段基準算（開 snr 時門檻用常態分位數）
-    tunable = {"threshold": (4.0, 1.0, 20.0), **RESIDUAL_TUNABLE, **SCALE_FLOOR_TUNABLE}
+    tunable = {"threshold": (4.0, 1.0, 20.0), **MIN_SCALE_RATIO_TUNABLE}
     other_params = frozenset({"tz", "min_slot_points", "ref_points"})
 
     def __init__(self, **params: Any):
@@ -47,28 +46,26 @@ class ResidualShiftDetector(DetectorOperator):
 
     def fit(self, df: pd.DataFrame) -> ResidualShiftDetector:
         self.profile_, resid = fit_seasonal_profile(df, self.tz, self.min_slot_points)
-        self.noise_ = noise_stats(self._jump(resid).to_numpy()[1:], self.param("fpr"))
-        values = df["value"]
-        self.level_ = float(values.median())
-        self.integer_ = is_integer_series(values)
+        self.noise_ = noise_stats(self._jump(resid).to_numpy()[1:])
+        self.level_ = float(df["value"].median())  # 序列水位：相對底噪用（base.floored_scale）
         self.fitted = True
         return self
 
     def get_state(self) -> dict:
         self._require_fitted()
-        return {"profile": self.profile_, "noise": self.noise_, "level": self.level_, "integer": self.integer_}
+        return {"profile": self.profile_, "noise": self.noise_, "level": self.level_}
 
     def load_state(self, state: dict) -> ResidualShiftDetector:
-        self.profile_, self.noise_ = dict(state["profile"]), dict(state["noise"])
-        self.level_, self.integer_ = float(state["level"]), bool(state.get("integer", False))
+        # 舊基準線多帶的 integer 與 noise 裡的 tail_q、fpr（已移除的整數底噪與尾巴校正）不讀
+        self.profile_, self.noise_ = dict(state["profile"]), {"noise": float(state["noise"]["noise"])}
+        # 沒記水位的基準線（放回相對底噪之前存的）：level 是 None，相對底噪等下次重訓才有
+        self.level_ = float(state["level"]) if state.get("level") is not None else None
         self.fitted = True
         return self
 
     def detect(self, df: pd.DataFrame) -> AnomalyResult:
         self._require_fitted()
-        scale = calibrated_scale(self.noise_, self.param("threshold"), self.param("max_tail_factor"),
-                                 min_scale=self.param("min_scale"), min_scale_ratio=self.param("min_scale_ratio"),
-                                 level=self.level_, integer=self.integer_)
+        scale = floored_scale(self.level_, self.param("min_scale_ratio"), self.noise_["noise"])
         jump = self._jump(seasonal_residual(df, self.profile_))
         jump.index = df.index
         scores = jump.abs() / scale

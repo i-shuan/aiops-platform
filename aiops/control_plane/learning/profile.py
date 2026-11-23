@@ -15,14 +15,12 @@ admin.proposal_approve 對它回 409 並說明要改 YAML。不自動改 YAML。
 """
 from __future__ import annotations
 
-import json
-from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pandas as pd
 
 from aiops.control_plane.learning.replay import fetch_span
-from aiops.engine.context import PipelineContext, Target
+from aiops.engine.context import PipelineContext
 from aiops.engine.errors import BadRequest, NotFound
 from aiops.engine.operator import BaseOperator
 from aiops.engine.pipeline import load_workflow
@@ -40,34 +38,10 @@ def _round(x):
     return None if x is None or pd.isna(x) else round(float(x), 4)
 
 
-def doc_counts(ctx: PipelineContext, start: datetime, end: datetime, step: int) -> pd.Series | None:
-    """Elasticsearch 來源：同一個查詢改成 count（每桶文件數）。sum／count 類聚合對沒資料的桶會回 0.0，
-    序列看起來像「流量掉到 0」而不是「沒有資料」（破壞性驛收場景 9：只有 7.5 天資料卻算出 168h 自相關）；
-    文件數為 0 的桶就是沒資料。其他資料源（Prometheus 沒資料就沒點、mock）回 None，不需要遮罩。"""
-    t = ctx.target
-    if t is None or t.source_type != "elasticsearch":
-        return None
-    try:
-        raw = json.loads(t.query)
-    except ValueError as e:
-        ctx.log(f"series_profile:doc-counts:skip:query-not-json:{e}")
-        return None
-    if not isinstance(raw, dict):
-        return None
-    raw = {k: v for k, v in raw.items() if k != "value_field"}
-    raw["agg"] = "count"
-    probe = replace(ctx, target=Target("elasticsearch", json.dumps(raw), t.entity))
-    try:
-        cdf = fetch_span(probe, start, end, step)
-    except NoDataError as e:
-        ctx.log(f"series_profile:doc-counts:no-data:{e}")  # 連文件數都撈不到：整段沒資料，fetch_span 本身已經會丟 NoDataError
-        return None
-    return cdf.set_index(pd.to_datetime(cdf["ts"], utc=True))["value"].astype(float)
-
-
 def profile(df: pd.DataFrame, step: int, docs: pd.Series | None = None) -> dict:
     """等間隔化後算 r(24h)、r(168h)、偏態、峰度。docs（每桶文件數）給了就把文件數為 0 的桶當成沒資料（NaN），
-    它們不參與自相關的配對，也不算進 points。"""
+    它們不參與自相關的配對，也不算進 points。目前沒有資料源提供 docs（原本的 Elasticsearch 文件數查詢隨直連 ES 一起移除，
+    2026-11-20）；會把空桶補成 0 的資料源接進來時，由它提供。"""
     s = df.set_index(pd.to_datetime(df["ts"], utc=True))["value"].astype(float).resample(f"{step}s").mean()
     empty = 0
     if docs is not None:
@@ -121,7 +95,7 @@ class SeriesProfileOp(BaseOperator):
         end = datetime.fromtimestamp(epoch - epoch % step, tz=as_utc(ctx.now).tzinfo)
         start = end - timedelta(days=req.days)
         df = fetch_span(ctx, start, end, step)
-        stats = profile(df, step, doc_counts(ctx, start, end, step))
+        stats = profile(df, step)
         stats.update(start=df["ts"].iloc[0].isoformat(), end=df["ts"].iloc[-1].isoformat(), days=req.days,
                      min_acf=self.min_acf, min_coverage=self.min_coverage)
         r24, r168 = stats["r_24h"], stats["r_168h"]
