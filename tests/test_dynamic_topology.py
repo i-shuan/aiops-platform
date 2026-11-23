@@ -360,7 +360,8 @@ def test_incident_traces_window_and_service_filter():
     ctx = op.execute(_ctx())
     info = ctx.result["trace_fetch"]
     assert info["start"] == (T - timedelta(minutes=15)).isoformat() and info["services"] == ["cart-api", "ord-svc"]
-    assert len(ctx.rca_spans) == 16 * 2 * 2  # 16 分鐘 × 2 個服務 × (transaction + db span)
+    # 17 分鐘 × 2 個服務 × (transaction + db span)。以前是 16：只撈到最後一點的起點，最後一分鐘沒撈（docs/E2E_DRILL.md 問題 6）
+    assert len(ctx.rca_spans) == 17 * 2 * 2
 
 
 def test_rca_and_trace_import_share_one_edge_parser(monkeypatch):

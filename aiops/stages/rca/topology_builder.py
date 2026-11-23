@@ -12,9 +12,10 @@ params:
 from __future__ import annotations
 
 from aiops.engine.context import PipelineContext
-from aiops.engine.graph import EdgeKind
+from aiops.engine.graph import ORIGIN_INCIDENT_TRACE, EdgeKind, Provenance
 from aiops.engine.registry import OperatorRegistry
-from aiops.engine.topology import service_edges
+from aiops.engine.topology import service_edge_last_seen, service_edges
+from aiops.engine.types import as_utc
 from aiops.engine.operator import BaseOperator
 from aiops.stages.rca.base import need_incident
 
@@ -42,6 +43,11 @@ class BuildDynamicTopology(BaseOperator):
             ctx.topology = found
         else:
             ctx.topology = before + [pair for pair in found if pair not in set(before)]
+        # 出處：這次事件的 span 裡直接看到的邊，是比「以前沉澱過」更強的依據，蓋掉資料表載入的那一筆
+        last = service_edge_last_seen(ctx.rca_spans)
+        for (a, b), n in edges:
+            ctx.edge_provenance[(EdgeKind.CALL.value, a, b)] = Provenance(
+                ORIGIN_INCIDENT_TRACE, f"{n} 次呼叫", as_utc(last[(a, b)]) if (a, b) in last else None)
         added = [pair for pair in found if pair not in set(before)]
         ctx.result["dynamic_topology"] = {
             "mode": self.mode, "spans": len(ctx.rca_spans), "traces": len({s.trace_id for s in ctx.rca_spans}),

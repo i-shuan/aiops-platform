@@ -102,7 +102,7 @@ RCA 管線
 
 第 7 層　通知
 - `alert.notify_payload`：替事故定嚴重度，產生通知內容（含回饋頁連結）。
-- `alert.heartbeat`：進行中的事故每輪續送；安靜超過 15 分鐘送結案。
+- `alert.heartbeat`：進行中的事故每輪續送；安靜超過 `resolve_after_minutes`（內建偵測管線 22 分鐘）送結案。
 - `notifier.auto`：依環境變數決定出口（只寫日誌，或送 Alertmanager）。資料庫寫入成功後才送。
 - `notifier.watchdog`：整輪每一步都成功才送「我還活著」的心跳；排程或資料源掛了，心跳過期就會告警。
 

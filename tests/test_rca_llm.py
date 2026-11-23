@@ -42,7 +42,7 @@ def test_all_sections_present_when_data_is_there_and_missing_ones_are_skipped_no
     rca = _rca(_incident(now), now=now)
     keys = [s["key"] for s in rca["sections"]]
     assert keys == ["summary", "timeline", "affected_entities", "golden_signals", "root_cause_candidates",
-                    "propagation_path", "suggested_actions"]
+                    "propagation_path", "graph_basis", "suggested_actions"]  # graph_basis：關係圖依據（邊的出處）
     assert rca["skipped"] == ["trace_evidence", "log_patterns", "similar_cases"] and all(s["body"].strip() for s in rca["sections"])
     # 預設根因算子改成 evidence；這裡沒有 trace 來源，所以退回拓撲推測，並且要在報告裡寫明不是用 trace 判斷的
     assert rca["root_cause"]["algorithm"] == "rca.root_cause.evidence"

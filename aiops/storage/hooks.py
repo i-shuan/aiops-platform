@@ -21,7 +21,7 @@ from aiops.engine.context import (
     TrainingExclusion,
 )
 from aiops.engine.errors import NotFound
-from aiops.engine.graph import Edge, EdgeKind
+from aiops.engine.graph import ORIGIN_DECLARED, ORIGIN_LOT, ORIGIN_TRACE, ORIGIN_WORKFLOW, Edge, EdgeKind, Provenance
 from aiops.engine.params import pick_most_specific
 from aiops.engine.platform_series import ALL_SOURCES, FIELDS, PLATFORM_SOURCE, split_platform_query
 from aiops.engine.topology import lot_edges_from_paths
@@ -60,6 +60,21 @@ KNOWLEDGE_POOL_SIZE = 500
 # 訓練基準線時往回看多久的事故（要涵蓋最長的訓練窗；168 時段基準線建議 3～4 週）與前後多排除幾分鐘
 EXCLUSION_LOOKBACK_DAYS = 35
 EXCLUSION_MARGIN = timedelta(minutes=10)
+
+
+def _seen(value) -> datetime | None:
+    return as_utc(value) if value else None
+
+
+def _provenance_dict(p: Provenance) -> dict:
+    return {"origin": p.origin, "detail": p.detail, "last_seen": p.last_seen.isoformat() if p.last_seen else None}
+
+
+def _provenance(row: dict) -> Provenance:
+    """事件群快照裡的一筆 -> 出處。舊快照沒有這三個鍵：出處不明。"""
+    seen = row.get("last_seen")
+    return Provenance(str(row.get("origin") or ""), str(row.get("detail") or ""),
+                      as_utc(datetime.fromisoformat(seen)) if seen else None)
 
 
 def _trace_service(query: str) -> str:
@@ -106,12 +121,17 @@ class StorageHooks:
             ctx.incident_environment = str(snapshot.get("environment", ctx.environment))
             if ctx.incident_environment != ctx.environment:
                 self._load_graph(ctx, ctx.incident_environment)
+            # 出處跟著邊走：用了快照的邊就用快照記的出處；舊快照沒記出處的，那種邊的出處清掉（不知道），
+            # 不拿資料表現在的 last_seen 充數（那是事件之後才刷新的時間）
+            recorded = {(p["kind"], p["from"], p["to"]): _provenance(p) for p in snapshot.get("provenance", [])}
             if not ctx.topology_explicit and snapshot.get("topology"):
                 ctx.topology = [(a, b) for a, b in snapshot["topology"]]
+                self._replace_provenance(ctx, EdgeKind.CALL, recorded)
             if not ctx.lot_edges_explicit and snapshot.get("lot_edges"):
                 ctx.lot_edges = [LotEdge(e["from"], e["to"], e["lots"]) for e in snapshot["lot_edges"]]
+                self._replace_provenance(ctx, EdgeKind.FLOW, recorded)
             if "declared" in snapshot:  # 建立當下的宣告邊優先（可重現：之後 CMDB 改了，舊事件群的報告不跟著變）
-                ctx.imported_edges = [Edge(e["from"], e["to"], EdgeKind(e["kind"]), float(e["weight"]))
+                ctx.imported_edges = [Edge(e["from"], e["to"], EdgeKind(e["kind"]), float(e["weight"]), _provenance(e))
                                       for e in snapshot["declared"]]
             rows = Traces.window(incident.entities, incident.start - _RCA_TRACE_MARGIN,
                                  incident.end + _RCA_TRACE_MARGIN)
@@ -132,16 +152,31 @@ class StorageHooks:
     @staticmethod
     def _load_graph(ctx: PipelineContext, environment: str) -> None:
         """關係圖只載入這個環境的邊（'' = 不分環境的那一份，跟加 environment 之前一樣）。workflow 明確給的拓撲／Lot 流向不覆蓋。"""
+        # 出處（engine/graph.Provenance）跟著邊一起載：換環境重載時，上一個環境載進來的出處整份丟掉，只留管線 YAML 寫死的
+        ctx.edge_provenance = {k: p for k, p in ctx.edge_provenance.items() if p.origin == ORIGIN_WORKFLOW}
         if not ctx.topology_explicit:
-            ctx.topology = [(e["caller"], e["callee"]) for e in ServiceEdges.all(environment)]
+            calls, queues = ServiceEdges.all(environment), AsyncEdges.all(environment)
+            ctx.topology = [(e["caller"], e["callee"]) for e in calls]
             # 非同步邊跟著同一條規則：workflow 自己指定拓撲（含空清單 = 不要用）時不載
-            ctx.async_edges = {(e["producer"], e["consumer"]): float(e["lag_ms_p95"])
-                               for e in AsyncEdges.all(environment)}
+            ctx.async_edges = {(e["producer"], e["consumer"]): float(e["lag_ms_p95"]) for e in queues}
+            ctx.edge_provenance.update({(EdgeKind.CALL.value, e["caller"], e["callee"]):
+                                        Provenance(ORIGIN_TRACE, f"累計 {e['calls']} 次呼叫", _seen(e["last_seen"])) for e in calls})
+            ctx.edge_provenance.update({(EdgeKind.ASYNC.value, e["producer"], e["consumer"]):
+                                        Provenance(ORIGIN_TRACE, f"累計 {e['messages']} 則訊息", _seen(e["last_seen"])) for e in queues})
         if not ctx.lot_edges_explicit:
             ctx.lot_edges = lot_edges_from_paths(LotPaths.paths(environment))
+            ctx.edge_provenance.update({(EdgeKind.FLOW.value, e.upstream, e.downstream): Provenance(ORIGIN_LOT, f"{e.lots} 個 Lot 走過")
+                                        for e in ctx.lot_edges})
         # 匯入的宣告邊（admin.graph_import）：整份換成這個環境的（RCA 換環境重載時不會留下上一個環境的）
-        ctx.imported_edges = [Edge(r["source"], r["target"], EdgeKind(r["kind"]), float(r["weight"]))
+        ctx.imported_edges = [Edge(r["source"], r["target"], EdgeKind(r["kind"]), float(r["weight"]),
+                                   Provenance(ORIGIN_DECLARED, r["origin"] or "", _seen(r["updated_at"])))
                               for r in DeclaredEdges.all(environment)]
+
+    @staticmethod
+    def _replace_provenance(ctx: PipelineContext, kind: EdgeKind, recorded: dict[tuple[str, str, str], Provenance]) -> None:
+        """這種邊改用事件群快照時：出處也換成快照記的（管線 YAML 寫死的不動）。"""
+        ctx.edge_provenance = {k: p for k, p in ctx.edge_provenance.items() if k[0] != kind.value or p.origin == ORIGIN_WORKFLOW}
+        ctx.edge_provenance.update({k: p for k, p in recorded.items() if k[0] == kind.value})
 
     def load_target(self, ctx: PipelineContext, detector_nodes: list[tuple[str, str]]) -> None:
         target = ctx.target
@@ -270,9 +305,14 @@ class StorageHooks:
                     "topology": [[a, b] for a, b in ctx.topology if a in entities or b in entities],
                     "lot_edges": [{"from": e.upstream, "to": e.downstream, "lots": e.lots} for e in ctx.lot_edges
                                   if e.upstream in entities or e.downstream in entities],
-                    "declared": [{"from": e.source, "to": e.target, "kind": e.kind.value, "weight": e.weight}
+                    "declared": [{"from": e.source, "to": e.target, "kind": e.kind.value, "weight": e.weight,
+                                  **_provenance_dict(e.provenance)}
                                  for e in [*ctx.declared_edges, *ctx.imported_edges]
                                  if e.source in entities or e.target in entities],
+                    # 觀測到的邊（呼叫、佇列、Lot 流向）當下的出處：之後重跑 RCA 才說得出「建卡時這條邊是哪來的、多久前看到的」
+                    "provenance": [{"kind": k, "from": a, "to": b, **_provenance_dict(p)}
+                                   for (k, a, b), p in sorted(ctx.edge_provenance.items())
+                                   if a in entities or b in entities],
                 }
                 row = Incidents.create(inc.uid, ctx.pipeline, inc.to_dict(), inc.severity, inc.suppressed_by,
                                        ctx.pipeline, snapshot)

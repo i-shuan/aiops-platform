@@ -48,6 +48,19 @@ watchdog:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
 
+# 關係圖的 trace 那一半：定期從 trace 來源把「誰呼叫誰」沉澱進 service_edges（aiops/pipelines/control/admin_topology_refresh.yaml）。
+# 沒有這個排程，又沒有人宣告依賴（POST /api/v1/ingestion/graph/import）時，關係圖是空的，連鎖告警不會併成一張卡。
+# 每小時一次、每次回看 60 分鐘（動作的預設值）：窗口剛好相接，呼叫次數不重複累加；代價是新的呼叫關係最慢一小時後才進圖。
+# 超過 7 天沒再看到的邊會被移除。trace 資料源沒設定（純指標的部署）時這個動作自己略過，不會失敗。
+# 限制：只寫「不分環境」的那一份圖；管線有設 environment 的，要另外用 API 帶 environment 觸發。
+topology:
+  enabled: true
+  schedule: "7 * * * *"
+  workflow: admin_topology_refresh
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
 # 只限開發：一起裝一台沒有持久儲存的 PostgreSQL（pod 重建資料就沒了）。
 # 開啟時若沒有另外給 AIOPS_DATABASE_URL，平台會自動連這台。
 devPostgres:
