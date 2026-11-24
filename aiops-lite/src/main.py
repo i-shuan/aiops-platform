@@ -287,8 +287,10 @@ def field_map(es: dict[str, Any], key: str, cls: type) -> Any:
         raise ConfigError(f"es.{key} 要是 欄位用途: 欄位名稱 的對照")
     check_keys(raw, names, f"es.{key}")
     values = {k: text(raw, k, getattr(cls(), k), f"es.{key}.") for k in raw}
-    if not all(values.values()):
-        raise ConfigError(f"es.{key} 的欄位名稱不能是空的")
+    # 唯一可以留空的是日誌的 level：日誌沒有等級欄位時，改用訊息文字挑錯誤日誌（grafana.search_errors）
+    optional = {"level"} if cls is LogFields else set()
+    if not all(v for k, v in values.items() if k not in optional):
+        raise ConfigError(f"es.{key} 的欄位名稱不能是空的" + ("（只有 level 可以留空）" if optional else ""))
     return cls(**values)
 
 

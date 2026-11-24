@@ -47,7 +47,7 @@ class LogFields:
     """日誌文件的欄位名稱（config.yaml 的 es.log_fields）；巢狀物件與帶點的扁平鍵都讀得到。"""
     time: str = "@timestamp"
     service: str = "service.name"
-    level: str = "log.level"
+    level: str = "log.level"   # "" = 日誌沒有等級欄位：改用訊息文字裡的等級字樣挑錯誤日誌（見 Grafana.search_errors）
     message: str = "message"
 
 
@@ -164,7 +164,11 @@ class Grafana:
                       start: datetime, end: datetime, size: int = 100, *, log_fields: LogFields = LogFields(),
                       trace_fields: TraceFields = TraceFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
                       error_statuses: tuple[str, ...] = ERROR_STATUS) -> dict[str, list[dict[str, Any]]]:
-        """撈時間窗內這些系統的錯誤日誌與錯誤 span，回傳 {"logs": [...], "traces": [...]}（各是 ES 的 _source）。"""
+        """撈時間窗內這些系統的錯誤日誌與錯誤 span，回傳 {"logs": [...], "traces": [...]}（各是 ES 的 _source）。
+
+        log_fields.level 是空字串 = 日誌沒有獨立的等級欄位（例如沒拆欄位的容器標準輸出）：改成在訊息欄位做全文比對，
+        訊息裡有 error_levels 任何一個字樣就算錯誤日誌。這是比對「詞」，不是比對等級，所以會混入不是錯誤的紀錄
+        （INFO 的訊息裡寫到 error 這個詞也會中）；訊息欄位必須是 text 型別（keyword 型別比不到，結果是 0 筆）。"""
         def window(field: str) -> dict[str, Any]:
             return {"range": {field: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
 
@@ -179,8 +183,12 @@ class Grafana:
             return (json.dumps({"index": index, "ignore_unavailable": True}) + "\n"
                     + json.dumps({"size": size, "sort": [{time_field: "desc"}], "query": query}) + "\n")
 
-        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service,
-                                            either(log_fields.level, error_levels)))]
+        if log_fields.level:
+            is_error = either(log_fields.level, error_levels)
+        else:  # 全文比對不分大小寫：ERROR／error／Error 只送一次
+            words = " ".join(dict.fromkeys(level.lower() for level in error_levels))
+            is_error = {"match": {log_fields.message: {"query": words, "operator": "or"}}}
+        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service, is_error))]
         if trace_index:
             kinds.append(("traces", trace_index, search(trace_index, trace_fields.time, trace_fields.service,
                                                         either(trace_fields.status, error_statuses))))

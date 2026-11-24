@@ -276,3 +276,38 @@ def test_tempo_and_timeline_settings(tmp_path):
 def test_tempo_and_timeline_settings_are_validated(tmp_path, text, message):
     with pytest.raises(ConfigError, match=message):
         load(tmp_path, MINIMAL + text + "\n")
+
+
+# ── 日誌沒有等級欄位（沒拆欄位的容器標準輸出）：es.log_fields.level 留空，改用訊息文字挑錯誤日誌 ──
+
+NO_LEVEL = LogFields(service="kubernetes.container_name", level="")
+
+
+def test_without_a_level_field_errors_are_picked_by_words_in_the_message(fake):
+    ev = collect(fake, log_fields=NO_LEVEL)
+    _header, query = (json.loads(line) for line in fake.es_requests[0].splitlines()[:2])
+    _window, services, is_error = query["query"]["bool"]["filter"]
+    assert "kubernetes.container_name" in services["bool"]["should"][0]["terms"]
+    # 全文比對不分大小寫：預設的 ERROR／error／Error… 收成三個詞，任何一個出現就算
+    assert is_error == {"match": {"message": {"query": "error fatal critical", "operator": "or"}}}
+    assert "log.level" not in fake.es_requests[0] and '"terms": {"":' not in fake.es_requests[0]
+    assert ev["error_logs"] and any("依訊息文字裡的等級字樣挑的" in note for note in ev["notes"])
+    assert "可能混入不是錯誤的紀錄" in rca.build_prompt(ev)   # LLM 看得到這批樣本的來歷
+    for line in ev["timelines"]:
+        assert all("level" not in event for event in line["events"])   # 沒有等級欄位就不硬塞一個空的 level
+
+
+def test_with_a_level_field_nothing_changes(fake):
+    ev = collect(fake)
+    query = json.loads(fake.es_requests[0].splitlines()[1])
+    assert "terms" in query["query"]["bool"]["filter"][2]["bool"]["should"][0] and '"match":' not in fake.es_requests[0]
+    assert not any("等級字樣" in note for note in ev["notes"])
+
+
+def test_only_the_log_level_field_may_be_left_empty(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(MINIMAL + "es: {log_fields: {service: kubernetes.container_name, level: ''}}\n")
+    assert Settings.load(str(path)).log_fields == NO_LEVEL
+    path.write_text(MINIMAL + "es: {log_fields: {message: ''}}\n")
+    with pytest.raises(ConfigError, match="只有 level 可以留空"):
+        Settings.load(str(path))

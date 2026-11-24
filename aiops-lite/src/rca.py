@@ -158,7 +158,7 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
 
     def entry(d: dict[str, Any], with_level: bool = False) -> dict[str, Any]:
         out = {"time": _dig(d, log_fields.time), "system": _dig(d, log_fields.service)}
-        if with_level:
+        if with_level and log_fields.level:
             out["level"] = _dig(d, log_fields.level)
         out["message"] = str(_dig(d, log_fields.message) or "")[:limits.max_message_chars]
         out.update({f: _dig(d, f) for f in id_fields if _dig(d, f) not in (None, "")})
@@ -171,6 +171,8 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
         for d in found["traces"][:limits.max_trace_samples]]
     if not found["logs"] and not found["traces"]:
         evidence["notes"].append("事故時間窗內沒有查到這些系統的錯誤日誌")
+    elif found["logs"] and not log_fields.level:  # 讓 LLM 知道這批樣本怎麼來的，不要把每一筆都當成錯誤
+        evidence["notes"].append("日誌沒有等級欄位：錯誤日誌樣本是依訊息文字裡的等級字樣挑的，可能混入不是錯誤的紀錄")
 
     # 關聯時間線：錯誤日誌裡出現最多次的批號／載具，回頭把它在各系統的紀錄（不限等級）照時間排出來。
     # 工廠沒有 trace id，批號與載具編號是天然的關聯碼；它只說明先後，不說明因果。
