@@ -1,8 +1,7 @@
 # aiops-lite
 
 事件驅動的極簡 AIOps：Grafana 告警經 Webhook 推進來 → 等一段 debounce → 跨系統收斂 → 收集證據交給 LLM → 寫回 Grafana 註記。
-只拿一把 Grafana Editor Token，不直連任何外部資料庫／ES。事故卡在 Grafana 上看；另外有一個選用的管理介面（React），
-用來看事故、調設定、回饋 RCA 對不對、檢查連線（見「管理介面」）。
+只拿一把 Grafana Editor Token，不直連任何外部資料庫／ES，沒有前端。
 
 這個 repo 現在只有 aiops-lite。原本的 aiops-platform（管線加可插拔算子的那一版：`aiops/`、它的測試、腳本、Helm chart、
 資料庫遷移）已經從這個分支移除；要找舊程式請看 Git 歷史。
@@ -109,7 +108,7 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 所以收到**第一個** Webhook 後固定等 `debounce_seconds`，這段時間進來的告警全部收進同一批，時間到才一起收斂、撈證據、問一次 LLM。
 視窗不會因為後面一直有告警進來而延後；跑的途中進來的告警排進下一個視窗，併入同一張事故並重新分析。
 
-## 設定：config.yaml，加上管理介面改過的項目
+## 設定：全部在一份 config.yaml
 
 沒有環境變數。程式只讀一份 `config.yaml`，預設路徑 `/etc/aiops/config.yaml`；要換位置只有一個環境變數 `AIOPS_CONFIG_FILE`。
 完整範例與每一項的說明見 `config.example.yaml`：
@@ -144,72 +143,19 @@ edges:
   設定被印出來（log、例外訊息）時，Token、密鑰、連線字串不會出現。
 - 實際看到註記的延遲 ≈ 規則的 `for` + Grafana 路由的 `group_wait` + `debounce_seconds` + LLM 回應時間。
 
-## 管理介面
-
-選用。`config.yaml` 設了 `admin.token` 才會開，沒設的話 `/ui/` 與 `/api/` 都回 404，行為跟沒有這個功能時一樣。
-跟服務在同一個 Pod、同一個 port：網頁在 `/ui/`，API 在 `/api/`。
-
-```bash
-kubectl port-forward svc/aiops-lite 8080:8080     # Service 是 ClusterIP
-# 瀏覽器開 http://localhost:8080/ui/ ，輸入 admin.token
-```
-
-| 頁面 | 做什麼 |
-| --- | --- |
-| 總覽 | 進行中與已結案的事故數、等待處理的告警、LLM 是否在退避、回饋統計、最近 10 輪的結果 |
-| 事故 | 清單與詳情（成員告警、摘要、退避狀態）；在詳情頁按「分析正確／分析錯誤」並留備註 |
-| 設定 | 改標籤名稱、時間、關係邊、日誌欄位對照、LLM 的調整項；存進資料庫，下一輪生效，不用重新部署 |
-| 連線檢查 | 照現在生效的設定實際連一次資料庫、Grafana、日誌、Tempo、LLM，並指出欄位對不上的地方 |
-
-![總覽](demo/images/ui-1-overview.png)
-![事故詳情與回饋](demo/images/ui-2-incident.png)
-![設定](demo/images/ui-3-settings.png)
-![連線檢查](demo/images/ui-4-checks.png)
-
-（截圖是本機實測：Grafana 13.0.7、Elasticsearch 8.19.23、PostgreSQL 16、真的 LLM；日誌是自己造的 11 筆。）
-
-**設定怎麼疊**
-
-- `config.yaml` 是基底。管理介面改過的項目存在資料庫（`settings_overrides`），蓋過 `config.yaml` 的同一項。
-- 只存「跟 `config.yaml` 不一樣」的項目；改回一樣的值就等於移除那一項的覆寫。
-- 儲存時整份設定用啟動時同一套檢查重新驗證，不合法就拒絕、什麼都不存。
-- 服務在啟動時、每一輪開始前、按下儲存的當下重新讀設定，所以最晚下一輪生效；重啟後從資料庫讀回來。
-- 資料庫裡的覆寫之後跟 `config.yaml` 合不起來（例如 `config.yaml` 改了相依的項目）時，服務只用 `config.yaml` 並記一行錯誤，設定頁會顯示原因。
-- **只認 `config.yaml`、介面上看不到也改不了的**：Grafana 網址與 Token、Webhook 密鑰、管理密鑰、LLM 網址與金鑰、資料庫連線字串、port、`log_level`、健康檢查門檻、自訂提示詞的檔案路徑。
-
-**資料放哪裡、會不會不見**
-
-設定覆寫、修改紀錄、回饋都在 aiops-lite 自己的資料庫。Helm 預設的 PostgreSQL 是 StatefulSet 加 PVC：Pod 重啟、`helm upgrade`、
-`helm uninstall` 都不會刪掉 PVC；手動刪 PVC 或刪掉 namespace 才會。**目前沒有備份**：底層磁碟壞掉資料就沒了，
-設定放進資料庫之後建議另外排 `pg_dump`（還沒做）。
-
-**安全上要知道的**
-
-- 一把共用的管理密鑰，沒有個人帳號：修改紀錄只記時間，不記是誰。密鑰至少 16 個字元，不能跟 Webhook 密鑰相同。
-- 沒有登入失敗次數的限制，也沒有 TLS：請只在內網或 `port-forward` 使用，不要直接對外開放。
-- 密鑰放在瀏覽器分頁的 sessionStorage，關掉分頁就要重新輸入。
-- API 的回應不含任何 Token、金鑰或連線字串（有測試逐一檢查）。
-- 事故詳情不顯示日誌原文；連線檢查只顯示服務名稱與等級的統計。
-
-**回饋目前只是紀錄**：存在 `feedback` 表，不寫回 Grafana，也還沒有任何程式拿它去改分析的行為（Phase 2 的檢索還沒實作）。
-
-**開發**：`cd ui && npm install && npm run dev`（`/api` 會轉給本機 8080 的 aiops-lite）；`npm run build` 產生 `ui/dist/`，Dockerfile 會自動做。
-
 ## 檔案
 
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
-| `src/server.py` | 289 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 561 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
-| `src/grafana.py` | 329 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/server.py` | 218 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
+| `src/main.py` | 449 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
+| `src/grafana.py` | 278 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
 | `src/grouping.py` | 166 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/rca.py` | 361 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
-| `src/report.py` | 64 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
-| `src/db.py` | 287 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
+| `src/rca.py` | 358 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/report.py` | 59 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
+| `src/db.py` | 183 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
 
-另外：`src/admin.py`（管理介面的 API 與靜態檔）、`src/checks.py`（連線檢查）、`ui/`（React 前端，Vite 編譯）。
-
-上表合計約 2,057 行。
+合計約 1,711 行。
 
 ## 各系統要做的事（平台零直連）
 

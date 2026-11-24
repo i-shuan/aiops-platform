@@ -62,20 +62,6 @@ class TraceFields:
     error: str = "error.message"
 
 
-def _either(name: str, values: Any) -> dict[str, Any]:
-    """欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到。"""
-    values = list(values)
-    return {"bool": {"minimum_should_match": 1, "should": [{"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
-
-
-def _is_error_log(log_fields: LogFields, error_levels: tuple[str, ...]) -> dict[str, Any]:
-    """「這筆是錯誤日誌」的查詢條件。有等級欄位就比等級；沒有（level 是空字串）就在訊息文字裡找等級字樣。"""
-    if log_fields.level:
-        return _either(log_fields.level, error_levels)
-    words = " ".join(dict.fromkeys(level.lower() for level in error_levels))  # 全文比對不分大小寫：ERROR／error／Error 只送一次
-    return {"match": {log_fields.message: {"query": words, "operator": "or"}}}
-
-
 class GrafanaError(Exception):
     """Grafana 連不上、Token 沒權限、回應不是預期的格式。"""
 
@@ -186,16 +172,26 @@ class Grafana:
         def window(field: str) -> dict[str, Any]:
             return {"range": {field: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
 
+        def either(name: str, values: Any) -> dict[str, Any]:
+            values = list(values)
+            # 欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到
+            return {"bool": {"minimum_should_match": 1, "should": [
+                {"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
+
         def search(index: str, time_field: str, service_field: str, extra: dict[str, Any]) -> str:
-            query = {"bool": {"filter": [window(time_field), _either(service_field, services), extra]}}
+            query = {"bool": {"filter": [window(time_field), either(service_field, services), extra]}}
             return (json.dumps({"index": index, "ignore_unavailable": True}) + "\n"
                     + json.dumps({"size": size, "sort": [{time_field: "desc"}], "query": query}) + "\n")
 
-        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service,
-                                            _is_error_log(log_fields, error_levels)))]
+        if log_fields.level:
+            is_error = either(log_fields.level, error_levels)
+        else:  # 全文比對不分大小寫：ERROR／error／Error 只送一次
+            words = " ".join(dict.fromkeys(level.lower() for level in error_levels))
+            is_error = {"match": {log_fields.message: {"query": words, "operator": "or"}}}
+        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service, is_error))]
         if trace_index:
             kinds.append(("traces", trace_index, search(trace_index, trace_fields.time, trace_fields.service,
-                                                        _either(trace_fields.status, error_statuses))))
+                                                        either(trace_fields.status, error_statuses))))
         raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
                             content="".join(body for _k, _index, body in kinds),
                             headers={"Content-Type": "application/x-ndjson"})
@@ -236,53 +232,6 @@ class Grafana:
             total = (hits.get("total") or {}).get("value", len(hits.get("hits") or []))
             out[value] = {"hits": [h.get("_source") or {} for h in hits.get("hits") or []], "total": int(total)}
         return out
-
-    def probe_logs(self, datasource_uid: str, log_index: str, start: datetime, end: datetime, *,
-                   log_fields: LogFields = LogFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
-                   top: int = 15) -> dict[str, Any]:
-        """給管理介面的連線檢查：時間窗內有幾筆日誌、服務欄位與等級欄位實際有哪些值、照現在的設定撈得到幾筆錯誤日誌。
-        回傳 {"total", "errors", "services": [(值, 筆數)], "levels": [...], "problems": [...]}。
-        服務、等級各用「欄位本身」與「.keyword」問一次（text 欄位不能直接做統計，動態 mapping 的值在 .keyword），取有結果的那個；
-        每個子查詢各自成敗，一個欄位的型別不能統計不會讓整個檢查失敗。"""
-        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-
-        def count(extra: list[dict[str, Any]]) -> dict[str, Any]:
-            return {"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [window, *extra]}}}
-
-        def values(field: str) -> dict[str, Any]:
-            return {"size": 0, "query": {"bool": {"filter": [window]}}, "aggs": {"v": {"terms": {"field": field, "size": top}}}}
-
-        asked = [("total", count([])), ("errors", count([_is_error_log(log_fields, error_levels)])),
-                 ("services", values(log_fields.service)), ("services", values(f"{log_fields.service}.keyword"))]
-        if log_fields.level:
-            asked += [("levels", values(log_fields.level)), ("levels", values(f"{log_fields.level}.keyword"))]
-        header = json.dumps({"index": log_index, "ignore_unavailable": True})
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(f"{header}\n{json.dumps(body)}\n" for _name, body in asked),
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(asked):
-            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
-        out: dict[str, Any] = {"total": 0, "errors": 0, "services": [], "levels": [], "problems": []}
-        for (name, _body), resp in zip(asked, responses):
-            if resp.get("error"):
-                if name in ("total", "errors"):   # 統計類的失敗多半只是欄位型別不能聚合，另一個寫法會有結果
-                    out["problems"].append(f"{name}：{json.dumps(resp['error'], ensure_ascii=False)[:200]}")
-                continue
-            if name in ("total", "errors"):
-                out[name] = int(((resp.get("hits") or {}).get("total") or {}).get("value", 0))
-            else:
-                found = [(str(b.get("key")), int(b.get("doc_count", 0)))
-                         for b in ((resp.get("aggregations") or {}).get("v") or {}).get("buckets") or []]
-                out[name] = out[name] or found
-        return out
-
-    def whoami(self) -> dict[str, Any]:
-        """這把 Token 屬於哪個組織（GET /api/org）。Token 無效或沒權限丟 GrafanaError。"""
-        raw = self._request("GET", "/api/org")
-        if not isinstance(raw, dict):
-            raise GrafanaError(f"/api/org 的回應不是物件：{str(raw)[:200]}")
-        return raw
 
     # ── Trace（經 Grafana 的 Tempo 資料源代理）──
 

@@ -7,5 +7,3 @@ __pycache__/
 config.yaml
 secrets.values.yaml
 *.secret.yaml
-ui/node_modules/
-ui/dist/

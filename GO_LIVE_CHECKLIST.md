@@ -104,18 +104,6 @@ aiops-lite 有一個收告警的網址（`http://<release>.<namespace>.svc:8080/
 - [ ] `webhook.token`：自己訂一組**純英數字**的字串。之後在 Grafana 的 Contact Point 要填同一組（第 3 節）
 - [ ] `postgres.password`：自己訂一組**純英數字**的字串（會放進連線字串，有符號會壞）
 
-### 要開管理介面的話
-
-在 `secrets.values.yaml` 多加一行（不開就不用寫）：
-
-```yaml
-admin: {token: "<至少 16 個字元的隨機字串>"}     # 產生：openssl rand -base64 24
-```
-
-部署後 `kubectl port-forward svc/aiops-lite 8080:8080`，瀏覽器開 `http://localhost:8080/ui/`。
-先到「連線檢查」按一次，它會直接指出 Token、資料源 uid、日誌欄位哪裡對不上，比手動下指令快。
-映像檔 build 的時候要連得到 npm registry（編譯前端）；現場不能上網的話，在能上網的機器 build 好再匯入。
-
 ## 2. 對齊 `values.yaml`（平台維運做）
 
 `deploy/helm/aiops-lite/values.yaml` 可以進 Git，裡面不放密碼。要看的只有這幾項：

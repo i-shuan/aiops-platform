@@ -8,10 +8,7 @@
 
 Grafana 連不上時註記寫不進去：事故照樣存在資料庫，下一輪補寫。資料庫連不上這一輪才算失敗，告警留在 inbox 下一輪再處理。
 
-**設定的來源有兩層**：config.yaml 是基底（沒有其他環境變數）；管理介面改過的可調項目存在資料庫（settings_overrides），
-每一輪開始時疊在 config.yaml 上面（apply_overrides）。Token、密碼、連線位址、監聽的 port 只認 config.yaml，
-管理介面看不到也改不了（EDITABLE 以外的鍵一律拒絕）。資料庫裡沒有覆寫 = 行為跟只有 config.yaml 時完全一樣。
-檔案路徑預設 /etc/aiops/config.yaml，要換用環境變數
+**所有設定都在一份 config.yaml**（沒有其他環境變數）。檔案路徑預設 /etc/aiops/config.yaml，要換用環境變數
 AIOPS_CONFIG_FILE 指定（唯一的一個）。檔案不存在、鍵名打錯、型別不對、必填沒填，啟動時直接報錯。完整範例見 config.example.yaml。
 檔案裡有 Token 與密碼：不要推上 Git（.gitignore 已排除 config.yaml）；Kubernetes 用 Secret 掛載。
 """
@@ -21,7 +18,7 @@ import logging
 import os
 import re
 import sys
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -41,22 +38,6 @@ CONFIG_ENV = "AIOPS_CONFIG_FILE"
 TIMING_DEFAULTS = {"debounce_seconds": 60, "followup_seconds": 60, "close_after_seconds": 300}
 TIMING_MINIMUM = {"debounce_seconds": 0, "followup_seconds": 1, "close_after_seconds": 0}
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
-ADMIN_TOKEN_MIN_CHARS = 16   # 管理密鑰太短等於沒設：能改設定的密鑰至少這麼長
-
-# 管理介面可以改的鍵（結構跟 config.yaml 一樣；"" = 最外層）。不在這裡的一律只認 config.yaml：
-# Token／金鑰／連線字串（機密）、grafana.url 與 llm.url（改了等於把資料送到別的地方）、port／host（要重啟）、
-# log_level 與 healthcheck（行程層級，啟動時決定）、llm.system_prompt_file（是檔案路徑）。
-EDITABLE: dict[str, frozenset[str]] = {
-    "": frozenset({"debounce_seconds", "followup_seconds", "close_after_seconds", "timezone", "edges"}),
-    "labels": frozenset({"detect", "severity", "service", "default_severity"}),
-    "es": frozenset({"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields", "error_levels",
-                     "error_statuses", "max_hits", "window_padding_minutes", "timeline_fields"}),
-    "tempo": frozenset({"datasource_uid", "max_traces", "max_spans", "trace_id_field"}),
-    "llm": frozenset({"model", "temperature", "timeout_seconds", "retry_initial_seconds", "retry_max_seconds",
-                      "max_log_samples", "max_trace_samples", "max_message_chars", "top_ids", "max_summary_chars",
-                      "id_pattern", "max_timeline_ids", "max_timeline_events"}),
-    "annotation": frozenset({"max_rule_links"}),
-}
 
 
 class ConfigError(Exception):
@@ -100,10 +81,6 @@ class Settings:
     rounds_retention_days: int = 90            # rounds 表保留幾天
     annotation_max_rule_links: int = 5         # 註記第 3 行最多列幾條規則連結
     edges: tuple[tuple[str, str], ...] = ()
-    admin_token: str = field(default="", repr=False)   # 管理介面的密鑰；空的 = 管理介面與 /api 整個關掉
-    # 讀進來的 config.yaml 原樣留著：管理介面的覆寫要疊在它上面重新驗證。裡面有 Token，所以不印、不參與比較
-    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
-    base_dir: Path | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def load(cls, path: str | None = None) -> "Settings":
@@ -114,7 +91,7 @@ class Settings:
     @classmethod
     def from_dict(cls, raw: dict[str, Any], base_dir: Path | None = None) -> "Settings":
         """base_dir：llm.system_prompt_file 寫相對路徑時相對於哪裡（= 設定檔所在的資料夾）。"""
-        known = {"grafana", "webhook", "database", "llm", "es", "tempo", "labels", "healthcheck", "annotation", "admin", "timezone",
+        known = {"grafana", "webhook", "database", "llm", "es", "tempo", "labels", "healthcheck", "annotation", "timezone",
                  "log_level", "edges", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
         check_keys(raw, known, "")
         grafana = section(raw, "grafana", {"url", "token", "timeout_seconds", "retries", "retry_backoff_seconds"})
@@ -131,11 +108,6 @@ class Settings:
         labels = section(raw, "labels", {"detect", "severity", "service", "default_severity"})
         health = section(raw, "healthcheck", {"stuck_seconds"})
         annotation = section(raw, "annotation", {"max_rule_links"})
-        admin_token = text(section(raw, "admin", {"token"}), "token", "", "admin.")
-        if admin_token and len(admin_token) < ADMIN_TOKEN_MIN_CHARS:
-            raise ConfigError(f"admin.token 至少要 {ADMIN_TOKEN_MIN_CHARS} 個字元（它能改設定；不開管理介面就整段不要寫）")
-        if admin_token and admin_token == text(webhook, "token", "", "webhook."):
-            raise ConfigError("admin.token 不能跟 webhook.token 一樣：Webhook 密鑰是填在 Grafana 上的，看得到的人不該因此能改設定")
         missing = [name for name, value in (("grafana.url", grafana.get("url")), ("grafana.token", grafana.get("token")),
                                             ("webhook.token", webhook.get("token"))) if not value]
         if missing:
@@ -224,91 +196,7 @@ class Settings:
             healthcheck_stuck_seconds=integer(health, "stuck_seconds", cls.healthcheck_stuck_seconds, 30, prefix="healthcheck."),
             rounds_retention_days=integer(raw, "rounds_retention_days", cls.rounds_retention_days, 1),
             annotation_max_rule_links=integer(annotation, "max_rule_links", cls.annotation_max_rule_links, 0, prefix="annotation."),
-            admin_token=admin_token, raw=raw, base_dir=base_dir,
             **{key: integer(raw, key, default, TIMING_MINIMUM[key]) for key, default in TIMING_DEFAULTS.items()})
-
-
-def editable_view(s: Settings) -> dict[str, Any]:
-    """把一份設定裡「管理介面可以改」的部分攤成 config.yaml 的結構（EDITABLE 的每個鍵都有值，沒設的是預設值）。
-    沒有任何機密：這個結果會原樣回給瀏覽器。"""
-    ev, llm = s.evidence, s.llm
-    return {
-        "debounce_seconds": s.debounce_seconds, "followup_seconds": s.followup_seconds,
-        "close_after_seconds": s.close_after_seconds, "timezone": s.tz, "edges": [list(e) for e in s.edges],
-        "labels": asdict(s.labels),
-        "es": {"datasource_uid": s.es_datasource_uid, "log_index": s.log_index, "trace_index": s.trace_index,
-               "id_fields": list(s.id_fields), "log_fields": asdict(s.log_fields), "trace_fields": asdict(s.trace_fields),
-               "error_levels": list(ev.error_levels), "error_statuses": list(ev.error_statuses), "max_hits": ev.max_hits,
-               "window_padding_minutes": ev.window_padding_minutes, "timeline_fields": list(ev.timeline_fields)},
-        "tempo": {"datasource_uid": s.tempo_datasource_uid, "max_traces": ev.max_traces, "max_spans": ev.max_trace_spans,
-                  "trace_id_field": ev.trace_id_field},
-        "llm": {"model": s.llm_model, "temperature": llm.temperature, "timeout_seconds": llm.timeout_seconds,
-                "retry_initial_seconds": s.llm_retry_initial_seconds, "retry_max_seconds": s.llm_retry_max_seconds,
-                "max_log_samples": ev.max_log_samples, "max_trace_samples": ev.max_trace_samples,
-                "max_message_chars": ev.max_message_chars, "top_ids": ev.top_ids,
-                "max_summary_chars": llm.max_summary_chars, "id_pattern": llm.id_pattern,
-                "max_timeline_ids": ev.max_timeline_ids, "max_timeline_events": ev.max_timeline_events},
-        "annotation": {"max_rule_links": s.annotation_max_rule_links},
-    }
-
-
-def check_editable(doc: Any, what: str = "設定") -> None:
-    """doc 只能有 EDITABLE 裡的鍵；多出來的（機密、不認得的）直接拒絕。"""
-    if not isinstance(doc, dict):
-        raise ConfigError(f"{what}要是物件")
-    for key, value in doc.items():
-        if key in EDITABLE[""]:
-            continue
-        if key not in EDITABLE:
-            raise ConfigError(f"{key!r} 不能在管理介面修改（只認 config.yaml），或不是認得的設定")
-        if not isinstance(value, dict):
-            raise ConfigError(f"{key} 要是一組設定（物件）")
-        extra = sorted(set(value) - EDITABLE[key])
-        if extra:
-            raise ConfigError(f"{key} 的 {extra} 不能在管理介面修改（只認 config.yaml），或不是認得的設定")
-
-
-def diff_overrides(wanted: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
-    """wanted、base 都是 editable_view 的結構：只留跟 base（config.yaml）不一樣的鍵。跟 config.yaml 一樣的不存，
-    之後 config.yaml 改了那個值才會跟著變。"""
-    out: dict[str, Any] = {}
-    for key, value in wanted.items():
-        if key in EDITABLE[""]:
-            if value != base.get(key):
-                out[key] = value
-            continue
-        changed = {k: v for k, v in value.items() if v != (base.get(key) or {}).get(k)}
-        if changed:
-            out[key] = changed
-    return out
-
-
-def apply_overrides(base: Settings, overrides: dict[str, Any]) -> Settings:
-    """把管理介面的覆寫疊在 config.yaml 上，整份重新驗證（跟啟動時同一套檢查）。沒有覆寫就原樣回傳 base。
-    覆寫裡的 null = 那一項回到預設值。"""
-    if not overrides:
-        return base
-    check_editable(overrides, "管理介面的設定")
-    raw = dict(base.raw)
-    for key, value in overrides.items():
-        if key in EDITABLE[""]:
-            raw[key] = value
-            continue
-        merged = dict(raw.get(key) or {})
-        for k, v in value.items():   # log_fields／trace_fields 是對照表：逐欄合併，沒改到的欄位留著
-            merged[k] = {**(merged.get(k) or {}), **v} if isinstance(v, dict) and isinstance(merged.get(k), dict) else v
-        raw[key] = merged
-    return Settings.from_dict(raw, base.base_dir)
-
-
-def effective_settings(base: Settings, db: Database) -> Settings:
-    """現在生效的設定 = config.yaml 疊上資料庫裡管理介面的覆寫。覆寫套不上去（存的時候合法，之後 config.yaml 改了才會發生）
-    就只用 config.yaml 並記一行錯誤：寧可照基底跑，也不要整個服務停掉。資料庫讀不到的例外照丟，由呼叫端決定。"""
-    try:
-        return apply_overrides(base, db.get_overrides())
-    except ConfigError as e:
-        log.error("資料庫裡管理介面的設定套不上去，只用 config.yaml：%s", e)
-        return base
 
 
 def integer(raw: dict[str, Any], key: str, default: int, minimum: int, maximum: int | None = None, prefix: str = "") -> int:

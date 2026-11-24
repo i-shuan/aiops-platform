@@ -6,9 +6,6 @@
   inbox      Webhook 收到、還沒處理的告警。先落地再回 200：等 debounce 的期間服務重啟也不會掉
   incidents  每個事故一列：狀態、嚴重度、成員告警、註記 id、第 2 行摘要
   rounds     每一輪一列：處理了幾筆告警、幾個錯誤
-  settings_overrides  管理介面改過的設定（一列，JSON；結構跟 config.yaml 一樣，只有可調的那些鍵）。沒有這一列 = 全部照 config.yaml
-  settings_history    每次儲存留一列（改之前、改之後），給管理介面看誰在什麼時候改了什麼；不會自動清
-  feedback            管理介面上對 RCA 摘要的回饋（正確／錯誤 + 備註），一張事故可以有多筆，以最新一筆為準
 """
 from __future__ import annotations
 
@@ -62,32 +59,6 @@ rounds = sa.Table(
     sa.Column("errors", sa.Text, nullable=False, default="[]"),  # JSON 陣列（字串）
 )
 
-settings_overrides = sa.Table(
-    "settings_overrides", metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=False),   # 永遠只有 id = 1 這一列
-    sa.Column("doc", sa.Text, nullable=False),                            # JSON
-    sa.Column("updated_at", TS, nullable=False),
-)
-
-settings_history = sa.Table(
-    "settings_history", metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("changed_at", TS, nullable=False, index=True),
-    sa.Column("before", sa.Text, nullable=False),   # JSON：改之前的 overrides
-    sa.Column("after", sa.Text, nullable=False),    # JSON：改之後的 overrides
-)
-
-feedback = sa.Table(
-    "feedback", metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("incident_uid", sa.String(32), nullable=False, index=True),
-    sa.Column("verdict", sa.String(8), nullable=False),    # ok／wrong
-    sa.Column("note", sa.Text, nullable=False, default=""),
-    sa.Column("summary", sa.Text, nullable=False, default=""),   # 回饋當下的摘要原文：之後摘要重新分析了，也知道當時評的是哪一版
-    sa.Column("created_at", TS, nullable=False),
-)
-
-VERDICTS = ("ok", "wrong")
 MEMBER_TIMES = ("starts_at", "ends_at")
 
 
@@ -201,82 +172,7 @@ class Database:
             if processed:
                 conn.execute(sa.delete(inbox).where(inbox.c.id.in_(list(processed))))
 
-    def list_incidents(self, status: str | None = None, limit: int = 50, offset: int = 0) -> tuple[list[Incident], int]:
-        """給管理介面：新的在前。回傳 (這一頁, 符合條件的總數)。"""
-        where = sa.true() if status is None else incidents.c.status == status
-        with self.engine.connect() as conn:
-            total = conn.execute(sa.select(sa.func.count()).select_from(incidents).where(where)).scalar_one()
-            rows = conn.execute(sa.select(incidents).where(where).order_by(incidents.c.started_at.desc(), incidents.c.uid)
-                                .limit(limit).offset(offset)).mappings().all()
-        return [self._incident(r) for r in rows], total
-
-    def inbox_size(self) -> int:
-        with self.engine.connect() as conn:
-            return conn.execute(sa.select(sa.func.count()).select_from(inbox)).scalar_one()
-
-    def ping(self) -> None:
-        with self.engine.connect() as conn:
-            conn.execute(sa.select(1))
-
-    # ── 管理介面改過的設定 ──
-
-    def get_overrides(self) -> dict[str, Any]:
-        with self.engine.connect() as conn:
-            raw = conn.execute(sa.select(settings_overrides.c.doc).where(settings_overrides.c.id == 1)).scalar_one_or_none()
-        return json.loads(raw) if raw else {}
-
-    def save_overrides(self, doc: dict[str, Any], now: datetime) -> None:
-        """整份取代，並在同一個交易留一筆歷史（改之前、改之後）。"""
-        after = json.dumps(doc, ensure_ascii=False, sort_keys=True)
-        with self.engine.begin() as conn:
-            before = conn.execute(sa.select(settings_overrides.c.doc).where(settings_overrides.c.id == 1)).scalar_one_or_none()
-            if before is None:
-                conn.execute(sa.insert(settings_overrides).values(id=1, doc=after, updated_at=now))
-            else:
-                conn.execute(sa.update(settings_overrides).where(settings_overrides.c.id == 1).values(doc=after, updated_at=now))
-            conn.execute(sa.insert(settings_history).values(changed_at=now, before=before or "{}", after=after))
-
-    def overrides_history(self, limit: int = 20) -> list[dict[str, Any]]:
-        with self.engine.connect() as conn:
-            rows = conn.execute(sa.select(settings_history).order_by(settings_history.c.id.desc()).limit(limit)).mappings().all()
-        return [{"changed_at": _iso(r["changed_at"]), "before": json.loads(r["before"]), "after": json.loads(r["after"])}
-                for r in rows]
-
-    # ── RCA 回饋 ──
-
-    def add_feedback(self, incident_uid: str, verdict: str, note: str, summary: str, now: datetime) -> None:
-        with self.engine.begin() as conn:
-            conn.execute(sa.insert(feedback).values(incident_uid=incident_uid, verdict=verdict, note=note,
-                                                    summary=summary, created_at=now))
-
-    def feedback_for(self, uids: list[str]) -> dict[str, list[dict[str, Any]]]:
-        """每張事故的回饋，新的在前。"""
-        if not uids:
-            return {}
-        with self.engine.connect() as conn:
-            rows = conn.execute(sa.select(feedback).where(feedback.c.incident_uid.in_(uids))
-                                .order_by(feedback.c.id.desc())).mappings().all()
-        out: dict[str, list[dict[str, Any]]] = {}
-        for r in rows:
-            out.setdefault(r["incident_uid"], []).append({
-                "verdict": r["verdict"], "note": r["note"], "summary": r["summary"], "created_at": _iso(r["created_at"])})
-        return out
-
-    def feedback_counts(self) -> dict[str, int]:
-        """以每張事故最新的一筆回饋為準，各有幾張。"""
-        latest = sa.select(sa.func.max(feedback.c.id)).group_by(feedback.c.incident_uid)
-        with self.engine.connect() as conn:
-            rows = conn.execute(sa.select(feedback.c.verdict, sa.func.count()).where(feedback.c.id.in_(latest))
-                                .group_by(feedback.c.verdict)).all()
-        return {**{v: 0 for v in VERDICTS}, **{v: n for v, n in rows}}
-
     # ── 執行紀錄 ──
-
-    def list_rounds(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self.engine.connect() as conn:
-            rows = conn.execute(sa.select(rounds).order_by(rounds.c.id.desc()).limit(limit)).mappings().all()
-        return [{"started_at": _iso(r["started_at"]), "finished_at": _iso(r["finished_at"]), "status": r["status"],
-                 "alerts": r["alerts"], "open_incidents": r["open_incidents"], "errors": json.loads(r["errors"])} for r in rows]
 
     def record_round(self, *, started_at: datetime, finished_at: datetime, status: str, alerts: int,
                      open_incidents: int, errors: list[str], retention_days: int = 90) -> None:

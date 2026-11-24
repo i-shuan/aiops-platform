@@ -6,6 +6,3 @@ config.yaml
 *.db
 .git
 __pycache__/
-ui/node_modules/
-ui/dist/
-demo/

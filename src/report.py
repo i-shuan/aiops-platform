@@ -24,16 +24,11 @@ def local_time(t: datetime, tz: str) -> str:
     return t.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d %H:%M")
 
 
-def rule_url(grafana_url: str, rule_uid: str) -> str:
-    """Grafana 告警規則編輯頁的網址；webhook 沒帶 ruleUID 就回空字串（不給壞掉的連結）。"""
-    return f"{grafana_url.rstrip('/')}/alerting/{quote(rule_uid, safe='')}/edit" if rule_uid else ""
-
-
 def rule_link(grafana_url: str, rule_uid: str, title: str) -> str:
     """Grafana 告警規則的編輯頁：在那裡改 aiops_severity 標籤，下一輪就生效。"""
-    href = rule_url(grafana_url, rule_uid)
-    if not href:
+    if not rule_uid:  # webhook 沒帶 ruleUID：只顯示名稱，不給壞掉的連結
         return html.escape(title)
+    href = f"{grafana_url.rstrip('/')}/alerting/{quote(rule_uid, safe='')}/edit"
     return f'<a href="{html.escape(href, quote=True)}" target="_blank">{html.escape(title)}</a>'
 
 

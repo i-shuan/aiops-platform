@@ -7,11 +7,10 @@
 #   grafana: {url: https://grafana.corp.example, token: glsa_xxx}
 #   webhook: {token: xxx}
 #   postgres: {password: xxx}
-#   admin: {token: xxx}        # 要開管理介面才需要
 
 image:
   repository: aiops-lite
-  tag: "0.5.0"
+  tag: "0.4.0"
   pullPolicy: IfNotPresent
 
 grafana:
@@ -21,14 +20,8 @@ grafana:
 webhook:
   token: ""      # 必填：Grafana Contact Point 帶的 Bearer 密鑰（兩邊填一樣）
 
-admin:
-  token: ""      # 管理介面的密鑰（至少 16 個字元，不能跟 webhook.token 一樣）。留空 = 管理介面與 /api 整個關掉
-                 # 這個值也寫在不進 Git 的 secrets.values.yaml。產生一把：openssl rand -base64 24
-
 service:
   port: 8080     # Grafana 的 Contact Point 打 http://<release>.<namespace>.svc:8080/webhook
-                 # 管理介面在同一個 port 的 /ui/。Service 是 ClusterIP，從自己的電腦看：
-                 #   kubectl port-forward svc/<release> 8080:8080  然後開 http://localhost:8080/ui/
 
 postgres:
   password: ""   # 必填：只用英數字（會放進連線字串）
