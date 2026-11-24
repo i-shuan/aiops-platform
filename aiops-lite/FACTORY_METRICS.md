@@ -271,6 +271,29 @@ WHERE finished_at > NOW() - INTERVAL '5 minutes'
 - **評估頻率不要太密**：建議 1～3 分鐘一次，避免拖慢產線資料庫。
 - 時間條件要用得到索引的欄位（例如 `updated_at`），不然每次評估都是全表掃描。
 
+**Grafana 開源版能連哪些資料庫**
+
+開源版（免費版）就能連開源資料庫，不需要 Enterprise 授權。
+
+| 資料庫 | 開源版 Grafana | 驗證狀態 |
+| --- | --- | --- |
+| PostgreSQL | 內建資料源外掛，不用另外安裝 | **實測過**（見下表） |
+| MySQL／MariaDB | 內建資料源外掛 | 安裝檔裡有這個外掛；沒有實際連過 |
+| Microsoft SQL Server | 內建資料源外掛 | 安裝檔裡有這個外掛；沒有實際連過 |
+| Oracle | 開源版的安裝檔裡**沒有**這個外掛；就我們所知它是 Enterprise 版才有的 | 沒有驗證過；上線前請向 Grafana 官方文件確認 |
+
+資料庫是 Oracle、又只有開源版 Grafana 時，可以用下面的 `sql_exporter`，或把統計值定時同步到 PostgreSQL。
+
+實測（2026-11-24，本機：Grafana 13.0.7，API 回報 `edition = Open Source`；PostgreSQL 16.15；假資料 4320 筆）：
+
+| 測試 | 結果 |
+| --- | --- |
+| 建立 PostgreSQL 資料源 | 成功（型別 `grafana-postgresql-datasource`） |
+| Save & test | `Database Connection OK` |
+| 用 Editor Token 下 SQL 統計（`group by`、`avg`、`sum`） | 成功 |
+| 時序格式的查詢（圖表與告警規則用的格式） | 成功 |
+| 用只有 `SELECT` 權限的帳號寫入 | 被資料庫擋下（`permission denied`） |
+
 **不想讓 Grafana 直連資料庫**：用 `sql_exporter` 定時查同一句 SQL，轉成 Prometheus metrics，規則改查 PromQL。
 
 ## 3. MQ：先找現成的 exporter
