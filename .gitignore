@@ -1,10 +1,9 @@
-values-local.yaml
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 *.db
-secrets.local.yaml
-
-# 合成資料產生器的輸出（scripts/synth_generator，可能上百 MB）
-synth-out/
+.env
+config.yaml
+secrets.values.yaml
+*.secret.yaml

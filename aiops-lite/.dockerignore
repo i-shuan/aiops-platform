@@ -1,8 +1,0 @@
-tests/
-deploy/
-dashboards/
-*.md
-config.yaml
-*.db
-.git
-__pycache__/

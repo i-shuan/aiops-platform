@@ -1,9 +1,0 @@
-name: admin_series_profile
-description: "手動動作：序列體檢（24h／168h 自相關、偏態、峰度）；沒有週期時產生「排除 detector.hourly_baseline」的 advisory 建議"
-nodes:
-  - name: series_profile
-    operator: admin.series_profile
-    # r(24h) 與 r(168h) 都低於 min_acf 才建議排除時段基準線。
-    # min_coverage：窗口裡有資料的時段比例不到這個值就寫「資料不足」、不算週期、不給建議
-    # （sum／count 聚合對沒資料的桶回 0.0，看起來像流量為 0；Elasticsearch 來源會另外用文件數分辨空桶）
-    params: {min_acf: 0.3, min_coverage: 0.5}

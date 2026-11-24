@@ -1,7 +1,0 @@
-name: admin_proposal_backtest
-description: "手動動作：proposal_backtest（含黃金事故防護罩：提案讓任何一場確認過的真事故一點都抓不到就標 rejected）"
-nodes:
-  - name: proposal_backtest
-    operator: admin.proposal_backtest
-    # 一次最多重跑最近幾場黃金事故（每場一次資料源查詢）
-    params: {golden_limit: 50}

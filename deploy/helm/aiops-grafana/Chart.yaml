@@ -1,6 +1,0 @@
-apiVersion: v2
-name: aiops-grafana
-description: 只負責顯示的 Grafana：APM（metrics／trace／log，讀 Elasticsearch）與平台告警（讀 Alertmanager）。不發通知、不含告警規則。
-type: application
-version: 0.1.0
-appVersion: "13.0.7"

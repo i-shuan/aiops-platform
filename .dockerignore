@@ -1,11 +1,8 @@
-# 機密與本機檔案一律不進映像檔
-values-local.yaml
-*.db
-.env*
-.venv/
-.git/
-.pytest_cache/
-**/__pycache__/
-*.pyc
 tests/
 deploy/
+dashboards/
+*.md
+config.yaml
+*.db
+.git
+__pycache__/

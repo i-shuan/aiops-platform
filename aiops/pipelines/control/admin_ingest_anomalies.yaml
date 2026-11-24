@@ -1,5 +1,0 @@
-name: admin_ingest_anomalies
-description: "手動動作：ingest_anomalies"
-nodes:
-  - name: ingest_anomalies
-    operator: admin.ingest_anomalies

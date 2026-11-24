@@ -1,5 +1,0 @@
-name: admin_proposal_create
-description: "手動動作：proposal_create"
-nodes:
-  - name: proposal_create
-    operator: admin.proposal_create

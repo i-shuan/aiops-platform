@@ -1,5 +1,0 @@
-name: admin_topology_refresh
-description: "手動／排程動作：從 trace 來源沉澱服務拓撲到 service_edges（排程：run-once -w admin_topology_refresh）"
-nodes:
-  - name: topology_refresh
-    operator: admin.topology_refresh
