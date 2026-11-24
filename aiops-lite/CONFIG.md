@@ -26,7 +26,7 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `es.log_index`、`es.trace_index` | `*`、空 | 日誌與 Trace 的 index；trace_index 空 = 不查 Trace |
 | `tempo.datasource_uid` | 空 | Grafana 上 Tempo 資料源的 uid；空 = 沒有呼叫鏈證據 |
 | `es.id_fields` | `[eqp_id, lot_id, carrier_id]` | 錯誤日誌裡要統計出現次數的識別碼欄位 |
-| `es.log_fields` | `time: @timestamp`、`service: service.name`、`level: log.level`、`message: message` | 日誌文件的欄位名稱 |
+| `es.log_fields` | `time: @timestamp`、`service: service.name`、`level: log.level`、`message: message` | 日誌文件的欄位名稱。只有 `level` 可以設成 `""`（見下面「日誌沒有等級欄位」） |
 | `es.trace_fields` | `time: @timestamp`、`service: service.name`、`span: span.name`、`trace_id: trace.id`、`status: status.code`、`error: error.message` | Trace 文件的欄位名稱 |
 | `timezone` | `Asia/Taipei` | 註記裡顯示的時間 |
 | `log_level` | `INFO` | `DEBUG` 會記下送給 LLM 的內容與原始回應 |
@@ -82,6 +82,49 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 - 設成 `""` 關掉摘要文字的檢查。模型另外列出的 `systems`、`ids` 清單照樣會檢查（不存在的系統或機台還是會被擋）。
 
 這個副作用在真實資料上多常發生沒有量過；用 OpenAI gpt-6-luna 實測的那一次沒有觸發。
+
+### 日誌沒有等級欄位（`es.log_fields.level: ""`）
+
+給「日誌沒有拆欄位、等級還包在訊息文字裡」的環境用，例如 Fluentd 直接收的 K8s 容器標準輸出。
+不用改收日誌的那一端；代價是準確度比有等級欄位差。**能拆欄位就拆欄位，這個只是過渡做法。**
+
+設定（K8s 容器日誌的例子，服務名稱在 `kubernetes.container_name`）：
+
+```yaml
+es:
+  log_index: "fluentd-*"
+  log_fields: {service: kubernetes.container_name, level: ""}
+```
+
+告警的 `service` 標籤值、`edges` 裡的名稱都要跟 `kubernetes.container_name` 的值一樣。
+
+**怎麼挑**：在訊息欄位做全文比對，訊息裡有 `es.error_levels` 任何一個詞就算錯誤日誌（不分大小寫，預設是 error、fatal、critical）。
+比對的是「完整的詞」，不是等級。要把 WARN 也算進去就在 `es.error_levels` 加上。
+送給 LLM 的補充說明會寫明「樣本是依訊息文字挑的，可能混入不是錯誤的紀錄」。
+
+**實測**（Elasticsearch 8.19.23、動態 mapping、13 筆自己造的容器日誌，用實際的查詢程式；不是產線資料）：
+
+| 訊息 | 結果 |
+| --- | --- |
+| <code>… &#124; ERROR &#124; …</code>、<code>… &#124; FATAL &#124; …</code>、`[error] upstream timed out`、`level=error msg=…` | 撈到 |
+| `java.lang.NullPointerException at …`（訊息裡沒有等級字樣） | **漏掉** |
+| `IOError: Connection reset by peer`（error 黏在別的字裡） | **漏掉** |
+| <code>… &#124; INFO &#124; … recovered after error from upstream</code> | **誤撈** |
+| <code>… &#124; DEBUG &#124; … log.level=error is not set</code> | **誤撈** |
+| `finished with 0 errors`、`ErrorHandler registered`、WARN、一般的 INFO | 沒撈（對） |
+| 別的容器的 ERROR | 沒撈（對） |
+
+6 筆真的錯誤撈到 4 筆、漏 2 筆；6 筆不是錯誤的誤撈 2 筆。這幾筆是為了涵蓋各種寫法挑的，比例不代表產線上的準確度。
+同一批資料用預設的 `log.level`（欄位不存在）是 0 筆。
+
+**限制**：
+
+- 沒有等級字樣的錯誤（例外堆疊的後續幾行、只寫例外名稱的訊息）撈不到。
+- INFO、DEBUG 的訊息裡提到 error 這個詞會被當成錯誤。
+- 訊息欄位在 ES 必須是 `text` 型別；是 `keyword` 的話比不到，結果是 0 筆。
+- 多行的例外堆疊如果被收成一行一筆，只有帶等級字樣的那一行會進來。
+- 機台、批號沒有拆成欄位的話，識別碼統計與關聯時間線仍然是空的；這個設定只解決「挑錯誤日誌」。
+- 沒有在真實的產線日誌上驗證過。
 
 ## B. 留在程式裡的內部常數（不開放設定）
 

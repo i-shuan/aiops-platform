@@ -52,7 +52,8 @@ es:                                      # 整段可以不寫：沒設 datasourc
   log_fields:                            # 日誌文件的欄位名稱（巢狀物件或帶點的扁平鍵都可以）；下面是預設值
     time: "@timestamp"
     service: service.name                # 要跟告警的 service 標籤值一致
-    level: log.level
+    level: log.level                     # 日誌沒有等級欄位（沒拆欄位的容器輸出）就設成 ""：改用訊息文字裡的等級字樣挑錯誤日誌，
+    #                                      # 會漏撈也會誤撈（見 CONFIG.md「日誌沒有等級欄位」）；其他欄位不能留空
     message: message
   trace_fields:                          # Trace／span 文件的欄位名稱；下面是預設值
     time: "@timestamp"

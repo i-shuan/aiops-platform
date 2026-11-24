@@ -51,6 +51,7 @@ es:              # datasourceUid 留空 = RCA 沒有日誌證據
   logIndex: "*"
   traceIndex: ""
   idFields: [eqp_id, lot_id, carrier_id]
+  # 日誌沒有等級欄位（沒拆欄位的容器輸出）：level 設成 ""，改用訊息文字挑錯誤日誌（會漏撈也會誤撈，見 CONFIG.md）
   logFields: {time: "@timestamp", service: service.name, level: log.level, message: message}
   traceFields: {time: "@timestamp", service: service.name, span: span.name, trace_id: trace.id, status: status.code, error: error.message}
 
