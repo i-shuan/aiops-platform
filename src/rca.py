@@ -325,10 +325,13 @@ def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int 
     systems |= {s for group in (evidence.get("timelines") or [], evidence.get("call_chains") or [])
                 for item in group for s in item.get("systems") or []}
     ids = {v for counts in evidence["id_counts"].values() for v in counts}
-    unknown = [s for s in answer.get("systems") or [] if s not in systems]
-    unknown += [i for i in answer.get("ids") or [] if i not in ids]
-    # 摘要文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     corpus = json.dumps(evidence, ensure_ascii=False)
+    unknown = [s for s in answer.get("systems") or [] if s not in systems]
+    # ids：在識別碼統計裡，或原樣出現在送給模型的證據裡（跟下面摘要文字同一個標準）都算有憑據。
+    # 只認統計會誤擋兩種真的有憑據的情況：日誌沒拆欄位、機台與批號只寫在訊息文字裡；以及有拆欄位但沒排進 top_ids 的。
+    # 這是字串比對：編出來的 EQP-1 剛好是證據裡 EQP-10 的開頭時擋不到（摘要文字的檢查本來就有同樣的限制）。
+    unknown += [i for i in answer.get("ids") or [] if i not in ids and not (isinstance(i, str) and i.strip() and i in corpus)]
+    # 摘要文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
         unknown += [t for t in re.findall(id_pattern, summary) if t not in corpus]

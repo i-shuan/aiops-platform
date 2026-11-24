@@ -8,6 +8,15 @@
 必填只有三個：`grafana.url`、`grafana.token`、`webhook.token`。鍵名打錯、型別不對、超出範圍，啟動時直接報錯。
 Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階」的項目寫在 `values.yaml` 的 `extraConfig`（結構跟 config.yaml 一樣）。
 
+## 管理介面與 config.yaml 的關係
+
+`admin.token`（選填，至少 16 個字元，不能跟 `webhook.token` 一樣）：設了才開管理介面；只能寫在 `config.yaml`。
+
+有開管理介面時，下面 A 表的多數項目也可以在介面的「設定」頁改，改過的值存在資料庫、蓋過 `config.yaml`，下一輪生效。
+**介面改不了、只認 `config.yaml` 的**：`grafana.*`、`webhook.*`、`database.url`、`admin.token`、`llm.url`、`llm.api_key`、
+`llm.system_prompt_file`、`log_level`、`healthcheck.stuck_seconds`、`retry_failed_round_seconds`、`rounds_retention_days`。
+原因：前幾項是機密或「改了等於把資料送到別的地方」，後幾項是行程層級、啟動時就決定的。可改的清單在 `src/main.py` 的 `EDITABLE`。
+
 ## A. 可以在 config.yaml 調的項目
 
 ### 常用設定

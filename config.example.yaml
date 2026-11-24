@@ -1,4 +1,5 @@
-# aiops-lite 的全部設定都在這一份檔案（沒有環境變數）。
+# aiops-lite 的設定檔（沒有環境變數）。有開管理介面時，介面上改過的可調項目存在資料庫、蓋過這裡的同一項；
+# Token、金鑰、連線位址、port 只認這份檔案。
 # 預設讀 /etc/aiops/config.yaml；要換位置用環境變數 AIOPS_CONFIG_FILE（唯一的一個）。
 # 複製成 config.yaml 再填：config.yaml 含 Token 與密碼，已列入 .gitignore，不要推上 Git。
 # 鍵名打錯、型別不對、必填沒填，啟動時直接報錯。
@@ -19,6 +20,9 @@ webhook:
   port: 8080
   # host: 0.0.0.0                        # 服務綁定的位址
   # max_body_bytes: 1000000              # 單次 Webhook 內容大小上限
+
+# admin:                                 # 管理介面（/ui/）與它的 API（/api/）。整段不寫 = 關掉
+#   token: ""                            # 管理密鑰：至少 16 個字元，不能跟 webhook.token 一樣。產生一把：openssl rand -base64 24
 
 database:
   url: sqlite:///aiops-lite.db           # 正式環境：postgresql+psycopg://aiops:密碼@主機:5432/aiops

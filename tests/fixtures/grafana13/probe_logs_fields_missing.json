@@ -1,0 +1,157 @@
+{
+ "request": {
+  "method": "POST",
+  "path": "/api/datasources/proxy/uid/es-uid/_msearch",
+  "body": "{\"index\": \"fluentd-demo\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795505771283, \"lte\": 1795527371283, \"format\": \"epoch_millis\"}}}]}}}\n{\"index\": \"fluentd-demo\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795505771283, \"lte\": 1795527371283, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\"]}}, {\"terms\": {\"log.level.keyword\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\"]}}]}}]}}}\n{\"index\": \"fluentd-demo\", \"ignore_unavailable\": true}\n{\"size\": 0, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795505771283, \"lte\": 1795527371283, \"format\": \"epoch_millis\"}}}]}}, \"aggs\": {\"v\": {\"terms\": {\"field\": \"service.name\", \"size\": 15}}}}\n{\"index\": \"fluentd-demo\", \"ignore_unavailable\": true}\n{\"size\": 0, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795505771283, \"lte\": 1795527371283, \"format\": \"epoch_millis\"}}}]}}, \"aggs\": {\"v\": {\"terms\": {\"field\": \"service.name.keyword\", \"size\": 15}}}}\n{\"index\": \"fluentd-demo\", \"ignore_unavailable\": true}\n{\"size\": 0, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795505771283, \"lte\": 1795527371283, \"format\": \"epoch_millis\"}}}]}}, \"aggs\": {\"v\": {\"terms\": {\"field\": \"log.level\", \"size\": 15}}}}\n{\"index\": \"fluentd-demo\", \"ignore_unavailable\": true}\n{\"size\": 0, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795505771283, \"lte\": 1795527371283, \"format\": \"epoch_millis\"}}}]}}, \"aggs\": {\"v\": {\"terms\": {\"field\": \"log.level.keyword\", \"size\": 15}}}}\n"
+ },
+ "status": 200,
+ "response": {
+  "took": 5,
+  "responses": [
+   {
+    "took": 2,
+    "timed_out": false,
+    "terminated_early": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 11,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "status": 200
+   },
+   {
+    "took": 1,
+    "timed_out": false,
+    "terminated_early": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 0,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "status": 200
+   },
+   {
+    "took": 3,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 11,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "v": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": []
+     }
+    },
+    "status": 200
+   },
+   {
+    "took": 2,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 11,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "v": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": []
+     }
+    },
+    "status": 200
+   },
+   {
+    "took": 1,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 11,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "v": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": []
+     }
+    },
+    "status": 200
+   },
+   {
+    "took": 2,
+    "timed_out": false,
+    "_shards": {
+     "total": 1,
+     "successful": 1,
+     "skipped": 0,
+     "failed": 0
+    },
+    "hits": {
+     "total": {
+      "value": 11,
+      "relation": "eq"
+     },
+     "max_score": null,
+     "hits": []
+    },
+    "aggregations": {
+     "v": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": []
+     }
+    },
+    "status": 200
+   }
+  ]
+ }
+}

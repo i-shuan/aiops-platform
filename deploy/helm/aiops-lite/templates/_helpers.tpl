@@ -6,6 +6,10 @@ grafana:
 webhook:
   token: {{ required "webhook.token 必填" .Values.webhook.token | quote }}
   port: 8080
+{{- if .Values.admin.token }}
+admin:
+  token: {{ .Values.admin.token | quote }}
+{{- end }}
 database:
   url: {{ default (printf "postgresql+psycopg://aiops:%s@%s-postgres:5432/aiops" .Values.postgres.password .Release.Name) .Values.database.url | quote }}
 llm:
