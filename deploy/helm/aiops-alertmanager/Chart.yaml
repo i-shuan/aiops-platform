@@ -1,6 +1,0 @@
-apiVersion: v2
-name: aiops-alertmanager
-description: 接收 aiops-platform 推送的通知，只依 labels 路由到各部門的 Contact Point
-type: application
-version: 0.1.0
-appVersion: "v0.28.1"

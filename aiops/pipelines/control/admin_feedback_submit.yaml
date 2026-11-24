@@ -1,5 +1,0 @@
-name: admin_feedback_submit
-description: "手動動作：feedback_submit"
-nodes:
-  - name: feedback_submit
-    operator: admin.feedback_submit

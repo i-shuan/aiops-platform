@@ -1,5 +1,0 @@
-name: admin_sources_check
-description: "手動動作：sources_check"
-nodes:
-  - name: sources_check
-    operator: admin.sources_check

@@ -1,6 +1,0 @@
-name: admin_feedback_propose
-description: "手動動作：feedback_propose"
-nodes:
-  - name: feedback_propose
-    operator: admin.feedback_propose
-    params: {provider: noop}

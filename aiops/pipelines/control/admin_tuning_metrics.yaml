@@ -1,5 +1,0 @@
-name: admin_tuning_metrics
-description: "手動動作：調參成效報表（核准前後的事件群與誤報／漏報數）"
-nodes:
-  - name: tuning_metrics
-    operator: admin.tuning_metrics
