@@ -55,13 +55,23 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 「錯誤種類與事故前後的次數」：事故前就以差不多的頻率出現的錯誤是平常就有的，不能當成這次事故的原因；
   事故前沒出現過（new=true）或明顯變多的才是線索。沒有次數的錯誤不能推論它是新的還是平常就有的。
 - 「警告」常常寫出後來出錯的原因（資源快用完、重試變多）：錯誤訊息本身沒寫原因時，看同一個系統在出錯前的警告。
-- summary 是寫給值班人員看的。用白話、短句，照這個順序寫，不要寫標題或編號：
-  先寫結論：最可能的源頭是哪個系統；判斷不出來就寫「還無法判定源頭」。
-  再寫依據：你是看到哪一種證據裡的什麼才這樣判斷，直接引用內容（例如「mq-broker 的錯誤日誌寫磁碟已滿」「佇列的消費者數從 1 變成 0」）。
-  判斷不出來，或依據只有告警與關係邊時，最後寫還缺什麼：從「證據概況」裡「缺…」「…查詢失敗」「沒接…」的項目挑最需要的一項，
-  說明補上它能確認什麼。不要只寫「證據不足」，也不要要求證據概況裡沒有提到的東西。
+- 一定要列出可能的原因（candidates），最多 3 個，由最可能排到最不可能。每個寫：
+  source＝系統名稱；confidence＝高、中、低其中一個；reason＝一句白話，講依據是哪一種證據裡的什麼，直接引用內容。
+- 信心怎麼標：
+  高＝有直接指向它的證據，而且沒有別的合理解釋（它自己這次才出現的錯誤、呼叫鏈停在它、它的指標先變壞、別的系統的錯誤訊息指名連不上它）。
+  中＝有指向它的證據，但還有別的可能。
+  低＝只是從告警的名稱、觸發的數值、哪一筆先響、關係邊推測，沒有直接證據。
+- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊列出可能的原因（信心標低），不要只回「無法判定」。
+  連推測的依據都沒有時 candidates 才可以是空的。
+- summary 是寫給值班人員看的，用白話、短句，不要寫標題或編號：先講最可能的原因與依據。
+  candidates 全部是低的時候，開頭要寫「目前只能推測」，最後寫最該補哪一種證據：從「證據概況」裡「缺…」「…查詢失敗」「沒接…」的項目挑一項，
+  說明補上它能確認什麼。不要要求證據概況裡沒有提到的東西。
 - 只輸出一個 JSON 物件，不要 Markdown：
-  {"summary": "繁體中文，150 字以內", "source": "最可能的源頭系統的名稱；還無法判定就填空字串", "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+  {"summary": "繁體中文，120 字以內", "candidates": [{"source": "系統名稱", "confidence": "高／中／低", "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+
+CONFIDENCE = ("高", "中", "低")
+MAX_CANDIDATES = 3
+DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "error_traces", "timelines", "call_chains", "metrics")
 
 TRACE_SEARCH_LIMIT = 20  # 向 Tempo 搜尋時最多要幾條，再從裡面挑最近的 max_traces 條
 SPAN_ATTRIBUTES = ("peer.service", "db.system", "server.address", "http.response.status_code", "messaging.destination.name")
@@ -665,9 +675,13 @@ def call_llm(api_url: str, api_key: str, model: str, prompt: str, transport: htt
     return str(r.json()["choices"][0]["message"]["content"])
 
 
-def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
-                 id_pattern: str = DEFAULT_ID_PATTERN) -> str:
-    """幻覺檢查：LLM 點名的系統與機台／批號必須真的在證據或關係邊裡。通過回傳摘要文字，不通過丟 ValueError。"""
+def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
+                id_pattern: str = DEFAULT_ID_PATTERN) -> tuple[str, list[dict[str, str]]]:
+    """幻覺檢查：LLM 點名的系統與機台／批號必須真的在證據或關係邊裡。通過回傳 (摘要, 可能的原因)，不通過丟 ValueError。
+
+    可能的原因最多留 MAX_CANDIDATES 個，每個是 {source, confidence, reason}。信心是模型自己標的，程式只做一件事：
+    **沒有直接證據指向那個系統，信心就壓成「低」**。直接證據 = 那個系統的名稱出現在日誌、警告、Trace、時間線、呼叫鏈或指標裡
+    （DIRECT_EVIDENCE）；只出現在告警與關係邊裡的不算。這不是校準：高、中、低不是機率，只是「依據有多直接」的分級。"""
     body = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     answer = json.loads(body)
     summary = " ".join(str(answer["summary"]).split())
@@ -680,39 +694,84 @@ def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int 
     ids = {v for counts in evidence["id_counts"].values() for v in counts}
     corpus = json.dumps(evidence, ensure_ascii=False)
     unknown = [s for s in answer.get("systems") or [] if s not in systems]
-    source = answer.get("source") or ""   # 選填（自訂提示詞可以不要求）：有填就必須是證據裡的系統
+    source = answer.get("source") or ""   # 舊格式（自訂提示詞可能還在用）：有填就必須是證據裡的系統
     if source and source not in systems:
         unknown.append(source)
     # ids：在識別碼統計裡，或原樣出現在送給模型的證據裡（跟下面摘要文字同一個標準）都算有憑據。
     # 只認統計會誤擋兩種真的有憑據的情況：日誌沒拆欄位、機台與批號只寫在訊息文字裡；以及有拆欄位但沒排進 top_ids 的。
     # 這是字串比對：編出來的 EQP-1 剛好是證據裡 EQP-10 的開頭時擋不到（摘要文字的檢查本來就有同樣的限制）。
     unknown += [i for i in answer.get("ids") or [] if i not in ids and not (isinstance(i, str) and i.strip() and i in corpus)]
-    # 摘要文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
+    raw = answer.get("candidates")
+    raw = raw if isinstance(raw, list) else []   # 選填：自訂提示詞可以不要求
+    direct = json.dumps({key: evidence.get(key) for key in DIRECT_EVIDENCE}, ensure_ascii=False)
+    candidates: list[dict[str, str]] = []
+    for item in raw[:MAX_CANDIDATES]:
+        if not isinstance(item, dict) or not str(item.get("source") or "").strip():
+            raise ValueError("candidates 的每一項都要有 source")
+        name = str(item["source"]).strip()
+        if name not in systems:
+            unknown.append(name)
+            continue
+        confidence = str(item.get("confidence") or "").strip()
+        if confidence not in CONFIDENCE or name not in direct:   # 沒標、亂標，或沒有直接證據指向它：一律當成低
+            confidence = "低"
+        candidates.append({"source": name, "confidence": confidence, "reason": " ".join(str(item.get("reason") or "").split())})
+    # 摘要與理由的文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
-        unknown += [t for t in re.findall(id_pattern, summary) if t not in corpus]
+        for sentence in (summary, *(c["reason"] for c in candidates)):
+            unknown += [t for t in re.findall(id_pattern, sentence) if t not in corpus]
     if unknown:
         raise ValueError(f"點名了證據裡沒有的名稱：{sorted(set(map(str, unknown)))}")
-    return summary[:max_summary_chars]
+    return summary[:max_summary_chars], candidates
 
 
-def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
-            transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
-            overview_text: str = "") -> tuple[str, bool, str]:
-    """回傳 (註記第 2 行, 是不是通過檢查的 LLM 推論, 沒通過的原因)。任何失敗都退回原始摘要，不丟例外。"""
+def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
+                 id_pattern: str = DEFAULT_ID_PATTERN) -> str:
+    """read_answer 只取摘要的那一半（通過檢查回傳摘要文字，不通過丟 ValueError）。"""
+    return read_answer(text, evidence, max_summary_chars=max_summary_chars, id_pattern=id_pattern)[0]
+
+
+def candidates_text(candidates: list[dict[str, str]], max_chars: int = 300) -> str:
+    """可能的原因寫成註記上的幾行：可能原因 1｜mq-broker（信心高）：…"""
+    return "\n".join(f"可能原因 {n}｜{c['source']}（信心{c['confidence']}）：{c['reason'][:max_chars]}"
+                     for n, c in enumerate(candidates, 1))
+
+
+@dataclass(frozen=True)
+class Analysis:
+    line: str          # 註記的「根因分析」那一行：[LLM 推論] … 或 [未經分析] …
+    analyzed: bool     # 是不是通過檢查的 LLM 推論
+    reason: str        # 沒通過的原因
+    candidates: str    # 註記上「可能原因」的幾行（candidates_text）；沒有就是空字串
+
+
+def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
+                 transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
+                 overview_text: str = "") -> Analysis:
+    """問 LLM 並檢查回答。任何失敗都退回原始摘要（沒有可能原因），不丟例外。"""
     fallback = f"[未經分析] {raw_summary(incident)}"
     if not api_url or not model:
-        return fallback, False, "沒有設定 llm.url、llm.model"
+        return Analysis(fallback, False, "沒有設定 llm.url、llm.model", "")
     try:
         prompt = build_prompt(evidence, overview_text)
         log.debug("事故 %s 送給 LLM 的內容：\n%s", incident.uid, prompt)
         answer = call_llm(api_url, api_key, model, prompt, transport, timeout=options.timeout_seconds,
                           temperature=options.temperature, system_prompt=options.system_prompt)
         log.debug("事故 %s LLM 的原始回應：%s", incident.uid, answer)
-        summary = check_answer(answer, evidence, max_summary_chars=options.max_summary_chars,
-                               id_pattern=options.id_pattern)
+        summary, candidates = read_answer(answer, evidence, max_summary_chars=options.max_summary_chars,
+                                          id_pattern=options.id_pattern)
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:  # ValueError 含 JSON 解析失敗
         reason = f"{type(e).__name__}: {e}"[:300]
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
-        return fallback, False, reason
-    return f"[LLM 推論] {summary}", True, ""
+        return Analysis(fallback, False, reason, "")
+    return Analysis(f"[LLM 推論] {summary}", True, "", candidates_text(candidates, options.max_summary_chars))
+
+
+def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
+            transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
+            overview_text: str = "") -> tuple[str, bool, str]:
+    """analyze_full 的前三項：(註記的根因分析那一行, 是不是通過檢查的 LLM 推論, 沒通過的原因)。"""
+    got = analyze_full(incident, evidence, api_url=api_url, api_key=api_key, model=model, transport=transport,
+                       options=options, overview_text=overview_text)
+    return got.line, got.analyzed, got.reason

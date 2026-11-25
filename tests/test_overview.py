@@ -173,7 +173,7 @@ def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):
     prompt = calls[0]["messages"][1]["content"]
     assert prompt.startswith("【0. 證據概況") and "service.name 是這些系統" in prompt.split("【1.")[0]
     system = calls[0]["messages"][0]["content"]
-    assert "不要只寫「證據不足」" in system and "不能當成它就是源頭的依據" in system
+    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system
 
 
 def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_changes(world):  # noqa: F811

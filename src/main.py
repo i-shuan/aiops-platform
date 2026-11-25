@@ -410,8 +410,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             if can_analyze and inc.llm_next_try is not None and now < inc.llm_next_try:
                 # 退避中：不查 ES、不打 LLM。摘要退回原始版本，但成員變了要跟著更新（誠實：沒有分析過）
                 raw = f"[未經分析] {rca.raw_summary(inc)}"
-                if (inc.summary, inc.analyzed) != (raw, False):
-                    inc.summary, inc.analyzed, inc.changed, inc.annotated = raw, False, True, False
+                if (inc.summary, inc.analyzed, inc.candidates) != (raw, False, ""):
+                    inc.summary, inc.analyzed, inc.candidates, inc.changed, inc.annotated = raw, False, "", True, False
                 log.debug("事故 %s 的 LLM 分析退避中，%s 之前不再試", inc.uid, inc.llm_next_try.isoformat())
                 continue
             evidence = rca.collect_evidence(
@@ -419,14 +419,14 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
                 log_fields=settings.log_fields, trace_fields=settings.trace_fields, limits=settings.evidence,
                     tempo_datasource_uid=settings.tempo_datasource_uid, metrics=settings.metrics)
-            before = (inc.summary, inc.analyzed, inc.evidence_note)
-            # 「證據」那一行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
+            before = (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates)
+            # 「證據」那幾行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
             inc.evidence_note = rca.overview_text(rca.overview(evidence, settings.log_fields, settings.evidence.error_levels))
-            inc.summary, inc.analyzed, reason = rca.analyze(
-                inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
-                model=settings.llm_model, transport=llm_transport, options=settings.llm,
-                overview_text=inc.evidence_note)
-            if (inc.summary, inc.analyzed, inc.evidence_note) != before:
+            got = rca.analyze_full(inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
+                                   model=settings.llm_model, transport=llm_transport, options=settings.llm,
+                                   overview_text=inc.evidence_note)
+            inc.summary, inc.analyzed, inc.candidates, reason = got.line, got.analyzed, got.candidates, got.reason
+            if (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates) != before:
                 inc.changed, inc.annotated = True, False
             if not can_analyze:
                 continue  # 沒設定 LLM 不是故障：不算失敗、不退避

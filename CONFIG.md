@@ -160,6 +160,7 @@ es:
 | 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/rca.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
 | 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/rca.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
 | 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的片語（每個 `*` 容許 3 個位置的間隔，上限 12） | `src/rca.py` 的 `log_pattern`、`pattern_phrase` | 歸類與計數的實作。間隔取 3 是因為一個 `*` 在原文可能是好幾個詞（IP 加 port 會被拆成兩個）；是近似值，未驗證泛化 |
+| 可能原因最多 3 個；信心只有高、中、低；沒有直接證據指向的系統信心壓成低 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE`、`DIRECT_EVIDENCE`、`read_answer` | 3 個是註記版面的上限。信心不是機率、沒有校準；程式的把關只是「名稱有沒有出現在日誌、Trace、指標這類證據裡」的字串比對，未驗證泛化 |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |
 | 嚴重度的判定方式 | — | 程式沒有「判定規則」：嚴重度直接讀告警的標籤，事故取成員裡最高的，只升不降 |
