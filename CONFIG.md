@@ -72,6 +72,12 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `tempo.trace_id_field` | `trace.id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號向 Tempo 取（立即取得到），不夠才用搜尋補 |
 | `tempo.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取 |
 | `tempo.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
+| `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid |
+| `metrics.queries` | `[]` | 最多 20 條 | 事故時要查的指標，每條 `{name, expr, services}`。`expr` 一定要有 `$service`（換成系統名稱，已跳脫）；`services` 選填，有寫就只對那幾個系統查。名稱不能重複 |
+| `metrics.lookback_minutes` | 60 | 5～1440 | 事故開始前往回看多久當基準（取中位數）。太短會把事故前的爬升算進基準 |
+| `metrics.step_seconds` | 60 | 5～3600 | 取樣間隔；不要小於指標的抓取間隔 |
+| `metrics.max_points` | 12 | 2～60 | 每條序列給 LLM 看幾個點（整段平均抽樣，最後一個點一定留） |
+| `metrics.max_series` | 5 | 1～20 | 一條查詢回很多條序列（例如每個佇列一條）時，只留事故期間數值最大的幾條 |
 
 #### 第 12 項的副作用（已知限制）
 
@@ -145,6 +151,8 @@ es:
 | Webhook 的必要欄位（`status`、`fingerprint`、`startsAt`、`labels`、`ruleUID`、`values`） | `src/grafana.py` 的 `parse_webhook` | Grafana 的 webhook 格式，不是我們定的 |
 | 向 Tempo 搜尋時一次要 20 條、再挑最近的 | `src/rca.py` 的 `TRACE_SEARCH_LIMIT` | Tempo 的搜尋不保證先回最新的；要調的是最後取幾條（`tempo.max_traces`） |
 | Tempo 查詢用 `resource.service.name` 比對分析單位 | `src/grafana.py` 的 `search_error_traces` | OTel 的標準屬性。把 `labels.service` 換成 function 或 cluster 時呼叫鏈會撈不到（見 README「改用別的單位分析」） |
+| 指標查詢最多 20 條、佔位字是 `$service` | `src/main.py` 的 `MAX_METRIC_QUERIES`、`src/rca.py` 的 `SERVICE_PLACEHOLDER` | 每張事故要查「查詢數 × 系統數」次，上限是保護指標資料庫；佔位字是設定檔的寫法約定 |
+| 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/rca.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |
 | 嚴重度的判定方式 | — | 程式沒有「判定規則」：嚴重度直接讀告警的標籤，事故取成員裡最高的，只升不降 |

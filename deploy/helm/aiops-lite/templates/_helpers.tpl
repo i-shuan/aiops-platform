@@ -26,6 +26,9 @@ es:
   trace_fields: {{ toJson .Values.es.traceFields }}
 tempo:
   datasource_uid: {{ .Values.tempo.datasourceUid | quote }}
+metrics:
+  datasource_uid: {{ .Values.metrics.datasourceUid | quote }}
+  queries: {{ toJson (default (list) .Values.metrics.queries) }}
 timezone: {{ .Values.timezone | quote }}
 log_level: {{ .Values.logLevel | quote }}
 debounce_seconds: {{ int .Values.timing.debounceSeconds }}

@@ -14,7 +14,7 @@
 | 界線 | 內容 |
 | :--- | :--- |
 | **對外只有一把 Grafana Editor Token** | 日誌、Trace、註記全部經 Grafana（資料源代理、Annotations API）。嚴禁直連 Elasticsearch、Tempo、產線資料庫 |
-| **什麼算異常由各系統自己的 Grafana 規則決定** | 平台不判斷數值、不放偵測器。告警沒推進來，平台就什麼都不做 |
+| **什麼算異常由各系統自己的 Grafana 規則決定** | 平台不判斷數值、不放偵測器。告警沒推進來，平台就什麼都不做。指標走勢那包證據只做算術（基準、最大、倍數），不准加「超過多少算異常」的門檻；要抓趨勢就寫成 Grafana 規則（`INPUTS.md`） |
 | **輸出即終點** | 產出只有 Grafana 註記（事故卡與 RCA 摘要）。不派工、不重啟、不改設定、不起子行程 |
 | **LLM 的結論不准看起來像定論** | 註記第 2 行固定標 `[LLM 推論]` 或 `[未經分析]`；LLM 失敗、格式不對、點名了證據裡沒有的東西，一律退回原始摘要，不硬猜 |
 | **資料源的缺口不在程式裡補** | 沒日誌、欄位對不上、時間戳錯，照實寫進證據的補充說明與文件的「已知限制」。格式差異只能用 `config.yaml` 的欄位對照吸收，不准寫業務特判 |
@@ -43,7 +43,7 @@ server（HTTP 服務與排程，只呼叫 main 的一輪流程）
 | :--- | :--- |
 | `src/server.py` | 收 Webhook（Bearer 驗證、先落地再回 200）、debounce、單一工作執行緒、`/healthz` |
 | `src/main.py` | 讀 `config.yaml`（嚴格檢查）與「一輪」的流程 |
-| `src/grafana.py` | 所有對 Grafana 的呼叫：解析 Webhook、ES 與 Tempo 代理、註記 |
+| `src/grafana.py` | 所有對 Grafana 的呼叫：解析 Webhook、ES／Tempo／Prometheus 相容資料源的代理、註記 |
 | `src/grouping.py` | 收斂（純函式）：同實體合併、關係邊、併入進行中事故、結案 |
 | `src/rca.py` | 收集證據、組 Prompt、呼叫 LLM、幻覺檢查 |
 | `src/report.py` | 註記的固定格式（純函式） |
@@ -57,6 +57,7 @@ server（HTTP 服務與排程，只呼叫 main 的一輪流程）
 
  * **要調門檻、時間、欄位名稱、標籤名稱？** 不寫程式：改 `config.yaml`（Helm 是 `values.yaml` 或 `extraConfig`）。可調項目與內部常數的分界見 `CONFIG.md`。
  * **要讓某個系統的告警進來？** 不寫程式：在公司 Grafana 的規則貼標籤、設通知路由（`README.md`、`GO_LIVE_CHECKLIST.md`）。
+ * **要讓指標走勢成為 RCA 證據？** 不寫程式：`config.yaml` 的 `metrics.queries` 加一條查詢。全部的輸入與最理想的狀態見 `INPUTS.md`。
  * **要讓日誌成為 RCA 證據？** 不寫程式：照 `FACTORY_METRICS.md` 的統一欄位規範送進 ES，範例在 `deploy/fluent-bit/`。
  * **要加新的設定項？** `src/main.py` 的 `Settings` 與 `from_dict`（要有範圍檢查），同步更新 `config.example.yaml`、`CONFIG.md`、Helm `values.yaml`。
  * **要加新的證據來源？** 對 Grafana 的呼叫寫在 `src/grafana.py`，收集與整理寫在 `src/rca.py`；撈不到要寫進 `evidence["notes"]`，不准讓整輪失敗。

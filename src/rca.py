@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import statistics
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -45,6 +46,7 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 不要寫任何筆數、次數、時間：那些由程式另外顯示。
 - 「關聯時間線」只代表同一個批號或載具在各系統出現的先後，不代表因果；各系統的時鐘可能有幾秒誤差。
 - 「呼叫鏈」是實際發生的呼叫：最下游、而且底下沒有其他失敗呼叫的那一段，比上游更接近源頭。
+- 「指標走勢」是數值在事故前後的變化（baseline 是事故前的中位數）：它說明哪個數值先變、變了多少，本身不代表因果。
 - 證據不足以判斷源頭時直接說「證據不足」，並說明還缺什麼。
 - 只輸出一個 JSON 物件，不要 Markdown：
   {"summary": "一句繁體中文，120 字以內：可能的源頭、影響範圍、集中的機台或批號", "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
@@ -70,6 +72,29 @@ class EvidenceLimits:
     trace_id_field: str = "trace.id"     # 錯誤日誌裡記 trace id 的欄位：有的話直接用編號向 Tempo 取（不必等它搜尋得到）
     max_traces: int = 3                  # 最多取回幾條錯誤 Trace 的呼叫鏈（Tempo）
     max_trace_spans: int = 30            # 每條呼叫鏈最多列幾個 span（失敗的優先）
+
+
+SERVICE_PLACEHOLDER = "$service"   # 指標查詢裡的這個字會換成系統名稱
+
+
+@dataclass(frozen=True)
+class MetricQuery:
+    """一條要在事故時查的指標（config.yaml 的 metrics.queries）。expr 是 PromQL／MetricsQL，裡面的 $service 會換成系統名稱。
+    services 有寫就只對這幾個系統查（例如佇列堆積只對 broker 查）；空的 = 事故裡每個系統都查。"""
+    name: str
+    expr: str
+    services: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MetricOptions:
+    """指標走勢這一包證據（config.yaml 的 metrics.*）。datasource_uid 或 queries 是空的 = 不查。"""
+    datasource_uid: str = ""             # Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid
+    queries: tuple[MetricQuery, ...] = ()
+    lookback_minutes: int = 60           # 事故開始前往回看多久當基準：太短會把事故前的爬升也算進基準
+    step_seconds: int = 60               # 取樣間隔；要不小於指標的抓取間隔，不然每一格都是同一個值
+    max_points: int = 12                 # 每條序列給 LLM 看幾個點（整段時間窗平均抽樣）
+    max_series: int = 5                  # 一條查詢回很多條序列時（例如每個佇列一條）只留事故期間數值最大的幾條
 
 
 @dataclass(frozen=True)
@@ -111,8 +136,9 @@ def raw_summary(incident: Incident) -> str:
 def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: Grafana, *, es_datasource_uid: str,
                      log_index: str, trace_index: str, id_fields: list[str], now: datetime,
                      log_fields: LogFields = LogFields(), trace_fields: TraceFields = TraceFields(),
-                     limits: EvidenceLimits = EvidenceLimits(), tempo_datasource_uid: str = "") -> dict[str, Any]:
-    """組證據：告警、關係邊、錯誤日誌與識別碼統計（ES）、關聯時間線（ES）、呼叫鏈（Tempo）。
+                     limits: EvidenceLimits = EvidenceLimits(), tempo_datasource_uid: str = "",
+                     metrics: MetricOptions = MetricOptions()) -> dict[str, Any]:
+    """組證據：告警、關係邊、錯誤日誌與識別碼統計（ES）、關聯時間線（ES）、呼叫鏈（Tempo）、指標走勢（Prometheus 相容）。
     任何一包撈不到（沒設資料源、Grafana 回錯）都不擋分析：那一包留空，並在 notes 寫明原因。"""
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
     start = incident.started_at - timedelta(minutes=limits.window_padding_minutes)
@@ -123,7 +149,7 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
                       for m in _members(incident)],
         "edges": [{"upstream": a, "downstream": b} for a, b in edges],
         "error_logs": [], "error_traces": [], "id_counts": {f: {} for f in id_fields},
-        "timelines": [], "call_chains": [], "notes": [],
+        "timelines": [], "call_chains": [], "metrics": [], "notes": [],
     }
     trace_ids: list[str] = []
     if es_datasource_uid:
@@ -133,7 +159,78 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
         evidence["notes"].append("沒有設定日誌資料源：沒有日誌證據")
     if tempo_datasource_uid:
         _collect_call_chains(evidence, incident, grafana, tempo_datasource_uid, start, end, limits, trace_ids)
+    if metrics.datasource_uid and metrics.queries:
+        _collect_metrics(evidence, incident, grafana, metrics, end)
     return evidence
+
+
+def promql_string(value: str) -> str:
+    """把系統名稱放進 PromQL 雙引號字串之前的跳脫。系統名稱來自告警的標籤（外部輸入），不跳脫的話名稱裡的引號
+    可以把查詢截斷、接上別的條件。"""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _round(value: float) -> float:
+    return float(f"{value:.4g}")   # 四位有效數字：給 LLM 看走勢夠用，不會被一長串小數淹沒
+
+
+def summarize_series(points: list[tuple[datetime, float]], incident_start: datetime, max_points: int) -> dict[str, Any] | None:
+    """一條序列壓成：事故前的基準（中位數）、事故期間的最小／最大／最後一個值、相對基準的倍數、平均抽樣的幾個點。
+    只做算術，不判斷「算不算異常」：那是 Grafana 規則的事，這裡沒有任何門檻。事故前沒有資料時 baseline 是 None。"""
+    if not points:
+        return None
+    before = [v for t, v in points if t < incident_start]
+    during = [(t, v) for t, v in points if t >= incident_start]
+    baseline = statistics.median(before) if before else None
+    out: dict[str, Any] = {"baseline": None if baseline is None else _round(baseline)}
+    if during:
+        values = [v for _t, v in during]
+        peak_at = max(during, key=lambda tv: tv[1])[0]
+        out["during"] = {"min": _round(min(values)), "max": _round(max(values)), "last": _round(values[-1]),
+                         "max_at": peak_at.strftime("%H:%M:%SZ")}
+        if baseline:   # 基準是 0 或沒有基準就不算倍數（除以零沒有意義）
+            out["last_vs_baseline"] = _round(values[-1] / baseline)
+            out["max_vs_baseline"] = _round(max(values) / baseline)
+    step = max(1, -(-len(points) // max_points))   # 無條件進位的整數除法
+    picked = points[::step]
+    if picked[-1] != points[-1]:
+        picked.append(points[-1])   # 最後一個點一定留：它是「現在」
+    out["points"] = [{"t": t.strftime("%H:%M:%S"), "v": _round(v)} for t, v in picked]
+    return out
+
+
+def _collect_metrics(evidence: dict[str, Any], incident: Incident, grafana: Grafana, options: MetricOptions,
+                     end: datetime) -> None:
+    """指標走勢：對事故裡的每個系統跑設定的每條查詢，時間窗是事故開始前 lookback_minutes 到現在。
+    一條查詢失敗（語法錯、資料源連不上）只記進 notes，其他查詢照跑；查得到但這個系統沒有資料的不列、也不算錯。"""
+    start = incident.started_at - timedelta(minutes=options.lookback_minutes)
+    failed: list[str] = []
+    for query in options.queries:
+        for service in incident.services:
+            if query.services and service not in query.services:
+                continue
+            expr = query.expr.replace(SERVICE_PLACEHOLDER, promql_string(service))
+            try:
+                series = grafana.query_range(options.datasource_uid, expr, start, end, options.step_seconds)
+            except GrafanaError as e:
+                log.warning("事故 %s 查不到指標「%s」（%s）：%s", incident.uid, query.name, service, e)
+                failed.append(f"{query.name}（{service}）")
+                continue
+            series = [s for s in series if s["points"]]
+            # 一條查詢回很多條序列時，留事故期間數值最大的幾條（沒有事故期間的點就看整段）
+            peak = lambda s: max((v for t, v in s["points"] if t >= incident.started_at), default=max(v for _t, v in s["points"]))
+            kept = sorted(series, key=peak, reverse=True)[:options.max_series]
+            for item in kept:
+                summary = summarize_series(item["points"], incident.started_at, options.max_points)
+                labels = {k: v for k, v in item["labels"].items() if k != "__name__"}
+                evidence["metrics"].append({"system": service, "metric": query.name, **({"labels": labels} if labels else {}),
+                                            **summary})
+            if len(series) > len(kept):
+                evidence["notes"].append(f"指標「{query.name}」（{service}）有 {len(series)} 條序列，只列數值最大的 {len(kept)} 條")
+    if failed:
+        evidence["notes"].append(f"指標查詢失敗：{'、'.join(failed)}")
+    elif not evidence["metrics"]:
+        evidence["notes"].append("設定的指標查詢在這段時間都沒有資料")
 
 
 def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana, uid: str, log_index: str,
@@ -293,6 +390,10 @@ def build_prompt(evidence: dict[str, Any]) -> str:
     if evidence.get("call_chains"):
         text += ("【6. 呼叫鏈：失敗請求實際的呼叫路徑（called_by 是呼叫它的系統；origin=true 是底下沒有其他失敗呼叫的失敗點）】\n"
                  f"{dump(evidence['call_chains'])}\n\n")
+    if evidence.get("metrics"):
+        text += ("【7. 指標走勢：各系統的數值在事故前後的變化（baseline 是事故開始前的中位數；during 是事故開始後；"
+                 "points 是整段時間平均抽樣的點，時間是 UTC。只說明數值怎麼變，不代表因果）】\n"
+                 f"{dump(evidence['metrics'])}\n\n")
     return text + f"【補充】{'；'.join(evidence['notes']) or '無'}"
 
 
@@ -325,10 +426,13 @@ def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int 
     systems |= {s for group in (evidence.get("timelines") or [], evidence.get("call_chains") or [])
                 for item in group for s in item.get("systems") or []}
     ids = {v for counts in evidence["id_counts"].values() for v in counts}
-    unknown = [s for s in answer.get("systems") or [] if s not in systems]
-    unknown += [i for i in answer.get("ids") or [] if i not in ids]
-    # 摘要文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     corpus = json.dumps(evidence, ensure_ascii=False)
+    unknown = [s for s in answer.get("systems") or [] if s not in systems]
+    # ids：在識別碼統計裡，或原樣出現在送給模型的證據裡（跟下面摘要文字同一個標準）都算有憑據。
+    # 只認統計會誤擋兩種真的有憑據的情況：日誌沒拆欄位、機台與批號只寫在訊息文字裡；以及有拆欄位但沒排進 top_ids 的。
+    # 這是字串比對：編出來的 EQP-1 剛好是證據裡 EQP-10 的開頭時擋不到（摘要文字的檢查本來就有同樣的限制）。
+    unknown += [i for i in answer.get("ids") or [] if i not in ids and not (isinstance(i, str) and i.strip() and i in corpus)]
+    # 摘要文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
         unknown += [t for t in re.findall(id_pattern, summary) if t not in corpus]

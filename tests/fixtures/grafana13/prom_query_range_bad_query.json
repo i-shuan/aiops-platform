@@ -1,0 +1,18 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/api/datasources/proxy/uid/prom-uid/api/v1/query_range",
+  "params": {
+   "query": "sum(rate(rabbitmq_queue_messages_ready{service=\"mq-broker\"}[1m)",
+   "start": "1795579528",
+   "end": "1795579938",
+   "step": "10"
+  }
+ },
+ "status": 400,
+ "response": {
+  "status": "error",
+  "errorType": "bad_data",
+  "error": "invalid parameter \"query\": 1:63: parse error: unexpected \")\" in subquery or range, expected \":\" or \"]\""
+ }
+}

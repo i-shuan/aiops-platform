@@ -64,6 +64,7 @@ class Settings:
     llm_retry_max_seconds: int = 1800
     es_datasource_uid: str = ""
     tempo_datasource_uid: str = ""             # Grafana 上 Tempo 資料源的 uid；空的 = 沒有呼叫鏈證據
+    metrics: rca.MetricOptions = rca.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
     log_index: str = "*"
     trace_index: str = ""
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
@@ -91,7 +92,7 @@ class Settings:
     @classmethod
     def from_dict(cls, raw: dict[str, Any], base_dir: Path | None = None) -> "Settings":
         """base_dir：llm.system_prompt_file 寫相對路徑時相對於哪裡（= 設定檔所在的資料夾）。"""
-        known = {"grafana", "webhook", "database", "llm", "es", "tempo", "labels", "healthcheck", "annotation", "timezone",
+        known = {"grafana", "webhook", "database", "llm", "es", "tempo", "labels", "healthcheck", "annotation", "metrics", "timezone",
                  "log_level", "edges", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
         check_keys(raw, known, "")
         grafana = section(raw, "grafana", {"url", "token", "timeout_seconds", "retries", "retry_backoff_seconds"})
@@ -106,6 +107,8 @@ class Settings:
                                  "timeline_fields"})
         tempo = section(raw, "tempo", {"datasource_uid", "max_traces", "max_spans", "trace_id_field"})
         labels = section(raw, "labels", {"detect", "severity", "service", "default_severity"})
+        metrics = section(raw, "metrics", {"datasource_uid", "queries", "lookback_minutes", "step_seconds", "max_points",
+                                           "max_series"})
         health = section(raw, "healthcheck", {"stuck_seconds"})
         annotation = section(raw, "annotation", {"max_rule_links"})
         missing = [name for name, value in (("grafana.url", grafana.get("url")), ("grafana.token", grafana.get("token")),
@@ -176,6 +179,7 @@ class Settings:
             es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es.") or "*",
             trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(ids),
             tempo_datasource_uid=text(tempo, "datasource_uid", "", "tempo."),
+            metrics=metric_options(metrics),
             log_fields=field_map(es, "log_fields", LogFields), trace_fields=field_map(es, "trace_fields", TraceFields),
             evidence=rca.EvidenceLimits(
                 max_hits=integer(es, "max_hits", d_ev.max_hits, 1, 10000, "es."),
@@ -294,6 +298,40 @@ def field_map(es: dict[str, Any], key: str, cls: type) -> Any:
     return cls(**values)
 
 
+MAX_METRIC_QUERIES = 20   # 每張事故要查「查詢數 × 系統數」次：設個上限，避免一份設定把指標資料庫打爆
+
+
+def metric_options(raw: dict[str, Any]) -> rca.MetricOptions:
+    d = rca.MetricOptions()
+    items = raw.get("queries") or []
+    if not isinstance(items, list) or len(items) > MAX_METRIC_QUERIES:
+        raise ConfigError(f"metrics.queries 要是清單，最多 {MAX_METRIC_QUERIES} 條")
+    queries, seen = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ConfigError(f"metrics.queries 的每一條要是 {{name, expr}}：{item!r}")
+        check_keys(item, {"name", "expr", "services"}, "metrics.queries")
+        name, expr = text(item, "name", "", "metrics.queries."), text(item, "expr", "", "metrics.queries.")
+        if not name or not expr:
+            raise ConfigError(f"metrics.queries 的每一條都要有 name 與 expr：{item!r}")
+        if name in seen:
+            raise ConfigError(f"metrics.queries 有兩條都叫 {name!r}：名稱會出現在給 LLM 的證據裡，不能重複")
+        seen.add(name)
+        if rca.SERVICE_PLACEHOLDER not in expr:
+            raise ConfigError(f"metrics.queries「{name}」的 expr 裡沒有 {rca.SERVICE_PLACEHOLDER}：每個系統會各查一次，"
+                              f"查詢要用它指定系統，例如 {{service=\"{rca.SERVICE_PLACEHOLDER}\"}}")
+        only = item.get("services") or []
+        if not isinstance(only, list) or not all(isinstance(s, str) and s.strip() for s in only):
+            raise ConfigError(f"metrics.queries「{name}」的 services 要是系統名稱清單")
+        queries.append(rca.MetricQuery(name=name, expr=expr, services=tuple(s.strip() for s in only)))
+    return rca.MetricOptions(
+        datasource_uid=text(raw, "datasource_uid", "", "metrics."), queries=tuple(queries),
+        lookback_minutes=integer(raw, "lookback_minutes", d.lookback_minutes, 5, 1440, "metrics."),
+        step_seconds=integer(raw, "step_seconds", d.step_seconds, 5, 3600, "metrics."),
+        max_points=integer(raw, "max_points", d.max_points, 2, 60, "metrics."),
+        max_series=integer(raw, "max_series", d.max_series, 1, 20, "metrics."))
+
+
 def parse_edges(items: Any) -> tuple[tuple[str, str], ...]:
     if not isinstance(items, list):
         raise ConfigError("edges 要是清單")
@@ -365,7 +403,7 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 inc, edges, grafana, es_datasource_uid=settings.es_datasource_uid, log_index=settings.log_index,
                 trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
                 log_fields=settings.log_fields, trace_fields=settings.trace_fields, limits=settings.evidence,
-                    tempo_datasource_uid=settings.tempo_datasource_uid)
+                    tempo_datasource_uid=settings.tempo_datasource_uid, metrics=settings.metrics)
             before = (inc.summary, inc.analyzed)
             inc.summary, inc.analyzed, reason = rca.analyze(
                 inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,

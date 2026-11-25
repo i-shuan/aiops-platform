@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -232,6 +233,29 @@ class Grafana:
             total = (hits.get("total") or {}).get("value", len(hits.get("hits") or []))
             out[value] = {"hits": [h.get("_source") or {} for h in hits.get("hits") or []], "total": int(total)}
         return out
+
+    # ── 指標（經 Grafana 的 Prometheus 相容資料源代理：Prometheus、VictoriaMetrics、Mimir…）──
+
+    def query_range(self, datasource_uid: str, expr: str, start: datetime, end: datetime, step_seconds: int
+                    ) -> list[dict[str, Any]]:
+        """區間查詢（Prometheus HTTP API 的 /api/v1/query_range）。回傳每條序列 {"labels": {...}, "points": [(時間, 數值)]}；
+        NaN 與無限大的點丟掉（除以零的查詢會回這種值，算不了統計）。查詢語法錯、資料源不對丟 GrafanaError。"""
+        raw = self._request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/v1/query_range", params={
+            "query": expr, "start": int(start.timestamp()), "end": int(end.timestamp()), "step": step_seconds})
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if not isinstance(data, dict) or raw.get("status") != "success" or not isinstance(data.get("result"), list):
+            raise GrafanaError(f"指標查詢的回應不是預期的格式：{str(raw)[:200]}")
+        if data.get("resultType") != "matrix":
+            raise GrafanaError(f"指標查詢要回時間序列（matrix），這條回的是 {data.get('resultType')}")
+        series = []
+        for item in data["result"]:
+            points = []
+            for ts, value in item.get("values") or []:
+                number = float(value)
+                if math.isfinite(number):
+                    points.append((datetime.fromtimestamp(float(ts), timezone.utc), number))
+            series.append({"labels": dict(item.get("metric") or {}), "points": points})
+        return series
 
     # ── Trace（經 Grafana 的 Tempo 資料源代理）──
 

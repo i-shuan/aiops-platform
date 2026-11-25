@@ -1,0 +1,20 @@
+{
+ "request": {
+  "method": "GET",
+  "path": "/api/datasources/proxy/uid/prom-uid/api/v1/query_range",
+  "params": {
+   "query": "sum by (queue) (rabbitmq_queue_messages_ready{service=\"amhs-mcs\"})",
+   "start": "1795579528",
+   "end": "1795579938",
+   "step": "10"
+  }
+ },
+ "status": 200,
+ "response": {
+  "status": "success",
+  "data": {
+   "resultType": "matrix",
+   "result": []
+  }
+ }
+}

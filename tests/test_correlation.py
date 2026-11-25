@@ -311,3 +311,18 @@ def test_only_the_log_level_field_may_be_left_empty(tmp_path):
     path.write_text(MINIMAL + "es: {log_fields: {message: ''}}\n")
     with pytest.raises(ConfigError, match="只有 level 可以留空"):
         Settings.load(str(path))
+
+
+def test_ids_that_only_appear_in_log_messages_count_as_evidence(fake):
+    """日誌沒拆欄位時，機台與批號只在訊息文字裡、不在識別碼統計裡：模型引用它們不是幻覺；證據裡完全沒有的照樣擋。
+    （真的 LLM + 沒拆欄位的容器日誌實測時遇到的：五個識別碼都在訊息裡，卻整份被退回。）"""
+    ev = collect(fake, log_fields=NO_LEVEL)
+    ev["id_counts"] = {"eqp_id": {}, "lot_id": {}, "carrier_id": {}}
+    ev["timelines"] = []
+    ev["error_logs"] = [{"time": "2026-11-21T02:41:07Z", "system": "cim-eap",
+                         "message": "publish timed out lot=LOT24A0031 eqp=EQP-CVD-07"}]
+    answer = {"summary": "cim-eap 發佈逾時，集中在 EQP-CVD-07", "systems": ["cim-eap"], "ids": ["EQP-CVD-07", "LOT24A0031"]}
+    assert rca.check_answer(json.dumps(answer), ev).startswith("cim-eap 發佈逾時")
+    for invented in ("EQP-LITHO-11", "", 7):
+        with pytest.raises(ValueError, match="點名了證據裡沒有的名稱"):
+            rca.check_answer(json.dumps({**answer, "ids": [invented]}), ev)
