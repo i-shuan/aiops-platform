@@ -46,7 +46,21 @@ class FakeGrafana:
         self.tempo_search = recorded("tempo_search")["response"]
         self.tempo_traces = {"11111111111111111111111111111111": recorded("tempo_trace")["response"]}
         self.tempo_requests: list[httpx.Request] = []
+        self.metric_requests: list[httpx.Request] = []
         self.transport = httpx.MockTransport(self.handle)
+
+    def query_range(self, query: str) -> httpx.Response:
+        """Prometheus 相容資料源的代理：回 Grafana 13.0.7 + Prometheus 3.5.0 + RabbitMQ 3.12.1 實際錄下來的回應
+        （prom_query_range_*.json）。只有 mq-broker 有佇列的指標；其他系統查得到但沒有資料；語法錯的回 400。"""
+        if "[1m)" in query:
+            name = "prom_query_range_bad_query"
+        elif 'service="mq-broker"' in query and "messages_ready" in query:
+            name = "prom_query_range_queue_ready"
+        elif 'service="mq-broker"' in query and "consumers" in query:
+            name = "prom_query_range_consumers"
+        else:
+            name = "prom_query_range_empty"
+        return replay(name)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -55,6 +69,9 @@ class FakeGrafana:
             return httpx.Response(500, json={"message": "boom"})
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/_msearch"):
             return self.msearch(request.content.decode())
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/v1/query_range"):
+            self.metric_requests.append(request)
+            return self.query_range(request.url.params["query"])
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/search"):
             self.tempo_requests.append(request)
             return httpx.Response(200, json=self.tempo_search)

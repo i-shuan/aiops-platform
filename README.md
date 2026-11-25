@@ -12,7 +12,7 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
                           ▼ Webhook（Contact Point）
 ┌──────────────────── aiops-lite（常駐服務，1 個副本）────────────────────┐
 │ 收 Webhook → 先存資料庫 → 等 debounce（預設 60 秒，YAML 可調）            │
-│   → 1 收斂（同系統、關係邊）→ 2 收集 4 包證據 → 3 LLM → 4 寫註記          │
+│   → 1 收斂（同系統、關係邊）→ 2 收集證據（最多 7 包）→ 3 LLM → 4 寫註記          │
 │ 有進行中事故時每 followup 秒續跑一輪，直到全部 resolved 並安靜夠久才結案   │
 └──────────────────────────────┬──────────────────────────────────────────┘
                                ▼ config.yaml 的 grafana.url + grafana.token
@@ -22,6 +22,8 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 部署物：1 個常駐 Deployment（+ Service）、1 個帶 PVC 的 PostgreSQL、1 個放整份 config.yaml 的 Secret（`deploy/helm/aiops-lite`）。
 
 **什麼算異常由各系統自己的 Grafana 告警規則決定**：規則 firing 就是異常，平台不重放查詢、不自己判數值（原本的 5 個偵測器已拿掉）。
+
+**全部的輸入、每一項的最低要求與最理想的狀態，見 `INPUTS.md`。**
 
 ## 工廠與傳統可觀測性一起用
 
@@ -40,7 +42,12 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 - **同一張事故**：工廠與 IT 服務的告警只要關係邊連得起來（例如 `[mes-api, cim-eap]`）就併成一張。兩邊的日誌要用同一套欄位名稱。
 - **呼叫鏈裡出現的系統算有憑據**：例如呼叫鏈指到一個沒有告警、也不在關係邊裡的資料庫，LLM 可以點名它；憑空編的系統照樣被擋。
 
-設定：`es.timeline_fields`、`tempo.datasource_uid` 等，見 `CONFIG.md` 的「關聯證據」。Loki、Jaeger 沒有接。
+- **指標走勢**（第 7 包，選用）：事故時經 Grafana 的 Prometheus 相容資料源查各系統的數值（`metrics.queries` 設定的查詢），
+  壓成「事故前的基準、事故後的最小／最大／最後值、相對基準的倍數」。只做算術、沒有門檻，不判斷算不算異常。
+  它補的是日誌與 Trace 看不到的情況，例如 MQ 的消費者不見了、流量暴增。
+
+設定：`es.timeline_fields`、`tempo.datasource_uid`、`metrics.*` 等，見 `CONFIG.md`。Loki、Jaeger 沒有接。
+要抓「還沒超標但走勢不對」，在 Grafana 規則用變化率、預測、跟之前比這類查詢，寫法與實測值見 `INPUTS.md`；平台本身不做異常偵測。
 
 ## 整合的單位：以 `service` 為準，一個 Grafana 一份
 
@@ -148,14 +155,14 @@ edges:
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
 | `src/server.py` | 218 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 449 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
-| `src/grafana.py` | 278 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/main.py` | 487 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
+| `src/grafana.py` | 302 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
 | `src/grouping.py` | 166 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/rca.py` | 358 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/rca.py` | 462 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
 | `src/report.py` | 59 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
 | `src/db.py` | 183 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
 
-合計約 1,711 行。
+合計約 1,877 行。
 
 ## 各系統要做的事（平台零直連）
 
@@ -291,6 +298,15 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 - chart 沒有部署到叢集、映像檔沒有實際 build 過（這個環境沒有 Docker 與叢集）。
 - 只測過 Grafana 13.0.7。
 
+- **指標走勢與趨勢型規則用真的元件實測**（2026-11-25，本機：Grafana 13.0.7、Prometheus 3.5.0、RabbitMQ 3.12.1 內建的
+  `rabbitmq_prometheus`、Editor Token；資料是腳本產生的）。佇列正常收送 180 秒後消費者停掉、生產者繼續送，真的堆到 1007 筆：
+  - aiops-lite 查到待處理訊息數的基準 0、最大 1007；消費者數從 1 變 0；發佈速率前後都是每秒約 10 筆。
+  - 真的 LLM 各問一次：有指標走勢時回「可能源頭是 mq-broker 的 eap.events 消費端失效，佇列堆積並影響 amhs-mcs」；
+    沒有時回「證據不足以判定源頭」。只有一個情境、一個模型。
+  - 五種趨勢型規則的查詢在正常期與堆積期算出的值見 `INPUTS.md`。只算了查詢的值，沒有建成 Grafana 規則讓它觸發。
+- **MQ 的呼叫鏈用真的 RabbitMQ 與自動埋點實測**（RabbitMQ 3.12.1、pika 1.5.0、OpenTelemetry pika 自動埋點、Tempo 2.9.0）：
+  消費端接在生產端底下時整條鏈串得起來；用連結、中途掉標頭、沒人收這三種串不起來（細節見 `INPUTS.md`）。只測了 Python 的 pika。
+
 ## 上線
 
 上線前要填哪些設定、公司 Grafana 與 ES 要配合什麼、還有哪些事沒驗證過，照 **`GO_LIVE_CHECKLIST.md`** 由上往下做。
@@ -311,6 +327,8 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 - 關聯時間線靠各系統日誌的時間戳排序：系統之間沒有對時的話，先後順序可能是錯的，LLM 會被誤導。
 - 呼叫鏈只看得到有埋點、沒被取樣掉的請求；日誌沒帶 trace id 時要靠 Tempo 搜尋，剛發生的 Trace 可能還搜不到。
 - 時間線與呼叫鏈會讓送給 LLM 的內容變長（每個事故多 1～2 次 ES 查詢、最多 4 次 Tempo 查詢）；一樣沒有遮罩。
+- 指標走勢只支援 Prometheus 相容的查詢，工廠端用 ES 筆數算的趨勢不會進這一包；基準是事故前的中位數，
+  事故前就在慢慢爬升的話基準會被拉高。每張事故多「查詢數 × 系統數」次指標查詢。VictoriaMetrics 沒有實測（這次用 Prometheus）。
 - 幻覺檢查只擋「名稱不存在」，擋不了「存在的系統被講錯因果」；所以第 2 行固定標 `[LLM 推論]`。
 - 沒有 Trace 時「集中在哪台機台／批號」只是錯誤日誌的計數，不是因果證據。
 - 上游沒有告警規則（或沒越線）時平台看不到它：只會看到下游的告警，不會替上游補洞。

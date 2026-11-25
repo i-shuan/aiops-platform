@@ -76,6 +76,19 @@ tempo:                                   # 整段可以不寫：沒設 datasourc
   # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace
   # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
 
+metrics:                                 # 整段可以不寫：沒設 datasource_uid 或沒有 queries = RCA 沒有指標走勢這包證據
+  datasource_uid: ""                     # Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid
+  queries: []                            # 事故時要查的指標（PromQL／MetricsQL）。每條都要有 $service：事故裡的每個系統各查一次，
+  #                                        # $service 換成系統名稱（跟告警的 service 標籤同一個值）。請用 = 比對，不要用 =~
+  #   - {name: 請求量（每秒）, expr: 'sum(rate(http_requests_total{service="$service"}[5m]))'}
+  #   - {name: 錯誤率, expr: 'sum(rate(http_requests_total{service="$service",code=~"5.."}[5m])) / sum(rate(http_requests_total{service="$service"}[5m]))'}
+  #   - {name: 佇列待處理訊息數, expr: 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})', services: [mq-broker]}
+  #                                        # services：只對這幾個系統查（佇列的指標只有 broker 有，其他系統不用白查）
+  # lookback_minutes: 60                 # 事故開始前往回看多久當基準（中位數）
+  # step_seconds: 60                     # 取樣間隔；不要小於指標的抓取間隔
+  # max_points: 12                       # 每條序列給 LLM 看幾個點
+  # max_series: 5                        # 一條查詢回很多條序列（例如每個佇列一條）時只留數值最大的幾條
+
 # labels:                                # 告警規則上的標籤名稱；改了要同步通知各系統團隊與 Grafana 的通知路由
 #   detect: aiops_detect                 # 值是 true 才納管
 #   severity: aiops_severity             # P0～P3

@@ -10,7 +10,7 @@
 
 image:
   repository: aiops-lite
-  tag: "0.4.0"
+  tag: "0.5.0"
   pullPolicy: IfNotPresent
 
 grafana:
@@ -57,6 +57,13 @@ es:              # datasourceUid 留空 = RCA 沒有日誌證據
 
 tempo:           # datasourceUid 留空 = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
   datasourceUid: ""    # Grafana 上 Tempo 資料源的 uid（取得方式跟 ES 的一樣）
+
+metrics:         # datasourceUid 或 queries 留空 = RCA 沒有指標走勢這包證據
+  datasourceUid: ""    # Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid
+  queries: []          # 事故時要查的指標；$service 會換成系統名稱。services 有寫就只對那幾個系統查。例如：
+  #   - {name: 請求量（每秒）, expr: 'sum(rate(http_requests_total{service="$service"}[5m]))'}
+  #   - {name: 佇列待處理訊息數, expr: 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})', services: [mq-broker]}
+  # 時間窗、取樣間隔等進階項目寫在 extraConfig.metrics（lookback_minutes、step_seconds、max_points、max_series）
 
 timezone: Asia/Taipei
 logLevel: INFO
