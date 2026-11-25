@@ -45,6 +45,7 @@ incidents = sa.Table(
     sa.Column("annotated", sa.Boolean, nullable=False, default=False),
     sa.Column("llm_failures", sa.Integer, nullable=False, default=0, server_default="0"),
     sa.Column("llm_next_try", TS),
+    sa.Column("candidates", sa.Text),      # 可以是 NULL（舊資料、沒有經過 LLM）
     sa.Column("evidence_note", sa.Text),   # 可以是 NULL（舊資料、還沒收集過證據）
     sa.Column("updated_at", TS, nullable=False),
 )
@@ -137,7 +138,7 @@ class Database:
             ended_at=_utc(row["ended_at"]), resolved_at=_utc(row["resolved_at"]), alert_count=row["alert_count"],
             summary=row["summary"], analyzed=bool(row["analyzed"]), annotation_id=row["annotation_id"],
             annotated=bool(row["annotated"]), llm_failures=row["llm_failures"], llm_next_try=_utc(row["llm_next_try"]),
-            evidence_note=row["evidence_note"] or "")
+            evidence_note=row["evidence_note"] or "", candidates=row["candidates"] or "")
 
     def _select(self, where: Any) -> list[Incident]:
         with self.engine.connect() as conn:
@@ -168,7 +169,7 @@ class Database:
                     "resolved_at": inc.resolved_at, "alert_count": inc.alert_count, "summary": inc.summary,
                     "analyzed": inc.analyzed, "annotation_id": inc.annotation_id, "annotated": inc.annotated,
                     "llm_failures": inc.llm_failures, "llm_next_try": inc.llm_next_try,
-                    "evidence_note": inc.evidence_note, "updated_at": now}
+                    "evidence_note": inc.evidence_note, "candidates": inc.candidates, "updated_at": now}
                 done = conn.execute(sa.update(incidents).where(incidents.c.uid == inc.uid).values(**values))
                 if done.rowcount == 0:
                     conn.execute(sa.insert(incidents).values(uid=inc.uid, **values))

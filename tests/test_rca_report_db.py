@@ -131,7 +131,7 @@ def test_annotation_is_three_lines_with_taiwan_time_and_rule_links():
     body = report.render(inc, "https://grafana.corp/", "Asia/Taipei")
     l1, l2, l3 = body["text"].split("<br>")
     assert l1 == "【P1・進行中】受影響系統：cim-eap、mq-broker｜收斂告警 2 筆"
-    assert l2 == "[LLM 推論] 源頭可能是 mq-broker"
+    assert l2 == "根因分析｜[LLM 推論] 源頭可能是 mq-broker"
     assert l3.startswith("2026-11-21 10:41 ～ 進行中（台灣時間）｜調整優先權：")
     assert '<a href="https://grafana.corp/alerting/cg4xgh0mv7oqod/edit" target="_blank">MQ queue depth（P1）</a>' in l3
     assert l3.index("MQ queue depth") < l3.index("CIM T3 timeout")  # 嚴重的排前面

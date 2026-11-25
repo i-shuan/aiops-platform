@@ -55,13 +55,25 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 「錯誤種類與事故前後的次數」：事故前就以差不多的頻率出現的錯誤是平常就有的，不能當成這次事故的原因；
   事故前沒出現過（new=true）或明顯變多的才是線索。沒有次數的錯誤不能推論它是新的還是平常就有的。
 - 「警告」常常寫出後來出錯的原因（資源快用完、重試變多）：錯誤訊息本身沒寫原因時，看同一個系統在出錯前的警告。
-- summary 是寫給值班人員看的。用白話、短句，照這個順序寫，不要寫標題或編號：
-  先寫結論：最可能的源頭是哪個系統；判斷不出來就寫「還無法判定源頭」。
-  再寫依據：你是看到哪一種證據裡的什麼才這樣判斷，直接引用內容（例如「mq-broker 的錯誤日誌寫磁碟已滿」「佇列的消費者數從 1 變成 0」）。
-  判斷不出來，或依據只有告警與關係邊時，最後寫還缺什麼：從「證據概況」裡「缺的證據」「查詢失敗」「還沒接的」挑最需要的一項，
-  說明補上它能確認什麼。不要只寫「證據不足」，也不要要求證據概況裡沒有提到的東西。
+- 一定要列出 1 到 3 個可能的原因（candidates），由最可能排到最不可能。每個寫：
+  source＝系統名稱；confidence＝0 到 100 的整數；reason＝一句白話，講它可能出了什麼事、依據是哪一種證據裡的什麼，直接引用內容。
+- 信心分數怎麼給（依據有多直接，不是機率）：
+  70～100＝有直接指向它的證據，而且沒有別的合理解釋（它自己這次才出現的錯誤、呼叫鏈停在它、它的指標先變壞、別的系統的錯誤訊息指名連不上它）。
+  40～69＝有指向它的證據，但還有別的可能。
+  0～39＝只是從告警的名稱、觸發的數值、哪一筆先響、關係邊推測，沒有直接證據。
+- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊列出可能的原因（分數給 39 以下），不要只回「無法判定」。
+  有別的合理可能就列出來，不要只列一個。連推測的依據都沒有時 candidates 才可以是空的。
+- summary 是寫給值班人員看的一句結論，用白話：最可能的原因是什麼。分數全部在 39 以下時，開頭寫「目前只能推測」，
+  並說最該補哪一種證據（從「證據概況」裡「缺…」「…查詢失敗」「沒接…」的項目挑一項）。不要要求證據概況裡沒有提到的東西。
 - 只輸出一個 JSON 物件，不要 Markdown：
-  {"summary": "繁體中文，150 字以內", "source": "最可能的源頭系統的名稱；還無法判定就填空字串", "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+  {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "confidence": 85, "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+
+MAX_CANDIDATES = 3
+DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "error_traces", "timelines", "call_chains", "metrics")
+# 信心分數的分段（提示詞裡跟模型講的同一套）。分數是模型自評「依據有多直接」，不是機率、沒有校準過。
+CONFIDENCE_HIGH, CONFIDENCE_MEDIUM = 70, 40
+NO_DIRECT_EVIDENCE_CAP = 30   # 沒有直接證據指向的系統，分數最高只到這裡（落在「只是推測」那一段）
+LEGACY_CONFIDENCE = {"高": 85, "中": 55, "低": 25}   # 舊格式的高／中／低換成各段的中間值
 
 TRACE_SEARCH_LIMIT = 20  # 向 Tempo 搜尋時最多要幾條，再從裡面挑最近的 max_traces 條
 SPAN_ATTRIBUTES = ("peer.service", "db.system", "server.address", "http.response.status_code", "messaging.destination.name")
@@ -513,12 +525,24 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, grafana: 
         evidence["notes"].append("Tempo 在事故時間窗內沒有這些系統的錯誤 Trace（沒有埋點、被取樣掉、或還沒寫入）")
 
 
+# 每一種證據能回答什麼問題。缺的時候寫在註記上：「缺錯誤日誌｜還看不出哪個系統出了什麼錯…」
+CAN_ANSWER = {
+    "關係邊": "這幾個系統誰影響誰",
+    "日誌": "哪個系統出了什麼錯、哪些錯誤是這次才出現的",
+    "錯誤日誌": "哪個系統出了什麼錯、哪些錯誤是這次才出現的",
+    "機台與批號": "問題集中在哪台機台、哪個批號",
+    "呼叫鏈": "失敗的請求實際停在哪個系統（包含沒有告警的相依服務）",
+    "指標走勢": "數值是怎麼變壞的（流量、佇列、資源）",
+}
+
+
 def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
-             error_levels: tuple[str, ...] = ERROR_LEVELS) -> dict[str, list[str]]:
+             error_levels: tuple[str, ...] = ERROR_LEVELS) -> dict[str, list[Any]]:
     """這次分析手上有什麼、缺什麼、為什麼缺。全部由程式從實際撈到的結果算出來，不經過 LLM。
-    回傳四組白話的句子：have（有）、missing（缺：查了但沒有，或沒有宣告）、failed（查詢失敗）、off（還沒接）。
-    「缺」的每一項都是「名稱：原因與下一步」：只說「沒有日誌」沒有用，要說是索引沒資料、系統名稱對不上，還是等級對不上。"""
-    out: dict[str, list[str]] = {"have": [], "missing": [], "failed": [], "off": []}
+    回傳四組：have（有的，白話的句子）、missing（缺的：查了但沒有，或沒有宣告）、failed（查詢失敗）、off（還沒接）。
+    後三組的每一項是 (名稱, 原因與下一步)；off 的第二段是 config.yaml 要設的鍵。名稱要在 CAN_ANSWER 裡：
+    只說「沒有日誌」沒有用，要說少了它哪一種分析做不了、是哪一關沒過（索引沒資料、系統名稱對不上、等級對不上）。"""
+    out: dict[str, list[Any]] = {"have": [], "missing": [], "failed": [], "off": []}
     sources = evidence.get("sources") or {}
     systems = {a["system"] for a in evidence["anomalies"]}
     out["have"].append(f"告警 {len(evidence['anomalies'])} 筆")
@@ -527,16 +551,16 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     if related:
         out["have"].append(f"這些系統之間的關係邊 {len(related)} 條")
     elif len(systems) > 1:
-        out["missing"].append("關係邊：這幾個系統之間沒有宣告上下游，分不出誰影響誰")
+        out["missing"].append(("關係邊", "這幾個系統之間沒有宣告上下游（config.yaml 的 edges）"))
     elif touching:
         out["have"].append(f"連到這個系統的關係邊 {len(touching)} 條（另一端沒有告警）")
     # 只有一個系統、也沒有宣告它的關係邊：不列為「缺」。系統自己出問題時不需要關係邊，列出來只會把人帶偏
 
     logs = sources.get("logs", "off")
     if logs == "off":
-        out["off"].append("日誌（es.datasource_uid）")
+        out["off"].append(("日誌", "es.datasource_uid"))
     elif logs == "failed":
-        out["failed"].append("日誌：Grafana 的 ES 資料源查不動，原因見服務的 log")
+        out["failed"].append(("日誌", "Grafana 的 ES 資料源查不動，原因見服務的 log"))
     elif logs == "empty":
         counts = evidence.get("log_counts")
         if counts is None:
@@ -552,7 +576,7 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
                    f"可能真的沒有錯誤，或等級的寫法對不上")
         else:
             why = f"這些系統有 {counts['services']} 筆日誌，但訊息文字裡沒有錯誤字樣。可能真的沒有錯誤"
-        out["missing"].append(f"錯誤日誌：{why}")
+        out["missing"].append(("錯誤日誌", why))
     else:
         patterns = evidence.get("error_patterns") or []
         counted = [r for r in patterns if "during" in r]
@@ -565,7 +589,7 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
         if ids:
             out["have"].append(f"機台／批號等識別碼 {ids} 個")
         elif evidence["id_counts"]:
-            out["missing"].append(f"機台與批號：錯誤日誌裡沒有 {'、'.join(evidence['id_counts'])} 這些欄位，看不出集中在哪裡")
+            out["missing"].append(("機台與批號", f"錯誤日誌裡沒有 {'、'.join(evidence['id_counts'])} 這些欄位"))
         if evidence["timelines"]:
             out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
     if evidence["error_traces"]:
@@ -575,38 +599,52 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     if chains == "ok":
         out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
     elif chains == "empty":
-        out["missing"].append("呼叫鏈：Tempo 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error")
+        out["missing"].append(("呼叫鏈", "Tempo 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error"))
     elif chains == "failed":
-        out["failed"].append("呼叫鏈：Grafana 的 Tempo 資料源查不動，原因見服務的 log")
+        out["failed"].append(("呼叫鏈", "Grafana 的 Tempo 資料源查不動，原因見服務的 log"))
     else:
-        out["off"].append("呼叫鏈（tempo.datasource_uid）")
+        out["off"].append(("呼叫鏈", "tempo.datasource_uid"))
 
     metrics = sources.get("metrics", "off")
     if metrics == "ok":
         out["have"].append(f"指標走勢 {len(evidence['metrics'])} 條")
     elif metrics == "empty":
-        out["missing"].append("指標走勢：設定的查詢在這段時間都沒有資料。檢查指標上對應系統名稱的標籤")
+        out["missing"].append(("指標走勢", "設定的查詢在這段時間都沒有資料。檢查指標上對應系統名稱的標籤"))
     elif metrics == "failed":
-        out["failed"].append("指標走勢：查詢失敗，原因見服務的 log")
+        out["failed"].append(("指標走勢", "查詢失敗，原因見服務的 log"))
     else:
-        out["off"].append("指標走勢（metrics.queries）")
+        out["off"].append(("指標走勢", "metrics.datasource_uid 與 metrics.queries"))
     return out
 
 
-def overview_text(groups: dict[str, list[str]]) -> str:
-    """把 overview() 的結果寫成幾行（註記上「證據」那幾行，也交給 LLM）：
-    有的列在同一行；缺的與查詢失敗的每項自己一行（各有原因）；還沒接的列在同一行，括號裡是 config.yaml 要設的鍵。"""
-    lines = [f"有的證據｜{'、'.join(groups['have'])}"]
-    lines += [f"缺的證據｜{item}" for item in groups["missing"]]
-    lines += [f"查詢失敗｜{item}" for item in groups["failed"]]
-    if groups["off"]:
-        lines.append(f"還沒接的｜{'、'.join(groups['off'])}")
+def overview_text(groups: dict[str, list[Any]]) -> str:
+    """把 overview() 的結果寫成幾行（註記上證據的那幾行，也交給 LLM）。
+    重點不是列出證據的名稱，而是「少了它，哪一種分析做不了」：
+      已有的證據｜…                                    一行
+      缺<名稱>｜還看不出<它能回答的問題>。<原因與下一步>   每項一行
+      <名稱>查詢失敗｜還看不出…。<原因>                   每項一行
+      沒接<名稱>｜還看不出…。要接就設定 <config.yaml 的鍵>  每項一行"""
+    lines = [f"已有的證據｜{'、'.join(groups['have'])}"]
+    lines += [f"缺{name}｜還看不出{CAN_ANSWER[name]}。{why}" for name, why in groups["missing"]]
+    lines += [f"{name}查詢失敗｜還看不出{CAN_ANSWER[name]}。{why}" for name, why in groups["failed"]]
+    lines += [f"沒接{name}｜還看不出{CAN_ANSWER[name]}。要接就設定 {key}" for name, key in groups["off"]]
     return "\n".join(lines)
+
+
+def overview_brief(groups: dict[str, list[Any]]) -> str:
+    """註記上的補充說明，只有一行：主角是根因分析，證據的狀況放在最後帶過。
+    缺的與查詢失敗的留原因（那是要動手處理的），沒接的只列名稱。完整版（overview_text）只交給 LLM。"""
+    parts = [f"已有{'、'.join(groups['have'])}"]
+    parts += [f"缺{name}（{why}）" for name, why in groups["missing"]]
+    parts += [f"{name}查詢失敗（{why}）" for name, why in groups["failed"]]
+    if groups["off"]:
+        parts.append(f"沒接{'、'.join(name for name, _key in groups['off'])}")
+    return "證據｜" + "；".join(parts)
 
 
 def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str:
     dump = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
-    head = f"【0. 證據概況（程式統計的事實：有的、缺的與原因、查詢失敗的、還沒接的）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
+    head = f"【0. 證據概況（程式統計的事實：已有的證據；缺的、查詢失敗的、沒接的各自讓哪一種分析做不了）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
     text = (f"{head}【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數）】\n"
@@ -650,9 +688,13 @@ def call_llm(api_url: str, api_key: str, model: str, prompt: str, transport: htt
     return str(r.json()["choices"][0]["message"]["content"])
 
 
-def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
-                 id_pattern: str = DEFAULT_ID_PATTERN) -> str:
-    """幻覺檢查：LLM 點名的系統與機台／批號必須真的在證據或關係邊裡。通過回傳摘要文字，不通過丟 ValueError。"""
+def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
+                id_pattern: str = DEFAULT_ID_PATTERN) -> tuple[str, list[dict[str, Any]]]:
+    """幻覺檢查：LLM 點名的系統與機台／批號必須真的在證據或關係邊裡。通過回傳 (摘要, 可能的原因)，不通過丟 ValueError。
+
+    可能的原因最多留 MAX_CANDIDATES 個，每個是 {source, confidence（0～100）, reason}。分數是模型自己給的，程式只做一件事：
+    **沒有直接證據指向那個系統，分數最高只到 NO_DIRECT_EVIDENCE_CAP**。直接證據 = 那個系統的名稱出現在日誌、警告、Trace、
+    時間線、呼叫鏈或指標裡（DIRECT_EVIDENCE）；只出現在告警與關係邊裡的不算。這不是校準：分數不是機率。"""
     body = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     answer = json.loads(body)
     summary = " ".join(str(answer["summary"]).split())
@@ -665,39 +707,94 @@ def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int 
     ids = {v for counts in evidence["id_counts"].values() for v in counts}
     corpus = json.dumps(evidence, ensure_ascii=False)
     unknown = [s for s in answer.get("systems") or [] if s not in systems]
-    source = answer.get("source") or ""   # 選填（自訂提示詞可以不要求）：有填就必須是證據裡的系統
+    source = answer.get("source") or ""   # 舊格式（自訂提示詞可能還在用）：有填就必須是證據裡的系統
     if source and source not in systems:
         unknown.append(source)
     # ids：在識別碼統計裡，或原樣出現在送給模型的證據裡（跟下面摘要文字同一個標準）都算有憑據。
     # 只認統計會誤擋兩種真的有憑據的情況：日誌沒拆欄位、機台與批號只寫在訊息文字裡；以及有拆欄位但沒排進 top_ids 的。
     # 這是字串比對：編出來的 EQP-1 剛好是證據裡 EQP-10 的開頭時擋不到（摘要文字的檢查本來就有同樣的限制）。
     unknown += [i for i in answer.get("ids") or [] if i not in ids and not (isinstance(i, str) and i.strip() and i in corpus)]
-    # 摘要文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
+    raw = answer.get("candidates")
+    raw = raw if isinstance(raw, list) else []   # 選填：自訂提示詞可以不要求
+    direct = json.dumps({key: evidence.get(key) for key in DIRECT_EVIDENCE}, ensure_ascii=False)
+    candidates: list[dict[str, Any]] = []
+    for item in raw[:MAX_CANDIDATES]:
+        if not isinstance(item, dict) or not str(item.get("source") or "").strip():
+            raise ValueError("candidates 的每一項都要有 source")
+        name = str(item["source"]).strip()
+        if name not in systems:
+            unknown.append(name)
+            continue
+        score = _confidence(item.get("confidence"))
+        if name not in direct:   # 沒有直接證據指向它：分數最高只到「只是推測」那一段
+            score = min(score, NO_DIRECT_EVIDENCE_CAP)
+        candidates.append({"source": name, "confidence": score, "reason": " ".join(str(item.get("reason") or "").split())})
+    # 摘要與理由的文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
-        unknown += [t for t in re.findall(id_pattern, summary) if t not in corpus]
+        for sentence in (summary, *(c["reason"] for c in candidates)):
+            unknown += [t for t in re.findall(id_pattern, sentence) if t not in corpus]
     if unknown:
         raise ValueError(f"點名了證據裡沒有的名稱：{sorted(set(map(str, unknown)))}")
-    return summary[:max_summary_chars]
+    return summary[:max_summary_chars], candidates
 
 
-def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
-            transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
-            overview_text: str = "") -> tuple[str, bool, str]:
-    """回傳 (註記第 2 行, 是不是通過檢查的 LLM 推論, 沒通過的原因)。任何失敗都退回原始摘要，不丟例外。"""
+def _confidence(raw: Any) -> int:
+    """模型給的信心分數整理成 0～100 的整數。沒給、不是數字：當成 0（不替它猜一個分數）。"""
+    if isinstance(raw, str) and raw.strip() in LEGACY_CONFIDENCE:
+        return LEGACY_CONFIDENCE[raw.strip()]
+    try:
+        value = float(str(raw).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, round(value))) if value == value else 0   # value != value 是 NaN
+
+
+def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
+                 id_pattern: str = DEFAULT_ID_PATTERN) -> str:
+    """read_answer 只取摘要的那一半（通過檢查回傳摘要文字，不通過丟 ValueError）。"""
+    return read_answer(text, evidence, max_summary_chars=max_summary_chars, id_pattern=id_pattern)[0]
+
+
+def candidates_text(candidates: list[dict[str, Any]], max_chars: int = 300) -> str:
+    """可能的原因寫成註記上的列點，分數放最後：1. mq-broker：…（信心 90）"""
+    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（信心 {c['confidence']}）" for n, c in enumerate(candidates, 1))
+
+
+@dataclass(frozen=True)
+class Analysis:
+    line: str          # 註記的「根因分析」那一行：[LLM 推論] … 或 [未經分析] …
+    analyzed: bool     # 是不是通過檢查的 LLM 推論
+    reason: str        # 沒通過的原因
+    candidates: str    # 註記上「可能原因」的幾行（candidates_text）；沒有就是空字串
+
+
+def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
+                 transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
+                 overview_text: str = "") -> Analysis:
+    """問 LLM 並檢查回答。任何失敗都退回原始摘要（沒有可能原因），不丟例外。"""
     fallback = f"[未經分析] {raw_summary(incident)}"
     if not api_url or not model:
-        return fallback, False, "沒有設定 llm.url、llm.model"
+        return Analysis(fallback, False, "沒有設定 llm.url、llm.model", "")
     try:
         prompt = build_prompt(evidence, overview_text)
         log.debug("事故 %s 送給 LLM 的內容：\n%s", incident.uid, prompt)
         answer = call_llm(api_url, api_key, model, prompt, transport, timeout=options.timeout_seconds,
                           temperature=options.temperature, system_prompt=options.system_prompt)
         log.debug("事故 %s LLM 的原始回應：%s", incident.uid, answer)
-        summary = check_answer(answer, evidence, max_summary_chars=options.max_summary_chars,
-                               id_pattern=options.id_pattern)
+        summary, candidates = read_answer(answer, evidence, max_summary_chars=options.max_summary_chars,
+                                          id_pattern=options.id_pattern)
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:  # ValueError 含 JSON 解析失敗
         reason = f"{type(e).__name__}: {e}"[:300]
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
-        return fallback, False, reason
-    return f"[LLM 推論] {summary}", True, ""
+        return Analysis(fallback, False, reason, "")
+    return Analysis(f"[LLM 推論] {summary}", True, "", candidates_text(candidates, options.max_summary_chars))
+
+
+def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
+            transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
+            overview_text: str = "") -> tuple[str, bool, str]:
+    """analyze_full 的前三項：(註記的根因分析那一行, 是不是通過檢查的 LLM 推論, 沒通過的原因)。"""
+    got = analyze_full(incident, evidence, api_url=api_url, api_key=api_key, model=model, transport=transport,
+                       options=options, overview_text=overview_text)
+    return got.line, got.analyzed, got.reason

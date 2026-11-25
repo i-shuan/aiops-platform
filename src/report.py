@@ -1,12 +1,11 @@
-"""把一個事故寫成 Grafana 註記。數字與時間全部由程式產生，LLM 只提供第 2 行的文字。
+"""把一個事故寫成 Grafana 註記。主角是根因分析；數字與時間由程式產生。
 
   第 1 行（程式）      受影響系統、嚴重度、收斂的告警筆數
-  第 2 行              [LLM 推論] …  或  [未經分析] 原始異常摘要
-  證據的幾行（程式）   有的證據｜…（一行）、缺的證據｜名稱：原因（每項一行）、查詢失敗｜…（每項一行）、還沒接的｜…（一行）
-                       還沒收集過證據的事故沒有這幾行
+  第 2 行              根因分析｜[LLM 推論] 一句結論   或   根因分析｜[未經分析] 原始異常摘要
+  列點 1～3 項         1. 系統：可能出了什麼事與依據（信心 N）。模型列的，由最可能排到最不可能；
+                       沒有直接證據指向的系統，程式把分數壓在 30 以下。沒有經過模型時沒有這幾行
+  證據（程式，一行）   證據｜已有…；缺…（原因）；沒接…。只是補充，還沒收集過證據的事故沒有這一行
   最後一行（程式）     起訖時間（台灣時間）+ 調整優先權的規則連結
-
-證據那幾行是為了回答「證據不足是哪裡不足」：它是程式照實際撈到的結果寫的，不是模型的說法（src/rca.py 的 overview）。
 
 Grafana 的註記文字會當 HTML 顯示（消毒過），所以換行用 <br>、連結用 <a>；系統名稱、規則名稱、LLM 的文字一律先跳脫，
 日誌或模型輸出裡的 <script>、<img> 之類不會變成標籤。
@@ -40,7 +39,7 @@ def render(incident: Incident, grafana_url: str, tz: str, max_links: int = 5) ->
     """回傳 POST／PATCH /api/annotations 的內容（time、timeEnd、tags、text）。"""
     line1 = (f"【{incident.severity}・{STATUS_TEXT[incident.status]}】"
              f"受影響系統：{html.escape('、'.join(incident.services))}｜收斂告警 {incident.alert_count} 筆")
-    line2 = html.escape(" ".join(incident.summary.split()))
+    line2 = "根因分析｜" + html.escape(" ".join(incident.summary.split()))   # 這一行是主角；[LLM 推論]／[未經分析] 的標示緊接在後
     end = incident.ended_at if incident.status == "closed" and incident.ended_at else None
     span = f"{local_time(incident.started_at, tz)} ～ {local_time(end, tz) if end else '進行中'}（台灣時間）"
     rules: dict[tuple[str, str], str] = {}  # (rule_uid, 規則名稱) -> 這條規則在這個事故裡最高的嚴重度
@@ -50,13 +49,14 @@ def render(incident: Incident, grafana_url: str, tz: str, max_links: int = 5) ->
     ranked = sorted(rules.items(), key=lambda kv: (SEVERITY_RANK[kv[1]], kv[0][1]))
     links = "、".join(rule_link(grafana_url, uid, f"{title}（{sev}）") for (uid, title), sev in ranked[:max_links])
     more = f" 等 {len(ranked)} 條" if len(ranked) > max_links else ""
-    proof = [html.escape(" ".join(line.split())) for line in incident.evidence_note.splitlines() if line.strip()]
+    lines = lambda text: [html.escape(" ".join(line.split())) for line in text.splitlines() if line.strip()]
+    causes, proof = lines(incident.candidates), lines(incident.evidence_note)
     last = f"{span}｜調整優先權：{links}{more}"
     return {
         "time": int(incident.started_at.timestamp() * 1000),
         "timeEnd": int((end or incident.last_seen_at).timestamp() * 1000),
         "tags": ["aiops", uid_tag(incident.uid), incident.severity, incident.status, *incident.services],
-        "text": "<br>".join([line1, line2, *proof, last]),
+        "text": "<br>".join([line1, line2, *causes, *proof, last]),
     }
 
 

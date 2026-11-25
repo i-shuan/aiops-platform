@@ -1,7 +1,8 @@
 """跑評估案例（eval/scenarios.py）並計分。開發工具，不是平台的一部分：不會被服務載入，也不進映像檔。
 
 每個案例：把日誌寫進 Elasticsearch → 用 aiops-lite 的程式（Editor Token 經 Grafana 的 ES 資料源代理）收集證據 →
-同一份證據問真的 LLM 幾次 → 計分。算對的條件：回答通過幻覺檢查、source 跟答案一樣、摘要有提到重點（any 裡任何一個詞）。
+同一份證據問真的 LLM 幾次 → 計分。算對的條件：回答通過幻覺檢查、排第一的可能原因跟答案一樣（答案是「無法判定」時：不能有 40 分以上的可能原因）、
+有提到重點（any 裡任何一個詞）。
 
   python -m eval.run --label baseline --runs 3 --out /tmp/eval-baseline.json
   python -m eval.run --label ablation --drop error_patterns,warnings         # 拿掉某幾包證據再問，看少了它差多少
@@ -82,20 +83,31 @@ def build_evidence(scenario: dict, grafana: Grafana, uid: str, index: str, now: 
 
 
 def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
-    """問一次並計分。回傳 {ok, why, source, summary}。"""
+    """問一次並計分。回傳 {ok, why, source, confidence, summary}。
+
+    答案是某個系統：排第一的可能原因要是它。答案是「無法判定」：不能有信心分數 40 以上的可能原因
+    （可以列 39 以下的推測，那正是要它做的事；把常態雜訊講成 40 分以上才算錯）。
+    重點字在摘要或任何一個可能原因的理由裡出現都算。"""
     try:
         raw = rca.call_llm(llm["url"], llm["key"], llm["model"], rca.build_prompt(evidence, overview), timeout=120)
-        summary = rca.check_answer(raw, evidence)
-        body = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        source = str(json.loads(body).get("source") or "")
+        summary, candidates = rca.read_answer(raw, evidence)
     except Exception as e:   # 連線、格式、幻覺檢查沒過：都算這一次沒答對
-        return {"ok": False, "why": f"{type(e).__name__}: {str(e).replace(llm['key'], '<key>')[:160]}", "source": None, "summary": ""}
+        return {"ok": False, "why": f"{type(e).__name__}: {str(e).replace(llm['key'], '<key>')[:160]}", "source": None,
+                "confidence": None, "summary": ""}
+    top = candidates[0] if candidates else {"source": "", "confidence": 0}
+    said = " ".join([summary, *(c["reason"] for c in candidates)])
+    listed = "、".join(f"{c['source']} {c['confidence']}" for c in candidates) or "（沒有列）"
     problems = []
-    if scenario["source"] is not None and source != scenario["source"]:
-        problems.append(f"source={source or '（無法判定）'}，答案是 {scenario['source'] or '（無法判定）'}")
-    if scenario["any"] and not any(word in summary for word in scenario["any"]):
-        problems.append(f"摘要沒有提到 {'／'.join(scenario['any'])}")
-    return {"ok": not problems, "why": "；".join(problems), "source": source, "summary": summary}
+    if scenario["source"] == "":
+        strong = [c for c in candidates if c["confidence"] >= rca.CONFIDENCE_MEDIUM]
+        if strong:
+            problems.append(f"答案是無法判定，卻給 {strong[0]['source']} {strong[0]['confidence']} 分")
+    elif scenario["source"] is not None and top["source"] != scenario["source"]:
+        problems.append(f"排第一的是 {top['source'] or '（沒有）'}，答案是 {scenario['source']}")
+    if scenario["any"] and not any(word in said for word in scenario["any"]):
+        problems.append(f"沒有提到 {'／'.join(scenario['any'])}")
+    return {"ok": not problems, "why": "；".join(problems), "source": top["source"], "confidence": top["confidence"],
+            "count": len(candidates), "candidates": listed, "summary": summary}
 
 
 def main() -> int:
@@ -136,10 +148,15 @@ def main() -> int:
             answers = list(pool.map(lambda _i: ask(evidence, overview, scenario, llm), range(args.runs)))
         ok = sum(a["ok"] for a in answers)
         right, total = right + ok, total + len(answers)
-        print(f"{scenario['name']:<32} {ok}/{len(answers)}  （日誌 {count} 筆，提示詞 {len(prompt)} 字）  {scenario['about']}")
+        named = [a for a in answers if a["source"]]
+        scores = [a["confidence"] for a in named]
+        tops = "、".join(sorted({a["source"] for a in named})) or "—"
+        spread = f"{min(scores)}～{max(scores)} 分" if scores else "—"
+        listed = "／".join(str(a.get("count", 0)) for a in answers)
+        print(f"{scenario['name']:<32} {ok}/{len(answers)}  排第一的：{tops}（{spread}）  各列了 {listed} 個  （提示詞 {len(prompt)} 字）")
         for a in answers:
             if not a["ok"]:
-                print(f"      ✗ {a['why']}｜{a['summary'][:110]}")
+                print(f"      ✗ {a['why']}｜{a.get('candidates', '')}｜{a['summary'][:90]}")
         results.append({"name": scenario["name"], "ok": ok, "runs": len(answers), "prompt_chars": len(prompt), "answers": answers})
     print(f"\n[{args.label}] 答對 {right}/{total}" + (f"（拿掉 {'、'.join(drop)}）" if drop else ""))
     if args.out:

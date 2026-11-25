@@ -143,7 +143,7 @@ es:
 | 嚴重度只有 P0～P3 與它們的排序 | `src/grafana.py` 的 `SEVERITIES`、`src/grouping.py` 的 `SEVERITY_RANK` | 儀表板用 `P0`、`P1` 標籤查註記；改了儀表板失效、舊事故對不上 |
 | 註記標籤 `aiops`、`aiops-incident:<uid>`、`open`／`closed`、系統名稱 | `src/report.py` | 儀表板的查詢、「註記建過就不重複建」的查找都依賴這些標籤 |
 | 註記的版面（標題、摘要、證據的幾行、時間）與「進行中／已結案」的文字 | `src/report.py` | 對外的呈現契約；`[LLM 推論]`／`[未經分析]` 的標示不能被設定拿掉 |
-| 證據幾行的用字與判斷（有的、缺的與原因、查詢失敗、還沒接的） | `src/rca.py` 的 `overview`、`overview_text` | 照實際撈到的結果產生，沒有可調的門檻；用字是給值班人員看的固定說法 |
+| 證據的判斷與用字：註記上一行（已有、缺的與原因、沒接的），交給模型的完整版另外寫每種證據少了會看不出什麼 | `src/rca.py` 的 `overview`、`overview_brief`、`overview_text`、`CAN_ANSWER` | 照實際撈到的結果產生，沒有可調的門檻；用字是給值班人員看的固定說法 |
 | 規則編輯連結的路徑 `/alerting/<uid>/edit` | `src/report.py` | 由 Grafana 的版本決定，不是我們的設定 |
 | 資料表與欄位名稱、成員告警的時間欄位 | `src/db.py` | 改了要搬資料；程式只會自動「補欄位」 |
 | 事故 uid 的長度（12 碼） | `src/grouping.py` | 內部識別；改了舊註記的標籤對不上 |
@@ -160,6 +160,7 @@ es:
 | 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/rca.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
 | 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/rca.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
 | 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的片語（每個 `*` 容許 3 個位置的間隔，上限 12） | `src/rca.py` 的 `log_pattern`、`pattern_phrase` | 歸類與計數的實作。間隔取 3 是因為一個 `*` 在原文可能是好幾個詞（IP 加 port 會被拆成兩個）；是近似值，未驗證泛化 |
+| 可能原因最多 3 個；信心分數 0～100，分段是 70／40；沒有直接證據指向的系統分數最高 30 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE_HIGH`、`CONFIDENCE_MEDIUM`、`NO_DIRECT_EVIDENCE_CAP`、`DIRECT_EVIDENCE` | 3 個是註記版面的上限。分段是提示詞裡跟模型講的定義，上限 30 落在「只是推測」那一段；分數不是機率、沒有校準。「有沒有直接證據」是名稱的字串比對。都只在 `EVAL.md` 的人造案例跑過，未驗證泛化 |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |
 | 嚴重度的判定方式 | — | 程式沒有「判定規則」：嚴重度直接讀告警的標籤，事故取成員裡最高的，只升不降 |

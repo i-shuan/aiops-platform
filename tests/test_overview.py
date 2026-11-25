@@ -59,7 +59,7 @@ def test_everything_present_is_listed_with_counts(fake):
     assert text.startswith("告警 3 筆、這些系統之間的關係邊 2 條、錯誤日誌 ")
     for part in ("識別碼", "跨系統時間線", "失敗請求的呼叫鏈 1 條", "指標走勢 1 條"):
         assert part in text
-    assert rca.overview_text(got) == "有的證據｜" + text   # 什麼都不缺：只有一行
+    assert rca.overview_text(got) == "已有的證據｜" + text   # 什麼都不缺：只有一行
 
 
 # ── 錯誤日誌 0 筆：三種原因分得出來，各有下一步 ──
@@ -74,7 +74,7 @@ def test_zero_error_logs_says_which_step_failed(fake, counts, says, next_step):
     fake.log_counts = counts
     ev = collect(fake)
     text = line(ev)
-    [missing] = [l for l in text.splitlines() if l.startswith("缺的證據｜錯誤日誌：")]   # 自己一行
+    [missing] = [l for l in text.splitlines() if l.startswith("缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。")]   # 自己一行，先講少了它哪種分析做不了
     assert says in missing and next_step in missing
     assert len(fake.count_requests) == 1
     # 送出去的計數查詢跟錄製時同一個形狀（兩個子查詢：整個時間窗、時間窗 + 系統）
@@ -100,14 +100,15 @@ def test_if_the_count_itself_fails_the_line_still_says_logs_are_missing(fake):
     real = fake.msearch
     fake.msearch = lambda body: real(body) if '"size": 100' in body else httpx.Response(500, json={"message": "boom"})
     ev = collect(fake)
-    assert "缺的證據｜錯誤日誌：沒有查到這些系統的錯誤日誌" in line(ev) and "log_counts" not in ev
+    assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。沒有查到這些系統的錯誤日誌" in line(ev) and "log_counts" not in ev
 
 
 # ── 沒接、查詢失敗 ──
 
 def test_sources_that_are_not_configured_are_listed_as_not_connected(fake):
     text = line(collect(fake, es=""))
-    assert "還沒接的｜日誌（es.datasource_uid）、呼叫鏈（tempo.datasource_uid）、指標走勢（metrics.queries）" in text
+    assert [l.split("｜")[0] for l in text.splitlines()[1:]] == ["沒接日誌", "沒接呼叫鏈", "沒接指標走勢"]
+    assert "沒接日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。要接就設定 es.datasource_uid" in text
     assert "查詢失敗" not in text
 
 
@@ -115,7 +116,7 @@ def test_failed_queries_are_reported_as_failed_not_as_missing(fake):
     fake.fail.add("/api/datasources/proxy/uid/")
     ev = collect(fake, tempo="tempo-uid", metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
     got = rca.overview(ev)
-    assert [s.split("：")[0] for s in got["failed"]] == ["日誌", "呼叫鏈", "指標走勢"] and got["off"] == []
+    assert [name for name, _why in got["failed"]] == ["日誌", "呼叫鏈", "指標走勢"] and got["off"] == []
 
 
 def test_queried_but_empty_traces_and_metrics_say_why(fake):
@@ -123,14 +124,15 @@ def test_queried_but_empty_traces_and_metrics_say_why(fake):
     ev = collect(fake, incident("amhs-mcs"), tempo="tempo-uid",
                  metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
     text = line(ev)
-    assert "缺的證據｜呼叫鏈：Tempo 裡沒有這些系統的失敗請求" in text and "缺的證據｜指標走勢：設定的查詢在這段時間都沒有資料" in text
+    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。Tempo 裡沒有這些系統的失敗請求" in text
+    assert "缺指標走勢｜還看不出數值是怎麼變壞的（流量、佇列、資源）。設定的查詢在這段時間都沒有資料" in text
 
 
 # ── 關係邊 ──
 
 def test_edges_are_judged_against_the_systems_in_this_incident(fake):
     assert "這些系統之間的關係邊 2 條" in line(collect(fake))
-    assert "缺的證據｜關係邊：這幾個系統之間沒有宣告上下游" in line(collect(fake, edges=[("x", "y")]))
+    assert "缺關係邊｜還看不出這幾個系統誰影響誰。這幾個系統之間沒有宣告上下游" in line(collect(fake, edges=[("x", "y")]))
     assert "連到這個系統的關係邊 1 條（另一端沒有告警）" in line(collect(fake, incident("mq-broker")))
     alone = line(collect(fake, incident("mq-broker"), edges=[]))
     assert "關係邊" not in alone   # 單一系統、沒宣告關係邊：不算缺（系統自己出問題時不需要它）
@@ -141,11 +143,11 @@ def test_edges_are_judged_against_the_systems_in_this_incident(fake):
 def test_annotation_shows_the_evidence_line_between_summary_and_time_and_escapes_it():
     inc = incident()
     inc.summary = "[LLM 推論] 還無法判定源頭"
-    inc.evidence_note = "有的證據｜告警 3 筆\n缺的證據｜錯誤日誌：<b>x</b>  多個空白\n\n還沒接的｜呼叫鏈（tempo.datasource_uid）"
+    inc.evidence_note = "已有的證據｜告警 3 筆\n缺錯誤日誌｜<b>x</b>  多個空白\n\n沒接呼叫鏈｜要接就設定 tempo.datasource_uid"
     l1, l2, have, missing, off, last = report.render(inc, "http://g", "Asia/Taipei")["text"].split("<br>")
-    assert (have, off) == ("有的證據｜告警 3 筆", "還沒接的｜呼叫鏈（tempo.datasource_uid）")
-    assert missing == "缺的證據｜錯誤日誌：&lt;b&gt;x&lt;/b&gt; 多個空白"   # 跳脫；每項自己一行
-    assert l2 == "[LLM 推論] 還無法判定源頭" and "台灣時間" in last
+    assert (have, off) == ("已有的證據｜告警 3 筆", "沒接呼叫鏈｜要接就設定 tempo.datasource_uid")
+    assert missing == "缺錯誤日誌｜&lt;b&gt;x&lt;/b&gt; 多個空白"   # 跳脫；每項自己一行
+    assert l2 == "根因分析｜[LLM 推論] 還無法判定源頭" and "台灣時間" in last
     inc.evidence_note = ""
     assert report.render(inc, "http://g", "Asia/Taipei")["text"].count("<br>") == 2   # 還沒收集過證據：沒有這一行
 
@@ -165,13 +167,15 @@ def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):
     w.receive("firing_mq", "firing_cim")
     assert w.run(60, llm=httpx.MockTransport(llm))["status"] == "ok"
     [inc] = rows(w, dbmod.incidents)
-    assert "缺的證據｜錯誤日誌：索引有 4 筆，但沒有一筆的 service.name 是這些系統" in inc["evidence_note"]
+    assert inc["evidence_note"].startswith("證據｜已有告警 2 筆") and "\n" not in inc["evidence_note"]   # 註記上只有一行
+    assert "缺錯誤日誌（索引有 4 筆，但沒有一筆的 service.name 是這些系統" in inc["evidence_note"]
     note = w.fake.annotations[inc["annotation_id"]]["text"]
-    assert "[LLM 推論] 還無法判定源頭" in note and "<br>有的證據｜告警 2 筆" in note and "<br>缺的證據｜錯誤日誌：" in note and "service.name 是這些系統" in note
+    assert "<br>根因分析｜[LLM 推論] 還無法判定源頭" in note and "<br>證據｜已有告警 2 筆" in note and "service.name 是這些系統" in note
     prompt = calls[0]["messages"][1]["content"]
     assert prompt.startswith("【0. 證據概況") and "service.name 是這些系統" in prompt.split("【1.")[0]
+    assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的" in prompt.split("【1.")[0]   # 完整的說明（少了它哪種分析做不了）只給模型
     system = calls[0]["messages"][0]["content"]
-    assert "不要只寫「證據不足」" in system and "不能當成它就是源頭的依據" in system
+    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system and "0 到 100 的整數" in system
 
 
 def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_changes(world):  # noqa: F811
@@ -183,7 +187,7 @@ def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_c
     w.run(120)   # 只是恢復：不重新分析，證據那一行照舊
     [after] = rows(w, dbmod.incidents)
     assert after["evidence_note"] == before["evidence_note"] != "" and len(w.llm_calls) == 1
-    assert "有的證據｜" in w.fake.annotations[after["annotation_id"]]["text"]
+    assert "證據｜已有" in w.fake.annotations[after["annotation_id"]]["text"]
 
 
 def test_without_llm_the_evidence_line_is_still_written(world):  # noqa: F811
@@ -191,7 +195,7 @@ def test_without_llm_the_evidence_line_is_still_written(world):  # noqa: F811
     w.receive("firing_mq")
     w.run(60, settings=replace(w.settings, llm_model=""))
     [inc] = rows(w, dbmod.incidents)
-    assert inc["summary"].startswith("[未經分析]") and inc["evidence_note"].startswith("有的證據｜告警 1 筆")
+    assert inc["summary"].startswith("[未經分析]") and inc["evidence_note"].startswith("證據｜已有告警 1 筆")
 
 
 def test_source_field_is_optional_but_must_be_a_system_in_the_evidence(fake):
@@ -202,3 +206,14 @@ def test_source_field_is_optional_but_must_be_a_system_in_the_evidence(fake):
     assert rca.check_answer(json.dumps({k: v for k, v in good.items() if k != "source"}), ev)   # 自訂提示詞沒要求這一欄
     with pytest.raises(ValueError, match="erp-core"):
         rca.check_answer(json.dumps({**good, "source": "erp-core"}), ev)
+
+
+def test_the_annotation_gets_one_brief_line_while_the_llm_gets_the_full_explanation(fake):
+    no_error_logs(fake)
+    fake.log_counts = "log_counts_service_mismatch"
+    groups = rca.overview(collect(fake, tempo="tempo-uid"))
+    brief = rca.overview_brief(groups)
+    assert "\n" not in brief and brief.startswith("證據｜已有告警 3 筆")
+    assert "缺錯誤日誌（索引有 4 筆" in brief and "還看不出" not in brief          # 留原因，不重複講能分析什麼
+    assert brief.endswith("沒接指標走勢") and "metrics.queries" not in brief          # 沒接的只列名稱
+    assert "還看不出" in rca.overview_text(groups) and "metrics.queries" in rca.overview_text(groups)
