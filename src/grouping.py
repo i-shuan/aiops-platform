@@ -52,8 +52,8 @@ class Incident:
     annotated: bool = False          # 目前的內容寫回 Grafana 了沒（沒寫成功下一輪補）
     llm_failures: int = 0            # LLM 分析連續失敗幾次（成功就歸零）；退避用
     llm_next_try: datetime | None = None  # 退避中：這個時間之前不再查 ES、不再打 LLM
-    candidates: str = ""             # 註記上「可能原因」的幾行（LLM 列的、程式檢查過的）；沒有就是空的
-    evidence_note: str = ""          # 註記上證據的那幾行：已有哪些、缺哪些各自讓哪種分析做不了（程式產生）
+    candidates: str = ""             # 註記上根因分析底下的列點（LLM 列的、程式檢查過的）；沒有就是空的
+    evidence_note: str = ""          # 註記上「證據｜…」那一行：已有哪些、缺哪些與原因、沒接哪些（程式產生）
     changed: bool = field(default=False, compare=False)  # 這一輪有沒有變（只活在記憶體，不存檔）
     fresh: bool = field(default=False, compare=False)    # 這一輪成員或嚴重度變了（只活在記憶體）：要重新分析
 

@@ -167,13 +167,15 @@ def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):
     w.receive("firing_mq", "firing_cim")
     assert w.run(60, llm=httpx.MockTransport(llm))["status"] == "ok"
     [inc] = rows(w, dbmod.incidents)
-    assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。索引有 4 筆，但沒有一筆的 service.name 是這些系統" in inc["evidence_note"]
+    assert inc["evidence_note"].startswith("證據｜已有告警 2 筆") and "\n" not in inc["evidence_note"]   # 註記上只有一行
+    assert "缺錯誤日誌（索引有 4 筆，但沒有一筆的 service.name 是這些系統" in inc["evidence_note"]
     note = w.fake.annotations[inc["annotation_id"]]["text"]
-    assert "<br>根因分析｜[LLM 推論] 還無法判定源頭" in note and "<br>已有的證據｜告警 2 筆" in note and "<br>缺錯誤日誌｜還看不出" in note and "service.name 是這些系統" in note
+    assert "<br>根因分析｜[LLM 推論] 還無法判定源頭" in note and "<br>證據｜已有告警 2 筆" in note and "service.name 是這些系統" in note
     prompt = calls[0]["messages"][1]["content"]
     assert prompt.startswith("【0. 證據概況") and "service.name 是這些系統" in prompt.split("【1.")[0]
+    assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的" in prompt.split("【1.")[0]   # 完整的說明（少了它哪種分析做不了）只給模型
     system = calls[0]["messages"][0]["content"]
-    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system
+    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system and "0 到 100 的整數" in system
 
 
 def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_changes(world):  # noqa: F811
@@ -185,7 +187,7 @@ def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_c
     w.run(120)   # 只是恢復：不重新分析，證據那一行照舊
     [after] = rows(w, dbmod.incidents)
     assert after["evidence_note"] == before["evidence_note"] != "" and len(w.llm_calls) == 1
-    assert "已有的證據｜" in w.fake.annotations[after["annotation_id"]]["text"]
+    assert "證據｜已有" in w.fake.annotations[after["annotation_id"]]["text"]
 
 
 def test_without_llm_the_evidence_line_is_still_written(world):  # noqa: F811
@@ -193,7 +195,7 @@ def test_without_llm_the_evidence_line_is_still_written(world):  # noqa: F811
     w.receive("firing_mq")
     w.run(60, settings=replace(w.settings, llm_model=""))
     [inc] = rows(w, dbmod.incidents)
-    assert inc["summary"].startswith("[未經分析]") and inc["evidence_note"].startswith("已有的證據｜告警 1 筆")
+    assert inc["summary"].startswith("[未經分析]") and inc["evidence_note"].startswith("證據｜已有告警 1 筆")
 
 
 def test_source_field_is_optional_but_must_be_a_system_in_the_evidence(fake):
@@ -204,3 +206,14 @@ def test_source_field_is_optional_but_must_be_a_system_in_the_evidence(fake):
     assert rca.check_answer(json.dumps({k: v for k, v in good.items() if k != "source"}), ev)   # 自訂提示詞沒要求這一欄
     with pytest.raises(ValueError, match="erp-core"):
         rca.check_answer(json.dumps({**good, "source": "erp-core"}), ev)
+
+
+def test_the_annotation_gets_one_brief_line_while_the_llm_gets_the_full_explanation(fake):
+    no_error_logs(fake)
+    fake.log_counts = "log_counts_service_mismatch"
+    groups = rca.overview(collect(fake, tempo="tempo-uid"))
+    brief = rca.overview_brief(groups)
+    assert "\n" not in brief and brief.startswith("證據｜已有告警 3 筆")
+    assert "缺錯誤日誌（索引有 4 筆" in brief and "還看不出" not in brief          # 留原因，不重複講能分析什麼
+    assert brief.endswith("沒接指標走勢") and "metrics.queries" not in brief          # 沒接的只列名稱
+    assert "還看不出" in rca.overview_text(groups) and "metrics.queries" in rca.overview_text(groups)

@@ -55,23 +55,25 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 「錯誤種類與事故前後的次數」：事故前就以差不多的頻率出現的錯誤是平常就有的，不能當成這次事故的原因；
   事故前沒出現過（new=true）或明顯變多的才是線索。沒有次數的錯誤不能推論它是新的還是平常就有的。
 - 「警告」常常寫出後來出錯的原因（資源快用完、重試變多）：錯誤訊息本身沒寫原因時，看同一個系統在出錯前的警告。
-- 一定要列出可能的原因（candidates），最多 3 個，由最可能排到最不可能。每個寫：
-  source＝系統名稱；confidence＝高、中、低其中一個；reason＝一句白話，講依據是哪一種證據裡的什麼，直接引用內容。
-- 信心怎麼標：
-  高＝有直接指向它的證據，而且沒有別的合理解釋（它自己這次才出現的錯誤、呼叫鏈停在它、它的指標先變壞、別的系統的錯誤訊息指名連不上它）。
-  中＝有指向它的證據，但還有別的可能。
-  低＝只是從告警的名稱、觸發的數值、哪一筆先響、關係邊推測，沒有直接證據。
-- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊列出可能的原因（信心標低），不要只回「無法判定」。
-  連推測的依據都沒有時 candidates 才可以是空的。
-- summary 是寫給值班人員看的，用白話、短句，不要寫標題或編號：先講最可能的原因與依據。
-  candidates 全部是低的時候，開頭要寫「目前只能推測」，最後寫最該補哪一種證據：從「證據概況」裡「缺…」「…查詢失敗」「沒接…」的項目挑一項，
-  說明補上它能確認什麼。不要要求證據概況裡沒有提到的東西。
+- 一定要列出 1 到 3 個可能的原因（candidates），由最可能排到最不可能。每個寫：
+  source＝系統名稱；confidence＝0 到 100 的整數；reason＝一句白話，講它可能出了什麼事、依據是哪一種證據裡的什麼，直接引用內容。
+- 信心分數怎麼給（依據有多直接，不是機率）：
+  70～100＝有直接指向它的證據，而且沒有別的合理解釋（它自己這次才出現的錯誤、呼叫鏈停在它、它的指標先變壞、別的系統的錯誤訊息指名連不上它）。
+  40～69＝有指向它的證據，但還有別的可能。
+  0～39＝只是從告警的名稱、觸發的數值、哪一筆先響、關係邊推測，沒有直接證據。
+- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊列出可能的原因（分數給 39 以下），不要只回「無法判定」。
+  有別的合理可能就列出來，不要只列一個。連推測的依據都沒有時 candidates 才可以是空的。
+- summary 是寫給值班人員看的一句結論，用白話：最可能的原因是什麼。分數全部在 39 以下時，開頭寫「目前只能推測」，
+  並說最該補哪一種證據（從「證據概況」裡「缺…」「…查詢失敗」「沒接…」的項目挑一項）。不要要求證據概況裡沒有提到的東西。
 - 只輸出一個 JSON 物件，不要 Markdown：
-  {"summary": "繁體中文，120 字以內", "candidates": [{"source": "系統名稱", "confidence": "高／中／低", "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+  {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "confidence": 85, "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
 
-CONFIDENCE = ("高", "中", "低")
 MAX_CANDIDATES = 3
 DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "error_traces", "timelines", "call_chains", "metrics")
+# 信心分數的分段（提示詞裡跟模型講的同一套）。分數是模型自評「依據有多直接」，不是機率、沒有校準過。
+CONFIDENCE_HIGH, CONFIDENCE_MEDIUM = 70, 40
+NO_DIRECT_EVIDENCE_CAP = 30   # 沒有直接證據指向的系統，分數最高只到這裡（落在「只是推測」那一段）
+LEGACY_CONFIDENCE = {"高": 85, "中": 55, "低": 25}   # 舊格式的高／中／低換成各段的中間值
 
 TRACE_SEARCH_LIMIT = 20  # 向 Tempo 搜尋時最多要幾條，再從裡面挑最近的 max_traces 條
 SPAN_ATTRIBUTES = ("peer.service", "db.system", "server.address", "http.response.status_code", "messaging.destination.name")
@@ -629,6 +631,17 @@ def overview_text(groups: dict[str, list[Any]]) -> str:
     return "\n".join(lines)
 
 
+def overview_brief(groups: dict[str, list[Any]]) -> str:
+    """註記上的補充說明，只有一行：主角是根因分析，證據的狀況放在最後帶過。
+    缺的與查詢失敗的留原因（那是要動手處理的），沒接的只列名稱。完整版（overview_text）只交給 LLM。"""
+    parts = [f"已有{'、'.join(groups['have'])}"]
+    parts += [f"缺{name}（{why}）" for name, why in groups["missing"]]
+    parts += [f"{name}查詢失敗（{why}）" for name, why in groups["failed"]]
+    if groups["off"]:
+        parts.append(f"沒接{'、'.join(name for name, _key in groups['off'])}")
+    return "證據｜" + "；".join(parts)
+
+
 def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str:
     dump = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
     head = f"【0. 證據概況（程式統計的事實：已有的證據；缺的、查詢失敗的、沒接的各自讓哪一種分析做不了）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
@@ -676,12 +689,12 @@ def call_llm(api_url: str, api_key: str, model: str, prompt: str, transport: htt
 
 
 def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
-                id_pattern: str = DEFAULT_ID_PATTERN) -> tuple[str, list[dict[str, str]]]:
+                id_pattern: str = DEFAULT_ID_PATTERN) -> tuple[str, list[dict[str, Any]]]:
     """幻覺檢查：LLM 點名的系統與機台／批號必須真的在證據或關係邊裡。通過回傳 (摘要, 可能的原因)，不通過丟 ValueError。
 
-    可能的原因最多留 MAX_CANDIDATES 個，每個是 {source, confidence, reason}。信心是模型自己標的，程式只做一件事：
-    **沒有直接證據指向那個系統，信心就壓成「低」**。直接證據 = 那個系統的名稱出現在日誌、警告、Trace、時間線、呼叫鏈或指標裡
-    （DIRECT_EVIDENCE）；只出現在告警與關係邊裡的不算。這不是校準：高、中、低不是機率，只是「依據有多直接」的分級。"""
+    可能的原因最多留 MAX_CANDIDATES 個，每個是 {source, confidence（0～100）, reason}。分數是模型自己給的，程式只做一件事：
+    **沒有直接證據指向那個系統，分數最高只到 NO_DIRECT_EVIDENCE_CAP**。直接證據 = 那個系統的名稱出現在日誌、警告、Trace、
+    時間線、呼叫鏈或指標裡（DIRECT_EVIDENCE）；只出現在告警與關係邊裡的不算。這不是校準：分數不是機率。"""
     body = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     answer = json.loads(body)
     summary = " ".join(str(answer["summary"]).split())
@@ -704,7 +717,7 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     raw = answer.get("candidates")
     raw = raw if isinstance(raw, list) else []   # 選填：自訂提示詞可以不要求
     direct = json.dumps({key: evidence.get(key) for key in DIRECT_EVIDENCE}, ensure_ascii=False)
-    candidates: list[dict[str, str]] = []
+    candidates: list[dict[str, Any]] = []
     for item in raw[:MAX_CANDIDATES]:
         if not isinstance(item, dict) or not str(item.get("source") or "").strip():
             raise ValueError("candidates 的每一項都要有 source")
@@ -712,10 +725,10 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
         if name not in systems:
             unknown.append(name)
             continue
-        confidence = str(item.get("confidence") or "").strip()
-        if confidence not in CONFIDENCE or name not in direct:   # 沒標、亂標，或沒有直接證據指向它：一律當成低
-            confidence = "低"
-        candidates.append({"source": name, "confidence": confidence, "reason": " ".join(str(item.get("reason") or "").split())})
+        score = _confidence(item.get("confidence"))
+        if name not in direct:   # 沒有直接證據指向它：分數最高只到「只是推測」那一段
+            score = min(score, NO_DIRECT_EVIDENCE_CAP)
+        candidates.append({"source": name, "confidence": score, "reason": " ".join(str(item.get("reason") or "").split())})
     # 摘要與理由的文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
@@ -726,16 +739,26 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     return summary[:max_summary_chars], candidates
 
 
+def _confidence(raw: Any) -> int:
+    """模型給的信心分數整理成 0～100 的整數。沒給、不是數字：當成 0（不替它猜一個分數）。"""
+    if isinstance(raw, str) and raw.strip() in LEGACY_CONFIDENCE:
+        return LEGACY_CONFIDENCE[raw.strip()]
+    try:
+        value = float(str(raw).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, round(value))) if value == value else 0   # value != value 是 NaN
+
+
 def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
                  id_pattern: str = DEFAULT_ID_PATTERN) -> str:
     """read_answer 只取摘要的那一半（通過檢查回傳摘要文字，不通過丟 ValueError）。"""
     return read_answer(text, evidence, max_summary_chars=max_summary_chars, id_pattern=id_pattern)[0]
 
 
-def candidates_text(candidates: list[dict[str, str]], max_chars: int = 300) -> str:
-    """可能的原因寫成註記上的幾行：可能原因 1｜mq-broker（信心高）：…"""
-    return "\n".join(f"可能原因 {n}｜{c['source']}（信心{c['confidence']}）：{c['reason'][:max_chars]}"
-                     for n, c in enumerate(candidates, 1))
+def candidates_text(candidates: list[dict[str, Any]], max_chars: int = 300) -> str:
+    """可能的原因寫成註記上的列點，分數放最後：1. mq-broker：…（信心 90）"""
+    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（信心 {c['confidence']}）" for n, c in enumerate(candidates, 1))
 
 
 @dataclass(frozen=True)

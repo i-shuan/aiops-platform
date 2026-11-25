@@ -421,10 +421,11 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                     tempo_datasource_uid=settings.tempo_datasource_uid, metrics=settings.metrics)
             before = (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates)
             # 「證據」那幾行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
-            inc.evidence_note = rca.overview_text(rca.overview(evidence, settings.log_fields, settings.evidence.error_levels))
+            groups = rca.overview(evidence, settings.log_fields, settings.evidence.error_levels)
+            inc.evidence_note = rca.overview_brief(groups)   # 註記上只放一行；完整的說明交給 LLM
             got = rca.analyze_full(inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
                                    model=settings.llm_model, transport=llm_transport, options=settings.llm,
-                                   overview_text=inc.evidence_note)
+                                   overview_text=rca.overview_text(groups))
             inc.summary, inc.analyzed, inc.candidates, reason = got.line, got.analyzed, got.candidates, got.reason
             if (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates) != before:
                 inc.changed, inc.annotated = True, False
