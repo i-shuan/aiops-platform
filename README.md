@@ -23,7 +23,7 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 
 **什麼算異常由各系統自己的 Grafana 告警規則決定**：規則 firing 就是異常，平台不重放查詢、不自己判數值（原本的 5 個偵測器已拿掉）。
 
-**全部的輸入、每一項的最低要求與最理想的狀態，見 `INPUTS.md`。**
+**全部的輸入與輸出、每一項的最低要求與最理想的狀態，見 `INPUTS.md`。**
 
 ## 工廠與傳統可觀測性一起用
 
@@ -297,64 +297,32 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 
 ## 驗證狀態（照實寫）
 
-做過的：
-- 190 個測試通過，**SQLite 與 PostgreSQL 16 各跑一遍都過**。Webhook 解析、ES 代理、註記全部用 **Grafana 13.0.7 實際送出與回應的內容**（`tests/fixtures/grafana13/`）；
-  常駐服務的測試真的起 HTTP 服務、連發 Webhook。
-- 對真的 Grafana 13.0.7 + PostgreSQL + ES 8.19.23 端到端跑過（2026-11-21，本機拋棄式環境，**資料是腳本控制的**）：
-  三條規則各隔 20 秒越線，Grafana 在 43 秒內陸續推了 3 個 Webhook；aiops-lite 在第一個 Webhook 後整整 60 秒才跑第一輪，
-  一輪收了 3 筆告警、收斂成 1 張 P1 事故（三個系統經兩條關係邊串起來）、寫 1 筆註記；三筆 resolved 進來後，
-  安靜滿設定的 60 秒結案，註記原地改成已結案，之後不再續跑。期間的錯誤日誌是在 debounce 期間才寫進 ES 的，分析時撈得到。
-- 改成單一 config.yaml 之後，用 `env -i`（清空所有環境變數、只留 `AIOPS_CONFIG_FILE`）起服務，對真的 Grafana 13.0.7 + PostgreSQL 16
-  + ES 8.19.23 再跑一次端到端：Webhook → debounce → 1 張事故 → 註記 → resolved → 結案都正常。那次 amhs-mcs 的規則沒有響
-  （測試腳本在規則的 10 秒評估週期內就把值改回去），所以事故只有 2 個系統；三個系統串起來的情況是先前（SQLite、環境變數版）驗過的。
-- **用真的 LLM（OpenAI，模型 `gpt-6-luna`，金鑰是你授權使用的環境金鑰）跑過端到端**（2026-11-21，本機 Grafana 13.0.7 + PostgreSQL 16 + ES 8.19.23，
-  日誌與告警是腳本灌的假資料）：三個系統先後越線 → 收成 1 張 P1 事故 → 真模型回出
-  「可能源頭為 mq-broker 的 lot.dispatch 消費延遲，影響下游 cim-eap 與 amhs-mcs，錯誤集中於 EQP-CVD-07、LOT24A0031 與 FOUP0912」，
-  通過幻覺檢查，註記標 `[LLM 推論]`；全部恢復後結案。錯的金鑰（401）也實測過：退回 `[未經分析]`、錯誤訊息不含金鑰。
-  這次實測抓到一個問題並已修掉：程式原本固定送 `temperature: 0`，這個模型只接受預設值、回 400；現在預設不送，要送請設 `llm.temperature`。
-- **Grafana 規則改查 ES 的版本，對真的 Grafana 13.0.7 + ES 8.19.23 + PostgreSQL 16 + 真的 LLM 再跑一次端到端**（2026-11-22，本機，資料是腳本灌的、
-  格式照 `FACTORY_METRICS.md` 的統一欄位規範）：3 條 Grafana 告警規則直接查 ES（MQ 佇列深度、CIM T3 逾時筆數、AMHS 中止筆數）真的觸發，
-  收斂成 1 張 P1 事故，真 LLM 指出 mq-broker 無消費者為可能源頭、異常集中在 EQP-CVD-07 等；恢復後結案。截圖（Grafana 告警規則、規則細節、
-  指標曲線疊事故區間、事件總覽）是這次實跑的真實畫面。這次抓到註記標籤更新後舊標籤仍查得到的問題（見上面「註記標籤變了就刪掉重建」），已修正並重跑確認。
-  那次的第三個告警（AMHS）比第一輪分析晚了幾秒才到，併入同一張事故後重新分析：進行中畫面先是 2 個系統，結案時是 3 個。
-- **關聯證據（批號時間線、Tempo 呼叫鏈）用真的元件實測**（2026-11-23，本機：Grafana 13.0.7、ES 8.19.23、Tempo 2.9.0、Editor Token，模擬資料）。
-  混合情境：IT 的 `mes-db` 連不上 → `mes-api`、`web-portal` 失敗 → 工廠的 `cim-eap` 逾時 → `amhs-mcs` 搬運中止。
-  - 四個告警經關係邊收成 1 張 P1 事故；批號 `LOT24A0031` 的時間線跨 `cim-eap`、`amhs-mcs`、`mes-api` 三個系統，含出事前的正常紀錄。
-  - 呼叫鏈取回 `web-portal → mes-api →（連不上 mes-db）`，失敗點標在 `mes-api` 的資料庫查詢。
-  - 真的 LLM（OpenAI `gpt-6-luna`）各問一次：日誌本身就寫了「connection refused mes-db」時，有沒有新證據結論都一樣（都指 mes-db）；
-    **把日誌改成只寫「upstream error」、關係邊也拿掉 mes-db 之後，沒有呼叫鏈的回「證據不足」，有呼叫鏈的指出 mes-db**。
-    也就是說，呼叫鏈在「日誌沒講清楚」時才有差別；每種情況只問了一次，沒有重複量測。
-  - 實測發現並處理的兩件事：Tempo 的搜尋不保證先回最新的（改成多搜再挑最近的）；剛收到的 Trace 要 8～40 秒以上才搜尋得到
-    （改成優先用日誌裡的 trace id 直接取，實測送出 3 秒後就取得到）。
-- Helm chart 用 `helm lint` 與 `helm template` 檢查過；產生的 Secret 裡的 `config.yaml` 用程式的 `Settings.from_dict` 讀過；
-  Deployment 沒有任何 `env`。
+全部是本機拋棄式環境、腳本產生的資料。**沒有任何一項用過產線資料。**
 
-沒做過的：
-- **沒有任何真實產線資料與真實的告警風暴**；60 秒夠不夠等到齊，要看現場各系統的告警時間差與 ES 延遲，請依實際情況調 YAML。
-- **真模型只實測過一個情境、一個模型**：摘要品質、不同情境下多常被幻覺檢查擋掉、其他模型的相容性都不知道；答案是不是對的根因，只有現場人員能判斷。
-- chart 沒有部署到叢集、映像檔沒有實際 build 過（這個環境沒有 Docker 與叢集）。
-- 只測過 Grafana 13.0.7。
+| 項目 | 怎麼驗的 | 結果 |
+| --- | --- | --- |
+| 自動測試 | 267 個，SQLite 與 PostgreSQL 16 各跑一遍。Grafana、ES、Tempo、Prometheus 的回應是實際錄下來的（`tests/fixtures/grafana13/`） | 全過 |
+| Webhook → debounce → 收斂 → 註記 → 結案 | Grafana 13.0.7 的告警規則真的觸發、真的推 Webhook；PostgreSQL 16、ES 8.19.23 | 三個系統收成一張事故，恢復後結案 |
+| LLM 摘要與幻覺檢查 | 真的 LLM（`gpt-6-luna`）。錯的金鑰、模型不接受的參數也測過 | 摘要寫進註記；失敗時退回 `[未經分析]`，錯誤訊息不含金鑰 |
+| 註記上證據的幾行 | 真的 Grafana、ES、LLM，三種情況：日誌齊全、系統名稱對不上、有日誌但沒有錯誤等級 | 三種各自寫出缺的是什麼（畫面見「註記怎麼讀」） |
+| 日誌前處理（去重、事故前後的次數、警告） | 16 個有標準答案的案例，真的 ES、Grafana、LLM | 開發用的 10 個：18/30 → 48/50；留出的 6 個：3/18 → 27/30（`EVAL.md`） |
+| 沒有等級欄位的容器日誌 | ES 8.19.23，13 筆各種寫法的日誌；另有一個留出案例 | 撈得到，但會漏撈也會誤撈（`CONFIG.md`） |
+| 批號時間線、Tempo 呼叫鏈 | Tempo 2.9.0、ES 8.19.23，工廠與 IT 服務混合的情境 | 日誌沒講清楚時，有呼叫鏈才指得出源頭（各問一次） |
+| MQ 的呼叫鏈 | RabbitMQ 3.12.1、pika 的 OpenTelemetry 自動埋點、Tempo 2.9.0 | 父子接法串得起來；連結、掉標頭、沒人收串不起來（`INPUTS.md`） |
+| 指標走勢 | Prometheus 3.5.0、RabbitMQ 內建的指標，佇列真的堆到 1007 筆 | 有指標走勢時模型指出消費端失效；沒有時說無法判定（各問一次） |
+| 趨勢型告警規則的寫法 | 同一份 RabbitMQ 資料上算五種查詢的值 | 正常期與堆積期的值見 `INPUTS.md`；沒有建成規則讓它觸發 |
+| Grafana 開源版連資料庫 | Grafana 13.0.7（Open Source）連 PostgreSQL 16 | 可以（`FACTORY_METRICS.md`） |
+| Helm chart | `helm lint`、`helm template`，產生的 `config.yaml` 用程式實際載入 | 通過 |
 
-- **指標走勢與趨勢型規則用真的元件實測**（2026-11-25，本機：Grafana 13.0.7、Prometheus 3.5.0、RabbitMQ 3.12.1 內建的
-  `rabbitmq_prometheus`、Editor Token；資料是腳本產生的）。佇列正常收送 180 秒後消費者停掉、生產者繼續送，真的堆到 1007 筆：
-  - aiops-lite 查到待處理訊息數的基準 0、最大 1007；消費者數從 1 變 0；發佈速率前後都是每秒約 10 筆。
-  - 真的 LLM 各問一次：有指標走勢時回「可能源頭是 mq-broker 的 eap.events 消費端失效，佇列堆積並影響 amhs-mcs」；
-    沒有時回「證據不足以判定源頭」。只有一個情境、一個模型。
-  - 五種趨勢型規則的查詢在正常期與堆積期算出的值見 `INPUTS.md`。只算了查詢的值，沒有建成 Grafana 規則讓它觸發。
-- **MQ 的呼叫鏈用真的 RabbitMQ 與自動埋點實測**（RabbitMQ 3.12.1、pika 1.5.0、OpenTelemetry pika 自動埋點、Tempo 2.9.0）：
-  消費端接在生產端底下時整條鏈串得起來；用連結、中途掉標頭、沒人收這三種串不起來（細節見 `INPUTS.md`）。只測了 Python 的 pika。
+**沒有驗證的**
 
-- **註記的證據幾行用真的元件實測**（2026-11-25，本機：Grafana 13.0.7、Elasticsearch 8.19.23、真的 LLM，10 筆自己造的日誌）。三張事故：
-  - 日誌齊全（mq-broker、cim-eap、amhs-mcs）：「mq-broker 最可能是源頭。其錯誤日誌寫 disk usage 98% on /data, producers blocked 及
-    no space left on device。cim-eap 發佈逾時，amhs-mcs 未收到派送指令」，證據行列出有的五項與還沒接的兩項。
-  - 日誌的系統名稱對不上（test-svc，日誌寫成 test_svc）：證據行寫「索引有 10 筆，但沒有一筆的 service.name 是這些系統」。
-  - 有日誌但沒有錯誤等級的（eqp-collector-it）：證據行寫「這些系統有 3 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL」。
-  - 後兩張模型都回「還無法判定源頭」並說明還缺什麼。每種情況只跑了一兩次、一個模型，摘要的用字每次會不同。
-
-- **日誌前處理用 16 個有標準答案的案例量過**（2026-11-25，本機真的 Elasticsearch 8.19.23、Grafana 13.0.7、LLM；日誌是腳本寫的）。
-  開發時用的 10 個案例：改動前 18/30，改動後 48/50。改完才寫的 6 個留出案例：改動前 3/18，改動後 27/30。
-  拆解之後，「各系統第一筆錯誤的時間表」與「跨系統共同識別碼」量不到差別，已經移除。案例、做法、還會錯的情況與這些數字的限制見 `EVAL.md`。
-  案例是人造的，這不是產線上的準確率。
+- **產線資料與真實的告警風暴。** 60 秒的 debounce 夠不夠、ES 的延遲多長、摘要對不對，都要現場才知道。
+- **映像檔沒有在這裡 build 過，chart 沒有在這裡部署過。**（你們的叢集上有跑，那不是這裡驗的。）
+- **VictoriaMetrics。** 指標走勢是用 Prometheus 測的。
+- **大索引上的查詢耗時。** 日誌前處理每張事故多兩次 ES 查詢，只在小資料量上跑過。
+- LLM 只測過一個模型；多數情境只問了一到五次。
+- 只測過 Grafana 13.0.7；多個 Grafana 組織、Loki、Jaeger、Windows 上的 Fluent Bit 都沒有測。
+- 日誌遮罩沒有做：送給 LLM 的內容是原文。
 
 ## 上線
 
