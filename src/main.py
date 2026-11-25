@@ -101,10 +101,11 @@ class Settings:
         llm = section(raw, "llm", {"url", "api_key", "model", "temperature", "timeout_seconds", "retry_initial_seconds",
                                    "retry_max_seconds", "max_log_samples", "max_trace_samples", "max_message_chars",
                                    "top_ids", "max_summary_chars", "system_prompt_file", "id_pattern",
-                                   "max_timeline_ids", "max_timeline_events"})
+                                   "max_timeline_ids", "max_timeline_events", "max_log_patterns",
+                                   "max_warn_patterns"})
         es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields",
                                  "error_levels", "error_statuses", "max_hits", "window_padding_minutes",
-                                 "timeline_fields"})
+                                 "timeline_fields", "baseline_minutes", "warn_levels"})
         tempo = section(raw, "tempo", {"datasource_uid", "max_traces", "max_spans", "trace_id_field"})
         labels = section(raw, "labels", {"detect", "severity", "service", "default_severity"})
         metrics = section(raw, "metrics", {"datasource_uid", "queries", "lookback_minutes", "step_seconds", "max_points",
@@ -194,7 +195,11 @@ class Settings:
                 max_timeline_events=integer(llm, "max_timeline_events", d_ev.max_timeline_events, 1, 500, "llm."),
                 trace_id_field=text(tempo, "trace_id_field", d_ev.trace_id_field, "tempo."),
                 max_traces=integer(tempo, "max_traces", d_ev.max_traces, 0, 20, "tempo."),
-                max_trace_spans=integer(tempo, "max_spans", d_ev.max_trace_spans, 1, 500, "tempo.")),
+                max_trace_spans=integer(tempo, "max_spans", d_ev.max_trace_spans, 1, 500, "tempo."),
+                baseline_minutes=integer(es, "baseline_minutes", d_ev.baseline_minutes, 5, 1440, "es."),
+                max_log_patterns=integer(llm, "max_log_patterns", d_ev.max_log_patterns, 0, 20, "llm."),
+                warn_levels=warn_levels(es, d_ev.warn_levels),
+                max_warn_patterns=integer(llm, "max_warn_patterns", d_ev.max_warn_patterns, 0, 20, "llm.")),
             labels=names, tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])),
             retry_failed_round_seconds=integer(raw, "retry_failed_round_seconds", cls.retry_failed_round_seconds, 1),
             healthcheck_stuck_seconds=integer(health, "stuck_seconds", cls.healthcheck_stuck_seconds, 30, prefix="healthcheck."),
@@ -230,6 +235,16 @@ def words(es: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, 
         return default
     if not isinstance(value, list) or not value or not all(isinstance(v, str) and v.strip() for v in value):
         raise ConfigError(f"es.{key} 要是非空的文字清單（大小寫不同要分開列）")
+    return tuple(v.strip() for v in value)
+
+
+def warn_levels(es: dict[str, Any], default: tuple[str, ...]) -> tuple[str, ...]:
+    """es.warn_levels：跟 error_levels 一樣是文字清單，但可以是空的（= 不撈警告）。"""
+    value = es.get("warn_levels")
+    if value is None:
+        return default
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise ConfigError("es.warn_levels 要是文字清單（大小寫不同要分開列；空清單 = 不撈警告）")
     return tuple(v.strip() for v in value)
 
 

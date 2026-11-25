@@ -132,7 +132,8 @@ def test_edges_are_judged_against_the_systems_in_this_incident(fake):
     assert "這些系統之間的關係邊 2 條" in line(collect(fake))
     assert "缺的證據｜關係邊：這幾個系統之間沒有宣告上下游" in line(collect(fake, edges=[("x", "y")]))
     assert "連到這個系統的關係邊 1 條（另一端沒有告警）" in line(collect(fake, incident("mq-broker")))
-    assert "缺的證據｜關係邊：沒有宣告這個系統的上下游" in line(collect(fake, incident("mq-broker"), edges=[]))
+    alone = line(collect(fake, incident("mq-broker"), edges=[]))
+    assert "關係邊" not in alone   # 單一系統、沒宣告關係邊：不算缺（系統自己出問題時不需要它）
 
 
 # ── 註記與整輪 ──
@@ -191,3 +192,13 @@ def test_without_llm_the_evidence_line_is_still_written(world):  # noqa: F811
     w.run(60, settings=replace(w.settings, llm_model=""))
     [inc] = rows(w, dbmod.incidents)
     assert inc["summary"].startswith("[未經分析]") and inc["evidence_note"].startswith("有的證據｜告警 1 筆")
+
+
+def test_source_field_is_optional_but_must_be_a_system_in_the_evidence(fake):
+    ev = collect(fake)
+    good = {"summary": "mq-broker 最可能是源頭", "source": "mq-broker", "systems": ["mq-broker"], "ids": []}
+    assert rca.check_answer(json.dumps(good), ev).startswith("mq-broker")
+    assert rca.check_answer(json.dumps({**good, "source": ""}), ev)                      # 還無法判定
+    assert rca.check_answer(json.dumps({k: v for k, v in good.items() if k != "source"}), ev)   # 自訂提示詞沒要求這一欄
+    with pytest.raises(ValueError, match="erp-core"):
+        rca.check_answer(json.dumps({**good, "source": "erp-core"}), ev)

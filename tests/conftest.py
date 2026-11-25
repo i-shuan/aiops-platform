@@ -48,6 +48,11 @@ class FakeGrafana:
         self.tempo_requests: list[httpx.Request] = []
         self.metric_requests: list[httpx.Request] = []
         self.count_requests: list[list[dict]] = []
+        self.profile_requests: list[list[dict]] = []
+        self.phrase_requests: list[list[dict]] = []
+        self.before_counts: dict[str, int] = {}     # 片語 -> 事故前出現幾筆（預設 0 = 事故前沒出現過）
+        self.warning_docs: list[dict] = []          # 錯誤概況查詢裡「警告」那個子查詢要回的文件
+        self.profile_docs: list[dict] | None = None   # 錯誤概況查詢看到的錯誤日誌；None = 跟最新樣本同一批
         self.log_counts = "log_counts_no_errors"   # 換成 log_counts_index_empty／log_counts_service_mismatch 測另外兩種原因
         self.transport = httpx.MockTransport(self.handle)
 
@@ -112,10 +117,39 @@ def _msearch(self: FakeGrafana, body: str) -> httpx.Response:
     關聯時間線的查詢只有兩個條件（時間、某個識別碼）→ 回帶那個識別碼的紀錄，由舊到新。"""
     lines = [json.loads(line) for line in body.splitlines() if line.strip()]
     queries = lines[1::2]
+    filters = lambda q: q["query"]["bool"]["filter"]
+    recorded_logs = [h["_source"] for h in self.es["responses"][0]["hits"]["hits"]]
+    total = lambda docs: {"total": {"value": len(docs), "relation": "eq"}, "max_score": None}
+    if all(q.get("size") == 0 and any("match_phrase" in f for f in filters(q)) for q in queries):
+        # 事故前後的次數比較（Grafana.count_phrases）：兩兩一組（事故期間、事故前）。事故期間 = 樣本裡照順序含這些詞的筆數；
+        # 事故前預設 0，測試可以用 before_counts[片語] 指定。回應的形狀跟錄下來的計數回應（log_counts_*.json）一樣
+        self.phrase_requests.append(queries)
+        responses = []
+        for i, q in enumerate(queries):
+            phrase = next(f["match_phrase"] for f in filters(q) if "match_phrase" in f)["message"]["query"]
+            service = filters(q)[1]["bool"]["should"][0]["terms"]
+            (_field, wanted), = service.items()
+            in_order = lambda text: __import__("re").search(".*".join(map(__import__("re").escape, phrase.split())), text) is not None
+            during = sum(1 for d in recorded_logs if (d.get("service") or {}).get("name") in wanted and in_order(str(d.get("message", ""))))
+            count = during if i % 2 == 0 else self.before_counts.get(phrase, 0)
+            responses.append({"hits": {"total": {"value": count, "relation": "eq"}, "max_score": None, "hits": []}, "status": 200})
+        return httpx.Response(200, json={"responses": responses})
     if all(q.get("size") == 0 and q.get("track_total_hits") for q in queries):
         # 錯誤日誌 0 筆之後的計數查詢（Grafana.count_logs）：回錄下來的真實回應，預設是「這些系統有日誌、但沒有錯誤等級的」
         self.count_requests.append(queries)
         return replay(self.log_counts)
+    if all(q.get("track_total_hits") and q.get("size", 0) > 0 and len(filters(q)) == 3 for q in queries):
+        # 錯誤概況（Grafana.error_profile）：每個系統各自最早的幾筆與總筆數，最後一個子查詢（有的話）是警告。
+        # 從錄下來的錯誤日誌樣本裡照系統挑、由舊到新排；樣本裡沒有警告，警告用 self.warning_docs 指定
+        self.profile_requests.append(queries)
+        responses = []
+        for q in queries:
+            (_field, wanted), = filters(q)[1]["bool"]["should"][0]["terms"].items()
+            (_level_field, levels), = filters(q)[2]["bool"]["should"][0]["terms"].items() if "bool" in filters(q)[2] else (("", []),)
+            source = self.warning_docs if "WARN" in levels else (recorded_logs if self.profile_docs is None else self.profile_docs)
+            docs = sorted((d for d in source if (d.get("service") or {}).get("name") in wanted), key=lambda d: str(d.get("@timestamp", "")))
+            responses.append({"hits": {**total(docs), "hits": [{"_source": d} for d in docs[:q["size"]]]}, "status": 200})
+        return httpx.Response(200, json={"responses": responses})
     if any(len(q["query"]["bool"]["filter"]) == 3 for q in queries):
         self.es_requests.append(body)
         self.error_searches += 1

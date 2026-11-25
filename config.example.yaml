@@ -37,6 +37,8 @@ llm:                                     # 整段可以不寫：沒設 url 與 m
   # top_ids: 10                          # 每種識別碼（機台、批號…）只列出現次數前幾名
   # max_timeline_ids: 2                  # 最多替幾個批號／載具做關聯時間線；0 = 不做
   # max_timeline_events: 30              # 每條時間線最多幾筆紀錄
+  # max_log_patterns: 6                  # 最多替幾種錯誤比較「事故前、事故期間各出現幾筆」；0 = 不比較（省一次 ES 查詢）
+  # max_warn_patterns: 5                 # 最多給 LLM 看幾種警告（WARN）；0 = 不撈警告
   # max_summary_chars: 300               # LLM 摘要超過這個長度就截斷（註記第 2 行）
   # system_prompt_file: system_prompt.txt  # 自訂系統提示詞的檔案（相對路徑 = 相對於這份設定檔）；
   #                                        # 必須保留「只輸出含 summary、systems、ids 的 JSON」，不然啟動時報錯
@@ -63,6 +65,8 @@ es:                                      # 整段可以不寫：沒設 datasourc
     status: status.code
     error: error.message
   # error_levels: [ERROR, error, Error, FATAL, fatal, CRITICAL, critical]   # 日誌等級是這些值才算錯誤（大小寫不同要分開列）
+  # warn_levels: [WARN, warn, Warn, WARNING, warning, Warning]   # 日誌等級是這些值算警告；[] = 不撈警告。日誌沒有等級欄位時不會撈
+  # baseline_minutes: 30                 # 「事故前」看多久：同一種錯誤在事故前這段時間出現幾筆，用來分辨平常就有的與新出現的
   # error_statuses: [error, ERROR, Error, STATUS_CODE_ERROR]               # span 狀態是這些值才算錯誤
   # max_hits: 100                        # 每次查詢最多撈幾筆；識別碼的出現次數只統計這幾筆
   # window_padding_minutes: 10           # 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現）

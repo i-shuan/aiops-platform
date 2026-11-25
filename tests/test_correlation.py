@@ -104,7 +104,7 @@ def test_timeline_failure_keeps_the_rest_of_the_evidence(fake):
     original = fake.msearch
     fake.msearch = lambda body: original(body) if '"log.level"' in body else httpx.Response(200, json={"responses": []})
     ev = collect(fake)
-    assert ev["timelines"] == [] and len(ev["error_logs"]) == 6 and any("關聯時間線撈取失敗" in n for n in ev["notes"])
+    assert ev["timelines"] == [] and (len(ev["error_logs"]), sum(e.get("similar_in_sample", 1) for e in ev["error_logs"])) == (4, 6) and any("關聯時間線撈取失敗" in n for n in ev["notes"])
 
 
 # ── 呼叫鏈（Tempo）──
@@ -188,7 +188,7 @@ def test_call_chains_do_not_need_es_and_are_skipped_without_a_tempo_datasource(f
 def test_tempo_failure_or_no_traces_is_noted_and_never_blocks(fake):
     fake.fail.add("/api/datasources/proxy/uid/tempo-uid")
     ev = collect(fake, tempo="tempo-uid")
-    assert ev["call_chains"] == [] and any("呼叫鏈（Tempo）撈取失敗" in n for n in ev["notes"]) and len(ev["error_logs"]) == 6
+    assert ev["call_chains"] == [] and any("呼叫鏈（Tempo）撈取失敗" in n for n in ev["notes"]) and (len(ev["error_logs"]), sum(e.get("similar_in_sample", 1) for e in ev["error_logs"])) == (4, 6)
     fake.fail.clear()
     fake.tempo_search = {"traces": []}
     assert any("沒有這些系統的錯誤 Trace" in n for n in collect(fake, tempo="tempo-uid")["notes"])

@@ -1,4 +1,5 @@
 tests/
+eval/
 deploy/
 dashboards/
 *.md

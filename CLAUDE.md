@@ -58,6 +58,7 @@ server（HTTP 服務與排程，只呼叫 main 的一輪流程）
  * **要調門檻、時間、欄位名稱、標籤名稱？** 不寫程式：改 `config.yaml`（Helm 是 `values.yaml` 或 `extraConfig`）。可調項目與內部常數的分界見 `CONFIG.md`。
  * **要讓某個系統的告警進來？** 不寫程式：在公司 Grafana 的規則貼標籤、設通知路由（`README.md`、`GO_LIVE_CHECKLIST.md`）。
  * **要讓指標走勢成為 RCA 證據？** 不寫程式：`config.yaml` 的 `metrics.queries` 加一條查詢。全部的輸入與最理想的狀態見 `INPUTS.md`。
+ * **要改提示詞、或改證據交給 LLM 之前的處理？** 先照 `EVAL.md` 跑一次量出現況，改完再跑。留出的案例變差就不合併；不准為了讓留出的案例過關去調程式。前處理只能歸類與計數，不准貼「暴增」「雜訊」這類要門檻的標籤。
  * **要讓日誌成為 RCA 證據？** 不寫程式：照 `FACTORY_METRICS.md` 的統一欄位規範送進 ES，範例在 `deploy/fluent-bit/`。
  * **要加新的設定項？** `src/main.py` 的 `Settings` 與 `from_dict`（要有範圍檢查），同步更新 `config.example.yaml`、`CONFIG.md`、Helm `values.yaml`。
  * **要加新的證據來源？** 對 Grafana 的呼叫寫在 `src/grafana.py`，收集與整理寫在 `src/rca.py`；撈不到要寫進 `evidence["notes"]`，不准讓整輪失敗。
@@ -72,6 +73,7 @@ server（HTTP 服務與排程，只呼叫 main 的一輪流程）
 python -m pytest tests -q                                             # SQLite
 TEST_DATABASE_URL=postgresql+psycopg://… python -m pytest tests -q    # PostgreSQL 再跑一遍
 helm lint deploy/helm/aiops-lite                                      # 有動 chart 的時候
+python -m eval.run --set tuning && python -m eval.run --set heldout   # 有動提示詞或證據前處理的時候：改之前、改之後各跑一次
 ```
 
 測試用的 Grafana、Tempo 回應是實際錄下來的（`tests/fixtures/grafana13/`），不要手寫假的回應格式去取代。

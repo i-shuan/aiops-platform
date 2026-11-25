@@ -30,6 +30,7 @@ log = logging.getLogger("aiops_lite.grafana")
 RETRY_STATUS = {429, 502, 503, 504}
 SEVERITIES = ("P0", "P1", "P2", "P3")
 TRUE_VALUES = {"true", "1", "yes", "on"}
+WARN_LEVELS = ("WARN", "warn", "Warn", "WARNING", "warning", "Warning")  # es.warn_levels 的預設值
 ERROR_LEVELS = ("ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical")  # es.error_levels 的預設值
 ERROR_STATUS = ("error", "ERROR", "Error", "STATUS_CODE_ERROR")                       # es.error_statuses 的預設值
 
@@ -67,6 +68,14 @@ def _either(name: str, values: Any) -> dict[str, Any]:
     """欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到。"""
     values = list(values)
     return {"bool": {"minimum_should_match": 1, "should": [{"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
+
+
+def _has_level(log_fields: LogFields, levels: tuple[str, ...]) -> dict[str, Any]:
+    """「這筆日誌是這些等級」的查詢條件。有等級欄位就比等級；沒有（level 是空字串）就在訊息文字裡找等級字樣。"""
+    if log_fields.level:
+        return _either(log_fields.level, levels)
+    words = " ".join(dict.fromkeys(level.lower() for level in levels))   # 全文比對不分大小寫：ERROR／error／Error 只送一次
+    return {"match": {log_fields.message: {"query": words, "operator": "or"}}}
 
 
 class GrafanaError(Exception):
@@ -184,12 +193,8 @@ class Grafana:
             return (json.dumps({"index": index, "ignore_unavailable": True}) + "\n"
                     + json.dumps({"size": size, "sort": [{time_field: "desc"}], "query": query}) + "\n")
 
-        if log_fields.level:
-            is_error = _either(log_fields.level, error_levels)
-        else:  # 全文比對不分大小寫：ERROR／error／Error 只送一次
-            words = " ".join(dict.fromkeys(level.lower() for level in error_levels))
-            is_error = {"match": {log_fields.message: {"query": words, "operator": "or"}}}
-        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service, is_error))]
+        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service,
+                                            _has_level(log_fields, error_levels)))]
         if trace_index:
             kinds.append(("traces", trace_index, search(trace_index, trace_fields.time, trace_fields.service,
                                                         _either(trace_fields.status, error_statuses))))
@@ -227,6 +232,69 @@ class Grafana:
                 raise GrafanaError(f"ES 計數失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
             counts.append(int(((resp.get("hits") or {}).get("total") or {}).get("value", 0)))
         return {"all": counts[0], "services": counts[1]}
+
+    def _msearch(self, datasource_uid: str, index: str, bodies: list[dict[str, Any]], what: str) -> list[dict[str, Any]]:
+        """同一個索引的多個子查詢一次送出；任何一個子查詢失敗就整個丟 GrafanaError。"""
+        header = json.dumps({"index": index, "ignore_unavailable": True})
+        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
+                            content="".join(f"{header}\n{json.dumps(body, ensure_ascii=False)}\n" for body in bodies),
+                            headers={"Content-Type": "application/x-ndjson"})
+        responses = raw.get("responses") if isinstance(raw, dict) else None
+        if not isinstance(responses, list) or len(responses) != len(bodies):
+            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
+        for resp in responses:
+            if resp.get("error"):
+                raise GrafanaError(f"ES {what}失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
+        return responses
+
+    @staticmethod
+    def _total(resp: dict[str, Any]) -> int:
+        return int(((resp.get("hits") or {}).get("total") or {}).get("value", 0))
+
+    def error_profile(self, datasource_uid: str, log_index: str, services: list[str], start: datetime, end: datetime, *,
+                      log_fields: LogFields = LogFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
+                      warn_levels: tuple[str, ...] = (), first_n: int = 3, warn_n: int = 50) -> dict[str, Any]:
+        """每個系統各問一次：時間窗內錯誤日誌的**總筆數**與**最早的幾筆**（由舊到新）。另外問這些系統的警告（由舊到新）。
+
+        為什麼要另外問：search_errors 是全部系統一起、從最新的往回取 max_hits 筆。某個系統大量報錯時，其他系統較早、
+        較少的錯誤會整個被擠掉；從那批樣本裡找「最早的一筆」找到的也不是真正的第一筆。這裡每個系統各自由舊到新取，不會互相擠。
+        回傳 {"services": {系統: {"total": 筆數, "first": [文件…]}}, "warnings": {"total": 筆數, "hits": [文件…]}}。
+        warn_levels 是空的就不問警告。"""
+        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
+        oldest_first = [{log_fields.time: "asc"}]
+        bodies = [{"size": first_n, "track_total_hits": True, "sort": oldest_first, "query": {"bool": {"filter": [
+            window, _either(log_fields.service, [service]), _has_level(log_fields, error_levels)]}}} for service in services]
+        if warn_levels:
+            bodies.append({"size": warn_n, "track_total_hits": True, "sort": oldest_first, "query": {"bool": {"filter": [
+                window, _either(log_fields.service, services), _has_level(log_fields, warn_levels)]}}})
+        responses = self._msearch(datasource_uid, log_index, bodies, "錯誤概況查詢")
+        hits = lambda resp: [h.get("_source") or {} for h in (resp.get("hits") or {}).get("hits") or []]
+        out: dict[str, Any] = {"services": {service: {"total": self._total(resp), "first": hits(resp)}
+                                            for service, resp in zip(services, responses)},
+                               "warnings": {"total": 0, "hits": []}}
+        if warn_levels:
+            out["warnings"] = {"total": self._total(responses[-1]), "hits": hits(responses[-1])}
+        return out
+
+    def count_phrases(self, datasource_uid: str, log_index: str, items: list[tuple[str, str, int, tuple[str, ...]]],
+                      start: datetime, end: datetime, before_start: datetime, *, log_fields: LogFields = LogFields()
+                      ) -> list[tuple[int, int]]:
+        """每個 (系統, 片語, 間隔, 等級) 各數兩次：片語在 [start, end]（事故期間）與 [before_start, start)（事故前）出現幾筆。
+        片語比對是 match_phrase 加 slop（訊息欄位要是 text 型別）：片語是樣板裡固定不變的詞，間隔留給被換成 * 的部分。
+        回傳 [(事故期間, 事故前), …]，順序跟 items 一樣。"""
+        def body(service: str, phrase: str, slop: int, levels: tuple[str, ...], window: dict[str, Any]) -> dict[str, Any]:
+            return {"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [
+                {"range": {log_fields.time: {**window, "format": "epoch_millis"}}}, _either(log_fields.service, [service]),
+                _has_level(log_fields, levels), {"match_phrase": {log_fields.message: {"query": phrase, "slop": slop}}}]}}}
+
+        bodies = []
+        for service, phrase, slop, levels in items:
+            bodies.append(body(service, phrase, slop, levels, {"gte": _ms(start), "lte": _ms(end)}))
+            bodies.append(body(service, phrase, slop, levels, {"gte": _ms(before_start), "lt": _ms(start)}))
+        if not bodies:
+            return []
+        totals = [self._total(resp) for resp in self._msearch(datasource_uid, log_index, bodies, "次數比較查詢")]
+        return list(zip(totals[0::2], totals[1::2]))
 
     def search_timeline(self, datasource_uid: str, index: str, field: str, values: list[str], start: datetime,
                         end: datetime, size: int, *, log_fields: LogFields = LogFields()) -> dict[str, dict[str, Any]]:
