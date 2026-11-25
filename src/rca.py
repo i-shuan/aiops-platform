@@ -58,7 +58,7 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - summary 是寫給值班人員看的。用白話、短句，照這個順序寫，不要寫標題或編號：
   先寫結論：最可能的源頭是哪個系統；判斷不出來就寫「還無法判定源頭」。
   再寫依據：你是看到哪一種證據裡的什麼才這樣判斷，直接引用內容（例如「mq-broker 的錯誤日誌寫磁碟已滿」「佇列的消費者數從 1 變成 0」）。
-  判斷不出來，或依據只有告警與關係邊時，最後寫還缺什麼：從「證據概況」裡「缺的證據」「查詢失敗」「還沒接的」挑最需要的一項，
+  判斷不出來，或依據只有告警與關係邊時，最後寫還缺什麼：從「證據概況」裡「缺…」「…查詢失敗」「沒接…」的項目挑最需要的一項，
   說明補上它能確認什麼。不要只寫「證據不足」，也不要要求證據概況裡沒有提到的東西。
 - 只輸出一個 JSON 物件，不要 Markdown：
   {"summary": "繁體中文，150 字以內", "source": "最可能的源頭系統的名稱；還無法判定就填空字串", "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
@@ -513,12 +513,24 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, grafana: 
         evidence["notes"].append("Tempo 在事故時間窗內沒有這些系統的錯誤 Trace（沒有埋點、被取樣掉、或還沒寫入）")
 
 
+# 每一種證據能回答什麼問題。缺的時候寫在註記上：「缺錯誤日誌｜還看不出哪個系統出了什麼錯…」
+CAN_ANSWER = {
+    "關係邊": "這幾個系統誰影響誰",
+    "日誌": "哪個系統出了什麼錯、哪些錯誤是這次才出現的",
+    "錯誤日誌": "哪個系統出了什麼錯、哪些錯誤是這次才出現的",
+    "機台與批號": "問題集中在哪台機台、哪個批號",
+    "呼叫鏈": "失敗的請求實際停在哪個系統（包含沒有告警的相依服務）",
+    "指標走勢": "數值是怎麼變壞的（流量、佇列、資源）",
+}
+
+
 def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
-             error_levels: tuple[str, ...] = ERROR_LEVELS) -> dict[str, list[str]]:
+             error_levels: tuple[str, ...] = ERROR_LEVELS) -> dict[str, list[Any]]:
     """這次分析手上有什麼、缺什麼、為什麼缺。全部由程式從實際撈到的結果算出來，不經過 LLM。
-    回傳四組白話的句子：have（有）、missing（缺：查了但沒有，或沒有宣告）、failed（查詢失敗）、off（還沒接）。
-    「缺」的每一項都是「名稱：原因與下一步」：只說「沒有日誌」沒有用，要說是索引沒資料、系統名稱對不上，還是等級對不上。"""
-    out: dict[str, list[str]] = {"have": [], "missing": [], "failed": [], "off": []}
+    回傳四組：have（有的，白話的句子）、missing（缺的：查了但沒有，或沒有宣告）、failed（查詢失敗）、off（還沒接）。
+    後三組的每一項是 (名稱, 原因與下一步)；off 的第二段是 config.yaml 要設的鍵。名稱要在 CAN_ANSWER 裡：
+    只說「沒有日誌」沒有用，要說少了它哪一種分析做不了、是哪一關沒過（索引沒資料、系統名稱對不上、等級對不上）。"""
+    out: dict[str, list[Any]] = {"have": [], "missing": [], "failed": [], "off": []}
     sources = evidence.get("sources") or {}
     systems = {a["system"] for a in evidence["anomalies"]}
     out["have"].append(f"告警 {len(evidence['anomalies'])} 筆")
@@ -527,16 +539,16 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     if related:
         out["have"].append(f"這些系統之間的關係邊 {len(related)} 條")
     elif len(systems) > 1:
-        out["missing"].append("關係邊：這幾個系統之間沒有宣告上下游，分不出誰影響誰")
+        out["missing"].append(("關係邊", "這幾個系統之間沒有宣告上下游（config.yaml 的 edges）"))
     elif touching:
         out["have"].append(f"連到這個系統的關係邊 {len(touching)} 條（另一端沒有告警）")
     # 只有一個系統、也沒有宣告它的關係邊：不列為「缺」。系統自己出問題時不需要關係邊，列出來只會把人帶偏
 
     logs = sources.get("logs", "off")
     if logs == "off":
-        out["off"].append("日誌（es.datasource_uid）")
+        out["off"].append(("日誌", "es.datasource_uid"))
     elif logs == "failed":
-        out["failed"].append("日誌：Grafana 的 ES 資料源查不動，原因見服務的 log")
+        out["failed"].append(("日誌", "Grafana 的 ES 資料源查不動，原因見服務的 log"))
     elif logs == "empty":
         counts = evidence.get("log_counts")
         if counts is None:
@@ -552,7 +564,7 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
                    f"可能真的沒有錯誤，或等級的寫法對不上")
         else:
             why = f"這些系統有 {counts['services']} 筆日誌，但訊息文字裡沒有錯誤字樣。可能真的沒有錯誤"
-        out["missing"].append(f"錯誤日誌：{why}")
+        out["missing"].append(("錯誤日誌", why))
     else:
         patterns = evidence.get("error_patterns") or []
         counted = [r for r in patterns if "during" in r]
@@ -565,7 +577,7 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
         if ids:
             out["have"].append(f"機台／批號等識別碼 {ids} 個")
         elif evidence["id_counts"]:
-            out["missing"].append(f"機台與批號：錯誤日誌裡沒有 {'、'.join(evidence['id_counts'])} 這些欄位，看不出集中在哪裡")
+            out["missing"].append(("機台與批號", f"錯誤日誌裡沒有 {'、'.join(evidence['id_counts'])} 這些欄位"))
         if evidence["timelines"]:
             out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
     if evidence["error_traces"]:
@@ -575,38 +587,41 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     if chains == "ok":
         out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
     elif chains == "empty":
-        out["missing"].append("呼叫鏈：Tempo 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error")
+        out["missing"].append(("呼叫鏈", "Tempo 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error"))
     elif chains == "failed":
-        out["failed"].append("呼叫鏈：Grafana 的 Tempo 資料源查不動，原因見服務的 log")
+        out["failed"].append(("呼叫鏈", "Grafana 的 Tempo 資料源查不動，原因見服務的 log"))
     else:
-        out["off"].append("呼叫鏈（tempo.datasource_uid）")
+        out["off"].append(("呼叫鏈", "tempo.datasource_uid"))
 
     metrics = sources.get("metrics", "off")
     if metrics == "ok":
         out["have"].append(f"指標走勢 {len(evidence['metrics'])} 條")
     elif metrics == "empty":
-        out["missing"].append("指標走勢：設定的查詢在這段時間都沒有資料。檢查指標上對應系統名稱的標籤")
+        out["missing"].append(("指標走勢", "設定的查詢在這段時間都沒有資料。檢查指標上對應系統名稱的標籤"))
     elif metrics == "failed":
-        out["failed"].append("指標走勢：查詢失敗，原因見服務的 log")
+        out["failed"].append(("指標走勢", "查詢失敗，原因見服務的 log"))
     else:
-        out["off"].append("指標走勢（metrics.queries）")
+        out["off"].append(("指標走勢", "metrics.datasource_uid 與 metrics.queries"))
     return out
 
 
-def overview_text(groups: dict[str, list[str]]) -> str:
-    """把 overview() 的結果寫成幾行（註記上「證據」那幾行，也交給 LLM）：
-    有的列在同一行；缺的與查詢失敗的每項自己一行（各有原因）；還沒接的列在同一行，括號裡是 config.yaml 要設的鍵。"""
-    lines = [f"有的證據｜{'、'.join(groups['have'])}"]
-    lines += [f"缺的證據｜{item}" for item in groups["missing"]]
-    lines += [f"查詢失敗｜{item}" for item in groups["failed"]]
-    if groups["off"]:
-        lines.append(f"還沒接的｜{'、'.join(groups['off'])}")
+def overview_text(groups: dict[str, list[Any]]) -> str:
+    """把 overview() 的結果寫成幾行（註記上證據的那幾行，也交給 LLM）。
+    重點不是列出證據的名稱，而是「少了它，哪一種分析做不了」：
+      已有的證據｜…                                    一行
+      缺<名稱>｜還看不出<它能回答的問題>。<原因與下一步>   每項一行
+      <名稱>查詢失敗｜還看不出…。<原因>                   每項一行
+      沒接<名稱>｜還看不出…。要接就設定 <config.yaml 的鍵>  每項一行"""
+    lines = [f"已有的證據｜{'、'.join(groups['have'])}"]
+    lines += [f"缺{name}｜還看不出{CAN_ANSWER[name]}。{why}" for name, why in groups["missing"]]
+    lines += [f"{name}查詢失敗｜還看不出{CAN_ANSWER[name]}。{why}" for name, why in groups["failed"]]
+    lines += [f"沒接{name}｜還看不出{CAN_ANSWER[name]}。要接就設定 {key}" for name, key in groups["off"]]
     return "\n".join(lines)
 
 
 def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str:
     dump = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
-    head = f"【0. 證據概況（程式統計的事實：有的、缺的與原因、查詢失敗的、還沒接的）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
+    head = f"【0. 證據概況（程式統計的事實：已有的證據；缺的、查詢失敗的、沒接的各自讓哪一種分析做不了）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
     text = (f"{head}【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數）】\n"

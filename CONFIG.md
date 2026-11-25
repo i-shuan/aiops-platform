@@ -143,7 +143,7 @@ es:
 | 嚴重度只有 P0～P3 與它們的排序 | `src/grafana.py` 的 `SEVERITIES`、`src/grouping.py` 的 `SEVERITY_RANK` | 儀表板用 `P0`、`P1` 標籤查註記；改了儀表板失效、舊事故對不上 |
 | 註記標籤 `aiops`、`aiops-incident:<uid>`、`open`／`closed`、系統名稱 | `src/report.py` | 儀表板的查詢、「註記建過就不重複建」的查找都依賴這些標籤 |
 | 註記的版面（標題、摘要、證據的幾行、時間）與「進行中／已結案」的文字 | `src/report.py` | 對外的呈現契約；`[LLM 推論]`／`[未經分析]` 的標示不能被設定拿掉 |
-| 證據幾行的用字與判斷（有的、缺的與原因、查詢失敗、還沒接的） | `src/rca.py` 的 `overview`、`overview_text` | 照實際撈到的結果產生，沒有可調的門檻；用字是給值班人員看的固定說法 |
+| 證據幾行的用字與判斷（已有的；缺的、查詢失敗的、沒接的各自讓哪一種分析做不了）、每種證據能回答什麼 | `src/rca.py` 的 `overview`、`overview_text`、`CAN_ANSWER` | 照實際撈到的結果產生，沒有可調的門檻；用字是給值班人員看的固定說法 |
 | 規則編輯連結的路徑 `/alerting/<uid>/edit` | `src/report.py` | 由 Grafana 的版本決定，不是我們的設定 |
 | 資料表與欄位名稱、成員告警的時間欄位 | `src/db.py` | 改了要搬資料；程式只會自動「補欄位」 |
 | 事故 uid 的長度（12 碼） | `src/grouping.py` | 內部識別；改了舊註記的標籤對不上 |

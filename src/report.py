@@ -1,8 +1,8 @@
 """把一個事故寫成 Grafana 註記。數字與時間全部由程式產生，LLM 只提供第 2 行的文字。
 
   第 1 行（程式）      受影響系統、嚴重度、收斂的告警筆數
-  第 2 行              [LLM 推論] …  或  [未經分析] 原始異常摘要
-  證據的幾行（程式）   有的證據｜…（一行）、缺的證據｜名稱：原因（每項一行）、查詢失敗｜…（每項一行）、還沒接的｜…（一行）
+  第 2 行              根因分析｜[LLM 推論] …  或  根因分析｜[未經分析] 原始異常摘要
+  證據的幾行（程式）   已有的證據｜…（一行）；缺的、查詢失敗的、沒接的每項一行，寫出「少了它還看不出什麼」與原因
                        還沒收集過證據的事故沒有這幾行
   最後一行（程式）     起訖時間（台灣時間）+ 調整優先權的規則連結
 
@@ -40,7 +40,7 @@ def render(incident: Incident, grafana_url: str, tz: str, max_links: int = 5) ->
     """回傳 POST／PATCH /api/annotations 的內容（time、timeEnd、tags、text）。"""
     line1 = (f"【{incident.severity}・{STATUS_TEXT[incident.status]}】"
              f"受影響系統：{html.escape('、'.join(incident.services))}｜收斂告警 {incident.alert_count} 筆")
-    line2 = html.escape(" ".join(incident.summary.split()))
+    line2 = "根因分析｜" + html.escape(" ".join(incident.summary.split()))   # 這一行是主角；[LLM 推論]／[未經分析] 的標示緊接在後
     end = incident.ended_at if incident.status == "closed" and incident.ended_at else None
     span = f"{local_time(incident.started_at, tz)} ～ {local_time(end, tz) if end else '進行中'}（台灣時間）"
     rules: dict[tuple[str, str], str] = {}  # (rule_uid, 規則名稱) -> 這條規則在這個事故裡最高的嚴重度
