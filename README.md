@@ -16,7 +16,7 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 │ 有進行中事故時每 followup 秒續跑一輪，直到全部 resolved 並安靜夠久才結案   │
 └──────────────────────────────┬──────────────────────────────────────────┘
                                ▼ config.yaml 的 grafana.url + grafana.token
-            Grafana Annotations（三行摘要）+「AIOps 事件總覽」儀表板
+            Grafana Annotations（摘要＋證據）+「AIOps 事件總覽」儀表板
 ```
 
 部署物：1 個常駐 Deployment（+ Service）、1 個帶 PVC 的 PostgreSQL、1 個放整份 config.yaml 的 Secret（`deploy/helm/aiops-lite`）。
@@ -104,6 +104,29 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 
 **沒有驗證的**：以上是依程式的寫法整理的，改用 function 或 cluster 當單位的設定沒有實際跑過。
 
+## 註記怎麼讀
+
+```
+【P2・進行中】受影響系統：test-svc｜收斂告警 1 筆                          ← 程式：誰受影響、多嚴重
+[LLM 推論] 還無法判定源頭。告警只顯示 test-svc 有「High error rate」；…     ← 模型：結論、依據、還缺什麼
+有的證據｜告警 1 筆                                                          ← 程式：這次分析手上有什麼
+缺的證據｜關係邊：沒有宣告這個系統的上下游，看不出問題是不是從別的系統來的   ← 程式：缺什麼、為什麼缺（每項一行）
+缺的證據｜錯誤日誌：索引有 10 筆，但沒有一筆的 service.name 是這些系統。檢查欄位名稱，以及值是否跟告警的系統名稱完全一樣
+還沒接的｜呼叫鏈（tempo.datasource_uid）、指標走勢（metrics.queries）        ← 程式：config.yaml 還沒設定的來源
+2026-11-25 14:46 ～ 進行中（台灣時間）｜調整優先權：High error rate（P2）    ← 程式：時間與規則連結
+```
+
+![證據的幾行](demo/images/5-evidence-lines.png)
+
+- **證據的幾行是程式照實際撈到的結果寫的，不是模型的說法。** 模型說「證據不足」時，看這幾行就知道不足在哪裡。
+- 「缺的證據」每一項都帶原因與下一步。錯誤日誌是 0 筆時，程式會多問一次筆數，分清楚三種情況：
+  索引在這段時間沒有資料、有資料但系統名稱對不上、系統有日誌但沒有一筆算錯誤。
+- 「查詢失敗」是 Grafana 的資料源查不動（跟「查了但沒有」不同），原因在服務的 log。
+- 「還沒接的」括號裡是 `config.yaml` 要設的鍵。
+- 模型被要求用白話寫：先講結論，再講依據（引用哪一種證據裡的什麼），判斷不出來時講還缺哪一項、補上能確認什麼。
+  「某個系統在上游」不能當成它是源頭的依據。
+- 還沒收集過證據的事故（例如 LLM 退避中才成立的）沒有證據的那幾行。
+
 ## 為什麼要等（debounce）
 
 收到 Webhook 的第 0 秒就分析，LLM 拿到的是殘缺的證據：
@@ -155,14 +178,14 @@ edges:
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
 | `src/server.py` | 218 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 487 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
-| `src/grafana.py` | 302 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
-| `src/grouping.py` | 166 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/rca.py` | 462 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
-| `src/report.py` | 59 | 固定三行註記（台灣時間、HTML 跳脫、調整優先權連結） |
-| `src/db.py` | 183 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
+| `src/main.py` | 490 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
+| `src/grafana.py` | 324 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/grouping.py` | 167 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
+| `src/rca.py` | 566 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/report.py` | 64 | 註記的固定格式（標題、摘要、證據的幾行、時間與調整優先權連結；台灣時間、HTML 跳脫） |
+| `src/db.py` | 186 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
 
-合計約 1,877 行。
+合計約 2,015 行。
 
 ## 各系統要做的事（平台零直連）
 
@@ -306,6 +329,13 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
   - 五種趨勢型規則的查詢在正常期與堆積期算出的值見 `INPUTS.md`。只算了查詢的值，沒有建成 Grafana 規則讓它觸發。
 - **MQ 的呼叫鏈用真的 RabbitMQ 與自動埋點實測**（RabbitMQ 3.12.1、pika 1.5.0、OpenTelemetry pika 自動埋點、Tempo 2.9.0）：
   消費端接在生產端底下時整條鏈串得起來；用連結、中途掉標頭、沒人收這三種串不起來（細節見 `INPUTS.md`）。只測了 Python 的 pika。
+
+- **註記的證據幾行用真的元件實測**（2026-11-25，本機：Grafana 13.0.7、Elasticsearch 8.19.23、真的 LLM，10 筆自己造的日誌）。三張事故：
+  - 日誌齊全（mq-broker、cim-eap、amhs-mcs）：「mq-broker 最可能是源頭。其錯誤日誌寫 disk usage 98% on /data, producers blocked 及
+    no space left on device。cim-eap 發佈逾時，amhs-mcs 未收到派送指令」，證據行列出有的五項與還沒接的兩項。
+  - 日誌的系統名稱對不上（test-svc，日誌寫成 test_svc）：證據行寫「索引有 10 筆，但沒有一筆的 service.name 是這些系統」。
+  - 有日誌但沒有錯誤等級的（eqp-collector-it）：證據行寫「這些系統有 3 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL」。
+  - 後兩張模型都回「還無法判定源頭」並說明還缺什麼。每種情況只跑了一兩次、一個模型，摘要的用字每次會不同。
 
 ## 上線
 

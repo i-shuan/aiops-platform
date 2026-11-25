@@ -4,7 +4,7 @@
   1. 取出這個 debounce 視窗內收到的告警（Webhook 收到時已經先存進資料庫）
   2. 收斂     同實體、關係邊、併入進行中事故；成員全部 resolved 並持續一段時間才結案
   3. RCA      收集 4 包證據交給 LLM（失敗退回原始摘要）
-  4. 寫回     先寫自己的資料庫，再寫 Grafana 註記（每個事故一筆，三行）
+  4. 寫回     先寫自己的資料庫，再寫 Grafana 註記（每個事故一筆：標題、摘要、證據的幾行、時間）
 
 Grafana 連不上時註記寫不進去：事故照樣存在資料庫，下一輪補寫。資料庫連不上這一輪才算失敗，告警留在 inbox 下一輪再處理。
 
@@ -80,7 +80,7 @@ class Settings:
     retry_failed_round_seconds: int = 30       # 一輪失敗（資料庫斷線）之後多久再試
     healthcheck_stuck_seconds: int = 600       # 同一輪跑超過這麼久，/healthz 回 503
     rounds_retention_days: int = 90            # rounds 表保留幾天
-    annotation_max_rule_links: int = 5         # 註記第 3 行最多列幾條規則連結
+    annotation_max_rule_links: int = 5         # 註記最後一行最多列幾條規則連結
     edges: tuple[tuple[str, str], ...] = ()
 
     @classmethod
@@ -404,11 +404,14 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
                 log_fields=settings.log_fields, trace_fields=settings.trace_fields, limits=settings.evidence,
                     tempo_datasource_uid=settings.tempo_datasource_uid, metrics=settings.metrics)
-            before = (inc.summary, inc.analyzed)
+            before = (inc.summary, inc.analyzed, inc.evidence_note)
+            # 「證據」那一行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
+            inc.evidence_note = rca.overview_text(rca.overview(evidence, settings.log_fields, settings.evidence.error_levels))
             inc.summary, inc.analyzed, reason = rca.analyze(
                 inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
-                model=settings.llm_model, transport=llm_transport, options=settings.llm)
-            if (inc.summary, inc.analyzed) != before:
+                model=settings.llm_model, transport=llm_transport, options=settings.llm,
+                overview_text=inc.evidence_note)
+            if (inc.summary, inc.analyzed, inc.evidence_note) != before:
                 inc.changed, inc.annotated = True, False
             if not can_analyze:
                 continue  # 沒設定 LLM 不是故障：不算失敗、不退避

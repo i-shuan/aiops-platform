@@ -71,9 +71,12 @@ def test_cascade_becomes_one_incident_one_llm_call_one_annotation_then_closes(wo
     assert inc["alert_count"] == 3 and inc["analyzed"] and rows(w, dbmod.inbox) == []
     assert len(w.fake.annotations) == 1 and len(w.llm_calls) == 1  # 三個告警只問一次 LLM、只寫一筆註記
     note = w.fake.annotations[inc["annotation_id"]]
-    l1, l2, l3 = note["text"].split("<br>")
+    l1, l2, have, off, l3 = note["text"].split("<br>")   # 中間多了證據的幾行：手上有什麼、還沒接什麼（程式產生）
     assert l1 == "【P1・進行中】受影響系統：amhs-mcs、cim-eap、mq-broker｜收斂告警 3 筆"
     assert l2.startswith("[LLM 推論] ") and "EQP-CVD-07" in l2 and "10:41 ～ 進行中（台灣時間）" in l3
+    assert have.startswith("有的證據｜告警 3 筆、這些系統之間的關係邊 2 條、錯誤日誌 ")
+    assert off == "還沒接的｜呼叫鏈（tempo.datasource_uid）、指標走勢（metrics.queries）"
+    assert inc["evidence_note"] and "【0. 證據概況" in w.llm_calls[0]["messages"][1]["content"]
     assert note["time"] == int(T0.timestamp() * 1000) and "open" in note["tags"]
     prompt = w.llm_calls[0]["messages"][1]["content"]
     assert "MQ queue depth" in prompt and '"upstream": "mq-broker"' in prompt and "EQP-CVD-07" in prompt

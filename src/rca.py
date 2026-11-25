@@ -47,9 +47,14 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 「關聯時間線」只代表同一個批號或載具在各系統出現的先後，不代表因果；各系統的時鐘可能有幾秒誤差。
 - 「呼叫鏈」是實際發生的呼叫：最下游、而且底下沒有其他失敗呼叫的那一段，比上游更接近源頭。
 - 「指標走勢」是數值在事故前後的變化（baseline 是事故前的中位數）：它說明哪個數值先變、變了多少，本身不代表因果。
-- 證據不足以判斷源頭時直接說「證據不足」，並說明還缺什麼。
+- 「關係邊」只說明誰可能影響誰。某個系統在上游，不能當成它就是源頭的依據；要有它自己出錯的證據（它的錯誤日誌、它的指標變化、呼叫鏈停在它）。
+- summary 是寫給值班人員看的。用白話、短句，照這個順序寫，不要寫標題或編號：
+  先寫結論：最可能的源頭是哪個系統；判斷不出來就寫「還無法判定源頭」。
+  再寫依據：你是看到哪一種證據裡的什麼才這樣判斷，直接引用內容（例如「mq-broker 的錯誤日誌寫磁碟已滿」「佇列的消費者數從 1 變成 0」）。
+  判斷不出來，或依據只有告警與關係邊時，最後寫還缺什麼：從「證據概況」裡「缺的證據」「查詢失敗」「還沒接的」挑最需要的一項，
+  說明補上它能確認什麼。不要只寫「證據不足」，也不要要求證據概況裡沒有提到的東西。
 - 只輸出一個 JSON 物件，不要 Markdown：
-  {"summary": "一句繁體中文，120 字以內：可能的源頭、影響範圍、集中的機台或批號", "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+  {"summary": "繁體中文，150 字以內", "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
 
 TRACE_SEARCH_LIMIT = 20  # 向 Tempo 搜尋時最多要幾條，再從裡面挑最近的 max_traces 條
 SPAN_ATTRIBUTES = ("peer.service", "db.system", "server.address", "http.response.status_code", "messaging.destination.name")
@@ -150,6 +155,8 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
         "edges": [{"upstream": a, "downstream": b} for a, b in edges],
         "error_logs": [], "error_traces": [], "id_counts": {f: {} for f in id_fields},
         "timelines": [], "call_chains": [], "metrics": [], "notes": [],
+        # 每一包的狀態，給 overview() 用：off 沒接／failed 查詢失敗／empty 查了但沒有／ok 有
+        "sources": {"logs": "off", "call_chains": "off", "metrics": "off"},
     }
     trace_ids: list[str] = []
     if es_datasource_uid:
@@ -157,10 +164,11 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
                                   start, end, log_fields, trace_fields, limits)
     else:
         evidence["notes"].append("沒有設定日誌資料源：沒有日誌證據")
-    if tempo_datasource_uid:
+    if tempo_datasource_uid and limits.max_traces >= 1:
         _collect_call_chains(evidence, incident, grafana, tempo_datasource_uid, start, end, limits, trace_ids)
     if metrics.datasource_uid and metrics.queries:
         _collect_metrics(evidence, incident, grafana, metrics, end)
+    evidence["window"] = {"start": iso(start), "end": iso(end)}
     return evidence
 
 
@@ -227,6 +235,7 @@ def _collect_metrics(evidence: dict[str, Any], incident: Incident, grafana: Graf
                                             **summary})
             if len(series) > len(kept):
                 evidence["notes"].append(f"指標「{query.name}」（{service}）有 {len(series)} 條序列，只列數值最大的 {len(kept)} 條")
+    evidence["sources"]["metrics"] = "ok" if evidence["metrics"] else ("failed" if failed else "empty")
     if failed:
         evidence["notes"].append(f"指標查詢失敗：{'、'.join(failed)}")
     elif not evidence["metrics"]:
@@ -244,7 +253,15 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
     except GrafanaError as e:
         log.warning("事故 %s 撈不到日誌證據：%s", incident.uid, e)
         evidence["notes"].append(f"日誌撈取失敗：{e}")
+        evidence["sources"]["logs"] = "failed"
         return []
+    evidence["sources"]["logs"] = "ok" if found["logs"] else "empty"
+    if not found["logs"]:
+        # 0 筆有三種完全不同的原因，處理方式也不同：多問一次總數，把它分清楚（只在 0 筆時多這一次查詢）
+        try:
+            evidence["log_counts"] = grafana.count_logs(uid, log_index, incident.services, start, end, log_fields=log_fields)
+        except GrafanaError as e:
+            log.warning("事故 %s 數不出日誌筆數：%s", incident.uid, e)
     counts = {f: Counter() for f in id_fields}
     for doc in found["logs"]:
         for f in id_fields:
@@ -350,9 +367,6 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, grafana: 
                          end: datetime, limits: EvidenceLimits, hinted_ids: list[str]) -> None:
     """先用錯誤日誌裡的 trace id 直接取（立即取得到，而且一定跟這次的錯誤有關）；不夠才用搜尋補。
     為什麼不只靠搜尋：實測 Tempo 2.9.0 收到 Trace 後 8～40 秒以上才搜尋得到，剛發生的事故常常搜不到自己的 Trace。"""
-    if limits.max_traces < 1:
-        return
-
     def add(trace_id: str) -> None:
         if trace_id and len(evidence["call_chains"]) < limits.max_traces \
                 and trace_id not in {c["trace_id"] for c in evidence["call_chains"]}:
@@ -372,14 +386,103 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, grafana: 
     except GrafanaError as e:
         log.warning("事故 %s 撈不到呼叫鏈：%s", incident.uid, e)
         evidence["notes"].append(f"呼叫鏈（Tempo）撈取失敗：{e}")
+        evidence["sources"]["call_chains"] = "ok" if evidence["call_chains"] else "failed"
         return
+    evidence["sources"]["call_chains"] = "ok" if evidence["call_chains"] else "empty"
     if not evidence["call_chains"]:
         evidence["notes"].append("Tempo 在事故時間窗內沒有這些系統的錯誤 Trace（沒有埋點、被取樣掉、或還沒寫入）")
 
 
-def build_prompt(evidence: dict[str, Any]) -> str:
+def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
+             error_levels: tuple[str, ...] = ERROR_LEVELS) -> dict[str, list[str]]:
+    """這次分析手上有什麼、缺什麼、為什麼缺。全部由程式從實際撈到的結果算出來，不經過 LLM。
+    回傳四組白話的句子：have（有）、missing（缺：查了但沒有，或沒有宣告）、failed（查詢失敗）、off（還沒接）。
+    「缺」的每一項都是「名稱：原因與下一步」：只說「沒有日誌」沒有用，要說是索引沒資料、系統名稱對不上，還是等級對不上。"""
+    out: dict[str, list[str]] = {"have": [], "missing": [], "failed": [], "off": []}
+    sources = evidence.get("sources") or {}
+    systems = {a["system"] for a in evidence["anomalies"]}
+    out["have"].append(f"告警 {len(evidence['anomalies'])} 筆")
+    related = [e for e in evidence["edges"] if e["upstream"] in systems and e["downstream"] in systems]
+    touching = [e for e in evidence["edges"] if e["upstream"] in systems or e["downstream"] in systems]
+    if related:
+        out["have"].append(f"這些系統之間的關係邊 {len(related)} 條")
+    elif len(systems) > 1:
+        out["missing"].append("關係邊：這幾個系統之間沒有宣告上下游，分不出誰影響誰")
+    elif touching:
+        out["have"].append(f"連到這個系統的關係邊 {len(touching)} 條（另一端沒有告警）")
+    else:
+        out["missing"].append("關係邊：沒有宣告這個系統的上下游，看不出問題是不是從別的系統來的")
+
+    logs = sources.get("logs", "off")
+    if logs == "off":
+        out["off"].append("日誌（es.datasource_uid）")
+    elif logs == "failed":
+        out["failed"].append("日誌：Grafana 的 ES 資料源查不動，原因見服務的 log")
+    elif logs == "empty":
+        counts = evidence.get("log_counts")
+        if counts is None:
+            why = "沒有查到這些系統的錯誤日誌"
+        elif counts["all"] == 0:
+            why = "索引在這段時間一筆資料都沒有。檢查 es.log_index 的名稱，以及日誌有沒有在送"
+        elif counts["services"] == 0:
+            why = (f"索引有 {counts['all']} 筆，但沒有一筆的 {log_fields.service} 是這些系統。"
+                   f"檢查欄位名稱，以及值是否跟告警的系統名稱完全一樣")
+        elif log_fields.level:
+            levels = "／".join(dict.fromkeys(v.upper() for v in error_levels))
+            why = (f"這些系統有 {counts['services']} 筆日誌，但 {log_fields.level} 沒有一筆是 {levels}。"
+                   f"可能真的沒有錯誤，或等級的寫法對不上")
+        else:
+            why = f"這些系統有 {counts['services']} 筆日誌，但訊息文字裡沒有錯誤字樣。可能真的沒有錯誤"
+        out["missing"].append(f"錯誤日誌：{why}")
+    else:
+        out["have"].append(f"錯誤日誌 {len(evidence['error_logs'])} 筆")
+        ids = sum(len(counts) for counts in evidence["id_counts"].values())
+        if ids:
+            out["have"].append(f"機台／批號等識別碼 {ids} 個")
+        elif evidence["id_counts"]:
+            out["missing"].append(f"機台與批號：錯誤日誌裡沒有 {'、'.join(evidence['id_counts'])} 這些欄位，看不出集中在哪裡")
+        if evidence["timelines"]:
+            out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
+    if evidence["error_traces"]:
+        out["have"].append(f"ES 裡的 Trace 錯誤片段 {len(evidence['error_traces'])} 筆")
+
+    chains = sources.get("call_chains", "off")
+    if chains == "ok":
+        out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
+    elif chains == "empty":
+        out["missing"].append("呼叫鏈：Tempo 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error")
+    elif chains == "failed":
+        out["failed"].append("呼叫鏈：Grafana 的 Tempo 資料源查不動，原因見服務的 log")
+    else:
+        out["off"].append("呼叫鏈（tempo.datasource_uid）")
+
+    metrics = sources.get("metrics", "off")
+    if metrics == "ok":
+        out["have"].append(f"指標走勢 {len(evidence['metrics'])} 條")
+    elif metrics == "empty":
+        out["missing"].append("指標走勢：設定的查詢在這段時間都沒有資料。檢查指標上對應系統名稱的標籤")
+    elif metrics == "failed":
+        out["failed"].append("指標走勢：查詢失敗，原因見服務的 log")
+    else:
+        out["off"].append("指標走勢（metrics.queries）")
+    return out
+
+
+def overview_text(groups: dict[str, list[str]]) -> str:
+    """把 overview() 的結果寫成幾行（註記上「證據」那幾行，也交給 LLM）：
+    有的列在同一行；缺的與查詢失敗的每項自己一行（各有原因）；還沒接的列在同一行，括號裡是 config.yaml 要設的鍵。"""
+    lines = [f"有的證據｜{'、'.join(groups['have'])}"]
+    lines += [f"缺的證據｜{item}" for item in groups["missing"]]
+    lines += [f"查詢失敗｜{item}" for item in groups["failed"]]
+    if groups["off"]:
+        lines.append(f"還沒接的｜{'、'.join(groups['off'])}")
+    return "\n".join(lines)
+
+
+def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str:
     dump = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
-    text = (f"【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
+    head = f"【0. 證據概況（程式統計的事實：有的、缺的與原因、查詢失敗的、還沒接的）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
+    text = (f"{head}【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本】\n{dump(evidence['error_logs'])}\n"
             f"【3b. Trace 錯誤片段】\n{dump(evidence['error_traces'])}\n\n"
@@ -442,13 +545,14 @@ def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int 
 
 
 def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
-            transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions()) -> tuple[str, bool, str]:
+            transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
+            overview_text: str = "") -> tuple[str, bool, str]:
     """回傳 (註記第 2 行, 是不是通過檢查的 LLM 推論, 沒通過的原因)。任何失敗都退回原始摘要，不丟例外。"""
     fallback = f"[未經分析] {raw_summary(incident)}"
     if not api_url or not model:
         return fallback, False, "沒有設定 llm.url、llm.model"
     try:
-        prompt = build_prompt(evidence)
+        prompt = build_prompt(evidence, overview_text)
         log.debug("事故 %s 送給 LLM 的內容：\n%s", incident.uid, prompt)
         answer = call_llm(api_url, api_key, model, prompt, transport, timeout=options.timeout_seconds,
                           temperature=options.temperature, system_prompt=options.system_prompt)

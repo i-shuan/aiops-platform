@@ -47,6 +47,8 @@ class FakeGrafana:
         self.tempo_traces = {"11111111111111111111111111111111": recorded("tempo_trace")["response"]}
         self.tempo_requests: list[httpx.Request] = []
         self.metric_requests: list[httpx.Request] = []
+        self.count_requests: list[list[dict]] = []
+        self.log_counts = "log_counts_no_errors"   # 換成 log_counts_index_empty／log_counts_service_mismatch 測另外兩種原因
         self.transport = httpx.MockTransport(self.handle)
 
     def query_range(self, query: str) -> httpx.Response:
@@ -110,6 +112,10 @@ def _msearch(self: FakeGrafana, body: str) -> httpx.Response:
     關聯時間線的查詢只有兩個條件（時間、某個識別碼）→ 回帶那個識別碼的紀錄，由舊到新。"""
     lines = [json.loads(line) for line in body.splitlines() if line.strip()]
     queries = lines[1::2]
+    if all(q.get("size") == 0 and q.get("track_total_hits") for q in queries):
+        # 錯誤日誌 0 筆之後的計數查詢（Grafana.count_logs）：回錄下來的真實回應，預設是「這些系統有日誌、但沒有錯誤等級的」
+        self.count_requests.append(queries)
+        return replay(self.log_counts)
     if any(len(q["query"]["bool"]["filter"]) == 3 for q in queries):
         self.es_requests.append(body)
         self.error_searches += 1

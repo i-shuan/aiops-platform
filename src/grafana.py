@@ -63,6 +63,12 @@ class TraceFields:
     error: str = "error.message"
 
 
+def _either(name: str, values: Any) -> dict[str, Any]:
+    """欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到。"""
+    values = list(values)
+    return {"bool": {"minimum_should_match": 1, "should": [{"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
+
+
 class GrafanaError(Exception):
     """Grafana 連不上、Token 沒權限、回應不是預期的格式。"""
 
@@ -173,26 +179,20 @@ class Grafana:
         def window(field: str) -> dict[str, Any]:
             return {"range": {field: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
 
-        def either(name: str, values: Any) -> dict[str, Any]:
-            values = list(values)
-            # 欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到
-            return {"bool": {"minimum_should_match": 1, "should": [
-                {"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
-
         def search(index: str, time_field: str, service_field: str, extra: dict[str, Any]) -> str:
-            query = {"bool": {"filter": [window(time_field), either(service_field, services), extra]}}
+            query = {"bool": {"filter": [window(time_field), _either(service_field, services), extra]}}
             return (json.dumps({"index": index, "ignore_unavailable": True}) + "\n"
                     + json.dumps({"size": size, "sort": [{time_field: "desc"}], "query": query}) + "\n")
 
         if log_fields.level:
-            is_error = either(log_fields.level, error_levels)
+            is_error = _either(log_fields.level, error_levels)
         else:  # 全文比對不分大小寫：ERROR／error／Error 只送一次
             words = " ".join(dict.fromkeys(level.lower() for level in error_levels))
             is_error = {"match": {log_fields.message: {"query": words, "operator": "or"}}}
         kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service, is_error))]
         if trace_index:
             kinds.append(("traces", trace_index, search(trace_index, trace_fields.time, trace_fields.service,
-                                                        either(trace_fields.status, error_statuses))))
+                                                        _either(trace_fields.status, error_statuses))))
         raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
                             content="".join(body for _k, _index, body in kinds),
                             headers={"Content-Type": "application/x-ndjson"})
@@ -205,6 +205,28 @@ class Grafana:
                 raise GrafanaError(f"ES 查詢 {index} 失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
             out[kind] = [h.get("_source") or {} for h in (resp.get("hits") or {}).get("hits") or []]
         return out
+
+    def count_logs(self, datasource_uid: str, log_index: str, services: list[str], start: datetime, end: datetime, *,
+                   log_fields: LogFields = LogFields()) -> dict[str, int]:
+        """錯誤日誌撈到 0 筆的時候用：同一個時間窗裡，索引總共有幾筆（"all"）、其中屬於這些系統的有幾筆（"services"，不限等級）。
+        三個數字放在一起就知道是哪一關沒過：索引沒資料、系統名稱對不上、還是等級對不上（或真的沒有錯誤）。"""
+        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
+        bodies = [{"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [window]}}},
+                  {"size": 0, "track_total_hits": True,
+                   "query": {"bool": {"filter": [window, _either(log_fields.service, services)]}}}]
+        header = json.dumps({"index": log_index, "ignore_unavailable": True})
+        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
+                            content="".join(f"{header}\n{json.dumps(body)}\n" for body in bodies),
+                            headers={"Content-Type": "application/x-ndjson"})
+        responses = raw.get("responses") if isinstance(raw, dict) else None
+        if not isinstance(responses, list) or len(responses) != len(bodies):
+            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
+        counts = []
+        for resp in responses:
+            if resp.get("error"):
+                raise GrafanaError(f"ES 計數失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
+            counts.append(int(((resp.get("hits") or {}).get("total") or {}).get("value", 0)))
+        return {"all": counts[0], "services": counts[1]}
 
     def search_timeline(self, datasource_uid: str, index: str, field: str, values: list[str], start: datetime,
                         end: datetime, size: int, *, log_fields: LogFields = LogFields()) -> dict[str, dict[str, Any]]:
