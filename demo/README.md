@@ -38,6 +38,9 @@ Grafana → Alerting → Alert rules，篩選 `state:firing`：MQ、CIM、AMHS �
 
 ## ② 根因分析＋LLM 推論（找源頭）
 
+> 這幾張是 2026-11-22 實跑的畫面，當時的註記是三行。之後的版本在摘要底下多了「有的證據／缺的證據／還沒接的」幾行，
+> 摘要也改成先講結論再講依據；新版的畫面是 `images/5-evidence-lines.png`，說明在 `README.md` 的「註記怎麼讀」。
+
 ![事故區間與三行摘要](images/2-rca-llm-tooltip.png)
 
 指標儀表板「AIOps 事件群（指標與事故區間）」（`dashboards/aiops-incident-metrics.json`），時間範圍 12:24:10～12:36:40：

@@ -56,7 +56,7 @@ def test_evidence_has_the_four_packs(fake):
     assert [(a["system"], a["status"], a["values"]) for a in ev["anomalies"]] == [
         ("mq-broker", "firing", {"A": 350, "C": 1}), ("cim-eap", "firing", {"A": 12, "C": 1})]
     assert ev["edges"][0] == {"upstream": "mq-broker", "downstream": "cim-eap"}
-    assert len(ev["error_logs"]) == 6 and len(ev["error_traces"]) == 2
+    assert (len(ev["error_logs"]), sum(e.get("similar_in_sample", 1) for e in ev["error_logs"])) == (4, 6) and len(ev["error_traces"]) == 2
     assert ev["id_counts"]["eqp_id"] == {"EQP-CVD-07": 3, "STK01": 1, "EQP-ETCH-02": 1}
     assert ev["id_counts"]["lot_id"]["LOT24A0031"] == 3 and ev["id_counts"]["carrier_id"]["FOUP0912"] == 3
     body = fake.es_requests[0]

@@ -60,7 +60,7 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | 19 | `retry_failed_round_seconds` | 30 | 1 以上 | 一輪失敗（例如資料庫斷線）之後多久再試 |
 | 20 | `healthcheck.stuck_seconds` | 600 | 30 以上 | 同一輪跑超過這麼久，`/healthz` 回 503（K8s 會重啟 Pod）。要大於「ES 逾時 + LLM 逾時」乘上同時進行中的事故數 |
 | 21 | `rounds_retention_days` | 90 | 1 以上 | 每輪執行紀錄（`rounds` 表）保留幾天 |
-| 22 | `annotation.max_rule_links` | 5 | 0 以上 | 註記第 3 行最多列幾條「調整優先權」的規則連結 |
+| 22 | `annotation.max_rule_links` | 5 | 0 以上 | 註記最後一行最多列幾條「調整優先權」的規則連結 |
 
 ### 關聯證據（批號時間線、Tempo 呼叫鏈）
 
@@ -69,6 +69,10 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `es.timeline_fields` | `id_fields` 裡的 `lot_id`、`carrier_id` | `id_fields` 的子集；`[]` = 不做 | 哪些識別碼要把跨系統的日誌串成時間線。工廠沒有 trace id，批號與載具就是關聯碼 |
 | `llm.max_timeline_ids` | 2 | 0～20 | 最多替幾個關聯碼做時間線（取錯誤日誌裡出現最多次的）；0 = 不做 |
 | `llm.max_timeline_events` | 30 | 1～500 | 每條時間線最多幾筆紀錄（由舊到新；超過會標示被截斷） |
+| `es.baseline_minutes` | 30 | 5～1440 | 「事故前」看多久。同一種錯誤在這段時間出現幾筆，會跟事故期間的筆數一起交給 LLM |
+| `llm.max_log_patterns` | 6 | 0～20 | 最多替幾種錯誤比較事故前後的筆數；0 = 不比較 |
+| `es.warn_levels` | WARN、warn、Warn、WARNING、warning、Warning | 文字清單，可以是空的 | 日誌等級是這些值算警告；空清單 = 不撈警告。日誌沒有等級欄位（`es.log_fields.level` 是空的）時不撈 |
+| `llm.max_warn_patterns` | 5 | 0～20 | 最多給 LLM 看幾種警告；0 = 不撈警告 |
 | `tempo.trace_id_field` | `trace.id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號向 Tempo 取（立即取得到），不夠才用搜尋補 |
 | `tempo.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取 |
 | `tempo.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
@@ -138,7 +142,8 @@ es:
 | --- | --- | --- |
 | 嚴重度只有 P0～P3 與它們的排序 | `src/grafana.py` 的 `SEVERITIES`、`src/grouping.py` 的 `SEVERITY_RANK` | 儀表板用 `P0`、`P1` 標籤查註記；改了儀表板失效、舊事故對不上 |
 | 註記標籤 `aiops`、`aiops-incident:<uid>`、`open`／`closed`、系統名稱 | `src/report.py` | 儀表板的查詢、「註記建過就不重複建」的查找都依賴這些標籤 |
-| 註記固定三行與「進行中／已結案」的文字 | `src/report.py` | 對外的呈現契約；`[LLM 推論]`／`[未經分析]` 的標示不能被設定拿掉 |
+| 註記的版面（標題、摘要、證據的幾行、時間）與「進行中／已結案」的文字 | `src/report.py` | 對外的呈現契約；`[LLM 推論]`／`[未經分析]` 的標示不能被設定拿掉 |
+| 證據幾行的用字與判斷（有的、缺的與原因、查詢失敗、還沒接的） | `src/rca.py` 的 `overview`、`overview_text` | 照實際撈到的結果產生，沒有可調的門檻；用字是給值班人員看的固定說法 |
 | 規則編輯連結的路徑 `/alerting/<uid>/edit` | `src/report.py` | 由 Grafana 的版本決定，不是我們的設定 |
 | 資料表與欄位名稱、成員告警的時間欄位 | `src/db.py` | 改了要搬資料；程式只會自動「補欄位」 |
 | 事故 uid 的長度（12 碼） | `src/grouping.py` | 內部識別；改了舊註記的標籤對不上 |
@@ -153,6 +158,8 @@ es:
 | Tempo 查詢用 `resource.service.name` 比對分析單位 | `src/grafana.py` 的 `search_error_traces` | OTel 的標準屬性。把 `labels.service` 換成 function 或 cluster 時呼叫鏈會撈不到（見 README「改用別的單位分析」） |
 | 指標查詢最多 20 條、佔位字是 `$service` | `src/main.py` 的 `MAX_METRIC_QUERIES`、`src/rca.py` 的 `SERVICE_PLACEHOLDER` | 每張事故要查「查詢數 × 系統數」次，上限是保護指標資料庫；佔位字是設定檔的寫法約定 |
 | 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/rca.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
+| 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/rca.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
+| 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的片語（每個 `*` 容許 3 個位置的間隔，上限 12） | `src/rca.py` 的 `log_pattern`、`pattern_phrase` | 歸類與計數的實作。間隔取 3 是因為一個 `*` 在原文可能是好幾個詞（IP 加 port 會被拆成兩個）；是近似值，未驗證泛化 |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |
 | 嚴重度的判定方式 | — | 程式沒有「判定規則」：嚴重度直接讀告警的標籤，事故取成員裡最高的，只升不降 |

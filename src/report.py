@@ -1,8 +1,12 @@
-"""把一個事故寫成 Grafana 註記：固定三行。數字與時間全部由程式產生，LLM 只提供第 2 行的文字。
+"""把一個事故寫成 Grafana 註記。數字與時間全部由程式產生，LLM 只提供第 2 行的文字。
 
-  第 1 行（程式）  受影響系統、嚴重度、收斂的告警筆數
-  第 2 行          [LLM 推論] …  或  [未經分析] 原始異常摘要
-  第 3 行（程式）  起訖時間（台灣時間）+ 調整優先權的規則連結
+  第 1 行（程式）      受影響系統、嚴重度、收斂的告警筆數
+  第 2 行              [LLM 推論] …  或  [未經分析] 原始異常摘要
+  證據的幾行（程式）   有的證據｜…（一行）、缺的證據｜名稱：原因（每項一行）、查詢失敗｜…（每項一行）、還沒接的｜…（一行）
+                       還沒收集過證據的事故沒有這幾行
+  最後一行（程式）     起訖時間（台灣時間）+ 調整優先權的規則連結
+
+證據那幾行是為了回答「證據不足是哪裡不足」：它是程式照實際撈到的結果寫的，不是模型的說法（src/rca.py 的 overview）。
 
 Grafana 的註記文字會當 HTML 顯示（消毒過），所以換行用 <br>、連結用 <a>；系統名稱、規則名稱、LLM 的文字一律先跳脫，
 日誌或模型輸出裡的 <script>、<img> 之類不會變成標籤。
@@ -46,12 +50,13 @@ def render(incident: Incident, grafana_url: str, tz: str, max_links: int = 5) ->
     ranked = sorted(rules.items(), key=lambda kv: (SEVERITY_RANK[kv[1]], kv[0][1]))
     links = "、".join(rule_link(grafana_url, uid, f"{title}（{sev}）") for (uid, title), sev in ranked[:max_links])
     more = f" 等 {len(ranked)} 條" if len(ranked) > max_links else ""
-    line3 = f"{span}｜調整優先權：{links}{more}"
+    proof = [html.escape(" ".join(line.split())) for line in incident.evidence_note.splitlines() if line.strip()]
+    last = f"{span}｜調整優先權：{links}{more}"
     return {
         "time": int(incident.started_at.timestamp() * 1000),
         "timeEnd": int((end or incident.last_seen_at).timestamp() * 1000),
         "tags": ["aiops", uid_tag(incident.uid), incident.severity, incident.status, *incident.services],
-        "text": "<br>".join([line1, line2, line3]),
+        "text": "<br>".join([line1, line2, *proof, last]),
     }
 
 
