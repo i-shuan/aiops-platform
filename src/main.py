@@ -475,9 +475,15 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 continue
             if can_analyze and inc.llm_next_try is not None and now < inc.llm_next_try:
                 # 退避中：不查日誌、不打 LLM。摘要退回原始版本，但成員變了要跟著更新（誠實：沒有分析過）
-                raw = f"[未經分析] {rca.raw_summary(inc)}"
-                if (inc.summary, inc.analyzed, inc.candidates) != (raw, False, ""):
-                    inc.summary, inc.analyzed, inc.candidates, inc.changed, inc.annotated = raw, False, "", True, False
+                # 註記上直接列的那幾行證據是上次收集的，照舊；只有第一行（哪些告警響了）跟著現在的成員更新
+                wait = int((inc.llm_next_try - now).total_seconds())
+                raw = rca.failure_line("unreachable", inc.llm_failures, wait) if inc.evidence_note.startswith("・") \
+                    else f"[未經分析] {rca.raw_summary(inc)}"
+                note = "\n".join(rca.alerts_fact(inc) if line.startswith("・告警：") else line for line in inc.evidence_note.splitlines())
+                same_text = lambda text: text.split("（連續失敗")[0]   # 剩幾分鐘每一輪都在變：只有那個數字不同不算內容變了
+                if (same_text(inc.summary), inc.analyzed, inc.candidates, inc.evidence_note) != (same_text(raw), False, "", note):
+                    inc.summary, inc.analyzed, inc.candidates, inc.evidence_note = raw, False, "", note
+                    inc.changed, inc.annotated = True, False
                 log.debug("事故 %s 的 LLM 分析退避中，%s 之前不再試", inc.uid, inc.llm_next_try.isoformat())
                 continue
             evidence = rca.collect_evidence(
@@ -491,18 +497,20 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                                    model=settings.llm_model, transport=llm_transport, options=settings.llm,
                                    overview_text=rca.overview_text(groups))
             inc.summary, inc.analyzed, inc.candidates, reason = got.line, got.analyzed, got.candidates, got.reason
-            if (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates) != before:
-                inc.changed, inc.annotated = True, False
-            if not can_analyze:
-                continue  # 沒設定 LLM 不是故障：不算失敗、不退避
-            if inc.analyzed:
+            if can_analyze and inc.analyzed:
                 if inc.llm_failures or inc.llm_next_try:
                     inc.llm_failures, inc.llm_next_try, inc.changed = 0, None, True
-            else:
+            elif can_analyze:
+                # LLM 不通或回答沒過檢查：流程照走。註記第 2 行說明原因與什麼時候再試，底下直接列程式收集到的證據（沒有推論）
                 inc.llm_failures += 1
                 delay = backoff_seconds(inc.llm_failures, settings.llm_retry_initial_seconds, settings.llm_retry_max_seconds)
                 inc.llm_next_try, inc.changed = now + timedelta(seconds=delay), True
+                inc.summary = rca.failure_line(got.failure, inc.llm_failures, delay)
+                inc.evidence_note = "\n".join([*rca.evidence_facts(inc, evidence), inc.evidence_note])
                 errors.append(f"事故 {inc.uid} 未經 LLM 分析（連續第 {inc.llm_failures} 次）：{reason}；{delay} 秒後再試")
+            # 沒設定 LLM 不是故障：不算失敗、不退避，第 2 行是原始摘要
+            if (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates) != before:
+                inc.changed, inc.annotated = True, False
         # 寫入順序：先落地自己的資料庫（事故 + 這批告警處理完了），再對外：修復請求 → Grafana 註記 → 事故 API。
         # 註記寫成功才記 annotated；出口各自記在 deliveries 表，失敗的下一輪再試，不影響註記
         db.save_incidents([i for i in incidents if i.changed], now, processed=ids)
