@@ -85,7 +85,7 @@ def test_llm_answer_that_only_names_things_in_evidence_is_used(fake):
 
 
 @pytest.mark.parametrize("answer, why", [
-    ({**GOOD, "systems": ["mq-broker", "erp-core"]}, "erp-core"),                  # 編了一個系統
+    ({**GOOD, "summary": "源頭是 erp-core，拖累 mq-broker", "systems": ["mq-broker", "erp-core"], "ids": []}, "erp-core"),   # 編了一個系統
     ({**GOOD, "ids": ["EQP-CVD-99"]}, "EQP-CVD-99"),                               # 編了一台機台
     ({**GOOD, "summary": "源頭是 mq-broker，集中在機台 EQP-LITHO-11", "ids": []}, "EQP-LITHO-11"),  # 只寫在句子裡
     ("根因是 mq-broker", "JSONDecodeError"),                                        # 不是 JSON

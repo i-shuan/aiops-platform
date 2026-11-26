@@ -232,7 +232,7 @@ def test_a_system_seen_only_in_the_call_chain_may_be_named_but_an_invented_one_m
     assert analyzed and "mes-db" in line                                # mes-db 沒有告警、也不在關係邊，但呼叫鏈裡真的有
     without = collect(fake, inc)                                        # 沒有 Trace：同一個答案就沒有憑據
     assert not rca.analyze(inc, without, transport=llm_returning(good)[0], **LLM)[1]
-    invented = {**good, "systems": ["billing-db"]}
+    invented = {**good, "summary": "源頭可能是 billing-db 連線被拒", "systems": ["billing-db"]}
     assert not rca.analyze(inc, ev, transport=llm_returning(invented)[0], **LLM)[1]
 
 

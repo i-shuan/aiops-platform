@@ -145,3 +145,66 @@ def test_a_failed_analysis_has_no_causes_and_clears_the_old_ones(world):  # noqa
     [inc] = rows(w, dbmod.incidents)
     assert inc["summary"].startswith("[未經分析]") and not inc["candidates"]
     assert "信心" not in w.fake.annotations[inc["annotation_id"]]["text"]
+
+
+# ── 關係邊是加分的，不是白名單：日誌原文裡指名的元件可以當成可能的原因（現場 AP1105 回報，2026-11-26）──
+
+def field_evidence(*messages):
+    """只有一個系統告警、沒有任何關係邊；錯誤日誌的訊息裡提到別的元件。形狀跟 collect_evidence 產生的一樣。"""
+    logs = [{"time": f"2026-11-26T04:51:2{n}Z", "system": "instana-agent", "message": m} for n, m in enumerate(messages)]
+    patterns = [{"system": "instana-agent", "pattern": rca.log_pattern(m), "example": m, "first_seen": "2026-11-26T04:51:20Z",
+                 "during": 3, "before": 0, "new": True} for m in messages]
+    return {"anomalies": [{"system": "instana-agent", "rule": "錯誤日誌異常", "severity": "P2", "started": "2026-11-26T04:50:00Z",
+                           "status": "firing", "values": {}}],
+            "edges": [], "error_logs": logs, "error_patterns": patterns, "warnings": [], "id_counts": {}, "timelines": [],
+            "call_chains": [], "metrics": [], "notes": [], "sources": {"logs": "ok"}}
+
+
+def reply(summary, *candidates, systems=()):
+    return json.dumps({"summary": summary, "systems": list(systems), "ids": [],
+                       "candidates": [{"source": s, "confidence": c, "reason": r} for s, c, r in candidates]}, ensure_ascii=False)
+
+
+def test_a_component_named_in_the_log_text_may_be_the_cause_without_any_edge():
+    ev = field_evidence("MariaDb | com.instana.sensor-mariadb - 1.1.33 | Cannot connect to MariaDb at db-host:3306")
+    summary, candidates = rca.read_answer(reply("最可能是 MariaDB 連不上", ("MariaDB", 82, "日誌寫 Cannot connect to MariaDb"),
+                                                 systems=["instana-agent", "MariaDB"]), ev)
+    assert [(c["source"], c["confidence"]) for c in candidates] == [("MariaDB", 82)]   # 大小寫跟日誌不同也算；日誌是直接證據，分數不壓
+    assert summary == "最可能是 MariaDB 連不上"
+
+
+def test_names_with_digits_and_ports_are_matched_against_the_original_text_not_the_masked_pattern():
+    message = 'group "kubernetes-apps": datasource vmselect-vmstack-victoria-metrics-k8s-stack:8481 returned 503'
+    ev = field_evidence(message)
+    assert "k*s" in ev["error_patterns"][0]["pattern"]                  # 歸類用的樣板把數字換成 *
+    prompt = rca.build_prompt(ev)
+    assert "k*s" not in prompt and "pattern" not in prompt and "vmselect-vmstack-victoria-metrics-k8s-stack:8481" in prompt   # 模型只看到原文
+    for name in ("vmselect-vmstack-victoria-metrics-k8s-stack", "vmselect-vmstack-victoria-metrics-k8s-stack:8481"):
+        _s, candidates = rca.read_answer(reply(f"最可能是 {name} 回 503", (name, 75, "日誌寫它回 503")), ev)
+        assert candidates[0]["source"] == name
+    with pytest.raises(ValueError, match="k\\*s"):                       # 樣板裡的寫法不是真的名稱：照抄它不算有憑據
+        rca.read_answer(reply("vmselect 回 503", ("vmselect-vmstack-victoria-metrics-k*s-stack", 75, "x")), ev)
+
+
+def test_a_name_that_is_nowhere_in_the_evidence_is_still_refused_when_it_is_the_conclusion():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    with pytest.raises(ValueError, match="PostgreSQL"):                 # 排第一的可能原因沒有憑據：整份不能用
+        rca.read_answer(reply("最可能是資料庫", ("PostgreSQL", 80, "x"), ("MariaDb", 60, "y")), ev)
+    with pytest.raises(ValueError, match="PostgreSQL"):                 # 結論的句子提到它、清單也列了它
+        rca.read_answer(reply("MariaDb 與 PostgreSQL 都連不上", ("MariaDb", 80, "y"), systems=["MariaDb", "PostgreSQL"]), ev)
+
+
+def test_an_ungrounded_runner_up_is_dropped_instead_of_throwing_everything_away():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    summary, candidates = rca.read_answer(reply("最可能是 MariaDb 連不上", ("MariaDb", 80, "日誌寫連不上"), ("PostgreSQL", 40, "猜的"),
+                                                 ("instana-agent", 30, "告警在它身上"), systems=["MariaDb", "PostgreSQL"]), ev)
+    assert [c["source"] for c in candidates] == ["MariaDb", "instana-agent"]   # 沒憑據的那一個拿掉，其餘照用
+    assert "PostgreSQL" not in rca.candidates_text(candidates) and summary.startswith("最可能是 MariaDb")
+
+
+def test_very_short_names_are_not_matched_by_text_and_known_systems_keep_working():
+    ev = field_evidence("db at host:3306 refused")
+    with pytest.raises(ValueError, match="db"):                          # 兩個字的名稱在任何文字裡都找得到：不算憑據
+        rca.read_answer(reply("db 掛了", ("db", 80, "x")), ev)
+    _s, candidates = rca.read_answer(reply("instana-agent 自己的問題", ("instana-agent", 60, "告警在它身上")), ev)
+    assert candidates[0]["source"] == "instana-agent"

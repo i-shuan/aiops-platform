@@ -70,6 +70,7 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
   {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "confidence": 85, "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
 
 MAX_CANDIDATES = 3
+MIN_NAME_CHARS = 3   # 名稱至少這麼長，才用「原樣出現在證據文字裡」當憑據：一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化
 DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "metrics")
 # 信心分數的分段（提示詞裡跟模型講的同一套）。分數是模型自評「依據有多直接」，不是機率、沒有校準過。
 CONFIDENCE_HIGH, CONFIDENCE_MEDIUM = 70, 40
@@ -692,11 +693,14 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     windows = evidence.get("count_windows") or {}
     counts_note = (f"during＝事故期間 {windows.get('during_minutes', '?')} 分鐘內的筆數，before＝事故前 {windows.get('before_minutes', '?')} 分鐘內的筆數；"
                    f"new=true 表示事故前一筆都沒有；沒有這些欄位的是數不出來")
+    # pattern（把數字換成 * 的樣板）只是程式歸類用的，不給模型看：它會把樣板裡的字當成真的名稱照抄
+    # （現場遇到的：k8s 被寫成 k*s）。模型看 example，那是原文。
+    shown = lambda rows: [{k: v for k, v in row.items() if k != "pattern"} for row in rows]
     if evidence.get("error_patterns"):
-        text += (f"【3d. 主要的錯誤種類與事故前後的次數（pattern 是把數字換成 * 的樣板；{counts_note}）】\n"
-                 f"{dump(evidence['error_patterns'])}\n\n")
+        text += (f"【3d. 主要的錯誤種類與事故前後的次數（example 是這一種錯誤最早的一筆原文；{counts_note}）】\n"
+                 f"{dump(shown(evidence['error_patterns']))}\n\n")
     if evidence.get("warnings"):
-        text += (f"【3e. 警告（等級是警告的日誌，還不是錯誤；{counts_note}）】\n{dump(evidence['warnings'])}\n\n")
+        text += (f"【3e. 警告（等級是警告的日誌，還不是錯誤；{counts_note}）】\n{dump(shown(evidence['warnings']))}\n\n")
     if evidence.get("timelines"):
         text += ("【5. 關聯時間線：同一個批號／載具在各系統的紀錄，由舊到新（只代表先後，不代表因果；各系統時鐘可能有誤差）】\n"
                  f"{dump(evidence['timelines'])}\n\n")
@@ -728,7 +732,13 @@ def call_llm(api_url: str, api_key: str, model: str, prompt: str, transport: htt
 
 def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
                 id_pattern: str = DEFAULT_ID_PATTERN) -> tuple[str, list[dict[str, Any]]]:
-    """幻覺檢查：LLM 點名的系統與機台／批號必須真的在證據或關係邊裡。通過回傳 (摘要, 可能的原因)，不通過丟 ValueError。
+    """幻覺檢查：LLM 點名的系統與機台／批號必須真的在證據裡。通過回傳 (摘要, 可能的原因)，不通過丟 ValueError。
+
+    什麼叫「在證據裡」：是告警的系統、關係邊或呼叫鏈裡的系統，**或者名稱原樣出現在送給模型的證據文字裡**（不分大小寫）。
+    後者是為了日誌訊息裡指名的元件：`Cannot connect to MariaDb`、`datasource vmselect-…-k8s-stack returned 503`。
+    它們沒有告警、也沒有人把它寫進關係邊，但確實是日誌寫的，不是模型編的。關係邊有寫當然更好，沒寫不該擋掉分析
+    （使用者的決定，2026-11-26，現場 AP1105 的兩張事故就是這樣被退回的）。
+    證據裡完全找不到的名稱：排第一的可能原因是它、或結論的句子提到它 → 整份不採用；只是排在後面的可能原因 → 只拿掉那一個。
 
     可能的原因最多留 MAX_CANDIDATES 個，每個是 {source, confidence（0～100）, reason}。分數是模型自己給的，程式只做一件事：
     **沒有直接證據指向那個系統，分數最高只到 NO_DIRECT_EVIDENCE_CAP**。直接證據 = 那個系統的名稱出現在日誌、警告、Trace、
@@ -743,10 +753,21 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     systems |= {s for group in (evidence.get("timelines") or [], evidence.get("call_chains") or [])
                 for item in group for s in item.get("systems") or []}
     ids = {v for counts in evidence["id_counts"].values() for v in counts}
-    corpus = json.dumps(evidence, ensure_ascii=False)
-    unknown = [s for s in answer.get("systems") or [] if s not in systems]
-    source = answer.get("source") or ""   # 舊格式（自訂提示詞可能還在用）：有填就必須是證據裡的系統
-    if source and source not in systems:
+    # 比對用的文字 = 送給模型的那些內容。pattern（數字換成 * 的樣板）模型看不到，也不能當憑據：k*s 不是真的名稱
+    visible = {**evidence, **{key: [{k: v for k, v in row.items() if k != "pattern"} for row in evidence.get(key) or []]
+                              for key in ("error_patterns", "warnings")}}
+    corpus = json.dumps(visible, ensure_ascii=False)
+    lowered = corpus.lower()
+
+    def grounded(name: Any) -> bool:
+        """這個名稱有憑據：是已知的系統，或原樣（不分大小寫）出現在證據文字裡。太短的名稱不用文字比對（隨便都對得到）。"""
+        text = str(name).strip()
+        return text in systems or (len(text) >= MIN_NAME_CHARS and text.lower() in lowered)
+
+    # systems 清單是模型自己列的「我提到了誰」。清單裡找不到憑據的名稱，只有當結論的句子真的提到它才算問題
+    unknown = [s for s in answer.get("systems") or [] if not grounded(s) and str(s).strip() and str(s).lower() in summary.lower()]
+    source = answer.get("source") or ""   # 舊格式（自訂提示詞可能還在用）：有填就必須有憑據
+    if source and not grounded(source):
         unknown.append(source)
     # ids：在識別碼統計裡，或原樣出現在送給模型的證據裡（跟下面摘要文字同一個標準）都算有憑據。
     # 只認統計會誤擋兩種真的有憑據的情況：日誌沒拆欄位、機台與批號只寫在訊息文字裡；以及有拆欄位但沒排進 top_ids 的。
@@ -754,17 +775,18 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     unknown += [i for i in answer.get("ids") or [] if i not in ids and not (isinstance(i, str) and i.strip() and i in corpus)]
     raw = answer.get("candidates")
     raw = raw if isinstance(raw, list) else []   # 選填：自訂提示詞可以不要求
-    direct = json.dumps({key: evidence.get(key) for key in DIRECT_EVIDENCE}, ensure_ascii=False)
+    direct = json.dumps({key: visible.get(key) for key in DIRECT_EVIDENCE}, ensure_ascii=False).lower()
     candidates: list[dict[str, Any]] = []
-    for item in raw[:MAX_CANDIDATES]:
+    for rank, item in enumerate(raw[:MAX_CANDIDATES]):
         if not isinstance(item, dict) or not str(item.get("source") or "").strip():
             raise ValueError("candidates 的每一項都要有 source")
         name = str(item["source"]).strip()
-        if name not in systems:
-            unknown.append(name)
-            continue
+        if not grounded(name):
+            if rank == 0:   # 排第一的就是結論在講的那一個：它沒有憑據，整份不能用
+                unknown.append(name)
+            continue        # 排在後面的：只拿掉這一個，其他照用
         score = _confidence(item.get("confidence"))
-        if name not in direct:   # 沒有直接證據指向它：分數最高只到「只是推測」那一段
+        if name.lower() not in direct:   # 沒有直接證據指向它：分數最高只到「只是推測」那一段
             score = min(score, NO_DIRECT_EVIDENCE_CAP)
         candidates.append({"source": name, "confidence": score, "reason": " ".join(str(item.get("reason") or "").split())})
     # 摘要與理由的文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids

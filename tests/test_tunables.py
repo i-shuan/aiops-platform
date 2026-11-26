@@ -241,7 +241,7 @@ def test_generic_terms_with_digits_are_rejected_by_default_and_the_check_can_be_
     assert rca.analyze(incident(), ev, transport=llm_returning(fake_equipment)[0], options=off, **LLM)[1]  # 文字不檢查了
     listed = {**generic, "ids": ["EQP-LITHO-11"]}
     assert not rca.analyze(incident(), ev, transport=llm_returning(listed)[0], options=off, **LLM)[1]      # 清單照樣檢查
-    invented = {**generic, "systems": ["erp-core"]}
+    invented = {**generic, "summary": "erp-core 的 HTTP2 連線中斷", "systems": ["erp-core"]}
     assert not rca.analyze(incident(), ev, transport=llm_returning(invented)[0], options=off, **LLM)[1]
 
 

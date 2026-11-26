@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -120,6 +121,12 @@ def build_evidence(scenario: dict, grafana: Grafana, store, now: datetime, setti
     return evidence, overview
 
 
+def _same_name(said: str, answer: str) -> bool:
+    """排第一的名稱跟答案是不是同一個：大小寫不同（MariaDb／MariaDB）、後面多帶連接埠（host:8481）都算同一個。"""
+    strip = lambda name: re.sub(r":\d+$", "", name.strip().lower())
+    return strip(said) == strip(answer)
+
+
 def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
     """問一次並計分。回傳 {ok, why, source, confidence, summary}。
 
@@ -140,7 +147,7 @@ def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
         strong = [c for c in candidates if c["confidence"] >= rca.CONFIDENCE_MEDIUM]
         if strong:
             problems.append(f"答案是無法判定，卻給 {strong[0]['source']} {strong[0]['confidence']} 分")
-    elif scenario["source"] is not None and top["source"] != scenario["source"]:
+    elif scenario["source"] is not None and _same_name(top["source"], scenario["source"]) is False:
         problems.append(f"排第一的是 {top['source'] or '（沒有）'}，答案是 {scenario['source']}")
     if scenario["any"] and not any(word in said for word in scenario["any"]):
         problems.append(f"沒有提到 {'／'.join(scenario['any'])}")
