@@ -10,10 +10,11 @@ import httpx
 import pytest
 
 from src import rca
-from src.grafana import Grafana, LogFields
+from src.grafana import Grafana
+from src.logs import LogFields, VictoriaLogs
 from src.grouping import Alert, converge
 from src.main import ConfigError, Settings
-from tests.conftest import SHIFT, log_row, recorded_rows, shifted
+from tests.conftest import collect_evidence, SHIFT, log_row, recorded_rows, shifted
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)
 NOW = T0 + timedelta(seconds=64)
@@ -30,7 +31,7 @@ def incident(*services):
 
 def collect(fake, inc=None, **kw):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    return rca.collect_evidence(inc or incident(), EDGES, grafana, logs_datasource_uid="vl",
+    return collect_evidence(inc or incident(), EDGES, grafana, logs_datasource_uid="vl",
                                 id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW, **kw)
 
 
@@ -89,8 +90,8 @@ def test_a_system_flooded_out_of_the_newest_sample_still_shows_its_earliest_erro
     """最新的那一批樣本全是 mq-broker（它在大量報錯）；cim-eap、amhs-mcs 較早的錯誤靠各系統各取最早幾筆的那一次補回來。"""
     fake.logs += [log_row(T0 + timedelta(seconds=n), "mq-broker", "ERROR", f"publish rejected: queue full ({n})") for n in range(8)]
     limits = rca.EvidenceLimits(max_hits=8)
-    newest = Grafana("http://grafana.test", "t", transport=fake.transport).search_errors(
-        "vl", incident().services, T0 - timedelta(minutes=10), NOW, 8)
+    newest = VictoriaLogs(Grafana("http://grafana.test", "t", transport=fake.transport), "vl").search_errors(
+        incident().services, T0 - timedelta(minutes=10), NOW, 8)
     assert {row["service.name"] for row in newest} == {"mq-broker"}      # 只看最新的 8 筆的話，另外兩個系統完全不見
     ev = collect(fake, limits=limits)
     assert {e["system"] for e in ev["error_logs"]} == {"mq-broker", "cim-eap", "amhs-mcs"}

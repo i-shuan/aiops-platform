@@ -32,6 +32,7 @@ class Alert:
     starts_at: datetime
     ends_at: datetime | None    # resolved 才有
     values: dict[str, Any] = field(default_factory=dict, hash=False)  # 觸發當下規則各節點的數值（給 LLM 當證據）
+    remediation: str = ""       # 規則上 aiops_remediation 標籤的值：這條告警響的時候可以跑的修復流程名稱；沒貼就是空的
 
 
 @dataclass
@@ -54,6 +55,7 @@ class Incident:
     llm_next_try: datetime | None = None  # 退避中：這個時間之前不再查日誌、不再打 LLM
     candidates: str = ""             # 註記上根因分析底下的列點（LLM 列的、程式檢查過的）；沒有就是空的
     evidence_note: str = ""          # 註記上「證據｜…」那一行：已有哪些、缺哪些與原因、沒接哪些（程式產生）
+    actions_note: str = ""           # 註記上「自動修復｜…」那一行：請下游跑了哪些修復流程、狀態（程式產生；沒有就是空的）
     changed: bool = field(default=False, compare=False)  # 這一輪有沒有變（只活在記憶體，不存檔）
     fresh: bool = field(default=False, compare=False)    # 這一輪成員或嚴重度變了（只活在記憶體）：要重新分析
 
@@ -94,7 +96,8 @@ def group_alerts(alerts: list[Alert], edges: list[tuple[str, str]]) -> list[list
 
 def _member(alert: Alert) -> dict[str, Any]:
     return {"rule_uid": alert.rule_uid, "title": alert.title, "service": alert.service, "severity": alert.severity,
-            "status": alert.status, "starts_at": alert.starts_at, "ends_at": alert.ends_at, "values": dict(alert.values)}
+            "status": alert.status, "starts_at": alert.starts_at, "ends_at": alert.ends_at, "values": dict(alert.values),
+            "remediation": alert.remediation}
 
 
 def _add(incident: Incident, fingerprint: str, member: dict[str, Any]) -> None:

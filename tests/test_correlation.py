@@ -10,10 +10,11 @@ import httpx
 import pytest
 
 from src import rca
-from src.grafana import Grafana, LogFields, parse_webhook
+from src.grafana import Grafana, parse_webhook
+from src.logs import LogFields
 from src.grouping import Alert, converge
 from src.main import ConfigError, Settings
-from tests.conftest import SHIFT, log_row, recorded_rows, recorded_trace, shifted, victoria, webhook
+from tests.conftest import collect_evidence, SHIFT, log_row, recorded_rows, recorded_trace, shifted, victoria, webhook
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)
 NOW = T0 + timedelta(seconds=64)
@@ -34,7 +35,7 @@ def incident(*services):
 
 def collect(fake, inc=None, *, logs="vl", traces="", limits=rca.EvidenceLimits(), **kw):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    return rca.collect_evidence(inc or incident(), EDGES, g, logs_datasource_uid=logs, id_fields=["eqp_id", "lot_id", "carrier_id"],
+    return collect_evidence(inc or incident(), EDGES, g, logs_datasource_uid=logs, id_fields=["eqp_id", "lot_id", "carrier_id"],
                                 now=NOW, limits=limits, traces_datasource_uid=traces, **kw)
 
 
@@ -272,8 +273,8 @@ def test_traces_and_timeline_settings(tmp_path):
     ("traces: {max_traces: -1}", "traces.max_traces"),
     ("traces: {max_spans: 0}", "traces.max_spans"),
     ("llm: {max_timeline_events: 0}", "llm.max_timeline_events"),
-    ("es: {datasource_uid: x}", "es（改成 logs）"),               # 換成 Victoria 之前的區段名稱：直接說改成什麼
-    ("tempo: {datasource_uid: x}", "tempo（改成 traces）"),
+    ("es: {datasource_uid: x}", "es（改成 logs，並加上 type: elasticsearch）"),               # 換成 Victoria 之前的區段名稱：直接說改成什麼
+    ("tempo: {datasource_uid: x}", "tempo（改成 traces，並加上 type: tempo）"),
     ("logs: {log_index: 'x-*'}", "logs 有不認得的設定"),
 ])
 def test_traces_and_timeline_settings_are_validated(tmp_path, text, message):

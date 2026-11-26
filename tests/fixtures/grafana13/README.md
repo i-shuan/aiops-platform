@@ -10,6 +10,8 @@
 | `annotation_create／patch／list.json` | 註記的建立、更新、依標籤查回（Editor Token） | `record.py` |
 | `victoria_logs.json` | 經 Grafana 代理查 VictoriaLogs v1.17.0（外掛 victoriametrics-logs-datasource 0.34.0）：`src/grafana.py` 每一個日誌查詢方法實際送出的請求與回應，加上寫進去的原始資料。2026-11-26 錄 | `record_victoria.py` |
 | `victoria_traces.json` | 經 Grafana 的 Jaeger 型別資料源查 VictoriaTraces v0.5.0：搜尋失敗的 Trace、用編號取、編號不存在（404）。2026-11-26 錄 | `record_victoria.py` |
+| `elasticsearch.json` | 經 Grafana 代理查 Elasticsearch 8.19.23：`src/logs.py` 的 Elasticsearch 每一個查詢方法、加上一次完整的證據收集，實際送出的請求與回應。資料跟 `victoria_logs.json` 是同一批。2026-11-26 錄 | `record_elasticsearch.py` |
+| `tempo_search.json`、`tempo_trace.json`、`tempo_trace_missing.json`、`tempo_search_bad_query.json` | 經 Grafana 代理查 Tempo 2.9.0：TraceQL 搜尋錯誤 Trace、用編號取、不存在（404、沒有內容）、TraceQL 寫錯（400）。送進去的三條 Trace 跟 VictoriaTraces 的是同一組。2026-11-23 錄 | `record_tempo.py` |
 | `meta.json` | Grafana 版本、錄製時間、資料源 uid | `record.py` |
 
 webhook 檔是 `{"headers", "body"}`（body 就是 Grafana 送的 JSON）；`victoria_*.json` 是 `{"exchanges": {名稱: [{"request", "status", "response"}]}}`，

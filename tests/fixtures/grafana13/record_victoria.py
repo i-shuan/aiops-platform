@@ -27,7 +27,9 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
-from src.grafana import Grafana, GrafanaError, LogFields  # noqa: E402
+from src.grafana import Grafana, GrafanaError  # noqa: E402
+from src.logs import LogFields, VictoriaLogs  # noqa: E402
+from src.traces import VictoriaTraces  # noqa: E402
 
 G, VL, VT = "http://127.0.0.1:23000", "http://127.0.0.1:29428", "http://127.0.0.1:29429"
 HERE = pathlib.Path(__file__).parent
@@ -162,34 +164,30 @@ def record(name, call):
     print(f"{name}: {len(exchanges[name])} 個請求 -> {shown[:150]}")
 
 
-L, ds = uids["logs"], lambda name: f'{{dataset="{name}"}}'
+L = uids["logs"]
+vlogs = lambda dataset, fields=LogFields(), raw_filter=None: VictoriaLogs(grafana, L, fields, raw_filter or f'{{dataset="{dataset}"}}')
 K8S = LogFields(service="kubernetes.container_name", level="")
 for name in (*DATASETS, "count-empty"):
-    record(f"dump_{name}", lambda: grafana._logsql(L, "* | sort by (_time)", START, END, extra_filter=ds(name)))
-record("search_errors", lambda: grafana.search_errors(L, SERVICES, START, END, 50, extra_filter=ds("factory")))
-record("search_errors_size_2", lambda: grafana.search_errors(L, SERVICES, START, END, 2, extra_filter=ds("factory")))
-record("search_errors_window", lambda: grafana.search_errors(L, SERVICES, BASE - timedelta(seconds=450), BASE - timedelta(seconds=390), 50,
-                                                           extra_filter=ds("factory")))
-record("search_errors_unparsed", lambda: grafana.search_errors(L, ["cim-eap", "mq-broker"], START, END, 50, log_fields=K8S,
-                                                             extra_filter=ds("unparsed")))
-record("error_profile", lambda: grafana.error_profile(L, SERVICES, START, END, warn_levels=("WARN", "WARNING"), first_n=2,
-                                                    extra_filter=ds("factory")))
-record("error_profile_warnings", lambda: grafana.error_profile(L, SERVICES, START, END, warn_levels=("WARN", "WARNING"),
-                                                             extra_filter=ds("count-no-errors")))
-record("count_phrases", lambda: grafana.count_phrases(
-    L, [("cim-eap", ["timeout", "waiting", "reply"], ("ERROR",)), ("cim-eap", ["equipment", "disconnected"], ("ERROR",)),
+    record(f"dump_{name}", lambda: vlogs(name)._query("* | sort by (_time)", START, END))
+record("search_errors", lambda: vlogs("factory").search_errors(SERVICES, START, END, 50))
+record("search_errors_size_2", lambda: vlogs("factory").search_errors(SERVICES, START, END, 2))
+record("search_errors_window", lambda: vlogs("factory").search_errors(SERVICES, BASE - timedelta(seconds=450), BASE - timedelta(seconds=390), 50))
+record("search_errors_unparsed", lambda: vlogs("unparsed", K8S).search_errors(["cim-eap", "mq-broker"], START, END, 50))
+record("error_profile", lambda: vlogs("factory").error_profile(SERVICES, START, END, warn_levels=("WARN", "WARNING"), first_n=2))
+record("error_profile_warnings", lambda: vlogs("count-no-errors").error_profile(SERVICES, START, END, warn_levels=("WARN", "WARNING")))
+record("count_phrases", lambda: vlogs("factory").count_phrases(
+    [("cim-eap", ["timeout", "waiting", "reply"], ("ERROR",)), ("cim-eap", ["equipment", "disconnected"], ("ERROR",)),
         ("mq-broker", ["consumer", "lag", "exceeded", "on", "queue", "lot.dispatch"], ("ERROR",)),
         ("amhs-mcs", ["no", "such", "words"], ("ERROR",))],
-    BASE - timedelta(seconds=450), END, START, extra_filter=ds("factory")))
-record("count_phrases_unparsed", lambda: grafana.count_phrases(
-    L, [("cim-eap", ["publish", "to", "eap.events", "timed", "out"], ("ERROR", "error")), ("cim-eap", ["health", "probe"], ("ERROR",))],
-    START, END, START - timedelta(minutes=30), log_fields=K8S, extra_filter=ds("unparsed")))
+    BASE - timedelta(seconds=450), END, START))
+record("count_phrases_unparsed", lambda: vlogs("unparsed", K8S).count_phrases(
+    [("cim-eap", ["publish", "to", "eap.events", "timed", "out"], ("ERROR", "error")), ("cim-eap", ["health", "probe"], ("ERROR",))],
+    START, END, START - timedelta(minutes=30)))
 for name in ("factory", "count-mismatch", "count-no-errors", "count-empty"):
-    record(f"count_logs_{name}", lambda: grafana.count_logs(L, SERVICES, START, END, extra_filter=ds(name)))
-record("search_timeline", lambda: grafana.search_timeline(L, "lot_id", ["LOT24A0031", "LOT24A0060", "LOT-NOPE"], START, END, 2,
-                                                         extra_filter=ds("factory")))
-record("quoted_service_name", lambda: grafana.search_errors(L, ['a"b\\c'], START, END, 5, extra_filter=ds("factory")))
-record("bad_filter", lambda: grafana.search_errors(L, SERVICES, START, END, 5, extra_filter="{dataset="))
+    record(f"count_logs_{name}", lambda: vlogs(name).count_logs(SERVICES, START, END))
+record("search_timeline", lambda: vlogs("factory").search_timeline("lot_id", ["LOT24A0031", "LOT24A0060", "LOT-NOPE"], START, END, 2))
+record("quoted_service_name", lambda: vlogs("factory").search_errors(['a"b\\c'], START, END, 5))
+record("bad_filter", lambda: vlogs("", raw_filter="{dataset=").search_errors(SERVICES, START, END, 5))
 (HERE / "victoria_logs.json").write_text(json.dumps({
     "versions": {"grafana": admin.get("/api/health").json()["version"], "victorialogs": "v1.17.0",
                  "plugin": "victoriametrics-logs-datasource 0.34.0"},
@@ -197,12 +195,12 @@ record("bad_filter", lambda: grafana.search_errors(L, SERVICES, START, END, 5, e
 
 exchanges = {}
 T = uids["traces"]
-record("search_error_traces", lambda: grafana.search_error_traces(T, ["web-portal", "mes-api", "mes-db"], START, END, 20))
-record("search_no_such_service", lambda: grafana.search_error_traces(T, ["nope"], START, END, 20))
-record("get_trace", lambda: grafana.get_trace(T, "11" * 16))
-record("get_trace_ok", lambda: grafana.get_trace(T, "33" * 16))
-record("get_trace_missing", lambda: grafana.get_trace(T, "ff" * 16))
-record("get_trace_bad_id", lambda: grafana.get_trace(T, "not-a-trace-id"))
+record("search_error_traces", lambda: VictoriaTraces(grafana, T).search_error_traces(["web-portal", "mes-api", "mes-db"], START, END, 20))
+record("search_no_such_service", lambda: VictoriaTraces(grafana, T).search_error_traces(["nope"], START, END, 20))
+record("get_trace", lambda: VictoriaTraces(grafana, T).get_trace("11" * 16))
+record("get_trace_ok", lambda: VictoriaTraces(grafana, T).get_trace("33" * 16))
+record("get_trace_missing", lambda: VictoriaTraces(grafana, T).get_trace("ff" * 16))
+record("get_trace_bad_id", lambda: VictoriaTraces(grafana, T).get_trace("not-a-trace-id"))
 (HERE / "victoria_traces.json").write_text(json.dumps({
     "versions": {"grafana": admin.get("/api/health").json()["version"], "victoriatraces": "v0.5.0"},
     "token_role": "Editor", "exchanges": exchanges}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")

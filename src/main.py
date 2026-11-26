@@ -29,7 +29,11 @@ import yaml
 
 from src import grouping, rca, report
 from src.db import Database
-from src.grafana import Grafana, GrafanaError, LabelNames, LogFields
+from src import logs as logstores
+from src import outputs as outlets
+from src import traces as tracestores
+from src.grafana import Grafana, GrafanaError, LabelNames
+from src.logs import LogFields
 
 log = logging.getLogger("aiops_lite")
 
@@ -62,12 +66,16 @@ class Settings:
     llm: rca.LlmOptions = rca.LlmOptions()
     llm_retry_initial_seconds: int = 60
     llm_retry_max_seconds: int = 1800
-    logs_datasource_uid: str = ""              # Grafana 上 VictoriaLogs 資料源的 uid；空的 = 沒有日誌證據
-    logs_filter: str = ""                      # 加在每條日誌查詢前面的 LogsQL 條件（logs.extra_filter）
-    traces_datasource_uid: str = ""            # Grafana 上 Jaeger 型別（指到 VictoriaTraces）資料源的 uid；空的 = 沒有呼叫鏈證據
+    logs_type: str = "victorialogs"            # 日誌的來源：victorialogs／elasticsearch（logs.type）
+    logs_datasource_uid: str = ""              # Grafana 上那個資料源的 uid；空的 = 沒有日誌證據
+    logs_filter: str = ""                      # 只有 VictoriaLogs：加在每條日誌查詢前面的 LogsQL 條件（logs.extra_filter）
+    logs_index: str = "*"                      # 只有 Elasticsearch：要查的索引（logs.index）
+    traces_type: str = "victoriatraces"        # Trace 的來源：victoriatraces（Grafana 的 Jaeger 型別資料源）／tempo
+    traces_datasource_uid: str = ""            # Grafana 上那個資料源的 uid；空的 = 沒有呼叫鏈證據
     metrics: rca.MetricOptions = rca.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
     log_fields: LogFields = LogFields()
+    outputs: outlets.OutputOptions = outlets.OutputOptions()   # 註記以外的出口：事故 API、自動修復（沒設 url = 佔位）
     evidence: rca.EvidenceLimits = rca.EvidenceLimits()
     labels: LabelNames = LabelNames()
     tz: str = "Asia/Taipei"
@@ -90,12 +98,13 @@ class Settings:
     @classmethod
     def from_dict(cls, raw: dict[str, Any], base_dir: Path | None = None) -> "Settings":
         """base_dir：llm.system_prompt_file 寫相對路徑時相對於哪裡（= 設定檔所在的資料夾）。"""
-        known = {"grafana", "webhook", "database", "llm", "logs", "traces", "labels", "healthcheck", "annotation", "metrics", "timezone",
+        known = {"grafana", "webhook", "database", "llm", "logs", "traces", "outputs", "labels", "healthcheck", "annotation", "metrics", "timezone",
                  "log_level", "edges", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
-        moved = [f"{old}（改成 {new}）" for old, new in (("es", "logs"), ("tempo", "traces")) if old in raw]
+        moved = [f"{old}（改成 {new}）" for old, new in (("es", "logs，並加上 type: elasticsearch"), ("tempo", "traces，並加上 type: tempo"))
+                 if old in raw]
         if moved:
-            raise ConfigError(f"資料來源換成 Victoria 之後，設定的區段改名了：{'、'.join(moved)}。"
-                              f"logs 底下也沒有 log_index、trace_index、trace_fields 了，見 config.example.yaml")
+            raise ConfigError(f"設定的區段改名了：{'、'.join(moved)}。logs 底下的 log_index 改叫 index、log_fields 改叫 fields，"
+                              f"trace_index 與 trace_fields 沒有了，見 config.example.yaml")
         check_keys(raw, known, "")
         grafana = section(raw, "grafana", {"url", "token", "timeout_seconds", "retries", "retry_backoff_seconds"})
         webhook = section(raw, "webhook", {"token", "port", "host", "max_body_bytes"})
@@ -105,10 +114,10 @@ class Settings:
                                    "top_ids", "max_summary_chars", "system_prompt_file", "id_pattern",
                                    "max_timeline_ids", "max_timeline_events", "max_log_patterns",
                                    "max_warn_patterns"})
-        logs = section(raw, "logs", {"datasource_uid", "extra_filter", "id_fields", "fields", "error_levels", "warn_levels",
+        logs = section(raw, "logs", {"type", "datasource_uid", "extra_filter", "index", "id_fields", "fields", "error_levels", "warn_levels",
                                      "max_hits", "window_padding_minutes", "timeline_fields", "baseline_minutes"})
-        traces = section(raw, "traces", {"datasource_uid", "max_traces", "max_spans", "trace_id_field"})
-        labels = section(raw, "labels", {"detect", "severity", "service", "default_severity"})
+        traces = section(raw, "traces", {"type", "datasource_uid", "max_traces", "max_spans", "trace_id_field"})
+        labels = section(raw, "labels", {"detect", "severity", "service", "default_severity", "remediation"})
         metrics = section(raw, "metrics", {"datasource_uid", "queries", "lookback_minutes", "step_seconds", "max_points",
                                            "max_series"})
         health = section(raw, "healthcheck", {"stuck_seconds"})
@@ -129,7 +138,7 @@ class Settings:
         default_severity = text(labels, "default_severity", d_lab.default_severity, "labels.").upper()
         if default_severity not in grouping.SEVERITY_RANK:
             raise ConfigError(f"labels.default_severity={default_severity!r} 要是 P0～P3")
-        names = LabelNames(**{k: text(labels, k, getattr(d_lab, k), "labels.") for k in ("detect", "severity", "service")},
+        names = LabelNames(**{k: text(labels, k, getattr(d_lab, k), "labels.") for k in ("detect", "severity", "service", "remediation")},
                            default_severity=default_severity)
         if not all((names.detect, names.severity, names.service)) or len({names.detect, names.severity, names.service}) < 3:
             raise ConfigError("labels.detect、labels.severity、labels.service 要是三個不同、非空的標籤名稱")
@@ -145,6 +154,10 @@ class Settings:
         retry_max = integer(llm, "retry_max_seconds", cls.llm_retry_max_seconds, 1, prefix="llm.")
         if retry_max < retry_initial:
             raise ConfigError("llm.retry_max_seconds 不能比 llm.retry_initial_seconds 小")
+        logs_type = one_of(logs, "type", "victorialogs", LOG_STORES, "logs.")
+        for key, only in (("extra_filter", "victorialogs"), ("index", "elasticsearch")):
+            if key in logs and logs_type != only:
+                raise ConfigError(f"logs.{key} 只有 logs.type 是 {only} 的時候才有用（現在是 {logs_type}）")
         ids = logs.get("id_fields", list(cls.id_fields))
         if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids):
             raise ConfigError("logs.id_fields 要是非空的欄位名稱清單")
@@ -178,10 +191,12 @@ class Settings:
                 system_prompt=read_prompt(text(llm, "system_prompt_file", "", "llm."), base_dir),
                 id_pattern=id_pattern),
             llm_retry_initial_seconds=retry_initial, llm_retry_max_seconds=retry_max,
-            logs_datasource_uid=text(logs, "datasource_uid", "", "logs."), logs_filter=text(logs, "extra_filter", "", "logs."),
-            id_fields=tuple(ids), traces_datasource_uid=text(traces, "datasource_uid", "", "traces."),
+            logs_type=logs_type, logs_datasource_uid=text(logs, "datasource_uid", "", "logs."),
+            logs_filter=text(logs, "extra_filter", "", "logs."), logs_index=text(logs, "index", "*", "logs.") or "*",
+            id_fields=tuple(ids), traces_type=one_of(traces, "type", "victoriatraces", TRACE_STORES, "traces."),
+            traces_datasource_uid=text(traces, "datasource_uid", "", "traces."),
             metrics=metric_options(metrics),
-            log_fields=log_field_names(logs),
+            log_fields=log_field_names(logs, logs_type), outputs=output_options(raw),
             evidence=rca.EvidenceLimits(
                 max_hits=integer(logs, "max_hits", d_ev.max_hits, 1, 10000, "logs."),
                 window_padding_minutes=integer(logs, "window_padding_minutes", d_ev.window_padding_minutes, 0, 1440, "logs."),
@@ -281,11 +296,11 @@ def check_keys(raw: dict[str, Any], known: set[str], where: str) -> None:
         raise ConfigError(f"設定檔{('的 ' + where + ' ') if where else ''}有不認得的設定 {unknown}；可用：{sorted(known)}")
 
 
-def section(raw: dict[str, Any], name: str, known: set[str]) -> dict[str, Any]:
+def section(raw: dict[str, Any], name: str, known: set[str], prefix: str = "") -> dict[str, Any]:
     value = raw.get(name) or {}
     if not isinstance(value, dict):
-        raise ConfigError(f"{name} 要是一組設定（物件）")
-    check_keys(value, known, name)
+        raise ConfigError(f"{prefix}{name} 要是一組設定（物件）")
+    check_keys(value, known, f"{prefix}{name}")
     return value
 
 
@@ -298,17 +313,66 @@ def text(raw: dict[str, Any], key: str, default: str, prefix: str = "") -> str:
     return value.strip()
 
 
-def log_field_names(logs: dict[str, Any]) -> LogFields:
-    """logs.fields：日誌裡「系統名稱」與「等級」兩個欄位叫什麼。時間與訊息在 VictoriaLogs 固定是 _time、_msg，不用設定。"""
+def output_options(raw: dict[str, Any]) -> outlets.OutputOptions:
+    """outputs：註記以外的兩個出口。url 留空 = 佔位（不送，只把本來會送的內容記進資料庫）。"""
+    out = section(raw, "outputs", {"incident_api", "remediation", "timeout_seconds"})
+    api = section(out, "incident_api", {"url", "token"}, "outputs.")
+    fix = section(out, "remediation", {"url", "token", "enabled"}, "outputs.")
+    enabled = fix.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("outputs.remediation.enabled 要是 true 或 false")
+    if enabled and not text(fix, "url", "", "outputs.remediation."):
+        raise ConfigError("outputs.remediation.enabled 是 true，但沒有設 outputs.remediation.url")
+    for name, part in (("incident_api", api), ("remediation", fix)):
+        url = text(part, "url", "", f"outputs.{name}.")
+        if url and not url.startswith(("http://", "https://")):
+            raise ConfigError(f"outputs.{name}.url 要是 http:// 或 https:// 開頭的網址")
+    return outlets.OutputOptions(
+        incident_api_url=text(api, "url", "", "outputs.incident_api."), incident_api_token=text(api, "token", "", "outputs.incident_api."),
+        remediation_url=text(fix, "url", "", "outputs.remediation."), remediation_token=text(fix, "token", "", "outputs.remediation."),
+        remediation_enabled=enabled, timeout_seconds=number(out, "timeout_seconds", 10.0, 1, 120, "outputs."))
+
+
+LOG_STORES = ("victorialogs", "elasticsearch")
+TRACE_STORES = ("victoriatraces", "tempo")
+
+
+def one_of(section: dict[str, Any], key: str, default: str, choices: tuple[str, ...], prefix: str) -> str:
+    value = section.get(key, default)
+    if value not in choices:
+        raise ConfigError(f"{prefix}{key} 要是 {'／'.join(choices)} 其中之一，現在是 {value!r}")
+    return value
+
+
+def log_field_names(logs: dict[str, Any], logs_type: str) -> LogFields:
+    """logs.fields：日誌裡各個欄位叫什麼。service、level 兩種來源都有；time、message 只有 Elasticsearch 能設
+    （VictoriaLogs 的時間與訊息固定是 _time、_msg）。唯一可以留空的是 level：改用訊息文字挑錯誤日誌。"""
     raw = logs.get("fields") or {}
     if not isinstance(raw, dict):
         raise ConfigError("logs.fields 要是 欄位用途: 欄位名稱 的對照")
-    check_keys(raw, {f.name for f in fields(LogFields)}, "logs.fields")
+    allowed = {"service", "level"} | ({"time", "message"} if logs_type == "elasticsearch" else set())
+    check_keys(raw, allowed, "logs.fields")
     values = {k: text(raw, k, getattr(LogFields(), k), "logs.fields.") for k in raw}
-    # 唯一可以留空的是 level：日誌沒有等級欄位時，改用訊息文字挑錯誤日誌（grafana.search_errors）
-    if "service" in values and not values["service"]:
-        raise ConfigError("logs.fields 的欄位名稱不能是空的（只有 level 可以留空）")
+    empty = [k for k, v in values.items() if not v and k != "level"]
+    if empty:
+        raise ConfigError(f"logs.fields 的欄位名稱不能是空的（只有 level 可以留空）：{empty}")
     return LogFields(**values)
+
+
+def log_store(settings: "Settings", grafana: Grafana) -> Any:
+    """照 logs.type 建日誌的來源；沒設 datasource_uid 回 None（沒有日誌證據）。"""
+    if not settings.logs_datasource_uid:
+        return None
+    if settings.logs_type == "elasticsearch":
+        return logstores.Elasticsearch(grafana, settings.logs_datasource_uid, settings.log_fields, settings.logs_index)
+    return logstores.VictoriaLogs(grafana, settings.logs_datasource_uid, settings.log_fields, settings.logs_filter)
+
+
+def trace_store(settings: "Settings", grafana: Grafana) -> Any:
+    if not settings.traces_datasource_uid:
+        return None
+    kind = tracestores.Tempo if settings.traces_type == "tempo" else tracestores.VictoriaTraces
+    return kind(grafana, settings.traces_datasource_uid)
 
 
 MAX_METRIC_QUERIES = 20   # 每張事故要查「查詢數 × 系統數」次：設個上限，避免一份設定把指標資料庫打爆
@@ -375,7 +439,7 @@ def backoff_seconds(failures: int, initial: int, maximum: int) -> int:
 
 
 def process(settings: Settings, *, now: datetime | None = None, grafana_transport: httpx.BaseTransport | None = None,
-            llm_transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
+            llm_transport: httpx.BaseTransport | None = None, outputs_transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
     """跑一輪，回傳這一輪的摘要（needs_followup = 還有事要做，沒有新 Webhook 也要再跑）。
     transport 參數只是 HTTP 連線的注入點（預設真的連出去）。"""
     started = datetime.now(timezone.utc)
@@ -385,7 +449,9 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
     grafana = Grafana(settings.grafana_url, settings.grafana_token, transport=grafana_transport,
                       timeout=settings.grafana_timeout_seconds, retries=settings.grafana_retries,
                       retry_backoff_seconds=settings.grafana_retry_backoff_seconds)
+    outputs = outlets.Outputs(settings.outputs, db, transport=outputs_transport)
     errors: list[str] = []
+    undelivered: list[str] = []   # 這一輪事故 API、修復請求沒送成功的（每一輪重新算，不跨輪）
     incidents: list[grouping.Incident] = []
     batch: list[grouping.Alert] = []
     status = "failed"
@@ -396,6 +462,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                                       close_after_seconds=settings.close_after_seconds)
         known = {i.uid for i in incidents}
         incidents += [i for i in db.unannotated_incidents() if i.uid not in known]
+        known = {i.uid for i in incidents}
+        incidents += [i for i in db.incidents_to_redeliver(outlets.MAX_ATTEMPTS) if i.uid not in known]   # 出口上次沒送成功的
         can_analyze = bool(settings.llm_api_url and settings.llm_model)
         for inc in incidents:
             if inc.status != "open":
@@ -413,9 +481,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 log.debug("事故 %s 的 LLM 分析退避中，%s 之前不再試", inc.uid, inc.llm_next_try.isoformat())
                 continue
             evidence = rca.collect_evidence(
-                inc, edges, grafana, logs_datasource_uid=settings.logs_datasource_uid, id_fields=list(settings.id_fields),
-                now=now, log_fields=settings.log_fields, limits=settings.evidence, logs_filter=settings.logs_filter,
-                traces_datasource_uid=settings.traces_datasource_uid, metrics=settings.metrics)
+                inc, edges, grafana, logs=log_store(settings, grafana), traces=trace_store(settings, grafana),
+                id_fields=list(settings.id_fields), now=now, limits=settings.evidence, metrics=settings.metrics)
             before = (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates)
             # 「證據」那幾行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
             groups = rca.overview(evidence, settings.log_fields, settings.evidence.error_levels)
@@ -436,8 +503,12 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 delay = backoff_seconds(inc.llm_failures, settings.llm_retry_initial_seconds, settings.llm_retry_max_seconds)
                 inc.llm_next_try, inc.changed = now + timedelta(seconds=delay), True
                 errors.append(f"事故 {inc.uid} 未經 LLM 分析（連續第 {inc.llm_failures} 次）：{reason}；{delay} 秒後再試")
-        # 寫入順序：先落地自己的資料庫（事故 + 這批告警處理完了），再寫 Grafana；註記寫成功才記 annotated
+        # 寫入順序：先落地自己的資料庫（事故 + 這批告警處理完了），再對外：修復請求 → Grafana 註記 → 事故 API。
+        # 註記寫成功才記 annotated；出口各自記在 deliveries 表，失敗的下一輪再試，不影響註記
         db.save_incidents([i for i in incidents if i.changed], now, processed=ids)
+        for inc in incidents:
+            undelivered += outputs.remediate(inc, now)   # 註記上要顯示修復請求的狀態，所以排在寫註記之前
+        db.save_incidents([i for i in incidents if i.changed], now)
         written = []
         for inc in incidents:
             if inc.annotated:
@@ -452,6 +523,9 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 log.warning("事故 %s 的註記沒寫成功，下一輪補：%s", inc.uid, e)
                 errors.append(f"事故 {inc.uid} 的註記寫入失敗：{e}")
         db.save_incidents(written, now)
+        for inc in incidents:
+            undelivered += outputs.publish(inc, settings.grafana_url, now)
+        errors += undelivered
         status = "degraded" if errors else "ok"
     except Exception as e:
         log.exception("這一輪失敗")
@@ -461,13 +535,15 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
         open_count = sum(1 for i in incidents if i.status == "open")
         summary = {"status": status, "alerts": len(batch), "open_incidents": open_count, "errors": errors,
                    "incidents": [i.uid for i in incidents if i.changed or i.annotated],
-                   "needs_followup": open_count > 0 or any(not i.annotated for i in incidents)}
+                   "needs_followup": open_count > 0 or any(not i.annotated for i in incidents)
+                   or bool(undelivered)}   # 出口沒送成功的：下一輪再試
         try:
             db.record_round(started_at=started, finished_at=datetime.now(timezone.utc), status=status,
                             alerts=len(batch), open_incidents=open_count, errors=errors,
                             retention_days=settings.rounds_retention_days)
         except Exception:  # 連執行紀錄都寫不進去（資料庫斷線）：留一行 log，不蓋掉原本的錯誤
             log.exception("這一輪的執行紀錄寫不進資料庫")
+        outputs.close()
         grafana.close()
         db.close()
     return summary

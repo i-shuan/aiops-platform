@@ -18,12 +18,26 @@ llm:
   retry_initial_seconds: {{ int .Values.llm.retryInitialSeconds }}
   retry_max_seconds: {{ int .Values.llm.retryMaxSeconds }}
 logs:
+  type: {{ .Values.logs.type | quote }}
   datasource_uid: {{ .Values.logs.datasourceUid | quote }}
+  {{- if eq .Values.logs.type "elasticsearch" }}
+  index: {{ default "*" .Values.logs.index | quote }}
+  {{- else }}
   extra_filter: {{ .Values.logs.extraFilter | quote }}
+  {{- end }}
   id_fields: {{ toJson .Values.logs.idFields }}
   fields: {{ toJson .Values.logs.fields }}
 traces:
+  type: {{ .Values.traces.type | quote }}
   datasource_uid: {{ .Values.traces.datasourceUid | quote }}
+outputs:
+  incident_api:
+    url: {{ .Values.outputs.incidentApi.url | quote }}
+    token: {{ .Values.outputs.incidentApi.token | quote }}
+  remediation:
+    url: {{ .Values.outputs.remediation.url | quote }}
+    token: {{ .Values.outputs.remediation.token | quote }}
+    enabled: {{ .Values.outputs.remediation.enabled }}
 metrics:
   datasource_uid: {{ .Values.metrics.datasourceUid | quote }}
   queries: {{ toJson (default (list) .Values.metrics.queries) }}

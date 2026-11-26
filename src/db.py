@@ -47,6 +47,7 @@ incidents = sa.Table(
     sa.Column("llm_next_try", TS),
     sa.Column("candidates", sa.Text),      # 可以是 NULL（舊資料、沒有經過 LLM）
     sa.Column("evidence_note", sa.Text),   # 可以是 NULL（舊資料、還沒收集過證據）
+    sa.Column("actions_note", sa.Text),    # 註記上「自動修復｜…」那一行；可以是 NULL（沒有修復流程）
     sa.Column("updated_at", TS, nullable=False),
 )
 
@@ -59,6 +60,20 @@ rounds = sa.Table(
     sa.Column("alerts", sa.Integer, nullable=False, default=0),
     sa.Column("open_incidents", sa.Integer, nullable=False, default=0),
     sa.Column("errors", sa.Text, nullable=False, default="[]"),  # JSON 陣列（字串）
+)
+
+deliveries = sa.Table(
+    "deliveries", metadata,   # 註記以外的出口（事故 API、自動修復）處理過什麼：見 src/outputs.py
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("channel", sa.String(32), nullable=False),          # incident_api／remediation
+    sa.Column("dedupe_key", sa.String(64), nullable=False),       # 同一個出口、同樣的內容只處理一次
+    sa.Column("incident_uid", sa.String(32), nullable=False, index=True),
+    sa.Column("status", sa.String(16), nullable=False),           # placeholder（沒有送出）／sent／failed
+    sa.Column("payload", sa.Text, nullable=False),                # JSON：送出去的（或本來會送的）內容
+    sa.Column("detail", sa.Text, nullable=False, default=""),     # 失敗的原因
+    sa.Column("attempts", sa.Integer, nullable=False, default=0),
+    sa.Column("updated_at", TS, nullable=False),
+    sa.UniqueConstraint("channel", "dedupe_key"),
 )
 
 MEMBER_TIMES = ("starts_at", "ends_at")
@@ -109,7 +124,7 @@ class Database:
         if not alerts:
             return
         rows = [{"received_at": now, "alert": json.dumps({
-            **{k: getattr(a, k) for k in ("fingerprint", "status", "rule_uid", "title", "service", "severity", "values")},
+            **{k: getattr(a, k) for k in ("fingerprint", "status", "rule_uid", "title", "service", "severity", "values", "remediation")},
             "starts_at": _iso(a.starts_at), "ends_at": _iso(a.ends_at)}, ensure_ascii=False)} for a in alerts]
         with self.engine.begin() as conn:
             conn.execute(sa.insert(inbox), rows)
@@ -138,7 +153,7 @@ class Database:
             ended_at=_utc(row["ended_at"]), resolved_at=_utc(row["resolved_at"]), alert_count=row["alert_count"],
             summary=row["summary"], analyzed=bool(row["analyzed"]), annotation_id=row["annotation_id"],
             annotated=bool(row["annotated"]), llm_failures=row["llm_failures"], llm_next_try=_utc(row["llm_next_try"]),
-            evidence_note=row["evidence_note"] or "", candidates=row["candidates"] or "")
+            evidence_note=row["evidence_note"] or "", candidates=row["candidates"] or "", actions_note=row["actions_note"] or "")
 
     def _select(self, where: Any) -> list[Incident]:
         with self.engine.connect() as conn:
@@ -169,12 +184,47 @@ class Database:
                     "resolved_at": inc.resolved_at, "alert_count": inc.alert_count, "summary": inc.summary,
                     "analyzed": inc.analyzed, "annotation_id": inc.annotation_id, "annotated": inc.annotated,
                     "llm_failures": inc.llm_failures, "llm_next_try": inc.llm_next_try,
-                    "evidence_note": inc.evidence_note, "candidates": inc.candidates, "updated_at": now}
+                    "evidence_note": inc.evidence_note, "candidates": inc.candidates, "actions_note": inc.actions_note,
+                    "updated_at": now}
                 done = conn.execute(sa.update(incidents).where(incidents.c.uid == inc.uid).values(**values))
                 if done.rowcount == 0:
                     conn.execute(sa.insert(incidents).values(uid=inc.uid, **values))
             if processed:
                 conn.execute(sa.delete(inbox).where(inbox.c.id.in_(list(processed))))
+
+    # ── 出口的處理紀錄 ──
+
+    def delivery(self, channel: str, key: str) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(sa.select(deliveries).where(deliveries.c.channel == channel, deliveries.c.dedupe_key == key)).mappings().first()
+        return dict(row) if row else None
+
+    def has_delivery(self, channel: str, incident_uid: str) -> bool:
+        """這張事故在這個出口處理過了沒（佔位也算）：用來分辨第一次（opened）與之後的更新（updated）。"""
+        with self.engine.connect() as conn:
+            return conn.execute(sa.select(deliveries.c.id).where(deliveries.c.channel == channel, deliveries.c.incident_uid == incident_uid,
+                                                                  deliveries.c.status.in_(("sent", "placeholder"))).limit(1)).first() is not None
+
+    def deliveries_of(self, channel: str, incident_uid: str) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(sa.select(deliveries).where(
+                deliveries.c.channel == channel, deliveries.c.incident_uid == incident_uid).order_by(deliveries.c.id)).mappings()]
+
+    def record_delivery(self, channel: str, key: str, incident_uid: str, status: str, payload: dict[str, Any], detail: str,
+                        attempts: int, now: datetime) -> None:
+        values = {"incident_uid": incident_uid, "status": status, "payload": json.dumps(payload, ensure_ascii=False),
+                  "detail": detail, "attempts": attempts, "updated_at": now}
+        with self.engine.begin() as conn:
+            done = conn.execute(sa.update(deliveries).where(deliveries.c.channel == channel, deliveries.c.dedupe_key == key).values(**values))
+            if done.rowcount == 0:
+                conn.execute(sa.insert(deliveries).values(channel=channel, dedupe_key=key, **values))
+
+    def incidents_to_redeliver(self, max_attempts: int) -> list[Incident]:
+        """有出口沒送成功、還可以再試的事故（包含已經結案的：結案那一筆沒送到也要補）。"""
+        with self.engine.connect() as conn:
+            uids = [r[0] for r in conn.execute(sa.select(deliveries.c.incident_uid).where(
+                deliveries.c.status == "failed", deliveries.c.attempts < max_attempts).distinct())]
+        return self._select(incidents.c.uid.in_(uids)) if uids else []
 
     # ── 執行紀錄 ──
 

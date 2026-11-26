@@ -11,7 +11,7 @@ from src import rca, report
 from src.db import Database
 from src.grafana import Grafana, parse_webhook
 from src.grouping import converge
-from tests.conftest import webhook
+from tests.conftest import collect_evidence, webhook
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)   # 樣本裡 MQ 告警的 startsAt
 NOW = T0 + timedelta(seconds=64)
@@ -30,7 +30,7 @@ def incident():
 
 def evidence(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    return rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
+    return collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
 
 
 def llm(answer, status=200):
@@ -68,10 +68,10 @@ def test_evidence_has_the_four_packs(fake):
 
 def test_evidence_without_log_datasource_or_when_the_query_fails_is_still_usable(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    ev = rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="", id_fields=["eqp_id"], now=NOW)
+    ev = collect_evidence(incident(), EDGES, g, logs_datasource_uid="", id_fields=["eqp_id"], now=NOW)
     assert ev["error_logs"] == [] and "沒有設定日誌資料源" in ev["notes"][0] and fake.log_queries == []
     fake.fail.add("/api/datasources/proxy")
-    ev = rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW)
+    ev = collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW)
     assert ev["error_logs"] == [] and "撈取失敗" in ev["notes"][0] and len(ev["anomalies"]) == 2
 
 

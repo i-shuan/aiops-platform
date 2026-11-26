@@ -609,7 +609,7 @@
      }
     },
     "status": 400,
-    "response": "remoteAddr: \"127.0.0.1:33196, X-Forwarded-For: 127.0.0.1, 127.0.0.1\"; requestURI: /select/logsql/query?end=2026-11-21T00%3A37%3A38.000000Z&query=%7Bdataset%3D+%22service.name%22%3Ain%28%22mq-broker%22%2C%22cim-eap%22%2C%22amhs-mcs%22%29+%22log.level%22%3Ain%28%22ERROR%22%2C%22error%22%2C%22Error%22%2C%22FATAL%22%2C%22fatal%22%2C%22CRITICAL%22%2C%22critical%22%29+%7C+sort+by+%28_time%29+desc+%7C+limit+5&start=2026-11-20T23%3A36%3A38.000000Z; cannot parse query [{dataset= \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 5]: unexpected token \"(\" in _stream filter; want 'or', 'and', '}' or ','; context: [{dataset= \"service.name\":in(]\n"
+    "response": "remoteAddr: \"127.0.0.1:37100, X-Forwarded-For: 127.0.0.1, 127.0.0.1\"; requestURI: /select/logsql/query?end=2026-11-21T00%3A37%3A38.000000Z&query=%7Bdataset%3D+%22service.name%22%3Ain%28%22mq-broker%22%2C%22cim-eap%22%2C%22amhs-mcs%22%29+%22log.level%22%3Ain%28%22ERROR%22%2C%22error%22%2C%22Error%22%2C%22FATAL%22%2C%22fatal%22%2C%22CRITICAL%22%2C%22critical%22%29+%7C+sort+by+%28_time%29+desc+%7C+limit+5&start=2026-11-20T23%3A36%3A38.000000Z; cannot parse query [{dataset= \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 5]: unexpected token \"(\" in _stream filter; want 'or', 'and', '}' or ','; context: [{dataset= \"service.name\":in(]\n"
    }
   ]
  }

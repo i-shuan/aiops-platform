@@ -11,7 +11,7 @@
 Grafana（Editor Token）、LLM。VictoriaLogs 不能刪單筆資料，所以每次執行、每個案例各寫進自己的 dataset（stream 欄位），
 查詢時用 logs.extra_filter 只看那一個；跑完資料留在裡面，整個資料目錄刪掉就清乾淨。
 設定用環境變數（這是開發工具，不走 config.yaml）：
-  EVAL_VL_URL、EVAL_GRAFANA_URL、EVAL_GRAFANA_TOKEN、EVAL_GRAFANA_ADMIN（user:password，用來建 VictoriaLogs 資料源）、
+  EVAL_VL_URL（--backend elasticsearch 時改用 EVAL_ES_URL）、EVAL_GRAFANA_URL、EVAL_GRAFANA_TOKEN、EVAL_GRAFANA_ADMIN（user:password，用來建 VictoriaLogs 資料源）、
   LLM_API_URL（預設 https://api.openai.com/v1）、LLM_API_KEY、LLM_CHAT_MODEL
 """
 from __future__ import annotations
@@ -30,7 +30,8 @@ from dataclasses import replace
 
 from eval.scenarios import HELD_OUT, SCENARIOS
 from src import rca
-from src.grafana import Grafana, LogFields
+from src.grafana import Grafana
+from src.logs import Elasticsearch, LogFields, VictoriaLogs
 from src.grouping import Alert, converge
 from src.main import Settings
 
@@ -74,16 +75,48 @@ def ensure_datasource(grafana_url: str, admin: str, vl_url: str) -> str:
         return made.json()["datasource"]["uid"]
 
 
-def build_evidence(scenario: dict, grafana: Grafana, uid: str, dataset: str, now: datetime, settings: Settings):
+def load_es(es: httpx.Client, index: str, logs: list, now: datetime, unparsed: bool = False) -> int:
+    """unparsed：照沒拆欄位的 K8s 容器日誌寫（動態 mapping、等級只在訊息文字裡、識別碼也只在訊息裡）。"""
+    es.delete(f"/{index}")
+    mapping = {"@timestamp": {"type": "date"}} if unparsed else {
+        "@timestamp": {"type": "date"}, "service": {"properties": {"name": {"type": "keyword"}}},
+        "log": {"properties": {"level": {"type": "keyword"}}}, "message": {"type": "text"}}
+    es.put(f"/{index}", json={"mappings": {"properties": mapping}}).raise_for_status()
+    lines = []
+    for ago, service, level, message, fields in logs:
+        stamp = (now - timedelta(seconds=ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        doc = ({"@timestamp": stamp, "stream": "stdout", "kubernetes": {"container_name": service, "namespace_name": "factory"},
+                "message": f"{stamp} | {level:<5} | worker-1 | {message}"} if unparsed else
+               {"@timestamp": stamp, "service": {"name": service}, "log": {"level": level}, "message": message, **fields})
+        lines.append(json.dumps({"index": {}}))
+        lines.append(json.dumps(doc, ensure_ascii=False))
+    r = es.post(f"/{index}/_bulk?refresh=true", content="\n".join(lines) + "\n", headers={"Content-Type": "application/x-ndjson"})
+    r.raise_for_status()
+    assert not r.json()["errors"], r.text[:300]
+    return len(logs)
+
+
+def ensure_es_datasource(grafana_url: str, admin: str, es_url: str) -> str:
+    user, password = admin.split(":", 1)
+    with httpx.Client(base_url=grafana_url, auth=(user, password), timeout=30) as http:
+        old = http.get("/api/datasources/name/eval-es")
+        if old.status_code == 200:
+            return old.json()["uid"]
+        made = http.post("/api/datasources", json={"name": "eval-es", "type": "elasticsearch", "access": "proxy", "url": es_url,
+                                                   "jsonData": {"index": "eval-*", "timeField": "@timestamp"}})
+        made.raise_for_status()
+        return made.json()["datasource"]["uid"]
+
+
+def build_evidence(scenario: dict, grafana: Grafana, store, now: datetime, settings: Settings):
     alerts = [Alert(f"{scenario['name']}-{i}", "firing", f"rule-{i}", title, service, severity, now - timedelta(seconds=ago), None, {"A": 1})
               for i, (service, title, severity, ago) in enumerate(scenario["alerts"])]
     edges = list(scenario["edges"])
     incidents = converge([], alerts, [], edges, now=now, close_after_seconds=300)
     assert len(incidents) == 1, f"{scenario['name']}：告警沒有收斂成一張事故（{len(incidents)} 張），案例的關係邊要補"
     [incident] = incidents
-    evidence = rca.collect_evidence(incident, edges, grafana, logs_datasource_uid=uid, id_fields=list(settings.id_fields), now=now,
-                                    log_fields=settings.log_fields, limits=settings.evidence, logs_filter=f'{{dataset="{dataset}"}}')
-    overview = rca.overview_text(rca.overview(evidence, settings.log_fields, settings.evidence.error_levels))
+    evidence = rca.collect_evidence(incident, edges, grafana, logs=store, id_fields=list(settings.id_fields), now=now, limits=settings.evidence)
+    overview = rca.overview_text(rca.overview(evidence, store.fields, settings.evidence.error_levels))
     return evidence, overview
 
 
@@ -121,14 +154,16 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--only", default="", help="只跑名稱含這個字的案例")
     parser.add_argument("--set", default="tuning", choices=["tuning", "heldout"], help="tuning＝開發時用的十個；heldout＝留出的")
+    parser.add_argument("--backend", default="victorialogs", choices=["victorialogs", "elasticsearch"], help="日誌寫進哪一種、從哪一種查")
     parser.add_argument("--drop", default="", help="問之前從證據裡拿掉這些鍵（逗號分隔），例如 error_patterns,warnings")
     parser.add_argument("--out", default="")
     parser.add_argument("--show-prompt", action="store_true")
     args = parser.parse_args()
     env = os.environ
     llm = {"url": env.get("LLM_API_URL", "https://api.openai.com/v1"), "key": env["LLM_API_KEY"], "model": env["LLM_CHAT_MODEL"]}
-    vl = httpx.Client(base_url=env["EVAL_VL_URL"], timeout=60)
-    uid = ensure_datasource(env["EVAL_GRAFANA_URL"], env["EVAL_GRAFANA_ADMIN"], env["EVAL_VL_URL"])
+    on_es = args.backend == "elasticsearch"
+    writer = httpx.Client(base_url=env["EVAL_ES_URL" if on_es else "EVAL_VL_URL"], timeout=60)
+    uid = (ensure_es_datasource if on_es else ensure_datasource)(env["EVAL_GRAFANA_URL"], env["EVAL_GRAFANA_ADMIN"], str(writer.base_url))
     grafana = Grafana(env["EVAL_GRAFANA_URL"], env["EVAL_GRAFANA_TOKEN"])
     settings = Settings(grafana_url=env["EVAL_GRAFANA_URL"], grafana_token=env["EVAL_GRAFANA_TOKEN"], webhook_token="unused")
     drop = [k for k in args.drop.split(",") if k]
@@ -141,8 +176,14 @@ def main() -> int:
         unparsed = bool(scenario.get("unparsed"))
         settings = replace(base_settings, log_fields=UNPARSED_FIELDS) if unparsed else base_settings
         dataset = f"eval-{scenario['name'].replace('_', '-')}-{int(now.timestamp())}"
-        load_logs(vl, dataset, scenario["logs"], now, unparsed)
-        evidence, overview = build_evidence(scenario, grafana, uid, dataset, now, settings)
+        if on_es:
+            index = "eval-" + scenario["name"].replace("_", "-")
+            load_es(writer, index, scenario["logs"], now, unparsed)
+            store = Elasticsearch(grafana, uid, settings.log_fields, index)
+        else:
+            load_logs(writer, dataset, scenario["logs"], now, unparsed)
+            store = VictoriaLogs(grafana, uid, settings.log_fields, f'{{dataset="{dataset}"}}')
+        evidence, overview = build_evidence(scenario, grafana, store, now, settings)
         for key in drop:
             if key in evidence:
                 evidence[key] = [] if isinstance(evidence[key], list) else {}

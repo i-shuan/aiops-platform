@@ -48,7 +48,8 @@ def world(fake, db_url):
 
     def run(seconds, **kw):
         return process(kw.pop("settings", settings), now=T0 + timedelta(seconds=seconds),
-                       grafana_transport=fake.transport, llm_transport=kw.pop("llm", w.llm))
+                       grafana_transport=fake.transport, llm_transport=kw.pop("llm", w.llm),
+                       outputs_transport=kw.pop("outputs", None))
 
     w.receive, w.run = receive, run
     return w
@@ -313,7 +314,7 @@ def test_zero_debounce_is_allowed_but_zero_followup_is_not(tmp_path):
 def test_configured_field_names_and_filter_are_used_for_the_log_queries_and_for_reading_the_rows(world):
     """公司的日誌欄位跟預設不同：查詢條件、讀回來的內容都要照 config.yaml 的欄位名稱；logs.extra_filter 加在每一條查詢前面。"""
     from dataclasses import replace
-    from src.grafana import LogFields
+    from src.logs import LogFields
     w = world
     w.fake.logs = [{"_time": "2026-11-21T02:40:00Z", "_msg": "T3 timeout", "app": "cim-eap", "severity": "ERROR", "namespace": "factory",
                     "eqp_id": "EQP-CVD-07", "lot_id": "LOT24A0031"},

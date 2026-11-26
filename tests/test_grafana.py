@@ -7,12 +7,22 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from src.grafana import Grafana, GrafanaError, LogFields, WebhookError, parse_webhook
+from src.grafana import Grafana, GrafanaError, WebhookError, parse_webhook
+from src.logs import LogFields, VictoriaLogs
+from src.traces import VictoriaTraces
 from tests.conftest import FakeGrafana, recorded, recorded_rows, victoria, webhook
 
 
 def client(handler) -> Grafana:
     return Grafana("http://grafana.test", "token", transport=httpx.MockTransport(handler))
+
+
+def vlogs(handler, uid="u", **kw) -> VictoriaLogs:
+    return VictoriaLogs(client(handler), uid, **kw)
+
+
+def vtraces(handler, uid="vt-uid") -> VictoriaTraces:
+    return VictoriaTraces(client(handler), uid)
 
 
 def test_firing_webhook_becomes_an_alert():
@@ -81,8 +91,8 @@ def form(request: httpx.Request) -> dict:
 
 def test_error_logs_come_from_the_victorialogs_proxy_newest_first():
     seen: list[httpx.Request] = []
-    found = client(answering(victoria("logs")["exchanges"]["search_errors"], seen)).search_errors(
-        "vl-uid", SERVICES, *HOUR, 50, extra_filter='{dataset="factory"}')
+    found = vlogs(answering(victoria("logs")["exchanges"]["search_errors"], seen), "vl-uid", extra_filter='{dataset="factory"}').search_errors(
+        SERVICES, *HOUR, 50)
     [request] = seen
     assert (request.method, request.url.path) == ("POST", "/api/datasources/proxy/uid/vl-uid/select/logsql/query")
     assert form(request) == victoria("logs")["exchanges"]["search_errors"][0]["request"]["form"]   # 送的跟錄製時一模一樣
@@ -96,9 +106,10 @@ def test_every_log_query_reads_the_recorded_victorialogs_answer():
     recorded_logs = victoria("logs")["exchanges"]
     k8s = LogFields(service="kubernetes.container_name", level="")
 
-    def call(name, method, *args, **kw):
+    def call(name, method, *args, extra_filter="", log_fields=LogFields(), **kw):
         seen: list[httpx.Request] = []
-        result = getattr(client(answering(recorded_logs[name], seen)), method)("<uid>", *args, **kw)
+        store = vlogs(answering(recorded_logs[name], seen), "<uid>", fields=log_fields, extra_filter=extra_filter)
+        result = getattr(store, method)(*args, **kw)
         assert [form(r) for r in seen] == [x["request"]["form"] for x in recorded_logs[name]], name
         return result
 
@@ -138,13 +149,13 @@ def test_a_rejected_log_query_is_reported_without_the_url_noise():
     [rec] = victoria("logs")["exchanges"]["bad_filter"]
     assert rec["status"] == 400 and rec["response"].startswith("remoteAddr:")
     with pytest.raises(GrafanaError) as e:
-        client(answering([rec], [])).search_errors("u", SERVICES, *HOUR, 5, extra_filter="{dataset=")
+        vlogs(answering([rec], []), extra_filter="{dataset=").search_errors(SERVICES, *HOUR, 5)
     assert "cannot parse query" in str(e.value) and "remoteAddr" not in str(e.value) and "requestURI" not in str(e.value)
 
 
 def test_a_log_answer_that_is_not_json_lines_is_reported():
     with pytest.raises(GrafanaError, match="不是一行一個 JSON"):
-        client(lambda r: httpx.Response(200, text="<html>login</html>")).search_errors("u", ["a"], *HOUR)
+        vlogs(lambda r: httpx.Response(200, text="<html>login</html>")).search_errors(["a"], *HOUR)
 
 
 def test_fake_logs_answer_like_the_real_one():
@@ -171,31 +182,32 @@ def test_fake_logs_answer_like_the_real_one():
 def test_traces_come_from_the_jaeger_proxy():
     recorded_traces = victoria("traces")["exchanges"]
     seen: list[httpx.Request] = []
-    found = client(answering(recorded_traces["search_error_traces"], seen)).search_error_traces(
-        "vt-uid", ["web-portal", "mes-api", "mes-db"], *HOUR, 20)
+    found = vtraces(answering(recorded_traces["search_error_traces"], seen)).search_error_traces(
+        ["web-portal", "mes-api", "mes-db"], *HOUR, 20)
     assert [r.url.path for r in seen] == ["/api/datasources/proxy/uid/vt-uid/api/traces"] * 3   # Jaeger 的搜尋一次一個服務
     assert [dict(r.url.params) for r in seen] == [x["request"]["params"] for x in recorded_traces["search_error_traces"]]
-    assert sorted(t["traceID"] for t in found) == ["11" * 16, "22" * 16]   # 兩個服務都搜到同樣兩條：各留一份；成功的那條沒有
-    assert all(t["spans"] and t["processes"] for t in found)
-    one = client(answering(recorded_traces["get_trace"], seen)).get_trace("vt-uid", "11" * 16)
+    assert sorted(t["id"] for t in found) == ["11" * 16, "22" * 16]   # 兩個服務都搜到同樣兩條：各留一份；成功的那條沒有
+    assert all(t["trace"]["spans"] and t["trace"]["processes"] for t in found)
+    assert {t["id"]: t["start"] for t in found} == {"11" * 16: 1795220838000000, "22" * 16: 1795220840000000}   # 最早的 span 的開始時間（微秒）
+    one = vtraces(answering(recorded_traces["get_trace"], seen)).get_trace("11" * 16)
     assert one["traceID"] == "11" * 16 and len(one["spans"]) == 4
     assert seen[-1].url.path == "/api/datasources/proxy/uid/vt-uid/api/traces/" + "11" * 16
-    assert client(answering(recorded_traces["get_trace_missing"], seen)).get_trace("vt-uid", "ff" * 16) is None   # 404
-    assert client(answering(recorded_traces["search_no_such_service"], seen)).search_error_traces("vt-uid", ["nope"], *HOUR, 20) == []
+    assert vtraces(answering(recorded_traces["get_trace_missing"], seen)).get_trace("ff" * 16) is None   # 404
+    assert vtraces(answering(recorded_traces["search_no_such_service"], seen)).search_error_traces(["nope"], *HOUR, 20) == []
 
 
 def test_fake_traces_answer_like_the_real_one():
     fake = FakeGrafana(shift=timedelta(0))
-    g = Grafana("http://grafana.test", "t", transport=fake.transport)
+    g = VictoriaTraces(Grafana("http://grafana.test", "t", transport=fake.transport), "u")
     recorded_traces = victoria("traces")["exchanges"]
     real = lambda name: [t for x in recorded_traces[name] for t in json.loads(x["response"])["data"]]
-    found = g.search_error_traces("u", ["web-portal", "mes-api", "mes-db"], *HOUR, 20)
-    assert sorted(found, key=lambda t: t["traceID"]) == sorted({t["traceID"]: t for t in real("search_error_traces")}.values(),
-                                                              key=lambda t: t["traceID"])
-    assert g.search_error_traces("u", ["nope"], *HOUR, 20) == []
-    assert g.search_error_traces("u", ["mes-api"], NOW - timedelta(minutes=5), NOW, 20) == []   # Trace 在時間窗之外
-    assert g.get_trace("u", "11" * 16) == real("get_trace")[0] and g.get_trace("u", "33" * 16) == real("get_trace_ok")[0]
-    assert g.get_trace("u", "ff" * 16) is None
+    found = g.search_error_traces(["web-portal", "mes-api", "mes-db"], *HOUR, 20)
+    assert sorted((t["trace"] for t in found), key=lambda t: t["traceID"]) == sorted(
+        {t["traceID"]: t for t in real("search_error_traces")}.values(), key=lambda t: t["traceID"])
+    assert g.search_error_traces(["nope"], *HOUR, 20) == []
+    assert g.search_error_traces(["mes-api"], NOW - timedelta(minutes=5), NOW, 20) == []   # Trace 在時間窗之外
+    assert g.get_trace("11" * 16) == real("get_trace")[0] and g.get_trace("33" * 16) == real("get_trace_ok")[0]
+    assert g.get_trace("ff" * 16) is None
 
 
 def test_annotation_is_created_once_then_patched(fake):
@@ -216,7 +228,7 @@ def test_recorded_annotation_responses_have_the_fields_we_read():
 def test_auth_failure_is_reported_and_transient_errors_are_retried(monkeypatch):
     monkeypatch.setattr("src.grafana.time.sleep", lambda s: None)
     now = datetime(2026, 11, 21, tzinfo=timezone.utc)
-    search = lambda g: g.search_errors("u", ["a"], now, now)
+    search = lambda g: VictoriaLogs(g, "u").search_errors(["a"], now, now)
     with pytest.raises(GrafanaError, match="HTTP 401"):
         search(client(lambda r: httpx.Response(401, json={"message": "Unauthorized"})))
     attempts = []

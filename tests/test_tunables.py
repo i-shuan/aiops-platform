@@ -13,7 +13,8 @@ from src import rca, report
 from src.grafana import Grafana, GrafanaError, LabelNames, parse_webhook
 from src.grouping import converge
 from src.main import ConfigError, Settings
-from tests.conftest import replay, webhook
+from src.logs import VictoriaLogs
+from tests.conftest import collect_evidence, replay, webhook
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)
 NOW = T0 + timedelta(seconds=64)
@@ -187,7 +188,7 @@ def test_log_query_uses_the_configured_levels_size_and_padding(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
     limits = rca.EvidenceLimits(max_hits=7, window_padding_minutes=30, error_levels=("E", "SEVERE"))
     inc = incident()
-    rca.collect_evidence(inc, EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW, limits=limits)
+    collect_evidence(inc, EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW, limits=limits)
     [sent] = [q for q in fake.log_queries if "sort by (_time) desc" in q["query"]]
     assert sent["query"].endswith('"log.level":in("E","SEVERE") | sort by (_time) desc | limit 7') and "ERROR" not in sent["query"]
     assert sent["start"] == (inc.started_at - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -197,18 +198,18 @@ def test_log_query_uses_the_configured_levels_size_and_padding(fake):
 def test_evidence_limits_control_how_much_the_llm_sees(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
     limits = rca.EvidenceLimits(max_log_samples=2, max_message_chars=20, top_ids=1)
-    ev = rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id"], now=NOW, limits=limits)
+    ev = collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id"], now=NOW, limits=limits)
     assert len(ev["error_logs"]) == 2
     assert all(len(l["message"]) <= 20 for l in ev["error_logs"])
     assert ev["id_counts"] == {"eqp_id": {"EQP-CVD-07": 3}, "lot_id": {"LOT24A0031": 2}}  # 統計看全部撈到的，不是只看樣本
-    none = rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW,
+    none = collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW,
                                 limits=rca.EvidenceLimits(max_log_samples=0))
     assert none["error_logs"] == [] and none["id_counts"]["eqp_id"]["EQP-CVD-07"] == 3
 
 
 def evidence(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    return rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
+    return collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
 
 
 GOOD = {"summary": "源頭可能是 mq-broker，錯誤集中在 EQP-CVD-07", "systems": ["mq-broker"], "ids": ["EQP-CVD-07"]}
@@ -264,7 +265,7 @@ def test_grafana_retries_backoff_and_timeout_are_configurable(monkeypatch):
     def search(**kw):
         g = Grafana("http://grafana.test", "t", transport=httpx.MockTransport(down), **kw)
         with pytest.raises(GrafanaError):
-            g.search_errors("u", ["a"], now, now)
+            VictoriaLogs(g, "u").search_errors(["a"], now, now)
 
     search(retries=0)
     assert len(attempts) == 1 and slept == []                    # 0 = 不重試

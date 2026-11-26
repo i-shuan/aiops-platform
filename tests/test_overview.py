@@ -12,9 +12,10 @@ import pytest
 
 from src import db as dbmod
 from src import rca, report
-from src.grafana import Grafana, LogFields
+from src.grafana import Grafana
+from src.logs import LogFields
 from src.grouping import Alert, converge
-from tests.conftest import SHIFT, recorded_rows, recorded_trace, shifted, shifted_trace, victoria
+from tests.conftest import collect_evidence, SHIFT, recorded_rows, recorded_trace, shifted, shifted_trace, victoria
 from tests.test_main import LLM_ANSWER, rows, world  # noqa: F401（fixture）
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)
@@ -37,7 +38,7 @@ def no_error_logs(fake):
 
 def collect(fake, inc=None, *, logs="vl", traces="", metrics=rca.MetricOptions(), edges=EDGES, **kw):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    return rca.collect_evidence(inc or incident(), edges, grafana, logs_datasource_uid=logs, id_fields=["eqp_id", "lot_id", "carrier_id"],
+    return collect_evidence(inc or incident(), edges, grafana, logs_datasource_uid=logs, id_fields=["eqp_id", "lot_id", "carrier_id"],
                                 now=NOW, traces_datasource_uid=traces, metrics=metrics, **kw)
 
 

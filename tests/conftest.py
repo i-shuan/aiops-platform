@@ -78,6 +78,7 @@ TRACE_MISSING = victoria("traces")["exchanges"]["get_trace_missing"][0]
 
 class FakeGrafana:
     """假的 Grafana：VictoriaLogs／Jaeger（VictoriaTraces）／Prometheus 相容資料源的代理，加上註記。
+    Elasticsearch（_msearch）與 Tempo（資料源 uid 以 tempo 開頭）則是照錄下來的真實回應原樣回話。
 
     日誌：self.logs 是 VictoriaLogs 會回的那種列；查詢交給 tests/logsql.py 照條件真的去篩（看不懂的語法回 400）。
     Trace：self.traces 是 {trace id: Jaeger 格式的 Trace}；搜尋照 service 與 error 標籤挑。
@@ -97,6 +98,11 @@ class FakeGrafana:
                 for trace in json.loads(exchange["response"])["data"]:
                     self.traces[trace["traceID"]] = shifted_trace(trace, shift)
         self.trace_requests: list[httpx.Request] = []
+        # Elasticsearch 與 Tempo：照錄下來的真實回應回話（不篩資料）。msearch_replies 是照順序用掉的 {"status", "response"}
+        self.msearch_replies: list[dict] = []
+        self.msearch_requests: list[str] = []
+        self.tempo_search = recorded("tempo_search")["response"]
+        self.tempo_traces = {"11" * 16: recorded("tempo_trace")["response"]}
         self.metric_requests: list[httpx.Request] = []
         self.transport = httpx.MockTransport(self.handle)
 
@@ -106,7 +112,7 @@ class FakeGrafana:
 
     @property
     def error_searches(self) -> int:
-        """撈錯誤日誌的次數（= 做了幾次證據收集）：Grafana.search_errors 是唯一用「最新的在前」排序的查詢。"""
+        """撈錯誤日誌的次數（= 做了幾次證據收集）：search_errors 是唯一用「最新的在前」排序的查詢。"""
         return len(self.queries("sort by (_time) desc"))
 
     def query_range(self, query: str) -> httpx.Response:
@@ -165,6 +171,17 @@ class FakeGrafana:
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/v1/query_range"):
             self.metric_requests.append(request)
             return self.query_range(request.url.params["query"])
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/_msearch"):
+            self.msearch_requests.append(request.content.decode())
+            reply = self.msearch_replies.pop(0)
+            return httpx.Response(reply["status"], text=reply["response"], headers={"Content-Type": "application/json"})
+        if path.startswith("/api/datasources/proxy/uid/tempo") and path.endswith("/api/search"):
+            self.trace_requests.append(request)
+            return httpx.Response(200, json=self.tempo_search)
+        if path.startswith("/api/datasources/proxy/uid/tempo") and "/api/traces/" in path:
+            self.trace_requests.append(request)
+            trace = self.tempo_traces.get(path.rsplit("/", 1)[1])
+            return httpx.Response(200, json=trace) if trace else httpx.Response(404)   # Tempo 的 404 沒有內容
         if path.startswith("/api/datasources/proxy/uid/") and "/api/traces" in path:
             return self.jaeger(request)
         if path == "/api/annotations" and request.method == "POST":
@@ -191,6 +208,15 @@ class FakeGrafana:
                 del self.annotations[ann_id], self.tag_index[ann_id]
                 return httpx.Response(200, json={"message": "Annotation deleted"})
         return httpx.Response(404, json={"message": "Not found"})
+
+
+def collect_evidence(incident, edges, grafana, *, logs_datasource_uid: str = "", traces_datasource_uid: str = "",
+                     log_fields=None, logs_filter: str = "", **kw):
+    """測試用的捷徑：用 VictoriaLogs／VictoriaTraces 當來源呼叫 rca.collect_evidence（uid 是空的 = 沒接）。"""
+    from src import logs, rca, traces
+    store = logs.VictoriaLogs(grafana, logs_datasource_uid, log_fields or logs.LogFields(), logs_filter) if logs_datasource_uid else None
+    chains = traces.VictoriaTraces(grafana, traces_datasource_uid) if traces_datasource_uid else None
+    return rca.collect_evidence(incident, edges, grafana, logs=store, traces=chains, **kw)
 
 
 @pytest.fixture
