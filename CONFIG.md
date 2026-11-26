@@ -223,6 +223,7 @@ Elasticsearch 的設定把 `extra_filter` 那一行換成 `type: elasticsearch` 
 | 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/rca.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
 | 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的條件（樣板裡固定不變的詞照順序出現：LogsQL 的 `seq`、Elasticsearch 的 intervals；固定的詞少於兩個就不數） | `src/rca.py` 的 `log_pattern`、`pattern_words` | 歸類與計數的實作。是近似：別種訊息剛好有同樣的詞、順序也一樣時會被算在一起；未驗證泛化 |
 | 可能原因最多 3 個；信心分數 0～100，分段是 70／40；沒有直接證據指向的系統分數最高 30 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE_HIGH`、`CONFIDENCE_MEDIUM`、`NO_DIRECT_EVIDENCE_CAP`、`DIRECT_EVIDENCE` | 3 個是註記版面的上限。分段是提示詞裡跟模型講的定義，上限 30 落在「只是推測」那一段；分數不是機率、沒有校準。「有沒有直接證據」是名稱的字串比對。都只在 `EVAL.md` 的人造案例跑過，未驗證泛化 |
+| 用「名稱原樣出現在證據文字裡」當憑據時，名稱至少要 3 個字 | `src/rca.py` 的 `MIN_NAME_CHARS` | 一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化 |
 | LLM 沒有分析時註記上直接列的證據：最多 5 行、每行引用的原文最多 120 字 | `src/rca.py` 的 `MAX_FACT_LINES`、`FACT_CHARS` | 版面的上限，不是判斷門檻；順序是固定規則（事故前沒出現過的先列），不代表誰是源頭 |
 | 出口送失敗最多試 10 次（每一輪一次）；出口的 JSON 格式與 `schema` 名稱；`deliveries` 表的狀態用字 | `src/outputs.py` 的 `MAX_ATTEMPTS`、`incident_payload`、`remediation_payloads` | 10 是沒有依據的數字，未驗證泛化；調之前先看下游多久會恢復。格式是對下游的契約，改了要跟對方一起改 |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |

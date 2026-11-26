@@ -10,7 +10,7 @@
 
 image:
   repository: aiops-lite
-  tag: "0.6.0"
+  tag: "0.6.2"
   pullPolicy: IfNotPresent
 
 grafana:

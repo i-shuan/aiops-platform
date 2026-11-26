@@ -97,6 +97,23 @@ SCENARIOS = [
         "logs": every(12, "order-api", "ERROR", "cache lookup {n} failed: connection refused redis-cache:6379", start=200),
         "source": "redis-cache", "any": ["redis-cache"],
     },
+    # ── 2026-11-26 現場回報（AP1105，真的日誌）做成的兩個案例。日誌內容是照回報裡看得到的片段重寫的，不是原文 ──
+    {
+        "name": "s11_dependency_only_in_log_text", "about": "現場回報：告警的系統日誌寫連不上某個元件，那個元件沒有告警、也沒有寫進關係邊",
+        "edges": [],
+        "alerts": [("instana-agent", "instana-agent 錯誤日誌異常", "P2", 150)],
+        "logs": every(20, "instana-agent", "ERROR", "MariaDb | com.instana.sensor-mariadb - 1.1.33 | Cannot connect to MariaDb at db-host:3306 (attempt {n})", start=240)
+                + every(20, "instana-agent", "ERROR", "MariaDb | com.instana.sensor-mariadb - 1.1.33 | Error during sensor activation, retry {n}", start=235),
+        "source": "MariaDb", "any": ["MariaDb", "MariaDB", "mariadb"],
+    },
+    {
+        "name": "s12_component_name_with_digits", "about": "現場回報：錯誤訊息裡的元件名稱帶數字（k8s），而且沒有寫進關係邊",
+        "edges": [],
+        "alerts": [("vmalert", "vmalert 錯誤日誌異常", "P2", 150)],
+        "logs": every(15, "vmalert", "ERROR", 'VictoriaMetrics/app/vmalert/rule/group.go:394 group "kubernetes-apps": failed to execute rule {n}: '
+                                               "datasource vmselect-vmstack-victoria-metrics-k8s-stack:8481 returned 503 Service Unavailable", start=260),
+        "source": "vmselect-vmstack-victoria-metrics-k8s-stack", "any": ["vmselect"],
+    },
     {
         "name": "s10_upstream_is_innocent", "about": "上游有告警但只有常態錯誤，新錯誤在下游自己（設定檔壞了）",
         "edges": [("mq-broker", "cim-eap")],
@@ -166,5 +183,13 @@ HELD_OUT = [
         "alerts": [("payment-api", "Payment API latency p95", "P1", 150)],
         "logs": every(7, "payment-api", "ERROR", "payment {n} rejected: timeout after 3000ms calling risk-engine /score", start=240),
         "source": "risk-engine", "any": ["risk-engine"],
+    },
+    {   # 2026-11-26 補的：放寬幻覺檢查之後才寫、才第一次跑。h01 從這一輪起不算乾淨的留出案例（見 EVAL.md）
+        "name": "h07_unlisted_storage_backend", "about": "告警的系統寫不進一個沒有告警、沒有關係邊的儲存元件（換一種說法、名稱帶數字）",
+        "edges": [("report-job", "bi-portal")],
+        "alerts": [("report-job", "Report job failures", "P2", 150), ("bi-portal", "Portal stale data", "P3", 120)],
+        "logs": every(18, "report-job", "ERROR", "export {n} aborted: PUT to s3-archive-02 bucket reports failed with 507 Insufficient Storage", start=250)
+                + every(40, "bi-portal", "WARN", "dashboard {n} shows data older than 30m", start=200),
+        "source": "s3-archive-02", "any": ["s3-archive-02", "空間", "Storage", "storage"],
     },
 ]
