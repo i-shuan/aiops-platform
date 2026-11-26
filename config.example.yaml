@@ -119,6 +119,7 @@ close_after_seconds: 300                 # 成員告警全部 resolved 之後，
 # annotation:
 #   max_rule_links: 5                    # 註記第 3 行最多列幾條「調整優先權」的規則連結
 
-edges:                                   # 系統層級的上下游關係 [上游, 下游]，3～5 條就夠
+edges:                                   # 選填：系統層級的上下游關係 [上游, 下游]。不寫也能分析；寫了，有關係的系統同時告警時
+                                         # 會併成同一張事故，LLM 也多一個「誰可能影響誰」的線索。下面兩條是範例
   - [mq-broker, cim-eap]
   - [cim-eap, amhs-mcs]

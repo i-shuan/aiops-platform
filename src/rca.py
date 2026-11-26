@@ -44,7 +44,8 @@ log = logging.getLogger("aiops_lite.rca")
 # 夾數字的識別碼樣式（EQP-CVD-07、LOT24A0031）：幻覺檢查用它在摘要文字裡找「像機台／批號的字」（llm.id_pattern 的預設值）
 DEFAULT_ID_PATTERN = r"[A-Za-z][A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*"
 
-SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用者給的證據判斷這個事故最可能的源頭與影響範圍。
+SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用者給的證據，說明這個事故為什麼會發生（哪裡出了什麼事、怎麼造成現在的現象）、影響到哪裡。
+根因不一定是「哪個系統是源頭」：也可能是資源用完、設定或憑證有問題、相依的元件連不上、流量變了。有多少證據就分析多少，不要因為少了某一種證據就不分析。
 規則：
 - 只能引用證據裡出現的系統名稱、機台、批號、載具等識別碼，不准自己編。
 - 不要寫任何筆數、次數、時間：那些由程式另外顯示。
@@ -57,17 +58,21 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
   事故前沒出現過（new=true）或明顯變多的才是線索。沒有次數的錯誤不能推論它是新的還是平常就有的。
 - 「警告」常常寫出後來出錯的原因（資源快用完、重試變多）：錯誤訊息本身沒寫原因時，看同一個系統在出錯前的警告。
 - 一定要列出 1 到 3 個可能的原因（candidates），由最可能排到最不可能。每個寫：
-  source＝系統名稱；confidence＝0 到 100 的整數；reason＝一句白話，講它可能出了什麼事、依據是哪一種證據裡的什麼，直接引用內容。
+  source＝系統名稱；
+  reason＝一句白話，講「發生了什麼、為什麼」：出了什麼事、機制是什麼、依據是哪一種證據裡的什麼，直接引用內容。不要只寫「它是源頭」；
+  kind＝evidence 或 inference。evidence：證據直接寫出了這個原因（錯誤訊息自己講了原因、呼叫鏈停在它、它的指標先變壞）。
+        inference：證據沒有直接寫，是你從現象、名稱、先後或常識推測的。可以推測，但要說是從哪一項證據推的；
+  confidence＝0 到 100 的整數。
 - 信心分數怎麼給（依據有多直接，不是機率）：
   70～100＝有直接指向它的證據，而且沒有別的合理解釋（它自己這次才出現的錯誤、呼叫鏈停在它、它的指標先變壞、別的系統的錯誤訊息指名連不上它）。
   40～69＝有指向它的證據，但還有別的可能。
-  0～39＝只是從告警的名稱、觸發的數值、哪一筆先響、關係邊推測，沒有直接證據。
+  0～39＝只是從告警的名稱、觸發的數值、哪一筆先響、關係邊推測，沒有直接證據。kind 是 inference 的一律給 39 以下。
 - 就算只有告警，也要根據告警的名稱、數值、先後與關係邊列出可能的原因（分數給 39 以下），不要只回「無法判定」。
   有別的合理可能就列出來，不要只列一個。連推測的依據都沒有時 candidates 才可以是空的。
-- summary 是寫給值班人員看的一句結論，用白話：最可能的原因是什麼。分數全部在 39 以下時，開頭寫「目前只能推測」，
-  並說最該補哪一種證據（從「證據概況」裡「缺…」「…查詢失敗」「沒接…」的項目挑一項）。不要要求證據概況裡沒有提到的東西。
+- summary 是寫給值班人員看的一句結論，用白話講這個問題為什麼會發生：哪裡出了什麼事、造成什麼現象。
+  不要只寫哪個系統是源頭，也不要抱怨缺了什麼證據（那個由程式另外顯示）。分數全部在 39 以下時，開頭寫「目前只能推測」。
 - 只輸出一個 JSON 物件，不要 Markdown：
-  {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "confidence": 85, "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+  {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "kind": "evidence", "confidence": 85, "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
 
 MAX_CANDIDATES = 3
 MIN_NAME_CHARS = 3   # 名稱至少這麼長，才用「原樣出現在證據文字裡」當憑據：一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化
@@ -550,11 +555,10 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     touching = [e for e in evidence["edges"] if e["upstream"] in systems or e["downstream"] in systems]
     if related:
         out["have"].append(f"這些系統之間的關係邊 {len(related)} 條")
-    elif len(systems) > 1:
-        out["missing"].append(("關係邊", "這幾個系統之間沒有宣告上下游（config.yaml 的 edges）"))
     elif touching:
         out["have"].append(f"連到這個系統的關係邊 {len(touching)} 條（另一端沒有告警）")
-    # 只有一個系統、也沒有宣告它的關係邊：不列為「缺」。系統自己出問題時不需要關係邊，列出來只會把人帶偏
+    # 沒有宣告關係邊：不列為「缺」。關係邊是加分的（幫忙把上下游的告警併成一張、提示誰可能影響誰），
+    # 沒寫照樣分析；每次都列出來只會讓人以為非寫不可（使用者的決定，2026-11-26）
 
     logs = sources.get("logs", "off")
     log_source = evidence.get("log_source") or {"name": "日誌", "scope_hint": "檢查日誌有沒有在送進來"}
@@ -589,8 +593,7 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
         ids = sum(len(counts) for counts in evidence["id_counts"].values())
         if ids:
             out["have"].append(f"機台／批號等識別碼 {ids} 個")
-        elif evidence["id_counts"]:
-            out["missing"].append(("機台與批號", f"錯誤日誌裡沒有 {'、'.join(evidence['id_counts'])} 這些欄位"))
+        # 日誌沒有機台、批號欄位：不列為「缺」。IT 服務本來就沒有這些欄位，有就用、沒有就照其他證據分析
         if evidence["timelines"]:
             out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
 
@@ -788,7 +791,12 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
         score = _confidence(item.get("confidence"))
         if name.lower() not in direct:   # 沒有直接證據指向它：分數最高只到「只是推測」那一段
             score = min(score, NO_DIRECT_EVIDENCE_CAP)
-        candidates.append({"source": name, "confidence": score, "reason": " ".join(str(item.get("reason") or "").split())})
+        # 模型自己說這一條是推測的（證據沒有直接寫）：可以列，但分數不能進到「有證據」那一段，註記上也會標「推測」
+        inferred = str(item.get("kind") or "").strip().lower() == "inference"
+        if inferred:
+            score = min(score, CONFIDENCE_MEDIUM - 1)
+        candidates.append({"source": name, "confidence": score, "reason": " ".join(str(item.get("reason") or "").split()),
+                           **({"inferred": True} if inferred else {})})
     # 摘要與理由的文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
@@ -817,8 +825,9 @@ def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int 
 
 
 def candidates_text(candidates: list[dict[str, Any]], max_chars: int = 300) -> str:
-    """可能的原因寫成註記上的列點，分數放最後：1. mq-broker：…（信心 90）"""
-    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（信心 {c['confidence']}）" for n, c in enumerate(candidates, 1))
+    """可能的原因寫成註記上的列點，分數放最後：1. mq-broker：…（信心 90）。模型標成推測的寫（推測，信心 30）。"""
+    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（{'推測，' if c.get('inferred') else ''}信心 {c['confidence']}）"
+                     for n, c in enumerate(candidates, 1))
 
 
 @dataclass(frozen=True)

@@ -308,6 +308,13 @@ def test_config_mistakes_are_rejected_at_startup(tmp_path, text, message):
         Settings.load(config(tmp_path, text))
 
 
+def test_edges_are_optional(tmp_path):
+    """關係邊是加分的：沒寫、或只寫了 edges: 後面留空，都當成沒有，不是設定錯誤。"""
+    assert Settings.load(config(tmp_path, MINIMAL)).edges == ()
+    assert Settings.load(config(tmp_path, MINIMAL + "edges:\n")).edges == ()
+    assert Settings.load(config(tmp_path, MINIMAL + "edges: []\n")).edges == ()
+
+
 def test_zero_debounce_is_allowed_but_zero_followup_is_not(tmp_path):
     assert Settings.load(config(tmp_path, MINIMAL + "debounce_seconds: 0\n")).debounce_seconds == 0
     assert Settings.load(config(tmp_path, MINIMAL + "close_after_seconds: 0\n")).close_after_seconds == 0

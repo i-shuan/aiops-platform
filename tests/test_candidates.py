@@ -208,3 +208,28 @@ def test_very_short_names_are_not_matched_by_text_and_known_systems_keep_working
         rca.read_answer(reply("db 掛了", ("db", 80, "x")), ev)
     _s, candidates = rca.read_answer(reply("instana-agent 自己的問題", ("instana-agent", 60, "告警在它身上")), ev)
     assert candidates[0]["source"] == "instana-agent"
+
+
+# ── 推測可以列，但要標出來、分數不能高（使用者的決定，2026-11-26）──
+
+def test_a_cause_the_model_marks_as_inferred_is_capped_and_shown_as_a_guess():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    raw = json.dumps({"summary": "instana-agent 的感測器連不上 MariaDb，所以一直報錯", "systems": [], "ids": [], "candidates": [
+        {"source": "MariaDb", "kind": "evidence", "confidence": 80, "reason": "日誌直接寫 Cannot connect to MariaDb"},
+        {"source": "instana-agent", "kind": "inference", "confidence": 85, "reason": "也可能是感測器的帳密設定錯了，日誌沒有寫"},
+        {"source": "db-host", "kind": "Inference", "confidence": 20, "reason": "主機可能關機了"}]}, ensure_ascii=False)
+    _summary, candidates = rca.read_answer(raw, ev)
+    assert [(c["source"], c["confidence"], c.get("inferred", False)) for c in candidates] == [
+        ("MariaDb", 80, False), ("instana-agent", rca.CONFIDENCE_MEDIUM - 1, True), ("db-host", 20, True)]   # 推測的壓到 39 以下；本來就低的不動
+    assert rca.candidates_text(candidates).splitlines() == [
+        "1. MariaDb：日誌直接寫 Cannot connect to MariaDb（信心 80）",
+        "2. instana-agent：也可能是感測器的帳密設定錯了，日誌沒有寫（推測，信心 39）",
+        "3. db-host：主機可能關機了（推測，信心 20）"]
+
+
+def test_answers_without_the_kind_field_keep_working_and_the_prompt_asks_for_why():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    _s, candidates = rca.read_answer(reply("連不上 MariaDb", ("MariaDb", 80, "日誌寫的")), ev)   # 自訂提示詞可能沒有 kind
+    assert candidates == [{"source": "MariaDb", "confidence": 80, "reason": "日誌寫的"}]
+    for part in ("為什麼會發生", "kind", "inference", "一律給 39 以下", "不要只寫哪個系統是源頭", "有多少證據就分析多少"):
+        assert part in rca.SYSTEM_PROMPT

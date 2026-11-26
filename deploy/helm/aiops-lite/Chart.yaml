@@ -2,5 +2,5 @@ apiVersion: v2
 name: aiops-lite
 description: aiops-lite：1 個常駐服務（收 Grafana Webhook）+ 1 個帶 PVC 的 PostgreSQL + 1 個放整份 config.yaml 的 Secret
 type: application
-version: 0.6.2
-appVersion: "0.6.2"
+version: 0.6.3
+appVersion: "0.6.3"
