@@ -123,7 +123,7 @@ aiops-lite 有一個收告警的網址（`http://<release>.<namespace>.svc:8080/
 
   ```bash
   curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/x-ndjson" \
-    "$GRAFANA/api/datasources/proxy/uid/$UID/_msearch" --data-binary $'{"index":"fluentd-*","ignore_unavailable":true}\n{"size":3,"sort":[{"@timestamp":"desc"}],"query":{"term":{"service.name":"cim-eap"}}}\n'
+    "$GRAFANA/api/datasources/proxy/uid/$UID/_msearch" --data-binary $'{"index":"fluentd-*","ignore_unavailable":true}\n{"size":3,"sort":[{"@timestamp":"desc"}],"query":{"match_phrase":{"service.name":"cim-eap"}}}\n'
   ```
 
   `responses[0].hits.hits` 是空的：沒有這個系統的日誌，或欄位名稱對不上（第 2 節）。
