@@ -9,8 +9,12 @@
 - **路線一：Grafana 直接查原始資料算數字**（VictoriaLogs 計數、SQL 查表）。不用多養元件，最快。
 - **路線二：轉成真的 metrics 存進時序庫**（exporter、日誌轉指標）。規則查詢比較便宜，但多一段設定要維護。
 
-**建議的做法是三個系統都照下面的「統一欄位規範」把日誌送進 VictoriaLogs**：告警與 RCA 證據共用同一份資料，aiops-lite 不用改程式。
+**建議的做法是三個系統都照下面的「統一欄位規範」把日誌送進日誌資料庫**：告警與 RCA 證據共用同一份資料，aiops-lite 不用改程式。
 SQL 查表與 exporter 仍然可以用來觸發告警，但那樣 RCA 不會有該系統的明細。
+
+**日誌資料庫可以是 VictoriaLogs 或 Elasticsearch**（`config.yaml` 的 `logs.type`，預設 `victorialogs`）。欄位規範兩種都一樣；
+這份文件的範例與指令以 VictoriaLogs 為主，用 Elasticsearch 時不一樣的地方集中寫在「改送 Elasticsearch」那一小節。
+Grafana 規則用哪個資料源算次數，跟 aiops-lite 用哪個來源查證據，用同一個比較好懂，但不是必須。
 
 ## 先看這一節：誰做什麼、兩條路的差別
 
@@ -19,11 +23,11 @@ SQL 查表與 exporter 仍然可以用來觸發告警，但那樣 RCA 不會有�
 | 元件 | 做什麼 | 不做什麼 |
 | --- | --- | --- |
 | Fluent Bit（各產線伺服器） | **只做單行拆欄位**：讀一行日誌，切出 `eqp_id`、`error_type` 等欄位，送進 VictoriaLogs | 不算次數、不算平均、不判斷門檻 |
-| VictoriaLogs | 存結構化日誌。沒有 mapping、不用先宣告型別；寫入時指定哪個欄位是時間、訊息、stream | — |
+| VictoriaLogs（或 Elasticsearch） | 存結構化日誌。VictoriaLogs 沒有 mapping、不用先宣告型別，寫入時指定哪個欄位是時間、訊息、stream；Elasticsearch 要注意 mapping（見「改送 Elasticsearch」） | — |
 | Grafana | **跨機統計與門檻**：算最近幾分鐘的筆數、平均、最大值，超標發 Webhook；另外當代理讓 aiops-lite 查 VictoriaLogs | — |
 | aiops-lite | 收告警、收斂、經 Grafana 去 VictoriaLogs 撈錯誤日誌樣本並統計機台／批號出現次數、交給 LLM、寫註記 | **不洗資料、不拆欄位、不算告警用的數字** |
 
-aiops-lite 這一側唯一要配合的是 `config.yaml`：欄位名稱（`logs.fields`、`logs.id_fields`）、錯誤等級的寫法（`logs.error_levels`）、
+aiops-lite 這一側唯一要配合的是 `config.yaml`：日誌存在哪一種（`logs.type`）、欄位名稱（`logs.fields`、`logs.id_fields`）、錯誤等級的寫法（`logs.error_levels`）、
 關係邊（`edges`）要跟實際的資料對上。改的是設定，不是程式。
 
 **為什麼統計不放在 Fluent Bit**
@@ -72,17 +76,19 @@ DB 唯讀 View ─▶ Grafana（直接寫 SQL 算次數、發告警）─▶ aio
 | --- | --- |
 | aiops-lite 的證據查詢（錯誤日誌、各系統最早的錯誤、警告、事故前後的次數、批號時間線、0 筆時的計數）| 用真的 VictoriaLogs v1.17.0 經 Grafana 13.0.7 的資料源代理驗過（2026-11-26，本機，腳本寫的假資料）。資料照下面的欄位規範、用 `/insert/jsonline` 寫入 |
 | 巢狀的 `service: {name: …}`、`log: {level: …}` 寫進去之後變成 `service.name`、`log.level` | 同上，實測過 |
+| 同樣的證據查詢改從 **Elasticsearch** 撈（`logs.type: elasticsearch`） | 用真的 Elasticsearch 8.19.23 經 Grafana 13.0.7 的資料源代理驗過（2026-11-26，本機）：把跟 VictoriaLogs 同一批假資料寫進去，每一種查詢的結果、收集到的整包證據都一樣（`tests/test_backends.py`）。索引一個是明確的 mapping（keyword／text）、一個是動態 mapping |
 | 用 LogsQL 算筆數（`stats count()`、`stats by (欄位) count()`） | 同上，實測過 |
 | 對數值欄位取最大值、最小值（`stats max(queue_depth)`、`stats min(consumers)`） | 實測過（2026-11-26）：Fluent Bit 送進去的 MQ 探針資料，`dashboards/aiops-incident-metrics.json` 的四個面板在 Grafana 上畫得出來。`avg` 沒有測 |
 | VictoriaLogs 的查詢當 **Grafana 告警規則** | 實測過一條（2026-11-26，Grafana 13.0.7 + 外掛 0.34.0）：`error_type:="T3_TIMEOUT" \| stats count() as value`、查詢型態 Stats、大於 3 就觸發，規則狀態變成 firing。沒有接著驗它推出來的 Webhook 內容（Webhook 的格式跟資料源無關，之前用別的資料源驗過） |
 | SQL 查表當 Grafana 規則 → Webhook → aiops-lite | 實測過（本機 Grafana 13.0.7 + PostgreSQL，假資料） |
 | Fluent Bit 設定（`deploy/fluent-bit/` 三份）拆欄位、`http` 輸出 → VictoriaLogs | 實測過（2026-11-26，Fluent Bit 5.2.0 + VictoriaLogs v1.17.0，本機，範例日誌約 30 行）：三份都回 HTTP 200，欄位攤平成 `service.name`、`log.level`、`eqp_id`…，訊息在 `_msg`，台灣時間轉成正確的 UTC，格式對不上的行整行進 `_msg` |
+| Fluent Bit 的 `es` 輸出 → Elasticsearch | 2026-11-21 用 Fluent Bit 5.2.0 + Elasticsearch 8.19.23 跑過同樣三份設定的拆欄位部分（當時的輸出是 `name: es`、`suppress_type_name: on`）。現在 `deploy/fluent-bit/` 的範例輸出是 VictoriaLogs；換回 `es` 輸出之後沒有重跑 |
 | Fluent Bit 的 TLS／帳密、日誌輪替、斷線補送 | **沒有實測過** |
 | IBM MQ exporter、Fluent Bit `log_to_metrics`、`sql_exporter`、textfile collector、Logstash JDBC | **沒有實測過**；細節以各工具的官方文件為準 |
 
 下面的查詢與設定是範例，表名、欄位名、門檻都要換成現場的。
 
-## 統一欄位規範（建議三個系統都照這個送進 VictoriaLogs）
+## 統一欄位規範（建議三個系統都照這個送；VictoriaLogs 與 Elasticsearch 都一樣）
 
 **為什麼要統一**：aiops-lite 的欄位對照（`config.yaml` 的 `logs.fields`）只有一組，不能每個系統各設一套。
 三個系統的欄位名稱不一樣的話，只有對得上的那個系統撈得到 RCA 證據。統一之後，同一份日誌 Grafana 拿來算告警、
@@ -108,7 +114,7 @@ aiops-lite 拿來取證，各系統只要拆一次欄位。
 
 VictoriaLogs 沒有索引名稱、也沒有 mapping：所有系統的日誌寫進同一個地方，靠欄位分。
 要讓 aiops-lite 只看其中一部分（例如同一套 VictoriaLogs 還收了辦公室系統的日誌），在 `config.yaml` 的 `logs.extra_filter`
-寫一段 LogsQL 條件，例如 `{namespace="factory"}`。
+寫一段 LogsQL 條件，例如 `{namespace="factory"}`。Elasticsearch 則是用索引分：`logs.index` 填要查的索引（例如 `factory-logs-*`）。
 
 ### 規則
 
@@ -122,7 +128,8 @@ VictoriaLogs 沒有索引名稱、也沒有 mapping：所有系統的日誌寫�
 4. **識別碼的寫法要固定。** `EQP-CVD-07` 與 `eqp-cvd-07` 會被當成兩台機台分開統計。
 5. **欄位名稱不想照這份規範也可以**，但三個系統要用同一套，然後把名稱寫進 `config.yaml`：
    系統、等級對應 `logs.fields`，識別碼對應 `logs.id_fields`，等級的寫法對應 `logs.error_levels`；
-   時間與訊息用寫入時的 `_time_field`、`_msg_field` 對應，aiops-lite 這一側不用設定。
+   時間與訊息：VictoriaLogs 用寫入時的 `_time_field`、`_msg_field` 對應，aiops-lite 這一側不用設定；
+   Elasticsearch 用 `logs.fields.time`、`logs.fields.message` 對應（預設 `@timestamp`、`message`）。
 
 ### 三個系統的日誌範例
 
@@ -175,6 +182,22 @@ curl -s -H "Authorization: Bearer $TOKEN" "$GRAFANA/api/datasources/proxy/uid/$U
 `$UID` 是 Grafana 上 VictoriaLogs 資料源的 uid。回應是一行一個 JSON。第一條查不到東西代表日誌沒有進來或時間不對；
 第二條查不到、第一條有，代表系統名稱或等級的寫法對不上。
 
+### 改送 Elasticsearch
+
+欄位規範與上面的日誌範例完全一樣，不一樣的只有四件事：
+
+1. **aiops-lite 的設定**：`logs.type: elasticsearch`、`logs.datasource_uid` 填 Grafana 上 Elasticsearch 資料源的 uid、
+   `logs.index` 填索引（例如 `factory-logs-*`，要對得到 Fluent Bit 寫進去的索引名稱）。`logs.extra_filter` 這時不能設。
+2. **mapping**：`message` 要是 text 型別（挑錯誤字樣、事故前後的次數都是對它做全文比對）；`service.name`、`log.level`、識別碼建議 keyword。
+   沒有先宣告、讓 Elasticsearch 動態建成 text 加 `.keyword` 也查得到。`@timestamp` 要是 date。要給 Grafana 取平均、最大值的數值欄位
+   （`queue_depth`、`transfer_seconds`）要是數字型別，不能被建成文字。
+3. **Fluent Bit 的輸出**：把範例裡的 `http` 輸出換成 `es` 輸出（`name: es`、`host`、`port`、`index`、`suppress_type_name: on`；
+   Elasticsearch 8 一定要 `suppress_type_name`）。拆欄位的部分不用動。`tail` 的 `key: message` 一樣要設：預設的 `log` 會跟 `log.level`
+   這個欄位衝突，Elasticsearch 會拒收。
+4. **檢查指令**：改打 `_msearch`，或直接在 Grafana 的 Explore 用那個資料源查 `service.name:"cim-eap" AND log.level:ERROR`。
+
+事故前後的次數比對在兩種資料庫上都是近似，而且比法不同（VictoriaLogs 分大小寫、Elasticsearch 不分），同一批資料數出來可能差一點。
+
 ### 收集端拆欄位的設定（第 1 步）：Fluent Bit 範例
 
 三份可以直接改的設定在 `deploy/fluent-bit/`，一個系統一份，裝在該系統的伺服器上，只讀日誌檔：
@@ -214,7 +237,7 @@ curl -s -H "Authorization: Bearer $TOKEN" "$GRAFANA/api/datasources/proxy/uid/$U
 | AMHS | MCS 有日誌檔：同 CIM。資料只在資料庫：用同步工具（例如 Logstash 的 JDBC input）把 ABORT、BLOCKED 紀錄寫成上面格式的日誌 | 對 `error_type:TRANSFER_ABORT` 算筆數；對 `transfer_seconds` 取平均 |
 | MQ | 定時腳本每 30～60 秒印一行 JSON（上面的範例），超過門檻時多印一行 `ERROR` | 對 `queue_depth` 取最大值；對 `consumers` 取最後一筆 |
 
-**跟下面「AMHS 走 SQL、MQ 走 exporter」的差別**：那兩條路告警一樣進得來，但 aiops-lite 的日誌證據只從 VictoriaLogs 撈，
+**跟下面「AMHS 走 SQL、MQ 走 exporter」的差別**：那兩條路告警一樣進得來，但 aiops-lite 的日誌證據只從 `logs.type` 指定的那個日誌資料庫撈，
 所以 RCA 不會有 AMHS、MQ 的明細（LLM 只知道哪條規則響了與觸發當下的數字；MQ 的指標有進 VictoriaMetrics 的話，可以用 `metrics.queries` 補上走勢）。
 要有明細，就要讓它們的錯誤紀錄也照規範進 VictoriaLogs。
 
@@ -344,7 +367,7 @@ WHERE finished_at > NOW() - INTERVAL '5 minutes'
    查不到資料時，規則會進入 NoData 狀態，可能另外發一則通知。每條規則都要在「Configure no data and error handling」
    明確選擇當成正常還是當成告警，不要留預設值碰運氣。
 3. **規則能觸發，不代表 RCA 有證據。**
-   告警進得來只需要規則與標籤；RCA 的日誌證據是 aiops-lite 另外經 Grafana 去 VictoriaLogs 查的，用的是 `config.yaml` 的 `logs.fields`。
+   告警進得來只需要規則與標籤；RCA 的日誌證據是 aiops-lite 另外經 Grafana 去日誌資料庫（VictoriaLogs 或 Elasticsearch）查的，用的是 `config.yaml` 的 `logs.type`、`logs.fields`。
    欄位名稱對不上、或日誌等級的寫法不在 `logs.error_levels` 裡，就撈不到任何日誌（註記的 LLM 摘要會只根據告警與關係邊；註記最後一行會寫出是哪一關沒過）。
 
 ## 進 aiops-lite 前的檢查清單
@@ -354,11 +377,13 @@ WHERE finished_at > NOW() - INTERVAL '5 minutes'
 - [ ] 規則查詢回傳的是一個數字（SQL 聚合成一列、LogsQL 用 `stats count()` 或對數值欄位聚合）。
 - [ ] 規則的 No data 行為已經明確選定。
 - [ ] 每個來源都有一條「資料還在進來」的規則。
-- [ ] 寫入 VictoriaLogs 時有指定 `_time_field`、`_msg_field`、`_stream_fields`；stream 欄位沒有用到批號這類值很多的欄位。
+- [ ] `config.yaml` 的 `logs.type` 跟日誌實際存的地方一致（VictoriaLogs 或 Elasticsearch）。
+- [ ] VictoriaLogs：寫入時有指定 `_time_field`、`_msg_field`、`_stream_fields`；stream 欄位沒有用到批號這類值很多的欄位。
+- [ ] Elasticsearch：`message` 是 text 型別、數值欄位是數字型別；`logs.index` 對得到實際的索引名稱。
 - [ ] 三個系統用同一套欄位名稱；`log.level` 的寫法一致（建議一律大寫）。
 - [ ] 日誌至少有時間、服務、等級、訊息四個欄位；服務與等級的名稱跟預設不同的話，已經寫進 `config.yaml` 的 `logs.fields`。
-- [ ] 用上面「寫進 VictoriaLogs 與檢查」的兩條指令，經 Grafana 查得到各系統的日誌與錯誤。
-- [ ] 走 SQL 或 exporter 觸發告警的系統，錯誤紀錄也有照規範進 VictoriaLogs（不然 RCA 沒有該系統的明細）。
+- [ ] 用上面「寫進 VictoriaLogs 與檢查」的兩條指令（Elasticsearch 用 Grafana 的 Explore），經 Grafana 查得到各系統的日誌與錯誤。
+- [ ] 走 SQL 或 exporter 觸發告警的系統，錯誤紀錄也有照規範進日誌資料庫（不然 RCA 沒有該系統的明細）。
 - [ ] 日誌等級的寫法（例如 `E`、`SEVERE`）跟預設不同的話，已經寫進 `logs.error_levels`。
 - [ ] 要統計的識別碼欄位（預設 `eqp_id`、`lot_id`、`carrier_id`）已經拆出來；名稱不同的話已經寫進 `logs.id_fields`。
 - [ ] Grafana 的通知路由把 `aiops_detect = true` 的告警送到 aiops-lite 的 Contact Point，而且沒有勾 Disable resolved message。
