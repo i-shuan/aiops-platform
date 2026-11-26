@@ -214,7 +214,7 @@ class Settings:
                 max_log_patterns=integer(llm, "max_log_patterns", d_ev.max_log_patterns, 0, 20, "llm."),
                 warn_levels=warn_levels(logs, d_ev.warn_levels),
                 max_warn_patterns=integer(llm, "max_warn_patterns", d_ev.max_warn_patterns, 0, 20, "llm.")),
-            labels=names, tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])),
+            labels=names, tz=tz, log_level=level, edges=parse_edges(raw.get("edges") or []),   # 選填：沒寫、留空都是沒有關係邊
             retry_failed_round_seconds=integer(raw, "retry_failed_round_seconds", cls.retry_failed_round_seconds, 1),
             healthcheck_stuck_seconds=integer(health, "stuck_seconds", cls.healthcheck_stuck_seconds, 30, prefix="healthcheck."),
             rounds_retention_days=integer(raw, "rounds_retention_days", cls.rounds_retention_days, 1),

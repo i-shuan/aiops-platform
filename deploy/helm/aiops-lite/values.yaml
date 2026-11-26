@@ -10,7 +10,7 @@
 
 image:
   repository: aiops-lite
-  tag: "0.6.2"
+  tag: "0.6.3"
   pullPolicy: IfNotPresent
 
 grafana:
@@ -89,10 +89,12 @@ timing:
   followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪（結案、補寫註記、重試 LLM）
   closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案（剛恢復又響不會另開一張）
 
-# 系統層級的上下游關係（[上游, 下游]），3～5 條就夠；不要把機台寫進來
-edges:
-  - [mq-broker, cim-eap]
-  - [cim-eap, amhs-mcs]
+# 選填：系統層級的上下游關係（[上游, 下游]）。不寫也能分析；寫了的好處是有關係的系統同時告警時會併成同一張事故，
+# LLM 也多一個「誰可能影響誰」的線索。例如：
+#   edges:
+#     - [mq-broker, cim-eap]
+#     - [cim-eap, amhs-mcs]
+edges: []
 
 resources:
   requests: {cpu: 100m, memory: 256Mi}

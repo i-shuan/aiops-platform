@@ -46,8 +46,12 @@ log_level: {{ .Values.logLevel | quote }}
 debounce_seconds: {{ int .Values.timing.debounceSeconds }}
 followup_seconds: {{ int .Values.timing.followupSeconds }}
 close_after_seconds: {{ int .Values.timing.closeAfterSeconds }}
+{{- if .Values.edges }}
 edges:
 {{- range .Values.edges }}
   - [{{ index . 0 | quote }}, {{ index . 1 | quote }}]
+{{- end }}
+{{- else }}
+edges: []
 {{- end }}
 {{- end -}}

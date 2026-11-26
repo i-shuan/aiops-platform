@@ -133,7 +133,7 @@ def test_queried_but_empty_traces_and_metrics_say_why(fake):
 
 def test_edges_are_judged_against_the_systems_in_this_incident(fake):
     assert "這些系統之間的關係邊 2 條" in line(collect(fake))
-    assert "缺關係邊｜還看不出這幾個系統誰影響誰。這幾個系統之間沒有宣告上下游" in line(collect(fake, edges=[("x", "y")]))
+    assert "關係邊" not in line(collect(fake, edges=[("x", "y")]))   # 這幾個系統之間沒宣告：不算缺，不提（關係邊是加分的）
     assert "連到這個系統的關係邊 1 條（另一端沒有告警）" in line(collect(fake, incident("mq-broker")))
     alone = line(collect(fake, incident("mq-broker"), edges=[]))
     assert "關係邊" not in alone   # 單一系統、沒宣告關係邊：不算缺（系統自己出問題時不需要它）
@@ -216,3 +216,11 @@ def test_the_annotation_gets_one_brief_line_while_the_llm_gets_the_full_explanat
     assert "缺錯誤日誌（這段時間有 4 筆日誌" in brief and "還看不出" not in brief          # 留原因，不重複講能分析什麼
     assert brief.endswith("沒接指標走勢") and "metrics.queries" not in brief          # 沒接的只列名稱
     assert "還看不出" in rca.overview_text(groups) and "metrics.queries" in rca.overview_text(groups)
+
+
+def test_logs_without_equipment_or_lot_fields_are_not_reported_as_missing(fake):
+    """IT 服務的日誌本來就沒有機台、批號欄位：有多少證據就分析多少，不每次都唸一遍。"""
+    fake.logs = [{k: v for k, v in row.items() if k not in ("eqp_id", "lot_id", "carrier_id")} for row in fake.logs]
+    text = line(collect(fake))
+    assert "機台" not in text and "批號" not in text and "eqp_id" not in text and text.startswith("已有的證據｜告警 3 筆")
+    assert "錯誤日誌 " in text
