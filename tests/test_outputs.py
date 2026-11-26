@@ -120,6 +120,25 @@ def test_a_closed_event_that_failed_is_still_retried_and_then_given_up(world, mo
     assert w.run(2000, settings=settings, outputs=down)["status"] == "ok"   # 放棄之後不再報錯、也不再續跑
 
 
+def test_llm_retries_do_not_send_an_update_each_time(world):  # noqa: F811
+    """LLM 不通時註記第 2 行有「連續失敗幾次、幾分鐘後重試」，每次重試都會變；只有那個數字不同，不算事故內容變了。"""
+    w = world
+    transport, seen = downstream()
+
+    def llm_down(request):
+        raise httpx.ConnectError("llm down")
+    settings = replace(w.settings, outputs=API)
+    w.receive("firing_mq")
+    for seconds in (60, 60 + 61, 60 + 61 + 121):                      # 三次都失敗：失敗次數 1、2、3
+        w.run(seconds, settings=settings, outputs=transport, llm=httpx.MockTransport(llm_down))
+    [inc] = rows(w, dbmod.incidents)
+    assert inc["llm_failures"] == 3 and "連續失敗 3 次" in inc["summary"]
+    assert [json.loads(r.content)["event"] for r in seen] == ["opened"]
+    assert json.loads(seen[0].content)["root_cause"] == {"analyzed": False, "summary": inc["summary"].replace("3 次，約 4 分鐘", "1 次，約 1 分鐘"), "candidates": []}
+    w.run(60 + 61 + 121 + 241, settings=settings, outputs=transport)  # LLM 回來了：內容真的變了，送一筆更新
+    assert [json.loads(r.content)["event"] for r in seen] == ["opened", "updated"] and json.loads(seen[-1].content)["root_cause"]["analyzed"]
+
+
 def test_connection_errors_are_reported_without_the_token(world):  # noqa: F811
     w = world
 

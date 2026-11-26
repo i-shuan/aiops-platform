@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -143,7 +144,10 @@ class Outputs:
         o = self.options
         event = "closed" if incident.status == "closed" else "updated" if self.db.has_delivery(INCIDENT_API, incident.uid) else "opened"
         payload = incident_payload(incident, grafana_url, event)
-        same = {**payload, "event": "", "grafana": {**payload["grafana"], "annotation_id": None}}   # 註記重建換了 id 不算內容變了
+        # 這幾樣變了不算內容變了、不重送：註記重建換了 id；LLM 還沒通時「連續失敗幾次、幾分鐘後重試」的數字（每次重試都會變）
+        steady = re.sub(r"（連續失敗 \d+ 次，約 \d+ 分鐘後重試）", "", payload["root_cause"]["summary"])
+        same = {**payload, "event": "", "grafana": {**payload["grafana"], "annotation_id": None},
+                "root_cause": {**payload["root_cause"], "summary": steady}}
         _status, detail = self._deliver(INCIDENT_API, incident.uid, _key(same), payload, o.incident_api_url, o.incident_api_token,
                                         bool(o.incident_api_url), now)
         return [f"事故 {incident.uid} 沒送到事故 API：{detail}"] if detail else []

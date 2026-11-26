@@ -143,7 +143,9 @@ def test_llm_outage_falls_back_and_is_retried_on_the_next_round(world):
     out = w.run(64, llm=httpx.MockTransport(down))
     [inc] = rows(w, dbmod.incidents)
     assert out["status"] == "degraded" and "未經 LLM 分析" in out["errors"][0] and not inc["analyzed"]
-    assert "[未經分析] mq-broker：MQ queue depth；cim-eap：CIM T3 timeout" in w.fake.annotations[inc["annotation_id"]]["text"]
+    note = w.fake.annotations[inc["annotation_id"]]["text"]
+    assert "根因分析｜[未經分析] LLM 目前連不上（連續失敗 1 次，約 1 分鐘後重試）。以下是程式收集到的證據，沒有經過推論：" in note
+    assert "<br>・告警：mq-broker：MQ queue depth；cim-eap：CIM T3 timeout<br>" in note   # 哪些告警響了還在，移到下面第一行
     w.run(124)  # 續跑時 LLM 回來了
     [inc] = rows(w, dbmod.incidents)
     assert inc["analyzed"] and "[LLM 推論]" in w.fake.annotations[inc["annotation_id"]]["text"]
@@ -415,7 +417,8 @@ def test_new_alerts_during_backoff_update_the_fallback_summary_without_calling_a
     assert out["errors"] == [] and len(attempts) == 1 and es_calls(w) == es_before
     [inc] = rows(w, dbmod.incidents)
     assert inc["alert_count"] == 2 and inc["analyzed"] is False
-    assert "[未經分析] mq-broker：MQ queue depth；cim-eap：CIM T3 timeout" in w.fake.annotations[inc["annotation_id"]]["text"]
+    note = w.fake.annotations[inc["annotation_id"]]["text"]
+    assert "[未經分析] LLM 目前連不上" in note and "<br>・告警：mq-broker：MQ queue depth；cim-eap：CIM T3 timeout<br>" in note
     w.run(124)                                                              # 到時間：帶著完整的成員重新分析
     assert rows(w, dbmod.incidents)[0]["analyzed"] and "CIM T3 timeout" in w.llm_calls[0]["messages"][1]["content"]
 

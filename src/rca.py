@@ -640,6 +640,47 @@ def overview_brief(groups: dict[str, list[Any]]) -> str:
     return "證據｜" + "；".join(parts)
 
 
+MAX_FACT_LINES = 5   # LLM 沒有分析時，註記上最多直接列幾行證據（版面的上限，不是判斷門檻）
+FACT_CHARS = 120     # 每一行引用的原文最多幾個字
+FAILURE_TEXT = {"unreachable": "LLM 目前連不上", "rejected": "LLM 的回答沒有通過檢查"}
+
+
+def alerts_fact(incident: Incident) -> str:
+    return f"・告警：{raw_summary(incident)}"
+
+
+def evidence_facts(incident: Incident, evidence: dict[str, Any]) -> list[str]:
+    """LLM 沒有分析的時候直接貼在註記上的幾行證據。全部是程式收集到的原文與筆數，沒有推論、沒有排名次：
+    第一行是哪些告警響了；再來是錯誤種類（事故前沒出現過的排前面，再照事故期間的筆數）；最後一行是呼叫鏈最底層的失敗點。"""
+    clip = lambda text: " ".join(str(text).split())[:FACT_CHARS]
+    lines = [alerts_fact(incident)]
+    chain = next((sp for c in evidence.get("call_chains") or [] for sp in c["spans"] if sp.get("origin")), None)
+    room = MAX_FACT_LINES - 1 - (1 if chain else 0)
+    patterns = sorted(evidence.get("error_patterns") or [], key=lambda r: (not r.get("new", False), -r.get("during", 0)))
+    for r in patterns[:room]:
+        if "during" not in r:
+            lines.append(f"・{r['system']}：{clip(r['example'])}")
+        else:
+            lines.append(f"・{r['system']}{' 新出現' if r['new'] else ''}：{clip(r['example'])}"
+                         f"（事故期間 {r['during']} 筆，事故前 {r['before']} 筆）")
+    if not patterns:   # 沒有做次數比較（查詢失敗或關掉了）：退而列錯誤日誌的樣本
+        for e in (evidence.get("error_logs") or [])[:room]:
+            lines.append(f"・{e['system']}：{clip(e['message'])}")
+    if chain:
+        target = (chain.get("attributes") or {}).get("peer.service")
+        path = " → ".join(x for x in (chain.get("called_by") if chain.get("called_by") != chain["service"] else None,
+                                      chain["service"], target) if x)
+        lines.append(f"・呼叫鏈停在：{path}，{clip(chain.get('error') or chain['span'])}")
+    return lines
+
+
+def failure_line(kind: str, failures: int, retry_seconds: int) -> str:
+    """LLM 沒有分析時註記第 2 行的內容：說明原因、什麼時候再試，並交代下面幾行是什麼。"""
+    minutes = max(1, round(retry_seconds / 60))
+    return (f"[未經分析] {FAILURE_TEXT.get(kind, FAILURE_TEXT['unreachable'])}（連續失敗 {failures} 次，約 {minutes} 分鐘後重試）。"
+            f"以下是程式收集到的證據，沒有經過推論：")
+
+
 def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str:
     dump = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
     head = f"【0. 證據概況（程式統計的事實：已有的證據；缺的、查詢失敗的、沒接的各自讓哪一種分析做不了）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
@@ -764,6 +805,7 @@ class Analysis:
     analyzed: bool     # 是不是通過檢查的 LLM 推論
     reason: str        # 沒通過的原因
     candidates: str    # 註記上「可能原因」的幾行（candidates_text）；沒有就是空字串
+    failure: str = ""  # 沒有分析的話是哪一種：unreachable（連不上、逾時、回錯誤碼）／rejected（有回答但沒通過檢查）；其餘是空的
 
 
 def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
@@ -784,7 +826,8 @@ def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, 
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:  # ValueError 含 JSON 解析失敗
         reason = f"{type(e).__name__}: {e}"[:300]
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
-        return Analysis(fallback, False, reason, "")
+        # 連不上、逾時、回 4xx／5xx 是「LLM 不通」；其餘是它有回答、但格式不對或沒通過幻覺檢查
+        return Analysis(fallback, False, reason, "", "unreachable" if isinstance(e, httpx.HTTPError) else "rejected")
     return Analysis(f"[LLM 推論] {summary}", True, "", candidates_text(candidates, options.max_summary_chars))
 
 
