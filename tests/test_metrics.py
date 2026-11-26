@@ -35,8 +35,7 @@ def incident(*services):
 
 def collect(fake, *queries, inc=None, **options):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    return rca.collect_evidence(inc or incident(), EDGES, grafana, es_datasource_uid="", log_index="*", trace_index="",
-                                id_fields=["lot_id"], now=FINISHED,
+    return rca.collect_evidence(inc or incident(), EDGES, grafana, logs_datasource_uid="", id_fields=["lot_id"], now=FINISHED,
                                 metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=queries, lookback_minutes=5,
                                                           step_seconds=10, **options))
 
@@ -152,8 +151,7 @@ def test_many_series_keep_only_the_largest_and_say_how_many_were_dropped():
             {"metric": {"queue": f"q{n}"}, "values": values(n * 10)} for n in range(1, 8)]}})
 
     grafana = Grafana("http://grafana.test", "t", transport=httpx.MockTransport(handle))
-    ev = rca.collect_evidence(incident("mq-broker"), EDGES, grafana, es_datasource_uid="", log_index="*", trace_index="",
-                              id_fields=["lot_id"], now=FINISHED,
+    ev = rca.collect_evidence(incident("mq-broker"), EDGES, grafana, logs_datasource_uid="", id_fields=["lot_id"], now=FINISHED,
                               metrics=rca.MetricOptions(datasource_uid="u", queries=(READY,), lookback_minutes=5, step_seconds=10, max_series=3))
     assert [m["labels"]["queue"] for m in ev["metrics"]] == ["q7", "q6", "q5"]
     assert any("有 7 條序列，只列數值最大的 3 條" in note for note in ev["notes"])
@@ -174,7 +172,7 @@ def test_without_metrics_settings_nothing_is_queried(fake):
     ev = collect(fake)
     assert ev["metrics"] == [] and fake.metric_requests == [] and not any("指標" in n for n in ev["notes"])
     no_uid = rca.collect_evidence(incident(), EDGES, Grafana("http://grafana.test", "t", transport=fake.transport),
-                                  es_datasource_uid="", log_index="*", trace_index="", id_fields=["lot_id"], now=FINISHED,
+                                  logs_datasource_uid="", id_fields=["lot_id"], now=FINISHED,
                                   metrics=rca.MetricOptions(queries=(READY,)))
     assert no_uid["metrics"] == [] and fake.metric_requests == []
 

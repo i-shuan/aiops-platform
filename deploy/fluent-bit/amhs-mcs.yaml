@@ -1,10 +1,10 @@
-# Fluent Bit 設定範例：AMHS（MCS）的文字日誌 → 拆欄位 → Elasticsearch
+# Fluent Bit 設定範例：AMHS（MCS）的文字日誌 → 拆欄位 → VictoriaLogs
 #
 # 範例假設日誌是「key=value」風格（格式是假設的，請照現場的日誌改 regex）：
 #   2026-11-21 10:41:50 ERROR Transfer ABORT carrier=FOUP0912 from=STK01 to=EQP-CVD-07 elapsed=412.5 reason=destination port occupied
 #   2026-11-21 10:42:10 INFO Transfer DONE carrier=FOUP0120 from=STK02 to=EQP-ETCH-02 elapsed=38.0
 #
-# 用 Fluent Bit 5.2.0 + Elasticsearch 8.19.23 實測過。MCS 沒有日誌檔、資料只在資料庫時，這份設定用不上（見 FACTORY_METRICS.md 的路線 B）。
+# 用 Fluent Bit 5.2.0 + VictoriaLogs v1.17.0 實測過（2026-11-26，本機、假資料）。MCS 沒有日誌檔、資料只在資料庫時，這份設定用不上（見 FACTORY_METRICS.md 的路線 B）。
 
 service:
   flush: 5
@@ -17,7 +17,7 @@ parsers:
     time_key: time
     time_format: '%Y-%m-%d %H:%M:%S'
     time_offset: '+0800'
-    types: transfer_seconds:float   # 數值欄位要轉成數字，不然 Grafana 沒辦法取平均
+    types: transfer_seconds:float   # 數值欄位轉成數字（VictoriaLogs 存的都是文字，但值要是純數字，Grafana 才能取平均）
 
 pipeline:
   inputs:
@@ -47,13 +47,19 @@ pipeline:
       add: error_type TRANSFER_BLOCKED
 
   outputs:
-    - name: es
+    # VictoriaLogs 的 JSON 行寫入介面。網址上的三個參數：哪個欄位當 stream（選值的種類少的，不要拿批號或機台當 stream）、
+    # 哪個欄位是訊息本文（存成 _msg）、哪個欄位是時間（存成 _time）。aiops-lite 查的時候就是用 _time、_msg 與 service.name、log.level
+    - name: http
       match: mcs
-      host: es.corp.example
-      port: 9200
-      index: factory-logs-amhs
-      suppress_type_name: on
-      tls: on
-      http_user: fluent-bit-writer
-      http_passwd: ${ES_PASSWORD}
+      host: victorialogs.corp.example
+      port: 9428
+      uri: /insert/jsonline?_stream_fields=service.name&_msg_field=message&_time_field=@timestamp
+      format: json_lines
+      json_date_key: '@timestamp'
+      json_date_format: iso8601
+      compress: gzip
       retry_limit: 5
+      # VictoriaLogs 本身沒有帳號密碼。前面有 vmauth 或反向代理做認證時才加下面三行（這一段沒有實測過）：
+      # tls: on
+      # http_user: fluent-bit-writer
+      # http_passwd: ${VL_PASSWORD}   # 從環境變數帶，不要寫在檔案裡

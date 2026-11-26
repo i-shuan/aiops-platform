@@ -1,7 +1,8 @@
 # aiops-lite
 
 事件驅動的極簡 AIOps：Grafana 告警經 Webhook 推進來 → 等一段 debounce → 跨系統收斂 → 收集證據交給 LLM → 寫回 Grafana 註記。
-只拿一把 Grafana Editor Token，不直連任何外部資料庫／ES，沒有前端。
+只拿一把 Grafana Editor Token，不直連任何外部資料庫，也不直連 Victoria 元件，沒有前端。
+日誌、Trace、指標都放在 Victoria 全家桶（VictoriaLogs、VictoriaTraces、VictoriaMetrics），全部經公司 Grafana 的資料源代理去查。
 
 這個 repo 現在只有 aiops-lite。原本的 aiops-platform（管線加可插拔算子的那一版：`aiops/`、它的測試、腳本、Helm chart、
 資料庫遷移）已經從這個分支移除；要找舊程式請看 Git 歷史。
@@ -31,22 +32,24 @@ MQ / CIM / AMHS ──▶ 公司 Grafana（資料源 + 貼標籤的告警規則�
 
 | 訊號 | 工廠（老舊系統、沒有埋點） | IT 服務（有埋點） | aiops-lite 怎麼用 |
 | --- | --- | --- | --- |
-| 指標 | 日誌轉指標（Grafana 規則對 ES 算次數） | 原生 metrics（Prometheus、VictoriaMetrics） | 兩者都是 Grafana 告警，Webhook 進來的格式一樣 |
-| 關聯 | **批號／載具**把各系統的日誌串成時間線 | **trace id** 向 Tempo 取回呼叫鏈 | 證據第 5 包（時間線）、第 6 包（呼叫鏈） |
-| 日誌 | ES | ES | 證據第 3、4 包（錯誤日誌樣本、識別碼出現次數） |
+| 指標 | 日誌轉指標（Grafana 規則對日誌算次數） | 原生 metrics（VictoriaMetrics） | 兩者都是 Grafana 告警，Webhook 進來的格式一樣 |
+| 關聯 | **批號／載具**把各系統的日誌串成時間線 | **trace id** 向 VictoriaTraces 取回呼叫鏈 | 證據第 5 包（時間線）、第 6 包（呼叫鏈） |
+| 日誌 | VictoriaLogs | VictoriaLogs | 證據第 3、4 包（錯誤日誌樣本、識別碼出現次數） |
 
-- **批號時間線**：從錯誤日誌裡挑出現最多次的批號與載具，回 ES 把它們在各系統的紀錄（不限等級、不限系統）照時間排出來。
+- **批號時間線**：從錯誤日誌裡挑出現最多次的批號與載具，回 VictoriaLogs 把它們在各系統的紀錄（不限等級、不限系統）照時間排出來。
   它只說明先後，不說明因果；靠各系統的時間戳排序，系統之間時鐘差幾秒，順序就可能是錯的。
-- **Tempo 呼叫鏈**：經 Grafana 的 Tempo 資料源取回失敗請求的整條呼叫路徑，標出「底下沒有其他失敗呼叫」的那個失敗點。
-  錯誤日誌帶 trace id（`tempo.trace_id_field`）時直接用編號取；沒有才用 TraceQL 搜尋。
+- **呼叫鏈**：經 Grafana 的 Jaeger 型別資料源（後面是 VictoriaTraces）取回失敗請求的整條呼叫路徑，標出「底下沒有其他失敗呼叫」的那個失敗點。
+  錯誤日誌帶 trace id（`traces.trace_id_field`，預設 `trace_id`）時先用編號取；不夠才搜尋：每個系統問一次「有 error 標籤的 Trace」，
+  回來的就是完整的 Trace。
 - **同一張事故**：工廠與 IT 服務的告警只要關係邊連得起來（例如 `[mes-api, cim-eap]`）就併成一張。兩邊的日誌要用同一套欄位名稱。
 - **呼叫鏈裡出現的系統算有憑據**：例如呼叫鏈指到一個沒有告警、也不在關係邊裡的資料庫，LLM 可以點名它；憑空編的系統照樣被擋。
 
-- **指標走勢**（第 7 包，選用）：事故時經 Grafana 的 Prometheus 相容資料源查各系統的數值（`metrics.queries` 設定的查詢），
+- **指標走勢**（第 7 包，選用）：事故時經 Grafana 的 Prometheus 型別資料源（指到 VictoriaMetrics）查各系統的數值（`metrics.queries` 設定的查詢），
   壓成「事故前的基準、事故後的最小／最大／最後值、相對基準的倍數」。只做算術、沒有門檻，不判斷算不算異常。
   它補的是日誌與 Trace 看不到的情況，例如 MQ 的消費者不見了、流量暴增。
 
-設定：`es.timeline_fields`、`tempo.datasource_uid`、`metrics.*` 等，見 `CONFIG.md`。Loki、Jaeger 沒有接。
+設定：`logs.timeline_fields`、`traces.datasource_uid`、`metrics.*` 等，見 `CONFIG.md`。Elasticsearch、Tempo、Loki 沒有接
+（原本查 Elasticsearch 與 Tempo 的程式已經整個換掉；設定檔還留著 `es`／`tempo` 區段的話，啟動時會報錯並說要改成什麼）。
 要抓「還沒超標但走勢不對」，在 Grafana 規則用變化率、預測、跟之前比這類查詢，寫法與實測值見 `INPUTS.md`；平台本身不做異常偵測。
 
 ## 整合的單位：以 `service` 為準，一個 Grafana 一份
@@ -85,7 +88,7 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 | `config.yaml` 的 `labels.service` | 指定用哪個告警標籤當分析單位（預設 `service`） |
 | `src/grafana.py` 的 `parse_webhook` | 從告警讀出這個標籤，放進 `Alert.service` |
 | `src/grouping.py` 的 `group_alerts`、`converge` | 以這個值收斂（同值合併、有關係邊就併） |
-| `src/grafana.py` 的 `search_errors`、`search_error_traces` | 用這個值去 ES、Tempo 撈證據 |
+| `src/grafana.py` 的 `search_errors`、`search_error_traces` | 用這個值去 VictoriaLogs、VictoriaTraces 撈證據 |
 
 **只換收斂單位：改設定就可以，不用改程式。** 把 `labels.service` 改成 `function` 或 `cluster`，
 告警貼上對應的標籤，`edges` 也用同一層的名稱寫。同一個 function 或 cluster 的告警就會併成一張事故。
@@ -94,10 +97,9 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 
 | 證據 | 換單位之後 | 怎麼處理 |
 | --- | --- | --- |
-| 錯誤日誌、識別碼統計（ES） | 程式拿分析單位的值去比對日誌的 `es.log_fields.service` 欄位（預設 `service.name`） | 日誌裡有 `function` 或 `cluster` 欄位的話，把 `es.log_fields.service` 改成那個欄位 |
-| 批號／載具時間線（ES） | 用批號、載具編號查，不用分析單位篩選；但批號是從上一列的錯誤日誌裡挑的，而且每筆事件顯示的「系統」也讀 `es.log_fields.service` | 上一列對得上，這包就有；改了欄位後時間線顯示的會是 function 或 cluster 名稱 |
-| ES 裡的 Trace 錯誤片段 | 同上，欄位是 `es.trace_fields.service` | 同上 |
-| Tempo 呼叫鏈 | 查詢寫死 `resource.service.name`，設定改不了 | **目前做不到**：這包證據會是空的，其他證據與 RCA 照常 |
+| 錯誤日誌、識別碼統計（VictoriaLogs） | 程式拿分析單位的值去比對日誌的 `logs.fields.service` 欄位（預設 `service.name`） | 日誌裡有 `function` 或 `cluster` 欄位的話，把 `logs.fields.service` 改成那個欄位 |
+| 批號／載具時間線（VictoriaLogs） | 用批號、載具編號查，不用分析單位篩選；但批號是從上一列的錯誤日誌裡挑的，而且每筆事件顯示的「系統」也讀 `logs.fields.service` | 上一列對得上，這包就有；改了欄位後時間線顯示的會是 function 或 cluster 名稱 |
+| 呼叫鏈（VictoriaTraces） | 搜尋時拿分析單位的值當 Trace 的服務名稱（`service.name`），設定改不了 | **目前做不到**：這包證據會是空的，其他證據與 RCA 照常。日誌有 trace id 欄位的話，用編號直接取的那幾條不受影響 |
 
 **限制：一次只能有一層。** 一張事故只記一個維度的名單，沒辦法「以 service 收斂、同時再往上看 function 或 cluster」。
 要多層同時分析得改程式（告警多帶幾個維度、收斂鍵可選、事故記錄各層名單，會動到 `grouping.py`、`db.py`、`report.py`），**目前沒有做**。
@@ -136,8 +138,10 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 【P2・進行中】受影響系統：test-svc｜收斂告警 1 筆
 根因分析｜[LLM 推論] 目前只能推測 test-svc 的錯誤率告警反映其自身異常；最該補錯誤日誌，以確認新錯誤及實際源頭。
 1. test-svc：「High error rate」告警在 test-svc 觸發，僅能提示該服務可能有錯誤率升高；缺少錯誤日誌，無法確認原因。（信心 30）
-證據｜已有告警 1 筆；缺錯誤日誌（索引有 10 筆，但沒有一筆的 service.name 是這些系統。檢查欄位名稱，以及值是否跟告警的系統名稱完全一樣）；沒接呼叫鏈、指標走勢
+證據｜已有告警 1 筆；缺錯誤日誌（這段時間有 13 筆日誌，但沒有一筆的 service.name 是這些系統。檢查欄位名稱，以及值是否跟告警的系統名稱完全一樣）；沒接呼叫鏈、指標走勢
 ```
+
+（下面這張圖是換成 Victoria 之前截的，版面一樣；括號裡的用字當時是「索引有 10 筆」，現在是「這段時間有 N 筆日誌」。）
 
 ![Grafana 上的實際畫面](demo/images/5-evidence-lines.png)
 
@@ -163,7 +167,7 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 
 **證據那一行**
 
-- 缺錯誤日誌時括號裡會寫是哪一關沒過：索引在這段時間沒有資料、有資料但系統名稱對不上、系統有日誌但沒有一筆算錯誤。
+- 缺錯誤日誌時括號裡會寫是哪一關沒過：這段時間一筆日誌都沒有、有日誌但系統名稱對不上、系統有日誌但沒有一筆算錯誤。
 - 「事故前後的次數比較 N 種錯誤（M 種事故前沒出現過）」：事故前就一直有的錯誤是平常的雜訊，不會被當成這次的原因。
 - 每種證據少了會看不出什麼（關係邊：誰影響誰；錯誤日誌：誰出了什麼錯；呼叫鏈：失敗的請求停在哪；指標走勢：數值怎麼變壞），
   這份完整的說明只交給模型，讓它在結論裡講最該補哪一種；註記上不重複。
@@ -177,17 +181,17 @@ Webhook 內容裡雖然帶組織編號，但程式不看；這些都是依 Grafa
 | --- | --- | --- |
 | 同類去重 | 把訊息裡的數字、UUID 換成 `*` 當成樣板，同一種錯誤只留最早的一筆**原文**，附上同類的筆數 | 五十行重複的日誌變成一行；原文保留，機台與批號不會被洗掉 |
 | 各系統分開取最早的幾筆 | 除了最新的那一批，每個系統各自再取最早的 3 筆 | 某個系統大量報錯時，別的系統較早、較少的錯誤不會被擠掉 |
-| 事故前後的次數 | 主要的幾種錯誤，向 ES 問它在事故期間與事故前 30 分鐘各出現幾筆 | 分辨平常就有的與新出現的。只給數字，不貼「暴增」「雜訊」的標籤 |
+| 事故前後的次數 | 主要的幾種錯誤，向 VictoriaLogs 問它在事故期間與事故前 30 分鐘各出現幾筆（一次查詢） | 分辨平常就有的與新出現的。只給數字，不貼「暴增」「雜訊」的標籤 |
 | 警告 | 同一段時間裡等級是 WARN 的日誌，同樣歸類與計數 | 出錯前的警告常常寫出原因（資源快用完、重試變多） |
 
-每張事故多兩次 ES 查詢（都經 Grafana）。日誌沒有等級欄位時不撈警告。這些改動有沒有用是量出來的，見 **`EVAL.md`**。
+每張事故多三次日誌查詢（各系統最早的錯誤、警告、計數；都經 Grafana）。日誌沒有等級欄位時不撈警告。這些改動有沒有用是量出來的，見 **`EVAL.md`**。
 
 ## 為什麼要等（debounce）
 
 收到 Webhook 的第 0 秒就分析，LLM 拿到的是殘缺的證據：
 
 - 上下游的告警有時間差：上游出事後下游可能幾十秒後才響，甚至門檻嚴的下游先響。太早分析會把受害者當成根因。
-- ES 日誌有寫入延遲（收集器緩衝、建索引）：太早查，撈不到機台與批號。
+- 日誌有寫入延遲（收集器緩衝；VictoriaLogs 收到後也要幾秒才查得到）：太早查，撈不到機台與批號。
 - 一場事故會連發好幾個 Webhook：各跑各的會重複問 LLM、註記互相覆蓋。
 
 所以收到**第一個** Webhook 後固定等 `debounce_seconds`，這段時間進來的告警全部收進同一批，時間到才一起收斂、撈證據、問一次 LLM。
@@ -203,13 +207,13 @@ grafana: {url: https://grafana.corp.example, token: ""}   # 必填
 webhook: {token: "", port: 8080}                          # token 必填
 database: {url: postgresql+psycopg://aiops:密碼@主機:5432/aiops}   # 沒寫 = sqlite:///aiops-lite.db
 llm: {url: "", api_key: "", model: "", retry_initial_seconds: 60, retry_max_seconds: 1800}   # 整段可省略 = 不分析；temperature 不寫 = 用模型預設值
-es:                                                       # 整段可省略 = 沒有日誌證據
-  datasource_uid: ""
-  log_index: "*"
-  trace_index: ""
+logs:                                                     # 整段可省略 = 沒有日誌證據
+  datasource_uid: ""                                      # Grafana 上 VictoriaLogs 資料源的 uid
+  extra_filter: ""                                        # 只看一部分日誌時填 LogsQL 條件，例如 '{namespace="factory"}'
   id_fields: [eqp_id, lot_id, carrier_id]
-  log_fields:   {time: "@timestamp", service: service.name, level: log.level, message: message}
-  trace_fields: {time: "@timestamp", service: service.name, span: span.name, trace_id: trace.id, status: status.code, error: error.message}
+  fields: {service: service.name, level: log.level}       # 時間與訊息在 VictoriaLogs 固定是 _time、_msg，不用設定
+traces: {datasource_uid: ""}                              # 整段可省略 = 沒有呼叫鏈證據；Jaeger 型別資料源（指到 VictoriaTraces）的 uid
+metrics: {datasource_uid: "", queries: []}                # 整段可省略 = 沒有指標走勢；Prometheus 型別資料源（指到 VictoriaMetrics）的 uid
 timezone: Asia/Taipei
 log_level: INFO
 debounce_seconds: 60      # 收到第一個 Webhook 後等多久才開始分析
@@ -219,11 +223,17 @@ edges:
   - [mq-broker, cim-eap]  # [上游, 下游]
 ```
 
-- **進階調整**（逾時、重試、ES 筆數上限、錯誤等級的值、給 LLM 的樣本數、提示詞、幻覺檢查樣式、標籤名稱、健康檢查門檻…）
+- **進階調整**（逾時、重試、日誌筆數上限、錯誤等級的值、給 LLM 的樣本數、提示詞、幻覺檢查樣式、標籤名稱、健康檢查門檻…）
   也都在這份檔案，全部選填；`config.example.yaml` 裡用 `#` 註解掉的就是。完整清單、預設值、範圍，以及哪些東西刻意不開放設定，見 **`CONFIG.md`**。
 - **啟動時嚴格檢查**：檔案不存在、鍵名打錯（任何一層）、型別不對、必填沒填，直接報錯、不啟動。數字開頭的密鑰要加引號。
-- **日誌與 Trace 的欄位名稱可以改**（`es.log_fields`、`es.trace_fields`）：查詢條件、排序、讀回來的內容都照這裡的名稱；沒寫的用預設值。
-  日誌沒有等級欄位時，`es.log_fields.level` 可以設成 `""`，改用訊息文字挑錯誤日誌（過渡做法，會漏撈也會誤撈，見 `CONFIG.md`）。
+- **日誌的系統與等級欄位名稱可以改**（`logs.fields`）：查詢條件、讀回來的內容都照這裡的名稱；沒寫的用預設值。
+  時間與訊息在 VictoriaLogs 固定是 `_time`、`_msg`（寫入時指定哪個欄位當時間、哪個當訊息），不用也不能在這裡設。
+  日誌沒有等級欄位時，`logs.fields.level` 可以設成 `""`，改成在訊息文字裡找 error、fatal 這些完整的詞（過渡做法：
+  INFO 的訊息寫到 error 這個詞也會被挑進來，見 `CONFIG.md`）。
+- **VictoriaLogs 沒有索引的概念**：原本的 `log_index` 沒有了。要只看一部分日誌，用 `logs.extra_filter` 填一段 LogsQL 條件，
+  它會加在每一條日誌查詢的最前面。
+- **舊的 `es`／`tempo` 區段會讓服務啟動失敗**，錯誤訊息會說改成 `logs`／`traces`。`log_index`、`trace_index`、`log_fields`、
+  `trace_fields`、`error_statuses`、`llm.max_trace_samples` 都已經沒有了。
 - **檔案裡有 Token 與密碼，不要推上 Git**：`config.yaml` 已在 `.gitignore` 與 `.dockerignore`，專案裡只有 `config.example.yaml`。
   設定被印出來（log、例外訊息）時，Token、密鑰、連線字串不會出現。
 - 實際看到註記的延遲 ≈ 規則的 `for` + Grafana 路由的 `group_wait` + `debounce_seconds` + LLM 回應時間。
@@ -233,19 +243,19 @@ edges:
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
 | `src/server.py` | 218 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 506 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
-| `src/grafana.py` | 392 | 解析告警 Webhook、ES Proxy 查日誌與 Trace、寫註記 |
+| `src/main.py` | 503 | 讀 config.yaml（嚴格檢查）與「一輪」的流程 |
+| `src/grafana.py` | 356 | 解析告警 Webhook、經資料源代理查 VictoriaLogs／VictoriaTraces／VictoriaMetrics、寫註記 |
 | `src/grouping.py` | 168 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/rca.py` | 800 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、Tempo 呼叫鏈）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
+| `src/rca.py` | 796 | 不寫推理演算法：收集證據（告警、關係邊、日誌、識別碼統計、批號時間線、呼叫鏈、指標走勢）、組 Prompt、呼叫 LLM、幻覺檢查、失敗退回原始摘要 |
 | `src/report.py` | 64 | 註記的固定格式（標題、摘要、證據的幾行、時間與調整優先權連結；台灣時間、HTML 跳脫） |
 | `src/db.py` | 187 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄 |
 
-合計約 2,335 行。
+合計約 2,290 行。
 
 ## 各系統要做的事（平台零直連）
 
 1. 把資料送進公司 Grafana 看得到的資料源：MQ 掛 Prometheus exporter；CIM 用日誌收集器做 Log 轉指標；AMHS 開唯讀 View 給
-   Grafana 的 SQL 資料源。錯誤日誌進 ES，帶 `service.name`、`log.level`、`message`、`@timestamp`，以及有的話 `eqp_id`／`lot_id`／`carrier_id`。
+   Grafana 的 SQL 資料源。錯誤日誌進 VictoriaLogs（Fluent Bit 的 http 輸出打 `/insert/jsonline`；巢狀的 `service: {name: …}` 進去後會攤平成 `service.name`），帶 `service.name`、`log.level`、`message`、`@timestamp`，以及有的話 `eqp_id`／`lot_id`／`carrier_id`。
 2. 在 Grafana 建告警規則（閾值自己定）並貼標籤：`aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名稱>`
    （要跟關係邊裡的名稱一樣）。這三個標籤名稱是預設值，可以在 config.yaml 的 `labels` 改。沒有 `service` 的告警會被略過並回報給送出端；`aiops_severity` 寫錯當成 P3。
 
@@ -255,7 +265,9 @@ Demo 的 Grafana 實際畫面（依「降噪、找源頭、鎖定機台批號、
 
 ## Grafana 要做的設定
 
-**都在公司 Grafana 的網頁介面（或它的 API）上做；不改 Grafana 映像檔、不裝外掛、不改規則的閾值。**
+**都在公司 Grafana 的網頁介面（或它的 API）上做；不改 Grafana 映像檔、不改規則的閾值。**
+**唯一的例外是一個外掛**：Grafana 沒有內建 VictoriaLogs 的資料源，要請 Grafana 管理員裝 `victoriametrics-logs-datasource`
+（實測 0.34.0）。這是日誌證據的前提條件；沒裝就只有告警、呼叫鏈與指標走勢。Trace 與指標用的是 Grafana 內建的資料源型別，不用裝東西。
 這個 repo 不部署 Grafana，用的是公司既有的那一套。
 
 | # | 項目 | 在哪做 | 怎麼做 |
@@ -264,14 +276,23 @@ Demo 的 Grafana 實際畫面（依「降噪、找源頭、鎖定機台批號、
 | 2 | 告警規則標籤 | Alerting → Alert rules → 編輯規則 → Labels | 每條要納管的規則加 `aiops_detect=true`、`aiops_severity=P0～P3`、`service=<系統名>` |
 | 3 | **Contact Point**（新增 1 個） | Alerting → Contact points → Add | 類型 Webhook；URL `http://<release>.<namespace>.svc:8080/webhook`；Authorization scheme `Bearer`、credentials 填 config.yaml 的 `webhook.token`；**不要**勾 Disable resolved message |
 | 4 | **Notification policy**（新增 1 條路由） | Alerting → Notification policies → New child policy | Matcher `aiops_detect = true` → 上面的 Contact Point；`group_wait` 設短（0～10 秒，平台自己會等 debounce）；要同時保留原本的通知就勾 Continue matching |
-| 5 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（事故清單：進行中、P0、P1、已結案；只用內建註記清單面板，不需要資料源）。另有 `dashboards/aiops-incident-metrics.json`（四張指標曲線，事故區間自動疊成紅色；匯入時選 ES 資料源，查詢要照 `FACTORY_METRICS.md` 的欄位規範，面板的查詢可自行改成各系統的指標） |
-| 6 | ES 資料源 uid（要日誌證據才需要） | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 config.yaml 的 `es.datasource_uid`（Helm：`es.datasourceUid`） |
+| 5 | 儀表板 | Dashboards → New → Import | 貼上或上傳 `dashboards/aiops-overview.json`（事故清單：進行中、P0、P1、已結案；只用內建註記清單面板，不需要資料源）。另有 `dashboards/aiops-incident-metrics.json`（四張指標曲線，事故區間自動疊成紅色；匯入時選日誌的資料源，查詢要照 `FACTORY_METRICS.md` 的欄位規範，面板的查詢可自行改成各系統的指標） |
+| 6 | **資料源**（要哪一種證據才需要哪一個） | Connections → Data sources → Add | 日誌：型別 **VictoriaLogs**（要先裝外掛），URL 填 VictoriaLogs 的位址。Trace：型別 **Jaeger**，URL 填 VictoriaTraces 的位址加 `/select/jaeger`。指標：型別 **Prometheus**，URL 填 VictoriaMetrics 的位址。已經有的就不用再建 |
+| 7 | 資料源的 uid | Connections → Data sources → 點進該資料源 | 從網址 `/connections/datasources/edit/<uid>` 取得，填進 config.yaml 的 `logs.datasource_uid`、`traces.datasource_uid`、`metrics.datasource_uid` |
+
+建好之後用同一把 Token 確認查得到日誌（回來的是一行一筆的 JSON；一行都沒有就是時間窗內沒有這個系統的日誌，或欄位名稱對不上）：
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$GRAFANA/api/datasources/proxy/uid/$UID/select/logsql/query" \
+  -d 'query="service.name":="cim-eap" | sort by (_time) desc | limit 3' \
+  -d "start=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)" -d "end=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
 
 ### 注意
 
 1. **規則、Contact Point、路由若是用 provisioning（YAML、Terraform）管的**，在 UI 上改會被下次部署蓋掉，要加進原本那份檔案。
 2. **Grafana 要連得到 aiops-lite 的 Service**（同叢集用 Service 名稱；不同叢集要自己開路）。
-3. **RBAC 只在預設權限下驗過**：Editor 能走 ES 代理、寫註記，是在 Grafana 13.0.7 預設權限下確認的。
+3. **RBAC 只在預設權限下驗過**：Editor 能走三個資料源的代理、寫註記，是在 Grafana 13.0.7 預設權限下確認的。
 4. **Token 與 Webhook 密鑰只放 `secrets.values.yaml`（不進 Git）**，專案裡的 `values.yaml` 保持空白。
 
 ## 流程細節
@@ -286,7 +307,7 @@ Demo 的 Grafana 實際畫面（依「降噪、找源頭、鎖定機台批號、
   LLM 回 JSON（summary／systems／ids），程式檢查點名的系統在事故或關係邊裡、機台批號在識別碼統計裡、
   摘要文字裡夾數字的識別碼在證據裡找得到；不通過就用 `[未經分析] 原始摘要`。
 - **LLM 失敗會指數退避**：分析失敗（連不上、逾時、回應格式不對、幻覺檢查沒過）後，等 `llm.retry_initial_seconds`（預設 60）才再試，
-  之後每失敗一次加倍（60、120、240…），最多 `llm.retry_max_seconds`（預設 1800）；成功就歸零。退避期間**不查 ES、不打 LLM、不重寫註記**
+  之後每失敗一次加倍（60、120、240…），最多 `llm.retry_max_seconds`（預設 1800）；成功就歸零。退避期間**不查日誌、不打 LLM、不重寫註記**
   （續跑的輪次照常跑，只是跳過這一步）；期間有新告警併進來，註記的 `[未經分析]` 原始摘要會跟著更新，到時間再帶完整成員重試。
   退避狀態存在資料庫，服務重啟不會重置。沒設 LLM（`llm.url` 留空）不算失敗、不退避。**不需要為了止損去清空 `llm.url`**。
 - **註記標籤變了就刪掉重建**：事故結案（open → closed）、嚴重度升級、有新系統加入時，註記的標籤會變。Grafana 13.0.7 實測：更新註記的標籤之後，用**舊標籤**查還是查得到它，儀表板的「進行中」清單會一直列著已結案的事故（用真的 Grafana 跑 demo 時發現的）。所以標籤變了就刪掉舊的、建一筆新的（註記 id 會換），只有文字或時間變才原地更新。
@@ -319,7 +340,7 @@ grafana:  {url: https://grafana.corp.example, token: glsa_xxx}
 webhook:  {token: xxx}
 postgres: {password: xxx}        # 只用英數字（會放進連線字串）
 llm:      {url: https://llm.corp.example/v1, apiKey: xxx, model: xxx}   # 可省略
-es:       {datasourceUid: xxx}                                          # 可省略
+logs:     {datasourceUid: xxx}                                          # 可省略；traces、metrics 同樣寫法
 ```
 
 ```
@@ -342,32 +363,38 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 
 | 項目 | 怎麼驗的 | 結果 |
 | --- | --- | --- |
-| 自動測試 | 292 個，SQLite 與 PostgreSQL 16 各跑一遍。Grafana、ES、Tempo、Prometheus 的回應是實際錄下來的（`tests/fixtures/grafana13/`） | 全過 |
-| Webhook → debounce → 收斂 → 註記 → 結案 | Grafana 13.0.7 的告警規則真的觸發、真的推 Webhook；PostgreSQL 16、ES 8.19.23 | 三個系統收成一張事故，恢復後結案 |
+| 自動測試 | 301 個，SQLite 與 PostgreSQL 16 各跑一遍。Grafana、VictoriaLogs、VictoriaTraces、Prometheus 的回應是實際錄下來的（`tests/fixtures/grafana13/`）；假的 Grafana 照查詢條件篩資料，篩出來的結果逐條跟真的 VictoriaLogs 比過 | 全過 |
+| 三個 Victoria 元件經 Grafana 查得到 | 2026-11-26。Grafana 13.0.7 + VictoriaLogs v1.17.0 + VictoriaTraces v0.5.0 + VictoriaMetrics v1.110.0（單機版官方執行檔），Editor Token 經資料源代理 | 三者都通 |
+| 完整流程：三系統連鎖 | 真的服務、Webhook、三個 Victoria 元件、真的 LLM（各問一次）。日誌 + VictoriaMetrics 的佇列指標 | 收成一張事故；排第一是 mq-broker（信心 95）；證據那一行列出指標走勢 1 條 |
+| 完整流程：系統名稱對不上 | 同上，日誌的 `service.name` 寫成別的名字 | 註記寫出「這段時間有 13 筆日誌，但沒有一筆的 service.name 是這些系統」 |
+| 完整流程：只有 INFO／WARN | 同上 | 註記寫出「這些系統有 3 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL」 |
+| 完整流程：有 Trace 的 IT 服務 | 同上，兩條失敗的 Trace 用 OTLP 送進 VictoriaTraces | 呼叫鏈 2 條；排第一是沒有告警的 mes-db（信心 85） |
+| 日誌前處理（去重、事故前後的次數、警告） | 16 個有標準答案的案例，真的 VictoriaLogs、Grafana、LLM | 見 `EVAL.md` |
+| 沒有等級欄位的容器日誌 | VictoriaLogs v1.17.0，4 筆沒拆欄位的日誌；另有一個留出案例 | 撈得到，但 INFO 訊息寫到 error 的那一筆也被挑進來（`CONFIG.md`） |
+| Webhook → debounce → 收斂 → 註記 → 結案 | **換成 Victoria 之前**驗的：Grafana 13.0.7 的告警規則真的觸發、真的推 Webhook；PostgreSQL 16。這段流程不碰資料來源 | 三個系統收成一張事故，恢復後結案 |
 | LLM 摘要與幻覺檢查 | 真的 LLM（`gpt-6-luna`）。錯的金鑰、模型不接受的參數也測過 | 摘要寫進註記；失敗時退回 `[未經分析]`，錯誤訊息不含金鑰 |
-| 註記上證據的幾行 | 真的 Grafana、ES、LLM，三種情況：日誌齊全、系統名稱對不上、有日誌但沒有錯誤等級 | 三種各自寫出缺的是什麼（畫面見「註記怎麼讀」） |
-| 日誌前處理（去重、事故前後的次數、警告） | 16 個有標準答案的案例，真的 ES、Grafana、LLM | 開發用的 10 個：18/30 → 50/50；留出的 6 個：3/18 → 27/30（`EVAL.md`，計分方式中途改過） |
-| 沒有等級欄位的容器日誌 | ES 8.19.23，13 筆各種寫法的日誌；另有一個留出案例 | 撈得到，但會漏撈也會誤撈（`CONFIG.md`） |
-| 批號時間線、Tempo 呼叫鏈 | Tempo 2.9.0、ES 8.19.23，工廠與 IT 服務混合的情境 | 日誌沒講清楚時，有呼叫鏈才指得出源頭（各問一次） |
-| MQ 的呼叫鏈 | RabbitMQ 3.12.1、pika 的 OpenTelemetry 自動埋點、Tempo 2.9.0 | 父子接法串得起來；連結、掉標頭、沒人收串不起來（`INPUTS.md`） |
-| 指標走勢 | Prometheus 3.5.0、RabbitMQ 內建的指標，佇列真的堆到 1007 筆 | 有指標走勢時模型指出消費端失效；沒有時說無法判定（各問一次） |
-| 趨勢型告警規則的寫法 | 同一份 RabbitMQ 資料上算五種查詢的值 | 正常期與堆積期的值見 `INPUTS.md`；沒有建成規則讓它觸發 |
+| MQ 的呼叫鏈 | **換成 Victoria 之前**驗的：RabbitMQ 3.12.1、pika 的 OpenTelemetry 自動埋點，當時 Trace 存在 Tempo 2.9.0 | 父子接法串得起來；連結、掉標頭、沒人收串不起來（`INPUTS.md`）。沒有在 VictoriaTraces 上重跑 |
+| 指標走勢（RabbitMQ 真的堆積） | **換成 Victoria 之前**驗的：Prometheus 3.5.0、RabbitMQ 內建的指標，佇列真的堆到 1007 筆 | 有指標走勢時模型指出消費端失效；沒有時說無法判定（各問一次）。VictoriaMetrics 上只用匯入的假數值跑過（上面第三列） |
+| 趨勢型告警規則的寫法 | 同一份 RabbitMQ 資料上算五種查詢的值（Prometheus） | 正常期與堆積期的值見 `INPUTS.md`；沒有建成規則讓它觸發 |
 | Grafana 開源版連資料庫 | Grafana 13.0.7（Open Source）連 PostgreSQL 16 | 可以（`FACTORY_METRICS.md`） |
 | Helm chart | `helm lint`、`helm template`，產生的 `config.yaml` 用程式實際載入 | 通過 |
 
 **沒有驗證的**
 
-- **產線資料與真實的告警風暴。** 60 秒的 debounce 夠不夠、ES 的延遲多長、摘要對不對，都要現場才知道。
-- **映像檔沒有在這裡 build 過，chart 沒有在這裡部署過。**（你們的叢集上有跑，那不是這裡驗的。）
-- **VictoriaMetrics。** 指標走勢是用 Prometheus 測的。
-- **大索引上的查詢耗時。** 日誌前處理每張事故多兩次 ES 查詢，只在小資料量上跑過。
+- **產線資料與真實的告警風暴。** 60 秒的 debounce 夠不夠、日誌的延遲多長、摘要對不對，都要現場才知道。
+- **映像檔沒有在這裡 build 過，chart 沒有在這裡部署過。**
+- **叢集版的 Victoria、vmauth、多租戶。** 只測過單機版、沒有認證的元件。
+- **在公司的 Grafana 上裝 VictoriaLogs 資料源外掛。** 只在本機的 Grafana 13.0.7 裝過 0.34.0。
+- **大量資料下的查詢時間。** 只在幾十筆到幾千筆的資料上跑過。特別是「錯誤日誌 0 筆時數整段時間有幾筆」那一次查詢，
+  會掃整個時間窗的全部日誌（有設 `logs.extra_filter` 的話只掃那一部分）。
+- **Fluent Bit 的認證、日誌輪替、斷線補送。** 三份範例設定用真的 Fluent Bit 5.2.0 送進 VictoriaLogs 跑過（欄位、時間都對），但只跑了一次、沒有帳密、沒有 TLS。
 - LLM 只測過一個模型；多數情境只問了一到五次。
-- 只測過 Grafana 13.0.7；多個 Grafana 組織、Loki、Jaeger、Windows 上的 Fluent Bit 都沒有測。
+- 只測過 Grafana 13.0.7；多個 Grafana 組織、Elasticsearch、Tempo、Loki、Windows 上的 Fluent Bit 都沒有測（前三者現在也沒有接）。
 - 日誌遮罩沒有做：送給 LLM 的內容是原文。
 
 ## 上線
 
-上線前要填哪些設定、公司 Grafana 與 ES 要配合什麼、還有哪些事沒驗證過，照 **`GO_LIVE_CHECKLIST.md`** 由上往下做。
+上線前要填哪些設定、公司 Grafana 與 Victoria 那一側要配合什麼、還有哪些事沒驗證過，照 **`GO_LIVE_CHECKLIST.md`** 由上往下做。
 
 ## 下一階段（只有設計，尚未實作）
 
@@ -383,12 +410,15 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 - **只能跑 1 個副本**：debounce 的計時在記憶體裡（告警本身有落地）。chart 固定 1 個副本、Recreate 升級。
 - **送給 LLM 的日誌樣本沒有遮罩**。日誌裡的敏感資訊要在產生端去識別化，或把 `llm.url` 指到公司內部的模型。
 - 關聯時間線靠各系統日誌的時間戳排序：系統之間沒有對時的話，先後順序可能是錯的，LLM 會被誤導。
-- 呼叫鏈只看得到有埋點、沒被取樣掉的請求；日誌沒帶 trace id 時要靠 Tempo 搜尋，剛發生的 Trace 可能還搜不到。
-- 時間線與呼叫鏈會讓送給 LLM 的內容變長（每個事故多 1～2 次 ES 查詢、最多 4 次 Tempo 查詢）；一樣沒有遮罩。
-- 指標走勢只支援 Prometheus 相容的查詢，工廠端用 ES 筆數算的趨勢不會進這一包；基準是事故前的中位數，
-  事故前就在慢慢爬升的話基準會被拉高。每張事故多「查詢數 × 系統數」次指標查詢。VictoriaMetrics 沒有實測（這次用 Prometheus）。
-- 事故前後的次數是用「樣板裡固定不變的詞」去 ES 比對的近似值：別種錯誤剛好有同樣的詞與順序時會被算在一起；
-  訊息欄位要是 `text` 型別；比不到的就不給次數。只有一個固定詞的訊息（例如只寫 `timeout`）不比較。
+- 呼叫鏈只看得到有埋點、沒被取樣掉的請求；日誌沒帶 trace id 時要靠搜尋，只找得到失敗有被標成 error 的 Trace；VictoriaTraces 收到後幾秒才搜尋得到（實測 3 秒）。
+- 時間線與呼叫鏈會讓送給 LLM 的內容變長（每個事故：每種關聯碼多 2 次日誌查詢；Trace 是每個系統搜尋 1 次，加上日誌裡的 trace id 各取 1 次）；一樣沒有遮罩。
+- 指標走勢只支援 Prometheus 相容的查詢，工廠端用日誌筆數算的趨勢不會進這一包；基準是事故前的中位數，
+  事故前就在慢慢爬升的話基準會被拉高。每張事故多「查詢數 × 系統數」次指標查詢。VictoriaMetrics 只用匯入的假數值實測過一次。
+- 事故前後的次數是用「樣板裡固定不變的詞照順序出現」（LogsQL 的 `seq`）去 VictoriaLogs 比對的近似值：
+  別種錯誤剛好有同樣的詞與順序時會被算在一起；比不到的就不給次數。只有一個固定詞的訊息（例如只寫 `timeout`）不比較。
+- 日誌沒有等級欄位時（`logs.fields.level: ""`），錯誤日誌是用 `_msg:i("error")` 這種「完整的詞、不分大小寫」的比對挑的：
+  INFO 的訊息寫到 error 這個詞也會中；訊息裡完全沒有等級字樣的錯誤則挑不到。
+- 日誌要 VictoriaLogs 資料源外掛；公司的 Grafana 不能裝外掛的話，就沒有日誌證據（程式不會改成直連）。
 - 模型把日誌裡的主機名稱（例如憑證的 CN）當成系統點名時，幻覺檢查會整份退回（`EVAL.md` 的 h01）。
 - 幻覺檢查只擋「名稱不存在」，擋不了「存在的系統被講錯因果」；所以第 2 行固定標 `[LLM 推論]`。
 - 沒有 Trace 時「集中在哪台機台／批號」只是錯誤日誌的計數，不是因果證據。

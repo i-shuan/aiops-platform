@@ -22,12 +22,11 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `llm.temperature` | 不送 | 有寫才送給模型（0～2）；有些模型只接受預設值 |
 | `llm.retry_initial_seconds` | 60 | LLM 分析失敗後第一次等多久再試 |
 | `llm.retry_max_seconds` | 1800 | 退避上限（每失敗一次加倍，成功歸零） |
-| `es.datasource_uid` | 空 | Grafana 上 ES 資料源的 uid；空 = 沒有日誌證據 |
-| `es.log_index`、`es.trace_index` | `*`、空 | 日誌與 Trace 的 index；trace_index 空 = 不查 Trace |
-| `tempo.datasource_uid` | 空 | Grafana 上 Tempo 資料源的 uid；空 = 沒有呼叫鏈證據 |
-| `es.id_fields` | `[eqp_id, lot_id, carrier_id]` | 錯誤日誌裡要統計出現次數的識別碼欄位 |
-| `es.log_fields` | `time: @timestamp`、`service: service.name`、`level: log.level`、`message: message` | 日誌文件的欄位名稱。只有 `level` 可以設成 `""`（見下面「日誌沒有等級欄位」） |
-| `es.trace_fields` | `time: @timestamp`、`service: service.name`、`span: span.name`、`trace_id: trace.id`、`status: status.code`、`error: error.message` | Trace 文件的欄位名稱 |
+| `logs.datasource_uid` | 空 | Grafana 上 VictoriaLogs 資料源（外掛 `victoriametrics-logs-datasource`）的 uid；空 = 沒有日誌證據 |
+| `logs.extra_filter` | 空 | 加在每一條日誌查詢最前面的 LogsQL 條件，用來只看一部分日誌，例如 `{namespace="factory"}`。VictoriaLogs 沒有索引，要限縮範圍就用這個；空 = 看這個資料源的全部 |
+| `traces.datasource_uid` | 空 | Grafana 上 Jaeger 型別資料源的 uid（URL 指到 VictoriaTraces 的 `/select/jaeger`）；空 = 沒有呼叫鏈證據 |
+| `logs.id_fields` | `[eqp_id, lot_id, carrier_id]` | 錯誤日誌裡要統計出現次數的識別碼欄位 |
+| `logs.fields` | `service: service.name`、`level: log.level` | 日誌的欄位名稱。只有 `level` 可以設成 `""`（見下面「日誌沒有等級欄位」）。時間與訊息在 VictoriaLogs 固定是 `_time`、`_msg`，不用設定（寫入時用 `_time_field`、`_msg_field` 對應） |
 | `timezone` | `Asia/Taipei` | 註記裡顯示的時間 |
 | `log_level` | `INFO` | `DEBUG` 會記下送給 LLM 的內容與原始回應 |
 | `debounce_seconds` | 60 | 收到第一個 Webhook 後等多久才開始分析 |
@@ -35,49 +34,53 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `close_after_seconds` | 300 | 成員告警全部 resolved 之後，再安靜多久才結案 |
 | `edges` | 空 | 系統層級的上下游關係 `[上游, 下游]` |
 
+資料來源換成 Victoria 之後（2026-11-26），原本的 `es`、`tempo` 兩個區段改名成 `logs`、`traces`；設定檔裡還留著舊名稱的話，
+啟動時直接報錯並指出新名稱。一起拿掉的設定：`log_index`、`trace_index`、`log_fields` 的 `time`／`message`、`trace_fields`、
+`error_statuses`、`llm.max_trace_samples`（最後兩項跟著「ES 裡的 Trace 錯誤片段」那包證據一起拿掉了）。
+
 ### 進階調整（原本寫死在程式裡，2026-11-21 起可調）
 
 | # | 鍵 | 預設值 | 範圍 | 用途／什麼時候要調 |
 | --- | --- | --- | --- | --- |
 | 1 | `llm.timeout_seconds` | 60 | 1～3600 | 等 LLM 回應的逾時。推理型模型比較慢、常逾時就調大；`healthcheck.stuck_seconds` 要跟著調大 |
-| 2 | `es.error_levels` | ERROR、error、Error、FATAL、fatal、CRITICAL、critical | 非空清單 | 日誌等級是這些值才算錯誤日誌。公司的日誌寫 `E`、`SEVERE` 之類就要改（大小寫不同要分開列） |
-| 3 | `es.error_statuses` | error、ERROR、Error、STATUS_CODE_ERROR | 非空清單 | span 狀態是這些值才算錯誤 span |
-| 4 | `es.max_hits` | 100 | 1～10000 | 每次 ES 查詢最多撈幾筆；識別碼的出現次數只統計這幾筆 |
-| 5 | `es.window_padding_minutes` | 10 | 0～1440 | 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現） |
+| 2 | `logs.error_levels` | ERROR、error、Error、FATAL、fatal、CRITICAL、critical | 非空清單 | 日誌等級是這些值才算錯誤日誌。公司的日誌寫 `E`、`SEVERE` 之類就要改（大小寫不同要分開列） |
+| 3 | （已移除） | — | — | 原本是 `es.error_statuses`，隨 ES 的 Trace 錯誤片段一起拿掉。編號留著，免得後面的項目跟舊文件對不上 |
+| 4 | `logs.max_hits` | 100 | 1～10000 | 錯誤日誌最多撈幾筆（最新的在前）；識別碼的出現次數只統計這幾筆 |
+| 5 | `logs.window_padding_minutes` | 10 | 0～1440 | 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現） |
 | 6 | `llm.max_log_samples` | 20 | 0 以上 | 給 LLM 看幾筆錯誤日誌樣本（控制 prompt 長度） |
-| 7 | `llm.max_trace_samples` | 10 | 0 以上 | 給 LLM 看幾筆 Trace 錯誤片段 |
+| 7 | （已移除） | — | — | 原本是 `llm.max_trace_samples`，同第 3 項 |
 | 8 | `llm.max_message_chars` | 300 | 20 以上 | 單筆日誌訊息截斷長度 |
 | 9 | `llm.top_ids` | 10 | 1 以上 | 每種識別碼只列出現次數前幾名 |
 | 10 | `llm.max_summary_chars` | 300 | 20 以上 | LLM 摘要超過就截斷（註記第 2 行） |
 | 11 | `llm.system_prompt_file` | 空（用內建提示詞） | 檔案路徑 | 自訂系統提示詞。相對路徑相對於設定檔所在資料夾。**必須保留「只輸出含 summary、systems、ids 的 JSON」**，少了這三個欄位名稱啟動時報錯。Helm 用 `llm.systemPrompt` 填多行文字即可 |
 | 12 | `llm.id_pattern` | `[A-Za-z][A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*` | 正規表示式；`""` = 關閉 | 幻覺檢查：摘要文字裡符合這個樣式的字必須在證據裡找得到。見下方「第 12 項的副作用」 |
-| 13 | `grafana.timeout_seconds` | 30 | 1～600 | 呼叫 Grafana（含 ES 代理、寫註記）的逾時 |
+| 13 | `grafana.timeout_seconds` | 30 | 1～600 | 呼叫 Grafana（含資料源代理、寫註記）的逾時 |
 | 14 | `grafana.retries`、`grafana.retry_backoff_seconds` | 2、0.5 | 0～10、0～60 | 短暫失敗（連線失敗、逾時、429／502／503／504）重試幾次、每次多等幾秒（第 n 次等 n 倍） |
 | 15 | `labels.detect`、`labels.severity`、`labels.service` | `aiops_detect`、`aiops_severity`、`service` | 三個不同的名稱 | 告警規則上的標籤名稱。改了要同步通知各系統團隊，Grafana 通知路由的 matcher 也要跟著改 |
 | 16 | `labels.default_severity` | P3 | P0～P3 | 嚴重度標籤沒寫或寫錯時當成哪一級 |
 | 17 | `webhook.max_body_bytes` | 1000000 | 1024 以上 | 單次 Webhook 內容大小上限，超過回 413 |
 | 18 | `webhook.host` | `0.0.0.0` | 位址 | 服務綁定的位址 |
 | 19 | `retry_failed_round_seconds` | 30 | 1 以上 | 一輪失敗（例如資料庫斷線）之後多久再試 |
-| 20 | `healthcheck.stuck_seconds` | 600 | 30 以上 | 同一輪跑超過這麼久，`/healthz` 回 503（K8s 會重啟 Pod）。要大於「ES 逾時 + LLM 逾時」乘上同時進行中的事故數 |
+| 20 | `healthcheck.stuck_seconds` | 600 | 30 以上 | 同一輪跑超過這麼久，`/healthz` 回 503（K8s 會重啟 Pod）。要大於「Grafana 逾時 + LLM 逾時」乘上同時進行中的事故數 |
 | 21 | `rounds_retention_days` | 90 | 1 以上 | 每輪執行紀錄（`rounds` 表）保留幾天 |
 | 22 | `annotation.max_rule_links` | 5 | 0 以上 | 註記最後一行最多列幾條「調整優先權」的規則連結 |
 
-### 關聯證據（批號時間線、Tempo 呼叫鏈）
+### 關聯證據（批號時間線、呼叫鏈、指標走勢）
 
 | 鍵 | 預設值 | 範圍 | 用途／什麼時候要調 |
 | --- | --- | --- | --- |
-| `es.timeline_fields` | `id_fields` 裡的 `lot_id`、`carrier_id` | `id_fields` 的子集；`[]` = 不做 | 哪些識別碼要把跨系統的日誌串成時間線。工廠沒有 trace id，批號與載具就是關聯碼 |
+| `logs.timeline_fields` | `id_fields` 裡的 `lot_id`、`carrier_id` | `id_fields` 的子集；`[]` = 不做 | 哪些識別碼要把跨系統的日誌串成時間線。工廠沒有 trace id，批號與載具就是關聯碼 |
 | `llm.max_timeline_ids` | 2 | 0～20 | 最多替幾個關聯碼做時間線（取錯誤日誌裡出現最多次的）；0 = 不做 |
 | `llm.max_timeline_events` | 30 | 1～500 | 每條時間線最多幾筆紀錄（由舊到新；超過會標示被截斷） |
-| `es.baseline_minutes` | 30 | 5～1440 | 「事故前」看多久。同一種錯誤在這段時間出現幾筆，會跟事故期間的筆數一起交給 LLM |
+| `logs.baseline_minutes` | 30 | 5～1440 | 「事故前」看多久。同一種錯誤在這段時間出現幾筆，會跟事故期間的筆數一起交給 LLM |
 | `llm.max_log_patterns` | 6 | 0～20 | 最多替幾種錯誤比較事故前後的筆數；0 = 不比較 |
-| `es.warn_levels` | WARN、warn、Warn、WARNING、warning、Warning | 文字清單，可以是空的 | 日誌等級是這些值算警告；空清單 = 不撈警告。日誌沒有等級欄位（`es.log_fields.level` 是空的）時不撈 |
+| `logs.warn_levels` | WARN、warn、Warn、WARNING、warning、Warning | 文字清單，可以是空的 | 日誌等級是這些值算警告；空清單 = 不撈警告。日誌沒有等級欄位（`logs.fields.level` 是空的）時不撈 |
 | `llm.max_warn_patterns` | 5 | 0～20 | 最多給 LLM 看幾種警告；0 = 不撈警告 |
-| `tempo.trace_id_field` | `trace.id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號向 Tempo 取（立即取得到），不夠才用搜尋補 |
-| `tempo.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取 |
-| `tempo.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
-| `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid |
-| `metrics.queries` | `[]` | 最多 20 條 | 事故時要查的指標，每條 `{name, expr, services}`。`expr` 一定要有 `$service`（換成系統名稱，已跳脫）；`services` 選填，有寫就只對那幾個系統查。名稱不能重複 |
+| `traces.trace_id_field` | `trace_id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號向 VictoriaTraces 取（最多試 `max_traces` 的兩倍個），不夠才用搜尋補 |
+| `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取（連搜尋都不做） |
+| `traces.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
+| `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以） |
+| `metrics.queries` | `[]` | 最多 20 條 | 事故時要查的指標（PromQL／MetricsQL），每條 `{name, expr, services}`。`expr` 一定要有 `$service`（換成系統名稱，已跳脫）；`services` 選填，有寫就只對那幾個系統查。名稱不能重複 |
 | `metrics.lookback_minutes` | 60 | 5～1440 | 事故開始前往回看多久當基準（取中位數）。太短會把事故前的爬升算進基準 |
 | `metrics.step_seconds` | 60 | 5～3600 | 取樣間隔；不要小於指標的抓取間隔 |
 | `metrics.max_points` | 12 | 2～60 | 每條序列給 LLM 看幾個點（整段平均抽樣，最後一個點一定留） |
@@ -93,26 +96,40 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 
 這個副作用在真實資料上多常發生沒有量過；用 OpenAI gpt-6-luna 實測的那一次沒有觸發。
 
-### 日誌沒有等級欄位（`es.log_fields.level: ""`）
+#### 每個事故會查幾次
 
-給「日誌沒有拆欄位、等級還包在訊息文字裡」的環境用，例如 Fluentd 直接收的 K8s 容器標準輸出。
+每一次都是經 Grafana 資料源代理的一個請求。
+
+| 查什麼 | 次數 |
+| --- | --- |
+| 錯誤日誌（最新的在前） | 1 |
+| 有錯誤日誌時：各系統最早的幾筆、警告、事故前後的次數 | 最多 3（次數是一條查詢算完所有種類；沒有等級欄位或關掉警告就少 1 次） |
+| 錯誤日誌 0 筆時：數這段時間的總筆數與這些系統的筆數 | 1 |
+| 關聯時間線 | 每種關聯碼欄位 2（內容、筆數） |
+| 呼叫鏈 | 日誌裡的 trace id 逐個取（最多 `max_traces` × 2 個）；不夠才搜尋，每個系統 1 次。搜尋回來的就是完整的 Trace，不用再逐條取 |
+| 指標走勢 | 查詢數 × 系統數（有寫 `services` 的只算那幾個系統） |
+
+### 日誌沒有等級欄位（`logs.fields.level: ""`）
+
+給「日誌沒有拆欄位、等級還包在訊息文字裡」的環境用，例如直接收的 K8s 容器標準輸出。
 不用改收日誌的那一端；代價是準確度比有等級欄位差。**能拆欄位就拆欄位，這個只是過渡做法。**
 
 設定（K8s 容器日誌的例子，服務名稱在 `kubernetes.container_name`）：
 
 ```yaml
-es:
-  log_index: "fluentd-*"
-  log_fields: {service: kubernetes.container_name, level: ""}
+logs:
+  extra_filter: '"kubernetes.namespace_name":="factory"'   # 選填：只看某個命名空間（一般欄位的寫法；stream 欄位可以寫成 {欄位="值"}）
+  fields: {service: kubernetes.container_name, level: ""}
 ```
 
 告警的 `service` 標籤值、`edges` 裡的名稱都要跟 `kubernetes.container_name` 的值一樣。
 
-**怎麼挑**：在訊息欄位做全文比對，訊息裡有 `es.error_levels` 任何一個詞就算錯誤日誌（不分大小寫，預設是 error、fatal、critical）。
-比對的是「完整的詞」，不是等級。要把 WARN 也算進去就在 `es.error_levels` 加上。
+**怎麼挑**：在訊息本文（`_msg`）裡找 `logs.error_levels` 的詞，任何一個出現就算錯誤日誌（不分大小寫，預設收成 error、fatal、critical 三個詞；
+LogsQL 的寫法是 `_msg:i("error") or _msg:i("fatal") or …`）。
+比對的是「完整的詞」，不是等級。要把 WARN 也算進去就在 `logs.error_levels` 加上。
 送給 LLM 的補充說明會寫明「樣本是依訊息文字挑的，可能混入不是錯誤的紀錄」。
 
-**實測**（Elasticsearch 8.19.23、動態 mapping、13 筆自己造的容器日誌，用實際的查詢程式；不是產線資料）：
+**實測**（2026-11-26，VictoriaLogs v1.17.0，13 筆自己造的容器日誌，用實際的查詢程式經 Grafana 代理；不是產線資料）：
 
 | 訊息 | 結果 |
 | --- | --- |
@@ -124,15 +141,18 @@ es:
 | `finished with 0 errors`、`ErrorHandler registered`、WARN、一般的 INFO | 沒撈（對） |
 | 別的容器的 ERROR | 沒撈（對） |
 
-6 筆真的錯誤撈到 4 筆、漏 2 筆；6 筆不是錯誤的誤撈 2 筆。這幾筆是為了涵蓋各種寫法挑的，比例不代表產線上的準確度。
-同一批資料用預設的 `log.level`（欄位不存在）是 0 筆。
+6 筆真的錯誤撈到 4 筆、漏 2 筆；6 筆不是錯誤的誤撈 2 筆（跟換成 Victoria 之前在 Elasticsearch 上測的結果一樣）。
+這幾筆是為了涵蓋各種寫法挑的，比例不代表產線上的準確度。同一批資料用預設的 `log.level`（欄位不存在）是 0 筆。
+測試樣本（`tests/fixtures/grafana13/victoria_logs.json` 的 `unparsed`）裡另有一筆 `health probe: 0 error(s) in last minute` 也被誤撈：
+`error(s)` 的括號把 error 隔成完整的詞。
 
 **限制**：
 
-- 沒有等級字樣的錯誤（例外堆疊的後續幾行、只寫例外名稱的訊息）撈不到。
-- INFO、DEBUG 的訊息裡提到 error 這個詞會被當成錯誤。
-- 訊息欄位在 ES 必須是 `text` 型別；是 `keyword` 的話比不到，結果是 0 筆。
+- INFO、DEBUG 的訊息裡提到 error 這個詞會被當成錯誤（實測）。
+- 沒有等級字樣的錯誤（例外堆疊的後續幾行、只寫例外名稱的訊息）撈不到（實測）。
+- 等級字樣黏在別的字裡（`IOError`、`errors`）不算同一個詞，撈不到；`finished with 0 errors` 這種也因此不會誤撈（實測）。
 - 多行的例外堆疊如果被收成一行一筆，只有帶等級字樣的那一行會進來。
+- 分不出警告：沒有等級欄位時不撈警告那一包。
 - 機台、批號沒有拆成欄位的話，識別碼統計與關聯時間線仍然是空的；這個設定只解決「挑錯誤日誌」。
 - 沒有在真實的產線日誌上驗證過。
 
@@ -150,16 +170,17 @@ es:
 | 要重試的 HTTP 狀態 429／502／503／504 | `src/grafana.py` 的 `RETRY_STATUS` | HTTP 的語意，不是調整項（要調的是次數與間隔：第 14 項） |
 | 標籤值 `true／1／yes／on` 視為開啟 | `src/grafana.py` 的 `TRUE_VALUES` | 值的寫法慣例 |
 | 退避的指數上限（2 的 30 次方）、錯誤訊息截斷長度（200、300 字） | `src/main.py` 的 `backoff_seconds`、`src/grafana.py`、`src/rca.py` | 防溢位與 log 長度的內部護欄 |
-| 註記查找的 `limit: 1`、ES 查詢的 `ignore_unavailable`、`.keyword` 備援 | `src/grafana.py` | 查詢的實作細節 |
+| 註記查找的 `limit: 1`、LogsQL 查詢的寫法（`in`、`seq`、`partition by`、`stats count() if`）、時間與訊息欄位 `_time`／`_msg` | `src/grafana.py` 的 `TIME_FIELD`、`MESSAGE_FIELD` 與各查詢方法 | 查詢的實作細節；`_time`、`_msg` 是 VictoriaLogs 固定的欄位名稱 |
 | 設定檔路徑 `/etc/aiops/config.yaml` 與唯一的環境變數 `AIOPS_CONFIG_FILE` | `src/main.py` | 設定的唯一入口，本身不能再放進設定檔 |
 | 各設定值的合法範圍、log 等級的可選值 | `src/main.py` | 驗證規則 |
 | Webhook 的必要欄位（`status`、`fingerprint`、`startsAt`、`labels`、`ruleUID`、`values`） | `src/grafana.py` 的 `parse_webhook` | Grafana 的 webhook 格式，不是我們定的 |
-| 向 Tempo 搜尋時一次要 20 條、再挑最近的 | `src/rca.py` 的 `TRACE_SEARCH_LIMIT` | Tempo 的搜尋不保證先回最新的；要調的是最後取幾條（`tempo.max_traces`） |
-| Tempo 查詢用 `resource.service.name` 比對分析單位 | `src/grafana.py` 的 `search_error_traces` | OTel 的標準屬性。把 `labels.service` 換成 function 或 cluster 時呼叫鏈會撈不到（見 README「改用別的單位分析」） |
+| 向 VictoriaTraces 搜尋時每個系統一次要 20 條、再挑最近的 | `src/rca.py` 的 `TRACE_SEARCH_LIMIT` | 搜尋結果不保證先回最新的；要調的是最後取幾條（`traces.max_traces`） |
+| Trace 搜尋用服務名稱（Jaeger 的 `service` 參數，也就是 OTel 的 `service.name`）比對分析單位，條件是 `error=true` | `src/grafana.py` 的 `search_error_traces` | Jaeger 查詢介面一次只能指定一個服務。把 `labels.service` 換成 function 或 cluster 時呼叫鏈會撈不到（見 README「改用別的單位分析」） |
+| 哪些 span 算失敗：`error` 標籤是 true，或 `otel.status_code` 是 ERROR；錯誤訊息取 `otel.status_description` | `src/rca.py` 的 `ERROR_TAG_VALUES`、`summarize_trace` | OTLP 的 status=ERROR 進 VictoriaTraces 之後就是這兩個標籤（實測 v0.5.0）；是格式，不是調整項 |
 | 指標查詢最多 20 條、佔位字是 `$service` | `src/main.py` 的 `MAX_METRIC_QUERIES`、`src/rca.py` 的 `SERVICE_PLACEHOLDER` | 每張事故要查「查詢數 × 系統數」次，上限是保護指標資料庫；佔位字是設定檔的寫法約定 |
 | 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/rca.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
 | 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/rca.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
-| 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的片語（每個 `*` 容許 3 個位置的間隔，上限 12） | `src/rca.py` 的 `log_pattern`、`pattern_phrase` | 歸類與計數的實作。間隔取 3 是因為一個 `*` 在原文可能是好幾個詞（IP 加 port 會被拆成兩個）；是近似值，未驗證泛化 |
+| 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的條件（樣板裡固定不變的詞照順序出現，LogsQL 的 `seq`；固定的詞少於兩個就不數） | `src/rca.py` 的 `log_pattern`、`pattern_words` | 歸類與計數的實作。是近似：別種訊息剛好有同樣的詞、順序也一樣時會被算在一起；未驗證泛化 |
 | 可能原因最多 3 個；信心分數 0～100，分段是 70／40；沒有直接證據指向的系統分數最高 30 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE_HIGH`、`CONFIDENCE_MEDIUM`、`NO_DIRECT_EVIDENCE_CAP`、`DIRECT_EVIDENCE` | 3 個是註記版面的上限。分段是提示詞裡跟模型講的定義，上限 30 落在「只是推測」那一段；分數不是機率、沒有校準。「有沒有直接證據」是名稱的字串比對。都只在 `EVAL.md` 的人造案例跑過，未驗證泛化 |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |

@@ -1,4 +1,4 @@
-# Fluent Bit 設定範例：MQ 的定時探針腳本印出的 JSON 行 → Elasticsearch
+# Fluent Bit 設定範例：MQ 的定時探針腳本印出的 JSON 行 → VictoriaLogs
 #
 # 老舊 MQ 沒有 exporter 時：寫一支定時腳本（每 30～60 秒）呼叫 MQ 的管理指令或管理 API，把結果一行一筆 JSON 寫到檔案。
 # 腳本怎麼取值依 MQ 的廠牌而定，這裡只規定它要印成什麼樣子：
@@ -7,7 +7,7 @@
 # 平常印 INFO 的狀態行（給 Grafana 取最大值）；超過門檻時多印一行 ERROR（aiops-lite 只撈錯誤等級的日誌當 RCA 證據）。
 # queue_depth、consumers 要印成數字，不要加引號。腳本自己要有逾時：MQ 卡住時腳本跟著卡住就沒有資料了。
 #
-# 用 Fluent Bit 5.2.0 + Elasticsearch 8.19.23 實測過。
+# 用 Fluent Bit 5.2.0 + VictoriaLogs v1.17.0 實測過（2026-11-26，本機、假資料）。
 
 service:
   flush: 5
@@ -38,13 +38,19 @@ pipeline:
       rename: level log.level
 
   outputs:
-    - name: es
+    # VictoriaLogs 的 JSON 行寫入介面。網址上的三個參數：哪個欄位當 stream（選值的種類少的，不要拿批號或機台當 stream）、
+    # 哪個欄位是訊息本文（存成 _msg）、哪個欄位是時間（存成 _time）。aiops-lite 查的時候就是用 _time、_msg 與 service.name、log.level
+    - name: http
       match: mq
-      host: es.corp.example
-      port: 9200
-      index: factory-logs-mq
-      suppress_type_name: on
-      tls: on
-      http_user: fluent-bit-writer
-      http_passwd: ${ES_PASSWORD}
+      host: victorialogs.corp.example
+      port: 9428
+      uri: /insert/jsonline?_stream_fields=service.name&_msg_field=message&_time_field=@timestamp
+      format: json_lines
+      json_date_key: '@timestamp'
+      json_date_format: iso8601
+      compress: gzip
       retry_limit: 5
+      # VictoriaLogs 本身沒有帳號密碼。前面有 vmauth 或反向代理做認證時才加下面三行（這一段沒有實測過）：
+      # tls: on
+      # http_user: fluent-bit-writer
+      # http_passwd: ${VL_PASSWORD}   # 從環境變數帶，不要寫在檔案裡

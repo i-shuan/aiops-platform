@@ -28,7 +28,6 @@ webhook: {token: 'w', host: 127.0.0.1, max_body_bytes: 2000000}
 llm:
   timeout_seconds: 180
   max_log_samples: 5
-  max_trace_samples: 2
   max_message_chars: 120
   top_ids: 3
   max_summary_chars: 80
@@ -36,13 +35,12 @@ llm:
   id_pattern: "EQP-[A-Z]+-[0-9]+"
   max_timeline_ids: 4
   max_timeline_events: 50
-es:
+logs:
   error_levels: [E, SEVERE]
-  error_statuses: [FAILED]
   max_hits: 500
   window_padding_minutes: 30
   timeline_fields: [carrier_id]
-tempo: {datasource_uid: tempo-1, max_traces: 5, max_spans: 60}
+traces: {datasource_uid: traces-1, max_traces: 5, max_spans: 60}
 labels: {detect: managed_by_aiops, severity: priority, service: system, default_severity: p2}
 healthcheck: {stuck_seconds: 1200}
 annotation: {max_rule_links: 2}
@@ -82,10 +80,10 @@ def test_every_optional_setting_is_read_from_the_file(tmp_path):
     assert (s.llm.timeout_seconds, s.llm.max_summary_chars, s.llm.id_pattern) == (180.0, 80, "EQP-[A-Z]+-[0-9]+")
     assert s.llm.system_prompt == PROMPT
     e = s.evidence
-    assert (e.max_log_samples, e.max_trace_samples, e.max_message_chars, e.top_ids) == (5, 2, 120, 3)
-    assert (e.error_levels, e.error_statuses, e.max_hits, e.window_padding_minutes) == (("E", "SEVERE"), ("FAILED",), 500, 30)
+    assert (e.max_log_samples, e.max_message_chars, e.top_ids) == (5, 120, 3)
+    assert (e.error_levels, e.max_hits, e.window_padding_minutes) == (("E", "SEVERE"), 500, 30)
     assert (e.timeline_fields, e.max_timeline_ids, e.max_timeline_events) == (("carrier_id",), 4, 50)
-    assert (s.tempo_datasource_uid, e.max_traces, e.max_trace_spans) == ("tempo-1", 5, 60)
+    assert (s.traces_datasource_uid, e.max_traces, e.max_trace_spans) == ("traces-1", 5, 60)
     assert s.labels == LabelNames("managed_by_aiops", "priority", "system", "P2")
     assert (s.healthcheck_stuck_seconds, s.annotation_max_rule_links) == (1200, 2)
     assert (s.retry_failed_round_seconds, s.rounds_retention_days) == (10, 30)
@@ -99,11 +97,10 @@ def test_without_the_optional_settings_everything_keeps_its_old_value(tmp_path):
     assert (s.llm.timeout_seconds, s.llm.temperature, s.llm.max_summary_chars, s.llm.system_prompt) == (60.0, None, 300, "")
     assert s.llm.id_pattern == rca.DEFAULT_ID_PATTERN
     e = s.evidence
-    assert (e.max_hits, e.window_padding_minutes, e.max_log_samples, e.max_trace_samples, e.max_message_chars, e.top_ids) == (100, 10, 20, 10, 300, 10)
+    assert (e.max_hits, e.window_padding_minutes, e.max_log_samples, e.max_message_chars, e.top_ids) == (100, 10, 20, 300, 10)
     assert e.error_levels == ("ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical")
-    assert e.error_statuses == ("error", "ERROR", "Error", "STATUS_CODE_ERROR")
     assert (e.timeline_fields, e.max_timeline_ids, e.max_timeline_events) == (("lot_id", "carrier_id"), 2, 30)
-    assert (s.tempo_datasource_uid, e.max_traces, e.max_trace_spans) == ("", 3, 30)
+    assert (s.traces_datasource_uid, e.max_traces, e.max_trace_spans) == ("", 3, 30)
     assert s.labels == LabelNames("aiops_detect", "aiops_severity", "service", "P3")
     assert (s.healthcheck_stuck_seconds, s.annotation_max_rule_links, s.retry_failed_round_seconds, s.rounds_retention_days) == (600, 5, 30, 90)
 
@@ -122,12 +119,13 @@ def test_without_the_optional_settings_everything_keeps_its_old_value(tmp_path):
     (MINIMAL + "llm: {id_pattern: '[A-'}", "llm.id_pattern"),
     (MINIMAL + "llm: {system_prompt_file: nowhere.txt}", "不存在"),
     (MINIMAL + "llm: {system_prompt: hi}", "不認得的設定"),
-    (MINIMAL + "es: {error_levels: []}", "es.error_levels"),
-    (MINIMAL + "es: {error_levels: ERROR}", "es.error_levels"),
-    (MINIMAL + "es: {error_statuses: [1]}", "es.error_statuses"),
-    (MINIMAL + "es: {max_hits: 0}", "es.max_hits"),
-    (MINIMAL + "es: {max_hits: 20000}", "es.max_hits"),
-    (MINIMAL + "es: {window_padding_minutes: -5}", "es.window_padding_minutes"),
+    (MINIMAL + "logs: {error_levels: []}", "logs.error_levels"),
+    (MINIMAL + "logs: {error_levels: ERROR}", "logs.error_levels"),
+    (MINIMAL + "logs: {error_statuses: [FAILED]}", "logs 有不認得的設定"),      # 這一項隨 ES 的 Trace 片段一起拿掉了
+    (MINIMAL + "llm: {max_trace_samples: 3}", "llm 有不認得的設定"),
+    (MINIMAL + "logs: {max_hits: 0}", "logs.max_hits"),
+    (MINIMAL + "logs: {max_hits: 20000}", "logs.max_hits"),
+    (MINIMAL + "logs: {window_padding_minutes: -5}", "logs.window_padding_minutes"),
     (MINIMAL + "labels: {default_severity: critical}", "labels.default_severity"),
     (MINIMAL + "labels: {service: ''}", "三個不同、非空"),
     (MINIMAL + "labels: {detect: service}", "三個不同、非空"),
@@ -144,7 +142,7 @@ def test_optional_settings_are_validated_at_startup(tmp_path, text, message):
 
 def test_integers_written_as_whole_floats_are_accepted(tmp_path):
     """Helm 把數字轉成 YAML 時可能寫成 500.0；不是整數的小數照樣拒絕。"""
-    assert load(tmp_path, MINIMAL + "es: {max_hits: 500.0}\ndebounce_seconds: 90.0\n").evidence.max_hits == 500
+    assert load(tmp_path, MINIMAL + "logs: {max_hits: 500.0}\ndebounce_seconds: 90.0\n").evidence.max_hits == 500
 
 
 def test_a_custom_prompt_must_keep_the_output_contract(tmp_path):
@@ -159,11 +157,11 @@ def test_a_custom_prompt_must_keep_the_output_contract(tmp_path):
 def test_every_optional_setting_is_documented_in_the_example_file():
     text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
     for key in ("timeout_seconds", "retries", "retry_backoff_seconds", "host", "max_body_bytes", "max_log_samples",
-                "max_trace_samples", "max_message_chars", "top_ids", "max_summary_chars", "system_prompt_file",
-                "id_pattern", "error_levels", "error_statuses", "max_hits", "window_padding_minutes", "labels:",
+                "max_message_chars", "top_ids", "max_summary_chars", "system_prompt_file",
+                "id_pattern", "error_levels", "logs:", "extra_filter", "max_hits", "window_padding_minutes", "labels:",
                 "default_severity", "stuck_seconds", "max_rule_links", "retry_failed_round_seconds",
                 "rounds_retention_days", "temperature", "timeline_fields", "max_timeline_ids",
-                "max_timeline_events", "tempo:", "max_traces", "max_spans"):
+                "max_timeline_events", "traces:", "max_traces", "max_spans", "trace_id_field"):
         assert key in text, f"config.example.yaml 沒有提到 {key}"
 
 
@@ -185,37 +183,32 @@ def test_label_names_and_default_severity_are_configurable():
     assert labels["aiops_detect"] == "true"                                 # 樣本本身用的是預設名稱
 
 
-def test_es_query_uses_the_configured_levels_statuses_size_and_padding(fake):
+def test_log_query_uses_the_configured_levels_size_and_padding(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    limits = rca.EvidenceLimits(max_hits=7, window_padding_minutes=30, error_levels=("E", "SEVERE"), error_statuses=("FAILED",))
+    limits = rca.EvidenceLimits(max_hits=7, window_padding_minutes=30, error_levels=("E", "SEVERE"))
     inc = incident()
-    rca.collect_evidence(inc, EDGES, g, es_datasource_uid="es", log_index="logs", trace_index="traces",
-                         id_fields=["eqp_id"], now=NOW, limits=limits)
-    _h1, logs, _h2, traces = (json.loads(line) for line in fake.es_requests[0].splitlines())
-    assert logs["size"] == traces["size"] == 7
-    text = json.dumps([logs, traces])
-    assert '"E"' in text and '"SEVERE"' in text and '"FAILED"' in text and '"ERROR"' not in text and '"error"' not in text
-    start = logs["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gte"]
-    assert start == int((inc.started_at - timedelta(minutes=30)).timestamp() * 1000)
+    rca.collect_evidence(inc, EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW, limits=limits)
+    [sent] = [q for q in fake.log_queries if "sort by (_time) desc" in q["query"]]
+    assert sent["query"].endswith('"log.level":in("E","SEVERE") | sort by (_time) desc | limit 7') and "ERROR" not in sent["query"]
+    assert sent["start"] == (inc.started_at - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert sent["end"] == NOW.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def test_evidence_limits_control_how_much_the_llm_sees(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    limits = rca.EvidenceLimits(max_log_samples=2, max_trace_samples=1, max_message_chars=20, top_ids=1)
-    ev = rca.collect_evidence(incident(), EDGES, g, es_datasource_uid="es", log_index="logs", trace_index="traces",
-                              id_fields=["eqp_id", "lot_id"], now=NOW, limits=limits)
-    assert len(ev["error_logs"]) == 2 and len(ev["error_traces"]) == 1
+    limits = rca.EvidenceLimits(max_log_samples=2, max_message_chars=20, top_ids=1)
+    ev = rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id"], now=NOW, limits=limits)
+    assert len(ev["error_logs"]) == 2
     assert all(len(l["message"]) <= 20 for l in ev["error_logs"])
-    assert ev["id_counts"] == {"eqp_id": {"EQP-CVD-07": 3}, "lot_id": {"LOT24A0031": 3}}  # 統計看全部撈到的，不是只看樣本
-    none = rca.collect_evidence(incident(), EDGES, g, es_datasource_uid="es", log_index="logs", trace_index="traces",
-                                id_fields=["eqp_id"], now=NOW, limits=rca.EvidenceLimits(max_log_samples=0))
+    assert ev["id_counts"] == {"eqp_id": {"EQP-CVD-07": 3}, "lot_id": {"LOT24A0031": 2}}  # 統計看全部撈到的，不是只看樣本
+    none = rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW,
+                                limits=rca.EvidenceLimits(max_log_samples=0))
     assert none["error_logs"] == [] and none["id_counts"]["eqp_id"]["EQP-CVD-07"] == 3
 
 
 def evidence(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    return rca.collect_evidence(incident(), EDGES, g, es_datasource_uid="es", log_index="logs", trace_index="traces",
-                                id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
+    return rca.collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
 
 
 GOOD = {"summary": "源頭可能是 mq-broker，錯誤集中在 EQP-CVD-07", "systems": ["mq-broker"], "ids": ["EQP-CVD-07"]}
@@ -271,7 +264,7 @@ def test_grafana_retries_backoff_and_timeout_are_configurable(monkeypatch):
     def search(**kw):
         g = Grafana("http://grafana.test", "t", transport=httpx.MockTransport(down), **kw)
         with pytest.raises(GrafanaError):
-            g.search_errors("u", "logs", None, ["a"], now, now)
+            g.search_errors("u", ["a"], now, now)
 
     search(retries=0)
     assert len(attempts) == 1 and slept == []                    # 0 = 不重試

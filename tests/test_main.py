@@ -1,4 +1,4 @@
-"""一輪一輪跑 main.process：真實的 Grafana webhook 樣本 + 假的 Grafana（ES、註記）+ SQLite + 假的 LLM。"""
+"""一輪一輪跑 main.process：真實的 Grafana webhook 樣本 + 假的 Grafana（VictoriaLogs、註記）+ SQLite + 假的 LLM。"""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from src import db as dbmod
 from src.grafana import parse_webhook
 from src.main import ConfigError, Settings, process, split_batch
-from tests.conftest import webhook
+from tests.conftest import SHIFT, recorded_trace, shifted_trace, webhook
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)  # 樣本裡第一筆告警（MQ）的 startsAt
 LLM_ANSWER = {"summary": "mq-broker 佇列積壓可能是源頭，下游 cim-eap 的 T3 逾時集中在機台 EQP-CVD-07",
@@ -23,13 +23,16 @@ BASE_ENV = {"GRAFANA_URL": "http://g", "GRAFANA_TOKEN": "t", "AIOPS_WEBHOOK_TOKE
 def world(fake, db_url):
     settings = Settings(grafana_url="http://grafana.test", grafana_token="t", webhook_token="w",
                         database_url=db_url, llm_api_url="http://llm.test/v1", llm_model="m",
-                        es_datasource_uid="es-uid", log_index="factory-logs", trace_index="factory-traces",
+                        logs_datasource_uid="vl-uid",
                         close_after_seconds=300, edges=(("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")))
     llm_calls = []
 
     def llm(request: httpx.Request) -> httpx.Response:
         llm_calls.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(LLM_ANSWER, ensure_ascii=False)}}]})
+        # 假的 LLM 只引用它真的看到的東西：這張事故沒有 cim-eap 的日誌時（只有 MQ 告警），證據裡不會有那台機台
+        seen = "EQP-CVD-07" in llm_calls[-1]["messages"][1]["content"]
+        answer = LLM_ANSWER if seen else {**LLM_ANSWER, "summary": "mq-broker 佇列積壓可能是源頭", "ids": []}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer, ensure_ascii=False)}}]})
 
     class World:
         pass
@@ -198,13 +201,12 @@ grafana: {url: "https://grafana.corp", token: "glsa_x"}
 webhook: {token: "wh-s3cret", port: 9090}
 database: {url: "postgresql+psycopg://u:p@db:5432/aiops"}
 llm: {url: "https://llm.corp/v1", api_key: "sk-s3cret", model: "m"}
-es:
+logs:
   datasource_uid: "abc"
-  log_index: "factory-logs"
-  trace_index: "factory-traces"
+  extra_filter: '{namespace="factory"}'
   id_fields: [eqp_id, lot_id]
-  log_fields: {time: ts, service: app, level: severity, message: msg}
-  trace_fields: {service: app, span: operation}
+  fields: {service: app, level: severity}
+traces: {datasource_uid: "jaeger-1"}
 timezone: Asia/Tokyo
 log_level: debug
 debounce_seconds: 90
@@ -228,9 +230,8 @@ def test_every_setting_comes_from_the_one_yaml_file(tmp_path):
     assert (s.grafana_url, s.grafana_token, s.webhook_token, s.port) == ("https://grafana.corp", "glsa_x", "wh-s3cret", 9090)
     assert s.database_url == "postgresql+psycopg://u:p@db:5432/aiops"
     assert (s.llm_api_url, s.llm_api_key, s.llm_model) == ("https://llm.corp/v1", "sk-s3cret", "m")
-    assert (s.es_datasource_uid, s.log_index, s.trace_index, s.id_fields) == ("abc", "factory-logs", "factory-traces", ("eqp_id", "lot_id"))
-    assert (s.log_fields.time, s.log_fields.service, s.log_fields.level, s.log_fields.message) == ("ts", "app", "severity", "msg")
-    assert (s.trace_fields.service, s.trace_fields.span, s.trace_fields.status) == ("app", "operation", "status.code")  # 沒寫的用預設
+    assert (s.logs_datasource_uid, s.logs_filter, s.id_fields) == ("abc", '{namespace="factory"}', ("eqp_id", "lot_id"))
+    assert (s.log_fields.service, s.log_fields.level, s.traces_datasource_uid) == ("app", "severity", "jaeger-1")
     assert (s.tz, s.log_level) == ("Asia/Tokyo", "DEBUG")
     assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds) == (90, 30, 600)
     assert s.edges == (("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs"))
@@ -239,8 +240,8 @@ def test_every_setting_comes_from_the_one_yaml_file(tmp_path):
 def test_only_the_required_settings_need_to_be_written(tmp_path):
     s = Settings.load(config(tmp_path, MINIMAL))
     assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds, s.edges) == (60, 60, 300, ())
-    assert (s.port, s.tz, s.database_url, s.llm_api_url, s.es_datasource_uid) == (8080, "Asia/Taipei", "sqlite:///aiops-lite.db", "", "")
-    assert s.log_fields.level == "log.level" and s.id_fields == ("eqp_id", "lot_id", "carrier_id")
+    assert (s.port, s.tz, s.database_url, s.llm_api_url, s.logs_datasource_uid) == (8080, "Asia/Taipei", "sqlite:///aiops-lite.db", "", "")
+    assert (s.log_fields.service, s.log_fields.level, s.logs_filter) == ("service.name", "log.level", "") and s.id_fields == ("eqp_id", "lot_id", "carrier_id")
 
 
 def test_the_example_config_is_valid_and_matches_the_defaults(tmp_path):
@@ -248,7 +249,7 @@ def test_the_example_config_is_valid_and_matches_the_defaults(tmp_path):
     text = (Path(__file__).resolve().parents[1] / "config.example.yaml").read_text(encoding="utf-8")
     s = Settings.load(config(tmp_path, text.replace('token: ""', 'token: "x"')))
     d = Settings(grafana_url="", grafana_token="", webhook_token="")
-    assert (s.log_fields, s.trace_fields, s.id_fields, s.tz) == (d.log_fields, d.trace_fields, d.id_fields, d.tz)
+    assert (s.log_fields, s.logs_filter, s.id_fields, s.tz) == (d.log_fields, d.logs_filter, d.id_fields, d.tz)
     assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds) == (60, 60, 300) and len(s.edges) == 2
 
 
@@ -273,12 +274,13 @@ def test_secrets_do_not_appear_when_settings_are_printed(tmp_path):
     ("", "grafana.url、grafana.token、webhook.token"),
     ("grafana: {url: 'http://g'}\nwebhook: {token: 'w'}\n", "grafana.token"),
     (MINIMAL + "grafan: {}\n", "不認得的設定 \\['grafan'\\]"),
-    (MINIMAL + "es: {datasource: x}\n", "es 有不認得的設定"),
-    (MINIMAL + "es: {log_fields: {levl: x}}\n", "es.log_fields 有不認得的設定"),
-    (MINIMAL + "es: {log_fields: {service: ''}}\n", "不能是空的"),
-    (MINIMAL + "es: {trace_fields: {status: ''}}\n", "不能是空的"),
-    (MINIMAL + "es: {id_fields: []}\n", "id_fields"),
-    (MINIMAL + "es: {id_fields: eqp_id}\n", "id_fields"),
+    (MINIMAL + "logs: {datasource: x}\n", "logs 有不認得的設定"),
+    (MINIMAL + "logs: {fields: {levl: x}}\n", "logs.fields 有不認得的設定"),
+    (MINIMAL + "logs: {fields: {service: ''}}\n", "不能是空的"),
+    (MINIMAL + "logs: {fields: {message: msg}}\n", "logs.fields 有不認得的設定"),   # 時間與訊息在 VictoriaLogs 固定是 _time、_msg
+    (MINIMAL + "logs: {fields: [service]}\n", "logs.fields 要是"),
+    (MINIMAL + "logs: {id_fields: []}\n", "id_fields"),
+    (MINIMAL + "logs: {id_fields: eqp_id}\n", "id_fields"),
     (MINIMAL + "grafana: [1]\n", "要是一組設定"),
     (MINIMAL + "llm: {api_key: 12345}\n", "要是文字"),
     (MINIMAL + "webhook: {token: w, port: http}\n", "webhook.port"),
@@ -308,28 +310,23 @@ def test_zero_debounce_is_allowed_but_zero_followup_is_not(tmp_path):
     assert Settings.load(config(tmp_path, MINIMAL + "close_after_seconds: 0\n")).close_after_seconds == 0
 
 
-def test_configured_field_names_are_used_for_the_es_query_and_for_reading_the_documents(world):
-    """公司的日誌欄位跟預設不同：查詢條件、排序、讀回來的內容都要照 config.yaml 的欄位名稱。"""
+def test_configured_field_names_and_filter_are_used_for_the_log_queries_and_for_reading_the_rows(world):
+    """公司的日誌欄位跟預設不同：查詢條件、讀回來的內容都要照 config.yaml 的欄位名稱；logs.extra_filter 加在每一條查詢前面。"""
     from dataclasses import replace
-    from src.grafana import LogFields, TraceFields
+    from src.grafana import LogFields
     w = world
-    es_hits = {"responses": [
-        {"hits": {"hits": [{"_source": {"ts": "2026-11-21T02:42:00Z", "app": "cim-eap", "severity": "ERROR",
-                                        "msg": "T3 timeout", "eqp_id": "EQP-CVD-07", "lot_id": "LOT24A0031"}}]}},
-        {"hits": {"hits": [{"_source": {"app": "cim-eap", "operation": "SECS S6F11"}}]}}]}
-    w.fake.es = es_hits
-    settings = replace(w.settings, log_fields=LogFields(time="ts", service="app", level="severity", message="msg"),
-                       trace_fields=TraceFields(service="app", span="operation"))
+    w.fake.logs = [{"_time": "2026-11-21T02:40:00Z", "_msg": "T3 timeout", "app": "cim-eap", "severity": "ERROR", "namespace": "factory",
+                    "eqp_id": "EQP-CVD-07", "lot_id": "LOT24A0031"},
+                   {"_time": "2026-11-21T02:40:30Z", "_msg": "other tenant", "app": "cim-eap", "severity": "ERROR", "namespace": "office",
+                    "eqp_id": "PRINTER-9"}]
+    settings = replace(w.settings, log_fields=LogFields(service="app", level="severity"), logs_filter='{namespace="factory"}')
     w.receive("firing_mq", "firing_cim")
     w.run(64, settings=settings)
-    sent = [json.loads(line) for line in w.fake.es_requests[0].splitlines()]
-    log_query, trace_query = sent[1], sent[3]
-    assert log_query["sort"] == [{"ts": "desc"}] and trace_query["sort"] == [{"@timestamp": "desc"}]
-    text = json.dumps(sent)
-    assert '"app"' in text and '"severity"' in text and '"service.name"' not in text and '"log.level"' not in text
-    assert '"status.code"' in text  # 沒改的欄位照預設
+    sent = [q["query"] for q in w.fake.log_queries]
+    assert len(sent) >= 4 and all(q.startswith('{namespace="factory"} ') for q in sent)
+    assert all("service.name" not in q and "log.level" not in q for q in sent) and '"app":in(' in sent[0] and '"severity":in(' in sent[0]
     prompt = w.llm_calls[0]["messages"][1]["content"]
-    assert "T3 timeout" in prompt and "EQP-CVD-07" in prompt and "SECS S6F11" in prompt
+    assert "T3 timeout" in prompt and "EQP-CVD-07" in prompt and "PRINTER-9" not in prompt and "other tenant" not in prompt
 
 
 # ── LLM 失敗的指數退避 ──
@@ -344,7 +341,7 @@ def llm_down():
     return httpx.MockTransport(handler), attempts
 
 
-def es_calls(w):
+def es_calls(w):   # 名字是沿用的：現在數的是對 VictoriaLogs 的錯誤日誌查詢
     """做了幾次證據收集（每次收集是一次錯誤日誌查詢，後面可能再跟一次關聯時間線的查詢）。"""
     return w.fake.error_searches
 
@@ -504,14 +501,18 @@ def test_configured_temperature_reaches_the_llm_request(world):
     assert w.llm_calls[0]["temperature"] == 0.3
 
 
-def test_round_with_tempo_configured_sends_timelines_and_call_chains_to_the_llm(world):
+def test_round_with_traces_configured_sends_timelines_and_call_chains_to_the_llm(world):
     from dataclasses import replace
     w = world
+    trace = shifted_trace(recorded_trace(), SHIFT)
+    trace["processes"]["p1"]["serviceName"] = "cim-eap"   # 錄下來的 Trace 是 web-portal → mes-api；讓其中一段屬於這張事故的系統
+    w.fake.traces = {trace["traceID"]: trace}
     w.receive("firing_mq", "firing_cim")
-    out = w.run(64, settings=replace(w.settings, tempo_datasource_uid="tempo-uid"))
+    out = w.run(64, settings=replace(w.settings, traces_datasource_uid="vt-uid"))
     assert out["status"] == "ok" and len(w.llm_calls) == 1
     prompt = w.llm_calls[0]["messages"][1]["content"]
     assert "【5. 關聯時間線" in prompt and "【6. 呼叫鏈" in prompt and "connection refused: mes-db:5432" in prompt
-    assert es_calls(w) == 1 and len(w.fake.timeline_requests) == 2 and len(w.fake.tempo_requests) == 3
-    w.run(124)                                                           # 沒有變化的續跑：不重查 ES、Tempo，也不重問 LLM
-    assert es_calls(w) == 1 and len(w.fake.tempo_requests) == 3 and len(w.llm_calls) == 1
+    timelines = len(w.fake.queries('partition by ("lot_id")') + w.fake.queries('partition by ("carrier_id")'))
+    assert es_calls(w) == 1 and timelines == 2 and len(w.fake.trace_requests) == 2          # Trace：每個系統搜尋一次
+    w.run(124)                                                           # 沒有變化的續跑：不重查日誌與 Trace，也不重問 LLM
+    assert es_calls(w) == 1 and len(w.fake.trace_requests) == 2 and len(w.llm_calls) == 1

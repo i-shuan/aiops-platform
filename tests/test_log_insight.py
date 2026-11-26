@@ -1,6 +1,6 @@
 """錯誤日誌的前處理：同類去重、各系統最早的錯誤不被擠掉、事故前後的次數、警告。
-都是歸類與算術，沒有「算不算異常」的門檻。假的 Grafana 從錄下來的真實樣本（es_proxy_logs_traces.json）組回應；
-真的 Elasticsearch 上的行為由 eval/run.py 的十個案例驗證（結果記在 EVAL.md）。"""
+都是歸類與算術，沒有「算不算異常」的門檻。假的 Grafana 拿錄下來的真實樣本（victoria_logs.json）照查詢條件篩；
+真的 VictoriaLogs 上的行為由 eval/run.py 的案例驗證（結果記在 EVAL.md）。"""
 from __future__ import annotations
 
 import json
@@ -13,6 +13,7 @@ from src import rca
 from src.grafana import Grafana, LogFields
 from src.grouping import Alert, converge
 from src.main import ConfigError, Settings
+from tests.conftest import SHIFT, log_row, recorded_rows, shifted
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)
 NOW = T0 + timedelta(seconds=64)
@@ -29,27 +30,30 @@ def incident(*services):
 
 def collect(fake, inc=None, **kw):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    return rca.collect_evidence(inc or incident(), EDGES, grafana, es_datasource_uid="es", log_index="factory-logs-*",
-                                trace_index="factory-traces", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW, **kw)
+    return rca.collect_evidence(inc or incident(), EDGES, grafana, logs_datasource_uid="vl",
+                                id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW, **kw)
+
+
+PROFILE, COUNTS = 'partition by ("service.name")', "stats count() if"   # 各系統最早的錯誤、事故前後的次數：各是一條查詢
 
 
 # ── 樣板 ──
 
-@pytest.mark.parametrize("message, pattern, phrase", [
-    ("heartbeat to MES retry failed attempt=312", "heartbeat to MES retry failed attempt=*", ("heartbeat to MES retry failed", 3)),
-    ("request 17 failed", "request * failed", ("request failed", 3)),
+@pytest.mark.parametrize("message, pattern, words", [
+    ("heartbeat to MES retry failed attempt=312", "heartbeat to MES retry failed attempt=*", ["heartbeat", "to", "MES", "retry", "failed"]),
+    ("request 17 failed", "request * failed", ["request", "failed"]),
     ("PLC connection lost on STK01 (10.3.2.15:502), transfers halted", "PLC connection lost on STK* (*), transfers halted",
-     ("PLC connection lost on transfers halted", 6)),
+     ["PLC", "connection", "lost", "on", "transfers", "halted"]),
     ("publish to eap.events timed out after 5000ms", "publish to eap.events timed out after *ms",
-     ("publish to eap.events timed out after", 3)),
-    ("id=3f2a9c1e-11aa-4b2c-9d3e-aabbccddeeff hash deadbeef12 ok", "id=* hash * ok", ("hash ok", 6)),
+     ["publish", "to", "eap.events", "timed", "out", "after"]),
+    ("id=3f2a9c1e-11aa-4b2c-9d3e-aabbccddeeff hash deadbeef12 ok", "id=* hash * ok", ["hash", "ok"]),
     ("timeout", "timeout", None),                       # 只有一個詞：不數（會把不相干的訊息都算進來）
-    ("code 500 at 10.0.0.1:8080", "code * at *", ("code at", 6)),
+    ("code 500 at 10.0.0.1:8080", "code * at *", ["code", "at"]),
     ("err 42", "err *", None),
 ])
-def test_messages_become_patterns_and_countable_phrases(message, pattern, phrase):
+def test_messages_become_patterns_and_countable_words(message, pattern, words):
     assert rca.log_pattern(message) == pattern
-    assert rca.pattern_phrase(pattern) == phrase
+    assert rca.pattern_words(pattern) == words
 
 
 def test_same_kind_of_error_with_different_numbers_is_one_pattern_but_words_are_not_touched():
@@ -72,23 +76,23 @@ def test_error_logs_keep_one_original_example_per_kind_with_the_count(fake):
 
 # ── 每個系統最早的幾筆：各系統分開問，不會互相擠掉 ──
 
-def test_each_system_is_asked_separately_for_its_oldest_errors(fake):
+def test_each_system_gets_its_own_oldest_errors_in_one_query(fake):
     collect(fake)
-    [profile] = fake.profile_requests
-    per_system, warnings = profile[:-1], profile[-1]
-    assert [q["query"]["bool"]["filter"][1]["bool"]["should"][0]["terms"]["service.name"] for q in per_system] == \
-        [[s] for s in incident().services]
-    assert all(q["sort"] == [{"@timestamp": "asc"}] and q["track_total_hits"] and q["size"] == rca.FIRST_ERRORS_PER_SYSTEM for q in per_system)
-    assert "WARN" in warnings["query"]["bool"]["filter"][2]["bool"]["should"][0]["terms"]["log.level"]
+    [profile] = fake.queries(PROFILE)
+    assert profile == ('"service.name":in("amhs-mcs","cim-eap","mq-broker") "log.level":in("ERROR","error","Error","FATAL","fatal",'
+                       f'"CRITICAL","critical") | sort by (_time) partition by ("service.name") limit {rca.FIRST_ERRORS_PER_SYSTEM}')
+    [warnings] = fake.queries('"log.level":in("WARN"')
+    assert warnings.endswith(f"| sort by (_time) | limit {rca.WARN_SAMPLE}")
 
 
 def test_a_system_flooded_out_of_the_newest_sample_still_shows_its_earliest_errors(fake):
-    """最新的那一批樣本全是 mq-broker（它在大量報錯）；cim-eap、amhs-mcs 較早的錯誤靠各系統分開問的那一次補回來。"""
-    everything = [h["_source"] for h in fake.es["responses"][0]["hits"]["hits"]]
-    fake.profile_docs = everything
-    fake.es["responses"][0]["hits"]["hits"] = [h for h in fake.es["responses"][0]["hits"]["hits"]
-                                               if h["_source"]["service"]["name"] == "mq-broker"]
-    ev = collect(fake)
+    """最新的那一批樣本全是 mq-broker（它在大量報錯）；cim-eap、amhs-mcs 較早的錯誤靠各系統各取最早幾筆的那一次補回來。"""
+    fake.logs += [log_row(T0 + timedelta(seconds=n), "mq-broker", "ERROR", f"publish rejected: queue full ({n})") for n in range(8)]
+    limits = rca.EvidenceLimits(max_hits=8)
+    newest = Grafana("http://grafana.test", "t", transport=fake.transport).search_errors(
+        "vl", incident().services, T0 - timedelta(minutes=10), NOW, 8)
+    assert {row["service.name"] for row in newest} == {"mq-broker"}      # 只看最新的 8 筆的話，另外兩個系統完全不見
+    ev = collect(fake, limits=limits)
     assert {e["system"] for e in ev["error_logs"]} == {"mq-broker", "cim-eap", "amhs-mcs"}
     assert {r["system"] for r in ev["error_patterns"]} == {"mq-broker", "cim-eap", "amhs-mcs"}   # 每個系統最早的那一種都有比較
 
@@ -96,7 +100,10 @@ def test_a_system_flooded_out_of_the_newest_sample_still_shows_its_earliest_erro
 # ── 事故前後的次數 ──
 
 def test_patterns_are_counted_during_and_before_and_new_is_a_fact_not_a_threshold(fake):
-    fake.before_counts = {"timeout waiting reply": 40}   # 「T3 timeout waiting S6F12 reply」的樣板是 T* … S*F*，片語不含那兩個詞
+    start = T0 - timedelta(minutes=10)                   # 事故時間窗的起點
+    fake.logs += [log_row(start - timedelta(seconds=30 * n + 5), "cim-eap", "ERROR", f"T3 timeout waiting S{n % 9}F12 reply")
+                  for n in range(40)]                    # 事故前 30 分鐘裡，同一種錯誤本來就有 40 筆
+    fake.logs.append(log_row(start - timedelta(minutes=31), "cim-eap", "ERROR", "T3 timeout waiting S6F12 reply"))   # 更早的不算
     ev = collect(fake)
     by_example = {r["example"]: r for r in ev["error_patterns"]}
     old = by_example["T3 timeout waiting S6F12 reply"]
@@ -104,28 +111,27 @@ def test_patterns_are_counted_during_and_before_and_new_is_a_fact_not_a_threshol
     fresh = [r for r in ev["error_patterns"] if r.get("new")]
     assert fresh and all(r["before"] == 0 for r in fresh)
     assert ev["count_windows"]["before_minutes"] == 30
-    # 計數查詢：兩兩一組，同一個片語，時間窗一個是事故期間、一個是事故前緊接的 30 分鐘
-    [phrases] = fake.phrase_requests
-    during, before = phrases[0]["query"]["bool"]["filter"][0]["range"]["@timestamp"], phrases[1]["query"]["bool"]["filter"][0]["range"]["@timestamp"]
-    assert before["lt"] == during["gte"] and during["gte"] - before["gte"] == 30 * 60 * 1000
-    assert phrases[0]["query"]["bool"]["filter"][3] == phrases[1]["query"]["bool"]["filter"][3]
+    # 計數：一條查詢、一次請求。查詢的時間範圍從事故前 30 分鐘開始，每一種錯誤用時間窗的起點切成「事故期間」與「事故前」
+    [counts] = [q for q in fake.log_queries if COUNTS in q["query"]]
+    assert counts["start"] == "2026-11-21T02:01:10.000000Z"
+    words = '"service.name":="cim-eap" "log.level":in("ERROR","error","Error","FATAL","fatal","CRITICAL","critical") _msg:seq("timeout","waiting","reply")'
+    assert f"count() if ({words} _time:>=2026-11-21T02:31:10.000000Z) as d" in counts["query"]   # 樣板是 T* … S*F*，帶 * 的詞不進條件
+    assert f"count() if ({words} _time:<2026-11-21T02:31:10.000000Z) as b" in counts["query"]
     prompt = rca.build_prompt(ev)
     assert "【3d. 主要的錯誤種類與事故前後的次數" in prompt and "事故前 30 分鐘" in prompt
 
 
-def test_a_phrase_that_matches_nothing_gets_no_counts_instead_of_a_wrong_zero(fake):
-    original = fake.msearch
+def test_a_pattern_that_counts_nothing_gets_no_counts_instead_of_a_wrong_zero(fake):
+    """計數的條件是近似的（固定的詞照順序出現）。萬一它連樣本自己那一筆都比不到，就不給次數。"""
+    original = fake.logsql
 
-    def zero_counts(body):
-        response = original(body)
-        if "match_phrase" in body:
-            data = response.json()
-            for r in data["responses"]:
-                r["hits"]["total"]["value"] = 0
-            return httpx.Response(200, json=data)
+    def zero_counts(request):
+        response = original(request)
+        if COUNTS in fake.log_queries[-1]["query"]:
+            return httpx.Response(200, text=json.dumps({key: "0" for key in json.loads(response.text)}) + "\n")
         return response
 
-    fake.msearch = zero_counts
+    fake.logsql = zero_counts
     ev = collect(fake)
     assert ev["error_patterns"] and all("during" not in r and "new" not in r for r in ev["error_patterns"])
     assert "事故前後的次數比較" not in rca.overview_text(rca.overview(ev))
@@ -133,52 +139,60 @@ def test_a_phrase_that_matches_nothing_gets_no_counts_instead_of_a_wrong_zero(fa
 
 def test_comparison_can_be_turned_off_and_baseline_length_is_configurable(fake):
     off = collect(fake, limits=rca.EvidenceLimits(max_log_patterns=0, max_warn_patterns=0))
-    assert off["error_patterns"] == [] and off["warnings"] == [] and fake.phrase_requests == []
-    assert len(off["error_logs"]) == 4 and fake.profile_requests       # 去重與各系統最早的樣本不受影響
+    assert off["error_patterns"] == [] and off["warnings"] == [] and fake.queries(COUNTS) == []
+    assert len(off["error_logs"]) == 4 and fake.queries(PROFILE)       # 去重與各系統最早的樣本不受影響
     collect(fake, limits=rca.EvidenceLimits(baseline_minutes=120))
-    window = [q["query"]["bool"]["filter"][0]["range"]["@timestamp"] for q in fake.phrase_requests[-1][:2]]
-    assert window[0]["gte"] - window[1]["gte"] == 120 * 60 * 1000
+    [counts] = [q for q in fake.log_queries if COUNTS in q["query"]]
+    assert counts["start"] == "2026-11-21T00:31:10.000000Z"            # 事故時間窗的起點再往前 120 分鐘
 
 
 # ── 警告 ──
 
 def warning(seconds, service, message):
-    return {"@timestamp": (T0 - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ"), "service": {"name": service},
-            "log": {"level": "WARN"}, "message": message}
+    return log_row(T0 - timedelta(seconds=seconds), service, "WARN", message)
 
 
 def test_warnings_are_grouped_counted_and_shown_separately_from_errors(fake):
-    fake.warning_docs = [warning(120, "mq-broker", "disk usage 91% on /data"), warning(90, "mq-broker", "disk usage 95% on /data"),
-                         warning(60, "cim-eap", "publish retry 3 of 5")]
+    fake.logs += [warning(120, "mq-broker", "disk usage 91% on /data"), warning(90, "mq-broker", "disk usage 95% on /data"),
+                  warning(60, "cim-eap", "publish retry 3 of 5"), warning(30, "erp", "unrelated system")]
     ev = collect(fake)
     assert [(w["system"], w["pattern"]) for w in ev["warnings"]] == [("mq-broker", "disk usage *% on /data"), ("cim-eap", "publish retry * of *")]
     assert ev["warnings"][0]["example"] == "disk usage 91% on /data"      # 原文、最早的那一筆
+    assert (ev["warnings"][0]["during"], ev["warnings"][0]["before"], ev["warnings"][0]["new"]) == (2, 0, True)
     assert "【3e. 警告" in rca.build_prompt(ev) and "警告 2 種" in rca.overview_text(rca.overview(ev))
     assert all("WARN" not in str(e.get("level", "")) for e in ev["error_logs"])
 
 
 def test_no_warnings_are_asked_for_without_a_level_field_or_when_turned_off(fake):
-    collect(fake, log_fields=LogFields(level=""))
-    assert len(fake.profile_requests[-1]) == 3                            # 只有三個系統各一個子查詢，沒有警告那一個
+    asked_for_warnings = lambda: [q for q in fake.log_queries if "warn" in q["query"].lower()]
+    collect(fake)
+    assert len(asked_for_warnings()) == 1                                 # 對照：預設會問一次
+    fake.log_queries.clear()
     collect(fake, limits=rca.EvidenceLimits(warn_levels=()))
-    assert len(fake.profile_requests[-1]) == 3
+    assert fake.queries(PROFILE) and asked_for_warnings() == []
+    fake.log_queries.clear()
+    fake.logs = shifted(recorded_rows("unparsed"), SHIFT)                 # 沒有等級欄位：分不出警告，不問
+    ev = collect(fake, log_fields=LogFields(service="kubernetes.container_name", level=""))
+    assert ev["error_logs"] and fake.queries('partition by ("kubernetes.container_name")') and asked_for_warnings() == []
 
 
 # ── 失敗不擋分析 ──
 
 def test_if_the_extra_queries_fail_the_original_samples_are_kept_and_it_is_noted(fake):
-    original = fake.msearch
-    fake.msearch = lambda body: httpx.Response(500, json={"message": "boom"}) if '"track_total_hits"' in body else original(body)
+    fake.fail_queries = {PROFILE}
     ev = collect(fake)
-    assert len(ev["error_logs"]) == 4 and ev["error_patterns"] == []
+    assert len(ev["error_logs"]) == 4 and ev["error_patterns"] == [] and fake.queries(COUNTS) == []
     assert any("錯誤概況查詢失敗" in n for n in ev["notes"])
+    fake.fail_queries = {COUNTS}
+    ev = collect(fake)
+    assert len(ev["error_logs"]) == 4 and all("during" not in r for r in ev["error_patterns"])
+    assert any("事故前後的次數比較查詢失敗" in n for n in ev["notes"])
 
 
 def test_no_extra_queries_when_there_are_no_error_logs(fake):
-    for resp in fake.es["responses"]:
-        resp["hits"] = {"total": {"value": 0, "relation": "eq"}, "max_score": None, "hits": []}
+    fake.logs = [row for row in fake.logs if row["log.level"] != "ERROR"]
     ev = collect(fake)
-    assert fake.profile_requests == [] and fake.phrase_requests == [] and ev["error_patterns"] == []
+    assert fake.queries(PROFILE) == [] and fake.queries(COUNTS) == [] and ev["error_patterns"] == []
 
 
 # ── 設定 ──
@@ -190,16 +204,16 @@ def load(tmp_path, text):
 
 
 def test_insight_settings_are_read_from_config(tmp_path):
-    s = load(tmp_path, "es: {baseline_minutes: 90, warn_levels: [W, WARN]}\nllm: {max_log_patterns: 3, max_warn_patterns: 0}\n")
+    s = load(tmp_path, "logs: {baseline_minutes: 90, warn_levels: [W, WARN]}\nllm: {max_log_patterns: 3, max_warn_patterns: 0}\n")
     assert (s.evidence.baseline_minutes, s.evidence.warn_levels, s.evidence.max_log_patterns, s.evidence.max_warn_patterns) == (90, ("W", "WARN"), 3, 0)
     d = load(tmp_path, "").evidence
     assert (d.baseline_minutes, d.max_log_patterns, d.max_warn_patterns) == (30, 6, 5) and "WARN" in d.warn_levels
-    assert load(tmp_path, "es: {warn_levels: []}\n").evidence.warn_levels == ()   # 空清單 = 不撈警告
+    assert load(tmp_path, "logs: {warn_levels: []}\n").evidence.warn_levels == ()   # 空清單 = 不撈警告
 
 
 @pytest.mark.parametrize("text, message", [
-    ("es: {baseline_minutes: 0}\n", "baseline_minutes"), ("llm: {max_log_patterns: 99}\n", "max_log_patterns"),
-    ("es: {warn_levels: WARN}\n", "warn_levels"), ("es: {warn_levels: [1]}\n", "warn_levels"),
+    ("logs: {baseline_minutes: 0}\n", "baseline_minutes"), ("llm: {max_log_patterns: 99}\n", "max_log_patterns"),
+    ("logs: {warn_levels: WARN}\n", "warn_levels"), ("logs: {warn_levels: [1]}\n", "warn_levels"),
 ])
 def test_bad_insight_settings_are_rejected_at_startup(tmp_path, text, message):
     with pytest.raises(ConfigError, match=message):

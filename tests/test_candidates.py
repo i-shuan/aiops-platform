@@ -28,8 +28,7 @@ def incident(*services):
 
 def evidence(fake, es="es"):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    return rca.collect_evidence(incident(), EDGES, grafana, es_datasource_uid=es, log_index="factory-logs-*",
-                                trace_index="factory-traces", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
+    return rca.collect_evidence(incident(), EDGES, grafana, logs_datasource_uid=es, id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
 
 
 def answer(*candidates, summary="mq-broker 最可能是源頭"):

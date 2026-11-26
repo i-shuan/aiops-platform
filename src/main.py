@@ -29,7 +29,7 @@ import yaml
 
 from src import grouping, rca, report
 from src.db import Database
-from src.grafana import Grafana, GrafanaError, LabelNames, LogFields, TraceFields
+from src.grafana import Grafana, GrafanaError, LabelNames, LogFields
 
 log = logging.getLogger("aiops_lite")
 
@@ -62,14 +62,12 @@ class Settings:
     llm: rca.LlmOptions = rca.LlmOptions()
     llm_retry_initial_seconds: int = 60
     llm_retry_max_seconds: int = 1800
-    es_datasource_uid: str = ""
-    tempo_datasource_uid: str = ""             # Grafana 上 Tempo 資料源的 uid；空的 = 沒有呼叫鏈證據
+    logs_datasource_uid: str = ""              # Grafana 上 VictoriaLogs 資料源的 uid；空的 = 沒有日誌證據
+    logs_filter: str = ""                      # 加在每條日誌查詢前面的 LogsQL 條件（logs.extra_filter）
+    traces_datasource_uid: str = ""            # Grafana 上 Jaeger 型別（指到 VictoriaTraces）資料源的 uid；空的 = 沒有呼叫鏈證據
     metrics: rca.MetricOptions = rca.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
-    log_index: str = "*"
-    trace_index: str = ""
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
     log_fields: LogFields = LogFields()
-    trace_fields: TraceFields = TraceFields()
     evidence: rca.EvidenceLimits = rca.EvidenceLimits()
     labels: LabelNames = LabelNames()
     tz: str = "Asia/Taipei"
@@ -92,21 +90,24 @@ class Settings:
     @classmethod
     def from_dict(cls, raw: dict[str, Any], base_dir: Path | None = None) -> "Settings":
         """base_dir：llm.system_prompt_file 寫相對路徑時相對於哪裡（= 設定檔所在的資料夾）。"""
-        known = {"grafana", "webhook", "database", "llm", "es", "tempo", "labels", "healthcheck", "annotation", "metrics", "timezone",
+        known = {"grafana", "webhook", "database", "llm", "logs", "traces", "labels", "healthcheck", "annotation", "metrics", "timezone",
                  "log_level", "edges", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
+        moved = [f"{old}（改成 {new}）" for old, new in (("es", "logs"), ("tempo", "traces")) if old in raw]
+        if moved:
+            raise ConfigError(f"資料來源換成 Victoria 之後，設定的區段改名了：{'、'.join(moved)}。"
+                              f"logs 底下也沒有 log_index、trace_index、trace_fields 了，見 config.example.yaml")
         check_keys(raw, known, "")
         grafana = section(raw, "grafana", {"url", "token", "timeout_seconds", "retries", "retry_backoff_seconds"})
         webhook = section(raw, "webhook", {"token", "port", "host", "max_body_bytes"})
         database = section(raw, "database", {"url"})
         llm = section(raw, "llm", {"url", "api_key", "model", "temperature", "timeout_seconds", "retry_initial_seconds",
-                                   "retry_max_seconds", "max_log_samples", "max_trace_samples", "max_message_chars",
+                                   "retry_max_seconds", "max_log_samples", "max_message_chars",
                                    "top_ids", "max_summary_chars", "system_prompt_file", "id_pattern",
                                    "max_timeline_ids", "max_timeline_events", "max_log_patterns",
                                    "max_warn_patterns"})
-        es = section(raw, "es", {"datasource_uid", "log_index", "trace_index", "id_fields", "log_fields", "trace_fields",
-                                 "error_levels", "error_statuses", "max_hits", "window_padding_minutes",
-                                 "timeline_fields", "baseline_minutes", "warn_levels"})
-        tempo = section(raw, "tempo", {"datasource_uid", "max_traces", "max_spans", "trace_id_field"})
+        logs = section(raw, "logs", {"datasource_uid", "extra_filter", "id_fields", "fields", "error_levels", "warn_levels",
+                                     "max_hits", "window_padding_minutes", "timeline_fields", "baseline_minutes"})
+        traces = section(raw, "traces", {"datasource_uid", "max_traces", "max_spans", "trace_id_field"})
         labels = section(raw, "labels", {"detect", "severity", "service", "default_severity"})
         metrics = section(raw, "metrics", {"datasource_uid", "queries", "lookback_minutes", "step_seconds", "max_points",
                                            "max_series"})
@@ -144,19 +145,19 @@ class Settings:
         retry_max = integer(llm, "retry_max_seconds", cls.llm_retry_max_seconds, 1, prefix="llm.")
         if retry_max < retry_initial:
             raise ConfigError("llm.retry_max_seconds 不能比 llm.retry_initial_seconds 小")
-        ids = es.get("id_fields", list(cls.id_fields))
+        ids = logs.get("id_fields", list(cls.id_fields))
         if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids):
-            raise ConfigError("es.id_fields 要是非空的欄位名稱清單")
+            raise ConfigError("logs.id_fields 要是非空的欄位名稱清單")
         ids = [i.strip() for i in ids]
-        timeline = es.get("timeline_fields")
+        timeline = logs.get("timeline_fields")
         if timeline is None:
             timeline = [f for f in d_ev.timeline_fields if f in ids]   # 預設：lot_id、carrier_id 裡有在統計的那幾個
         if not isinstance(timeline, list) or not all(isinstance(i, str) and i.strip() for i in timeline):
-            raise ConfigError("es.timeline_fields 要是欄位名稱清單（空清單 = 不做關聯時間線）")
+            raise ConfigError("logs.timeline_fields 要是欄位名稱清單（空清單 = 不做關聯時間線）")
         timeline = [i.strip() for i in timeline]
         strangers = [f for f in timeline if f not in ids]
         if strangers:
-            raise ConfigError(f"es.timeline_fields 的 {strangers} 不在 es.id_fields 裡：時間線只能用有在統計的識別碼")
+            raise ConfigError(f"logs.timeline_fields 的 {strangers} 不在 logs.id_fields 裡：時間線只能用有在統計的識別碼")
         return cls(
             grafana_url=text(grafana, "url", "", "grafana."), grafana_token=text(grafana, "token", "", "grafana."),
             grafana_timeout_seconds=number(grafana, "timeout_seconds", cls.grafana_timeout_seconds, 1, 600, "grafana."),
@@ -177,28 +178,26 @@ class Settings:
                 system_prompt=read_prompt(text(llm, "system_prompt_file", "", "llm."), base_dir),
                 id_pattern=id_pattern),
             llm_retry_initial_seconds=retry_initial, llm_retry_max_seconds=retry_max,
-            es_datasource_uid=text(es, "datasource_uid", "", "es."), log_index=text(es, "log_index", "*", "es.") or "*",
-            trace_index=text(es, "trace_index", "", "es."), id_fields=tuple(ids),
-            tempo_datasource_uid=text(tempo, "datasource_uid", "", "tempo."),
+            logs_datasource_uid=text(logs, "datasource_uid", "", "logs."), logs_filter=text(logs, "extra_filter", "", "logs."),
+            id_fields=tuple(ids), traces_datasource_uid=text(traces, "datasource_uid", "", "traces."),
             metrics=metric_options(metrics),
-            log_fields=field_map(es, "log_fields", LogFields), trace_fields=field_map(es, "trace_fields", TraceFields),
+            log_fields=log_field_names(logs),
             evidence=rca.EvidenceLimits(
-                max_hits=integer(es, "max_hits", d_ev.max_hits, 1, 10000, "es."),
-                window_padding_minutes=integer(es, "window_padding_minutes", d_ev.window_padding_minutes, 0, 1440, "es."),
-                error_levels=words(es, "error_levels", d_ev.error_levels), error_statuses=words(es, "error_statuses", d_ev.error_statuses),
+                max_hits=integer(logs, "max_hits", d_ev.max_hits, 1, 10000, "logs."),
+                window_padding_minutes=integer(logs, "window_padding_minutes", d_ev.window_padding_minutes, 0, 1440, "logs."),
+                error_levels=words(logs, "error_levels", d_ev.error_levels),
                 max_log_samples=integer(llm, "max_log_samples", d_ev.max_log_samples, 0, prefix="llm."),
-                max_trace_samples=integer(llm, "max_trace_samples", d_ev.max_trace_samples, 0, prefix="llm."),
                 max_message_chars=integer(llm, "max_message_chars", d_ev.max_message_chars, 20, prefix="llm."),
                 top_ids=integer(llm, "top_ids", d_ev.top_ids, 1, prefix="llm."),
                 timeline_fields=tuple(timeline),
                 max_timeline_ids=integer(llm, "max_timeline_ids", d_ev.max_timeline_ids, 0, 20, "llm."),
                 max_timeline_events=integer(llm, "max_timeline_events", d_ev.max_timeline_events, 1, 500, "llm."),
-                trace_id_field=text(tempo, "trace_id_field", d_ev.trace_id_field, "tempo."),
-                max_traces=integer(tempo, "max_traces", d_ev.max_traces, 0, 20, "tempo."),
-                max_trace_spans=integer(tempo, "max_spans", d_ev.max_trace_spans, 1, 500, "tempo."),
-                baseline_minutes=integer(es, "baseline_minutes", d_ev.baseline_minutes, 5, 1440, "es."),
+                trace_id_field=text(traces, "trace_id_field", d_ev.trace_id_field, "traces."),
+                max_traces=integer(traces, "max_traces", d_ev.max_traces, 0, 20, "traces."),
+                max_trace_spans=integer(traces, "max_spans", d_ev.max_trace_spans, 1, 500, "traces."),
+                baseline_minutes=integer(logs, "baseline_minutes", d_ev.baseline_minutes, 5, 1440, "logs."),
                 max_log_patterns=integer(llm, "max_log_patterns", d_ev.max_log_patterns, 0, 20, "llm."),
-                warn_levels=warn_levels(es, d_ev.warn_levels),
+                warn_levels=warn_levels(logs, d_ev.warn_levels),
                 max_warn_patterns=integer(llm, "max_warn_patterns", d_ev.max_warn_patterns, 0, 20, "llm.")),
             labels=names, tz=tz, log_level=level, edges=parse_edges(raw.get("edges", [])),
             retry_failed_round_seconds=integer(raw, "retry_failed_round_seconds", cls.retry_failed_round_seconds, 1),
@@ -229,22 +228,22 @@ def number(raw: dict[str, Any], key: str, default: float, minimum: float, maximu
     return float(value)
 
 
-def words(es: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
-    value = es.get(key)
+def words(logs: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = logs.get(key)
     if value is None:
         return default
     if not isinstance(value, list) or not value or not all(isinstance(v, str) and v.strip() for v in value):
-        raise ConfigError(f"es.{key} 要是非空的文字清單（大小寫不同要分開列）")
+        raise ConfigError(f"logs.{key} 要是非空的文字清單（大小寫不同要分開列）")
     return tuple(v.strip() for v in value)
 
 
-def warn_levels(es: dict[str, Any], default: tuple[str, ...]) -> tuple[str, ...]:
-    """es.warn_levels：跟 error_levels 一樣是文字清單，但可以是空的（= 不撈警告）。"""
-    value = es.get("warn_levels")
+def warn_levels(logs: dict[str, Any], default: tuple[str, ...]) -> tuple[str, ...]:
+    """logs.warn_levels：跟 error_levels 一樣是文字清單，但可以是空的（= 不撈警告）。"""
+    value = logs.get("warn_levels")
     if value is None:
         return default
     if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
-        raise ConfigError("es.warn_levels 要是文字清單（大小寫不同要分開列；空清單 = 不撈警告）")
+        raise ConfigError("logs.warn_levels 要是文字清單（大小寫不同要分開列；空清單 = 不撈警告）")
     return tuple(v.strip() for v in value)
 
 
@@ -299,18 +298,17 @@ def text(raw: dict[str, Any], key: str, default: str, prefix: str = "") -> str:
     return value.strip()
 
 
-def field_map(es: dict[str, Any], key: str, cls: type) -> Any:
-    raw = es.get(key) or {}
-    names = {f.name for f in fields(cls)}
+def log_field_names(logs: dict[str, Any]) -> LogFields:
+    """logs.fields：日誌裡「系統名稱」與「等級」兩個欄位叫什麼。時間與訊息在 VictoriaLogs 固定是 _time、_msg，不用設定。"""
+    raw = logs.get("fields") or {}
     if not isinstance(raw, dict):
-        raise ConfigError(f"es.{key} 要是 欄位用途: 欄位名稱 的對照")
-    check_keys(raw, names, f"es.{key}")
-    values = {k: text(raw, k, getattr(cls(), k), f"es.{key}.") for k in raw}
-    # 唯一可以留空的是日誌的 level：日誌沒有等級欄位時，改用訊息文字挑錯誤日誌（grafana.search_errors）
-    optional = {"level"} if cls is LogFields else set()
-    if not all(v for k, v in values.items() if k not in optional):
-        raise ConfigError(f"es.{key} 的欄位名稱不能是空的" + ("（只有 level 可以留空）" if optional else ""))
-    return cls(**values)
+        raise ConfigError("logs.fields 要是 欄位用途: 欄位名稱 的對照")
+    check_keys(raw, {f.name for f in fields(LogFields)}, "logs.fields")
+    values = {k: text(raw, k, getattr(LogFields(), k), "logs.fields.") for k in raw}
+    # 唯一可以留空的是 level：日誌沒有等級欄位時，改用訊息文字挑錯誤日誌（grafana.search_errors）
+    if "service" in values and not values["service"]:
+        raise ConfigError("logs.fields 的欄位名稱不能是空的（只有 level 可以留空）")
+    return LogFields(**values)
 
 
 MAX_METRIC_QUERIES = 20   # 每張事故要查「查詢數 × 系統數」次：設個上限，避免一份設定把指標資料庫打爆
@@ -408,17 +406,16 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             if not (inc.fresh or not inc.summary or (can_analyze and not inc.analyzed)):
                 continue
             if can_analyze and inc.llm_next_try is not None and now < inc.llm_next_try:
-                # 退避中：不查 ES、不打 LLM。摘要退回原始版本，但成員變了要跟著更新（誠實：沒有分析過）
+                # 退避中：不查日誌、不打 LLM。摘要退回原始版本，但成員變了要跟著更新（誠實：沒有分析過）
                 raw = f"[未經分析] {rca.raw_summary(inc)}"
                 if (inc.summary, inc.analyzed, inc.candidates) != (raw, False, ""):
                     inc.summary, inc.analyzed, inc.candidates, inc.changed, inc.annotated = raw, False, "", True, False
                 log.debug("事故 %s 的 LLM 分析退避中，%s 之前不再試", inc.uid, inc.llm_next_try.isoformat())
                 continue
             evidence = rca.collect_evidence(
-                inc, edges, grafana, es_datasource_uid=settings.es_datasource_uid, log_index=settings.log_index,
-                trace_index=settings.trace_index, id_fields=list(settings.id_fields), now=now,
-                log_fields=settings.log_fields, trace_fields=settings.trace_fields, limits=settings.evidence,
-                    tempo_datasource_uid=settings.tempo_datasource_uid, metrics=settings.metrics)
+                inc, edges, grafana, logs_datasource_uid=settings.logs_datasource_uid, id_fields=list(settings.id_fields),
+                now=now, log_fields=settings.log_fields, limits=settings.evidence, logs_filter=settings.logs_filter,
+                traces_datasource_uid=settings.traces_datasource_uid, metrics=settings.metrics)
             before = (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates)
             # 「證據」那幾行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
             groups = rca.overview(evidence, settings.log_fields, settings.evidence.error_levels)

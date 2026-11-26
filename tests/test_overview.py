@@ -1,9 +1,8 @@
 """註記的「證據」那一行：這次分析手上有哪些證據、缺哪些、為什麼缺。全部由程式從實際撈到的結果產生，不經過 LLM。
-「錯誤日誌 0 筆」三種原因的計數回應是真的 Grafana 13.0.7 + Elasticsearch 8.19.23 錄下來的（log_counts_*.json，
-錄製腳本 record_log_counts.py）。"""
+「錯誤日誌 0 筆」三種原因各有一批從真的 VictoriaLogs v1.17.0 錄下來的資料（victoria_logs.json 的 count-* 三個 dataset，
+錄製腳本 record_victoria.py）；假的 Grafana 照查詢條件去數，數出來的跟真的一樣（tests/test_grafana.py 有逐條比對）。"""
 from __future__ import annotations
 
-import copy
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -15,7 +14,7 @@ from src import db as dbmod
 from src import rca, report
 from src.grafana import Grafana, LogFields
 from src.grouping import Alert, converge
-from tests.conftest import recorded
+from tests.conftest import SHIFT, recorded_rows, recorded_trace, shifted, shifted_trace, victoria
 from tests.test_main import LLM_ANSWER, rows, world  # noqa: F401（fixture）
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)
@@ -32,17 +31,17 @@ def incident(*services):
 
 
 def no_error_logs(fake):
-    """ES 查得到、但錯誤日誌是 0 筆（回應格式是錄下來的真實樣本，只把命中清空）。"""
-    fake.es = copy.deepcopy(recorded("es_proxy_logs_traces")["response"])
-    for resp in fake.es["responses"]:
-        resp["hits"] = {"total": {"value": 0, "relation": "eq"}, "max_score": None, "hits": []}
+    """日誌查得到、但沒有錯誤等級的（樣本裡只剩那一筆 INFO）。"""
+    fake.logs = [row for row in fake.logs if row["log.level"] != "ERROR"]
 
 
-def collect(fake, inc=None, *, es="es", tempo="", metrics=rca.MetricOptions(), edges=EDGES, **kw):
+def collect(fake, inc=None, *, logs="vl", traces="", metrics=rca.MetricOptions(), edges=EDGES, **kw):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    return rca.collect_evidence(inc or incident(), edges, grafana, es_datasource_uid=es, log_index="factory-logs-*",
-                                trace_index="factory-traces", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW,
-                                tempo_datasource_uid=tempo, metrics=metrics, **kw)
+    return rca.collect_evidence(inc or incident(), edges, grafana, logs_datasource_uid=logs, id_fields=["eqp_id", "lot_id", "carrier_id"],
+                                now=NOW, traces_datasource_uid=traces, metrics=metrics, **kw)
+
+
+COUNT = "count() as total, count() if"   # 錯誤日誌 0 筆之後多問的那一次
 
 
 def line(ev, **kw):
@@ -52,7 +51,10 @@ def line(ev, **kw):
 # ── 有什麼 ──
 
 def test_everything_present_is_listed_with_counts(fake):
-    ev = collect(fake, tempo="tempo-uid", metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
+    trace = shifted_trace(recorded_trace(), SHIFT)
+    trace["processes"]["p1"]["serviceName"] = "cim-eap"      # 錄下來的 Trace 是 web-portal → mes-api；讓其中一段屬於這張事故的系統
+    fake.traces = {trace["traceID"]: trace}
+    ev = collect(fake, traces="vt-uid", metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
     got = rca.overview(ev)
     assert got["missing"] == [] and got["off"] == [] and got["failed"] == []
     text = "、".join(got["have"])
@@ -64,41 +66,39 @@ def test_everything_present_is_listed_with_counts(fake):
 
 # ── 錯誤日誌 0 筆：三種原因分得出來，各有下一步 ──
 
-@pytest.mark.parametrize("counts, says, next_step", [
-    ("log_counts_index_empty", "索引在這段時間一筆資料都沒有", "es.log_index"),
-    ("log_counts_service_mismatch", "索引有 4 筆，但沒有一筆的 service.name 是這些系統", "值是否跟告警的系統名稱完全一樣"),
-    ("log_counts_no_errors", "這些系統有 5 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL", "等級的寫法對不上"),
+@pytest.mark.parametrize("dataset, says, next_step", [
+    ("count-empty", "這段時間一筆日誌都沒有", "logs.extra_filter"),
+    ("count-mismatch", "這段時間有 4 筆日誌，但沒有一筆的 service.name 是這些系統", "值是否跟告警的系統名稱完全一樣"),
+    ("count-no-errors", "這些系統有 5 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL", "等級的寫法對不上"),
 ])
-def test_zero_error_logs_says_which_step_failed(fake, counts, says, next_step):
-    no_error_logs(fake)
-    fake.log_counts = counts
+def test_zero_error_logs_says_which_step_failed(fake, dataset, says, next_step):
+    fake.logs = shifted(recorded_rows(dataset), SHIFT)
     ev = collect(fake)
     text = line(ev)
     [missing] = [l for l in text.splitlines() if l.startswith("缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。")]   # 自己一行，先講少了它哪種分析做不了
     assert says in missing and next_step in missing
-    assert len(fake.count_requests) == 1
-    # 送出去的計數查詢跟錄製時同一個形狀（兩個子查詢：整個時間窗、時間窗 + 系統）
-    was = [json.loads(l) for l in recorded(counts)["request"]["body"].splitlines()][1::2]
-    shape = lambda q: (q["size"], q["track_total_hits"], len(q["query"]["bool"]["filter"]))
-    assert [shape(q) for q in fake.count_requests[0]] == [shape(q) for q in was]
+    [sent] = fake.queries(COUNT)
+    # 送出去的計數查詢跟錄製時同一個寫法（錄製時前面多一段只看某個 dataset 的條件，系統名稱的順序不同）
+    was = victoria("logs")["exchanges"][f"count_logs_{dataset}"][0]["request"]["form"]["query"]
+    assert was.replace('in("mq-broker","cim-eap","amhs-mcs")', 'in("amhs-mcs","cim-eap","mq-broker")') == f'{{dataset="{dataset}"}} {sent}'
 
 
 def test_the_extra_count_query_only_happens_when_there_are_no_error_logs(fake):
     collect(fake)
-    assert fake.count_requests == []
+    assert fake.queries(COUNT) == []
 
 
 def test_no_level_field_and_custom_levels_are_named_in_the_reason(fake):
     no_error_logs(fake)
-    ev = collect(fake, log_fields=LogFields(service="kubernetes.container_name", level=""))
-    assert "訊息文字裡沒有錯誤字樣" in line(ev, log_fields=LogFields(service="kubernetes.container_name", level=""))
-    assert "severity 沒有一筆是 E／SEVERE" in line(ev, log_fields=LogFields(level="severity"), error_levels=("E", "SEVERE"))
+    assert "severity 沒有一筆是 E／SEVERE" in line(collect(fake), log_fields=LogFields(level="severity"), error_levels=("E", "SEVERE"))
+    k8s = LogFields(service="kubernetes.container_name", level="")
+    fake.logs = [row for row in shifted(recorded_rows("unparsed"), SHIFT) if "track-in" in row["_msg"]]   # 沒拆欄位、訊息裡也沒有錯誤字樣
+    assert "這些系統有 1 筆日誌，但訊息文字裡沒有錯誤字樣" in line(collect(fake, log_fields=k8s), log_fields=k8s)
 
 
 def test_if_the_count_itself_fails_the_line_still_says_logs_are_missing(fake):
     no_error_logs(fake)
-    real = fake.msearch
-    fake.msearch = lambda body: real(body) if '"size": 100' in body else httpx.Response(500, json={"message": "boom"})
+    fake.fail_queries = {COUNT}
     ev = collect(fake)
     assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。沒有查到這些系統的錯誤日誌" in line(ev) and "log_counts" not in ev
 
@@ -106,25 +106,25 @@ def test_if_the_count_itself_fails_the_line_still_says_logs_are_missing(fake):
 # ── 沒接、查詢失敗 ──
 
 def test_sources_that_are_not_configured_are_listed_as_not_connected(fake):
-    text = line(collect(fake, es=""))
+    text = line(collect(fake, logs=""))
     assert [l.split("｜")[0] for l in text.splitlines()[1:]] == ["沒接日誌", "沒接呼叫鏈", "沒接指標走勢"]
-    assert "沒接日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。要接就設定 es.datasource_uid" in text
+    assert "沒接日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的。要接就設定 logs.datasource_uid" in text
     assert "查詢失敗" not in text
 
 
 def test_failed_queries_are_reported_as_failed_not_as_missing(fake):
     fake.fail.add("/api/datasources/proxy/uid/")
-    ev = collect(fake, tempo="tempo-uid", metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
+    ev = collect(fake, traces="vt-uid", metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
     got = rca.overview(ev)
     assert [name for name, _why in got["failed"]] == ["日誌", "呼叫鏈", "指標走勢"] and got["off"] == []
 
 
 def test_queried_but_empty_traces_and_metrics_say_why(fake):
-    fake.tempo_search = {"traces": []}
-    ev = collect(fake, incident("amhs-mcs"), tempo="tempo-uid",
+    fake.traces = {}
+    ev = collect(fake, incident("amhs-mcs"), traces="vt-uid",
                  metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
     text = line(ev)
-    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。Tempo 裡沒有這些系統的失敗請求" in text
+    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。VictoriaTraces 裡沒有這些系統的失敗請求" in text
     assert "缺指標走勢｜還看不出數值是怎麼變壞的（流量、佇列、資源）。設定的查詢在這段時間都沒有資料" in text
 
 
@@ -143,9 +143,9 @@ def test_edges_are_judged_against_the_systems_in_this_incident(fake):
 def test_annotation_shows_the_evidence_line_between_summary_and_time_and_escapes_it():
     inc = incident()
     inc.summary = "[LLM 推論] 還無法判定源頭"
-    inc.evidence_note = "已有的證據｜告警 3 筆\n缺錯誤日誌｜<b>x</b>  多個空白\n\n沒接呼叫鏈｜要接就設定 tempo.datasource_uid"
+    inc.evidence_note = "已有的證據｜告警 3 筆\n缺錯誤日誌｜<b>x</b>  多個空白\n\n沒接呼叫鏈｜要接就設定 traces.datasource_uid"
     l1, l2, have, missing, off, last = report.render(inc, "http://g", "Asia/Taipei")["text"].split("<br>")
-    assert (have, off) == ("已有的證據｜告警 3 筆", "沒接呼叫鏈｜要接就設定 tempo.datasource_uid")
+    assert (have, off) == ("已有的證據｜告警 3 筆", "沒接呼叫鏈｜要接就設定 traces.datasource_uid")
     assert missing == "缺錯誤日誌｜&lt;b&gt;x&lt;/b&gt; 多個空白"   # 跳脫；每項自己一行
     assert l2 == "根因分析｜[LLM 推論] 還無法判定源頭" and "台灣時間" in last
     inc.evidence_note = ""
@@ -155,8 +155,7 @@ def test_annotation_shows_the_evidence_line_between_summary_and_time_and_escapes
 def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):  # noqa: F811
     """使用者實際遇到的情況：告警進來了、日誌的欄位對不上。註記要直接說出是哪一關沒過，而不是只有「證據不足」。"""
     w = world
-    no_error_logs(w.fake)
-    w.fake.log_counts = "log_counts_service_mismatch"
+    w.fake.logs = shifted(recorded_rows("count-mismatch"), SHIFT)   # 有日誌，但 service.name 寫的是別的名字
     calls = []
 
     def llm(request):   # 沒有日誌的情境，模型不會（也不能）點名機台：world 預設的回答有 EQP-CVD-07，會被幻覺檢查擋掉
@@ -168,7 +167,7 @@ def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):
     assert w.run(60, llm=httpx.MockTransport(llm))["status"] == "ok"
     [inc] = rows(w, dbmod.incidents)
     assert inc["evidence_note"].startswith("證據｜已有告警 2 筆") and "\n" not in inc["evidence_note"]   # 註記上只有一行
-    assert "缺錯誤日誌（索引有 4 筆，但沒有一筆的 service.name 是這些系統" in inc["evidence_note"]
+    assert "缺錯誤日誌（這段時間有 4 筆日誌，但沒有一筆的 service.name 是這些系統" in inc["evidence_note"]
     note = w.fake.annotations[inc["annotation_id"]]["text"]
     assert "<br>根因分析｜[LLM 推論] 還無法判定源頭" in note and "<br>證據｜已有告警 2 筆" in note and "service.name 是這些系統" in note
     prompt = calls[0]["messages"][1]["content"]
@@ -209,11 +208,10 @@ def test_source_field_is_optional_but_must_be_a_system_in_the_evidence(fake):
 
 
 def test_the_annotation_gets_one_brief_line_while_the_llm_gets_the_full_explanation(fake):
-    no_error_logs(fake)
-    fake.log_counts = "log_counts_service_mismatch"
-    groups = rca.overview(collect(fake, tempo="tempo-uid"))
+    fake.logs = shifted(recorded_rows("count-mismatch"), SHIFT)
+    groups = rca.overview(collect(fake, traces="vt-uid"))
     brief = rca.overview_brief(groups)
     assert "\n" not in brief and brief.startswith("證據｜已有告警 3 筆")
-    assert "缺錯誤日誌（索引有 4 筆" in brief and "還看不出" not in brief          # 留原因，不重複講能分析什麼
+    assert "缺錯誤日誌（這段時間有 4 筆日誌" in brief and "還看不出" not in brief          # 留原因，不重複講能分析什麼
     assert brief.endswith("沒接指標走勢") and "metrics.queries" not in brief          # 沒接的只列名稱
     assert "還看不出" in rca.overview_text(groups) and "metrics.queries" in rca.overview_text(groups)

@@ -24,8 +24,8 @@
   "panels": [
     {
       "datasource": {
-        "type": "elasticsearch",
-        "uid": "${DS_FACTORY_ES}"
+        "type": "victoriametrics-logs-datasource",
+        "uid": "${DS_VICTORIALOGS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -81,33 +81,15 @@
       },
       "targets": [
         {
-          "alias": "MQ 佇列深度（門檻 200）",
-          "bucketAggs": [
-            {
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "15s",
-                "min_doc_count": "0",
-                "trimEdges": "0"
-              },
-              "type": "date_histogram"
-            }
-          ],
           "datasource": {
-            "type": "elasticsearch",
-            "uid": "${DS_FACTORY_ES}"
+            "type": "victoriametrics-logs-datasource",
+            "uid": "${DS_VICTORIALOGS}"
           },
-          "metrics": [
-            {
-              "field": "queue_depth",
-              "id": "1",
-              "type": "max"
-            }
-          ],
-          "query": "service.name:mq-broker",
-          "refId": "A",
-          "timeField": "@timestamp"
+          "expr": "\"service.name\":=\"mq-broker\" queue_depth:* | stats max(queue_depth) as value",
+          "queryType": "statsRange",
+          "step": "30s",
+          "legendFormat": "MQ 佇列深度（門檻 200）",
+          "refId": "A"
         }
       ],
       "title": "MQ 佇列深度（mq-broker）",
@@ -115,8 +97,8 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
-        "uid": "${DS_FACTORY_ES}"
+        "type": "victoriametrics-logs-datasource",
+        "uid": "${DS_VICTORIALOGS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -156,33 +138,15 @@
       },
       "targets": [
         {
-          "alias": "MQ 消費者連線數",
-          "bucketAggs": [
-            {
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "15s",
-                "min_doc_count": "0",
-                "trimEdges": "0"
-              },
-              "type": "date_histogram"
-            }
-          ],
           "datasource": {
-            "type": "elasticsearch",
-            "uid": "${DS_FACTORY_ES}"
+            "type": "victoriametrics-logs-datasource",
+            "uid": "${DS_VICTORIALOGS}"
           },
-          "metrics": [
-            {
-              "field": "consumers",
-              "id": "1",
-              "type": "min"
-            }
-          ],
-          "query": "service.name:mq-broker",
-          "refId": "A",
-          "timeField": "@timestamp"
+          "expr": "\"service.name\":=\"mq-broker\" consumers:* | stats min(consumers) as value",
+          "queryType": "statsRange",
+          "step": "30s",
+          "legendFormat": "MQ 消費者連線數",
+          "refId": "A"
         }
       ],
       "title": "MQ 消費者連線數（mq-broker）",
@@ -190,8 +154,8 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
-        "uid": "${DS_FACTORY_ES}"
+        "type": "victoriametrics-logs-datasource",
+        "uid": "${DS_VICTORIALOGS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -231,32 +195,15 @@
       },
       "targets": [
         {
-          "alias": "CIM 通訊逾時次數",
-          "bucketAggs": [
-            {
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "15s",
-                "min_doc_count": "0",
-                "trimEdges": "0"
-              },
-              "type": "date_histogram"
-            }
-          ],
           "datasource": {
-            "type": "elasticsearch",
-            "uid": "${DS_FACTORY_ES}"
+            "type": "victoriametrics-logs-datasource",
+            "uid": "${DS_VICTORIALOGS}"
           },
-          "metrics": [
-            {
-              "id": "1",
-              "type": "count"
-            }
-          ],
-          "query": "error_type:T3_TIMEOUT",
-          "refId": "A",
-          "timeField": "@timestamp"
+          "expr": "error_type:=\"T3_TIMEOUT\" | stats count() as value",
+          "queryType": "statsRange",
+          "step": "30s",
+          "legendFormat": "CIM 通訊逾時次數",
+          "refId": "A"
         }
       ],
       "title": "CIM 通訊逾時次數（cim-eap）",
@@ -264,8 +211,8 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
-        "uid": "${DS_FACTORY_ES}"
+        "type": "victoriametrics-logs-datasource",
+        "uid": "${DS_VICTORIALOGS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -305,32 +252,15 @@
       },
       "targets": [
         {
-          "alias": "AMHS 搬運中止次數",
-          "bucketAggs": [
-            {
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "15s",
-                "min_doc_count": "0",
-                "trimEdges": "0"
-              },
-              "type": "date_histogram"
-            }
-          ],
           "datasource": {
-            "type": "elasticsearch",
-            "uid": "${DS_FACTORY_ES}"
+            "type": "victoriametrics-logs-datasource",
+            "uid": "${DS_VICTORIALOGS}"
           },
-          "metrics": [
-            {
-              "id": "1",
-              "type": "count"
-            }
-          ],
-          "query": "error_type:TRANSFER_ABORT",
-          "refId": "A",
-          "timeField": "@timestamp"
+          "expr": "error_type:=\"TRANSFER_ABORT\" | stats count() as value",
+          "queryType": "statsRange",
+          "step": "30s",
+          "legendFormat": "AMHS 搬運中止次數",
+          "refId": "A"
         }
       ],
       "title": "AMHS 搬運中止次數（amhs-mcs）",
@@ -351,12 +281,12 @@
   "uid": "aiops-lite-metrics",
   "__inputs": [
     {
-      "name": "DS_FACTORY_ES",
-      "label": "Elasticsearch（日誌資料源）",
-      "description": "存放 factory-logs-* 的資料源",
+      "name": "DS_VICTORIALOGS",
+      "label": "VictoriaLogs（日誌資料源）",
+      "description": "存放各系統日誌的 VictoriaLogs 資料源（外掛 victoriametrics-logs-datasource）",
       "type": "datasource",
-      "pluginId": "elasticsearch",
-      "pluginName": "Elasticsearch"
+      "pluginId": "victoriametrics-logs-datasource",
+      "pluginName": "VictoriaLogs"
     }
   ]
 }

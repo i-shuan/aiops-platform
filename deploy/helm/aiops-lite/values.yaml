@@ -10,7 +10,7 @@
 
 image:
   repository: aiops-lite
-  tag: "0.5.0"
+  tag: "0.6.0"
   pullPolicy: IfNotPresent
 
 grafana:
@@ -46,20 +46,19 @@ llm:             # 整段留空 = 不分析，註記第 2 行是 [未經分析] 
   # 有填的話 chart 會把它放進同一個 Secret 的 system_prompt.txt，並自動設好 llm.system_prompt_file。
   systemPrompt: ""
 
-es:              # datasourceUid 留空 = RCA 沒有日誌證據
-  datasourceUid: ""
-  logIndex: "*"
-  traceIndex: ""
+logs:            # datasourceUid 留空 = RCA 沒有日誌證據
+  datasourceUid: ""    # Grafana 上 VictoriaLogs 資料源（外掛 victoriametrics-logs-datasource）的 uid
+  extraFilter: ""      # 加在每條日誌查詢最前面的 LogsQL 條件，只看某一部分的日誌，例如 '{namespace="factory"}'；留空 = 全部
   idFields: [eqp_id, lot_id, carrier_id]
-  # 日誌沒有等級欄位（沒拆欄位的容器輸出）：level 設成 ""，改用訊息文字挑錯誤日誌（會漏撈也會誤撈，見 CONFIG.md）
-  logFields: {time: "@timestamp", service: service.name, level: log.level, message: message}
-  traceFields: {time: "@timestamp", service: service.name, span: span.name, trace_id: trace.id, status: status.code, error: error.message}
+  # 日誌沒有等級欄位（沒拆欄位的容器輸出）：level 設成 ""，改用訊息文字挑錯誤日誌（會誤撈，見 CONFIG.md）。
+  # 時間與訊息在 VictoriaLogs 固定是 _time、_msg，不用設定
+  fields: {service: service.name, level: log.level}
 
-tempo:           # datasourceUid 留空 = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
-  datasourceUid: ""    # Grafana 上 Tempo 資料源的 uid（取得方式跟 ES 的一樣）
+traces:          # datasourceUid 留空 = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
+  datasourceUid: ""    # Grafana 上 Jaeger 型別資料源的 uid（URL 指到 VictoriaTraces 的 /select/jaeger）
 
 metrics:         # datasourceUid 或 queries 留空 = RCA 沒有指標走勢這包證據
-  datasourceUid: ""    # Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid
+  datasourceUid: ""    # Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以）
   queries: []          # 事故時要查的指標；$service 會換成系統名稱。services 有寫就只對那幾個系統查。例如：
   #   - {name: 請求量（每秒）, expr: 'sum(rate(http_requests_total{service="$service"}[5m]))'}
   #   - {name: 佇列待處理訊息數, expr: 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})', services: [mq-broker]}
@@ -72,14 +71,14 @@ logLevel: INFO
 # 可用的鍵與預設值見 config.example.yaml 裡註解掉的那些行，以及 CONFIG.md。平常留空。例如：
 #   extraConfig:
 #     llm: {timeout_seconds: 180, id_pattern: "(EQP|LOT|FOUP)[-A-Z0-9]+"}
-#     es: {error_levels: [E, SEVERE], max_hits: 500}
+#     logs: {error_levels: [E, SEVERE], max_hits: 500}
 #     labels: {service: system}
 #     healthcheck: {stuck_seconds: 1200}
 extraConfig: {}
 
 # 事件驅動的時間設定（秒）。改了之後 helm upgrade 會自動重啟服務。
 timing:
-  debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析：等上下游告警到齊、等 ES 日誌落盤
+  debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析：等上下游告警到齊、等日誌寫進 VictoriaLogs
   followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪（結案、補寫註記、重試 LLM）
   closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案（剛恢復又響不會另開一張）
 

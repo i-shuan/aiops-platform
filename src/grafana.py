@@ -1,14 +1,21 @@
-"""跟公司 Grafana 講話的唯一出口：只用 config.yaml 的 grafana.url + 一把 Editor Token，不直連任何資料庫、Prometheus 或 ES。
+"""跟公司 Grafana 講話的唯一出口：只用 config.yaml 的 grafana.url + 一把 Editor Token，不直連任何資料庫或 Victoria 元件。
 
   parse_webhook     解析 Grafana 告警 webhook（Contact Point 推進來的）：哪條規則、哪個系統、嚴重度、firing／resolved
-  search_errors     POST /api/datasources/proxy/uid/<uid>/_msearch  經 Grafana 的 ES 資料源查錯誤日誌與 Trace 片段
-                    （欄位名稱由 LogFields／TraceFields 決定，來自 config.yaml）
-  search_timeline   同一個代理：用批號／載具這類關聯碼把跨系統的日誌撈回來（不限等級），給「關聯時間線」用
-  search_error_traces／get_trace  GET /api/datasources/proxy/uid/<uid>/api/search、/api/traces/<id>
-                    經 Grafana 的 Tempo 資料源找出錯誤 Trace、取回整條呼叫鏈
+  日誌（VictoriaLogs）  POST /api/datasources/proxy/uid/<uid>/select/logsql/query，查詢語言是 LogsQL
+      search_errors     時間窗內這些系統的錯誤日誌，最新的在前
+      error_profile     每個系統各自最早的幾筆錯誤，加上這些系統的警告
+      count_phrases     幾種錯誤在事故期間與事故前各出現幾筆（一次請求）
+      count_logs        錯誤日誌是 0 筆時：整段時間有幾筆、這些系統有幾筆
+      search_timeline   用批號／載具這類關聯碼把跨系統的日誌撈回來（不限等級）
+  Trace（VictoriaTraces）  GET /api/datasources/proxy/uid/<uid>/api/traces…，Jaeger 相容的查詢介面
+      search_error_traces／get_trace   找出有錯誤的 Trace、用編號取回一條
+  指標（VictoriaMetrics）  GET /api/datasources/proxy/uid/<uid>/api/v1/query_range，Prometheus 相容
+      query_range
   upsert_annotation POST／PATCH /api/annotations                  每個事故一筆註記
 
-格式以 tests/fixtures/grafana13/（Grafana 13.0.7 實際送出、實際回應的內容）為準。
+Grafana 上要有三個資料源：VictoriaLogs（外掛 victoriametrics-logs-datasource）、Jaeger 型別指到 VictoriaTraces 的
+/select/jaeger、Prometheus 型別指到 VictoriaMetrics。格式以 tests/fixtures/grafana13/ 為準：Grafana 13.0.7 實際送出與回應的內容，
+其中 Victoria 的部分是 VictoriaLogs v1.17.0、VictoriaTraces v0.5.0、VictoriaMetrics v1.110.0 經 Grafana 代理實際回的。
 """
 from __future__ import annotations
 
@@ -21,6 +28,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from urllib.parse import quote
+
 import httpx
 
 from src.grouping import Alert
@@ -30,9 +39,8 @@ log = logging.getLogger("aiops_lite.grafana")
 RETRY_STATUS = {429, 502, 503, 504}
 SEVERITIES = ("P0", "P1", "P2", "P3")
 TRUE_VALUES = {"true", "1", "yes", "on"}
-WARN_LEVELS = ("WARN", "warn", "Warn", "WARNING", "warning", "Warning")  # es.warn_levels 的預設值
-ERROR_LEVELS = ("ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical")  # es.error_levels 的預設值
-ERROR_STATUS = ("error", "ERROR", "Error", "STATUS_CODE_ERROR")                       # es.error_statuses 的預設值
+WARN_LEVELS = ("WARN", "warn", "Warn", "WARNING", "warning", "Warning")  # logs.warn_levels 的預設值
+ERROR_LEVELS = ("ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical")  # logs.error_levels 的預設值
 
 
 @dataclass(frozen=True)
@@ -44,38 +52,41 @@ class LabelNames:
     default_severity: str = "P3"
 
 
+TIME_FIELD, MESSAGE_FIELD = "_time", "_msg"   # VictoriaLogs 固定的欄位名稱：時間與訊息本文（寫入時用 _time_field／_msg_field 對應）
+
+
 @dataclass(frozen=True)
 class LogFields:
-    """日誌文件的欄位名稱（config.yaml 的 es.log_fields）；巢狀物件與帶點的扁平鍵都讀得到。"""
-    time: str = "@timestamp"
+    """日誌的欄位名稱（config.yaml 的 logs.fields）。時間與訊息在 VictoriaLogs 固定是 _time、_msg，不用設定。"""
     service: str = "service.name"
     level: str = "log.level"   # "" = 日誌沒有等級欄位：改用訊息文字裡的等級字樣挑錯誤日誌（見 Grafana.search_errors）
-    message: str = "message"
 
 
-@dataclass(frozen=True)
-class TraceFields:
-    """Trace／span 文件的欄位名稱（config.yaml 的 es.trace_fields）。"""
-    time: str = "@timestamp"
-    service: str = "service.name"
-    span: str = "span.name"
-    trace_id: str = "trace.id"
-    status: str = "status.code"
-    error: str = "error.message"
+def _q(value: Any) -> str:
+    """把欄位名稱或值寫成 LogsQL 的雙引號字串（引號、反斜線、換行都跳脫）。系統名稱來自告警標籤，是外部輸入。"""
+    return json.dumps(str(value), ensure_ascii=False)
 
 
-def _either(name: str, values: Any) -> dict[str, Any]:
-    """欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到。"""
-    values = list(values)
-    return {"bool": {"minimum_should_match": 1, "should": [{"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
+def _in(field: str, values: Any) -> str:
+    """欄位的值是這幾個其中之一（完全相等）。"""
+    return f"{_q(field)}:in({','.join(_q(v) for v in values)})"
 
 
-def _has_level(log_fields: LogFields, levels: tuple[str, ...]) -> dict[str, Any]:
-    """「這筆日誌是這些等級」的查詢條件。有等級欄位就比等級；沒有（level 是空字串）就在訊息文字裡找等級字樣。"""
+def _has_level(log_fields: LogFields, levels: tuple[str, ...]) -> str:
+    """「這筆日誌是這些等級」的條件。有等級欄位就比等級；沒有（level 是空字串）就在訊息文字裡找等級字樣（不分大小寫）。"""
     if log_fields.level:
-        return _either(log_fields.level, levels)
-    words = " ".join(dict.fromkeys(level.lower() for level in levels))   # 全文比對不分大小寫：ERROR／error／Error 只送一次
-    return {"match": {log_fields.message: {"query": words, "operator": "or"}}}
+        return _in(log_fields.level, levels)
+    words = dict.fromkeys(level.lower() for level in levels)   # ERROR／error／Error 只留一個
+    return "(" + " or ".join(f"{MESSAGE_FIELD}:i({_q(word)})" for word in words) + ")"
+
+
+def _seq(words: list[str]) -> str:
+    """訊息裡照順序出現這些詞（中間可以隔別的字）。"""
+    return f"{MESSAGE_FIELD}:seq({','.join(_q(w) for w in words)})"
+
+
+def _rfc3339(t: datetime) -> str:
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 class GrafanaError(Exception):
@@ -86,10 +97,6 @@ class WebhookError(ValueError):
     """推進來的內容不是 Grafana 告警 webhook 的格式：整包拒收（HTTP 400）。"""
 
 
-def _ms(t: datetime) -> int:
-    return int(t.timestamp() * 1000)
-
-
 def _when(raw: Any) -> datetime | None:
     """Grafana 的時間（RFC3339，可能帶奈秒）；還沒結束的告警 endsAt 是 0001-01-01。"""
     text = str(raw or "")
@@ -97,12 +104,6 @@ def _when(raw: Any) -> datetime | None:
         return None
     # 小數秒最多留 6 位（Grafana 給奈秒，舊版 Python 的 fromisoformat 不吃）
     return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", text.replace("Z", "+00:00"))).astimezone(timezone.utc)
-
-
-def _traceql_regex(name: str) -> str:
-    """服務名稱放進 TraceQL 的 =~ "…" 裡：正規表示式的特殊字元要跳脫，字串裡的反斜線與引號也要跳脫。"""
-    escaped = re.sub(r'([.^$*+?()\[\]{}|\\])', r'\\\1', name)
-    return escaped.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def parse_webhook(payload: Any, names: LabelNames = LabelNames()) -> tuple[list[Alert], list[str]]:
@@ -150,7 +151,7 @@ class Grafana:
         self._http.close()
 
     def _request(self, method: str, path: str, *, accept: tuple[int, ...] = (), with_status: bool = False,
-                 empty_ok: bool = False, **kw: Any) -> Any:
+                 empty_ok: bool = False, raw: bool = False, **kw: Any) -> Any:
         """短暫抖動（連線失敗、逾時、429／502／503／504）重試 retries 次（預設 2），每次多等 retry_backoff_seconds；
         其他錯誤直接丟 GrafanaError。"""
         last = ""
@@ -166,162 +167,116 @@ class Grafana:
                 last = f"HTTP {r.status_code}"
                 continue
             if r.status_code >= 400 and r.status_code not in accept:
-                raise GrafanaError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:300]}")
+                # Victoria 的錯誤訊息前面有一段 remoteAddr 與整條網址（requestURI），真正的原因在最後一段
+                reason = r.text.split("; ", 2)[-1] if r.text.startswith("remoteAddr:") else r.text
+                raise GrafanaError(f"{method} {path} -> HTTP {r.status_code}: {reason.strip()[:300]}")
+            if raw:   # VictoriaLogs 一行回一個 JSON 物件，不是一份 JSON
+                return r.text
             try:
-                data = None if empty_ok and not r.content.strip() else r.json()  # Tempo 的 404 沒有內容
+                data = None if empty_ok and not r.content.strip() else r.json()
             except ValueError as e:
                 raise GrafanaError(f"{method} {path} 回的不是 JSON：{r.text[:200]}") from e
             return (r.status_code, data) if with_status else data
         raise GrafanaError(f"{method} {path} 重試後仍失敗：{last}")
 
-    # ── 日誌與 Trace（經 Grafana 的 ES 資料源代理）──
+    # ── 日誌（經 Grafana 的 VictoriaLogs 資料源代理；查詢語言是 LogsQL）──
 
-    def search_errors(self, datasource_uid: str, log_index: str, trace_index: str | None, services: list[str],
-                      start: datetime, end: datetime, size: int = 100, *, log_fields: LogFields = LogFields(),
-                      trace_fields: TraceFields = TraceFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
-                      error_statuses: tuple[str, ...] = ERROR_STATUS) -> dict[str, list[dict[str, Any]]]:
-        """撈時間窗內這些系統的錯誤日誌與錯誤 span，回傳 {"logs": [...], "traces": [...]}（各是 ES 的 _source）。
+    def _logsql(self, datasource_uid: str, query: str, start: datetime, end: datetime, *, extra_filter: str = "",
+                limit: int | None = None) -> list[dict[str, Any]]:
+        """送一條 LogsQL，回傳每一列（VictoriaLogs 一行回一個 JSON 物件）。start、end 是查詢的時間範圍。
+        extra_filter 是 config.yaml 的 logs.extra_filter：加在每條查詢最前面的條件（例如只看某個 stream 或命名空間）。"""
+        full = f"{extra_filter} {query}".strip()
+        data = {"query": full, "start": _rfc3339(start), "end": _rfc3339(end), **({"limit": limit} if limit is not None else {})}
+        text = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/select/logsql/query", data=data, raw=True)
+        rows = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError as e:
+                raise GrafanaError(f"VictoriaLogs 回的不是一行一個 JSON：{line[:200]}") from e
+            if not isinstance(row, dict):
+                raise GrafanaError(f"VictoriaLogs 回的每一行要是物件：{line[:200]}")
+            rows.append(row)
+        return rows
 
-        log_fields.level 是空字串 = 日誌沒有獨立的等級欄位（例如沒拆欄位的容器標準輸出）：改成在訊息欄位做全文比對，
-        訊息裡有 error_levels 任何一個字樣就算錯誤日誌。這是比對「詞」，不是比對等級，所以會混入不是錯誤的紀錄
-        （INFO 的訊息裡寫到 error 這個詞也會中）；訊息欄位必須是 text 型別（keyword 型別比不到，結果是 0 筆）。"""
-        def window(field: str) -> dict[str, Any]:
-            return {"range": {field: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-
-        def search(index: str, time_field: str, service_field: str, extra: dict[str, Any]) -> str:
-            query = {"bool": {"filter": [window(time_field), _either(service_field, services), extra]}}
-            return (json.dumps({"index": index, "ignore_unavailable": True}) + "\n"
-                    + json.dumps({"size": size, "sort": [{time_field: "desc"}], "query": query}) + "\n")
-
-        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service,
-                                            _has_level(log_fields, error_levels)))]
-        if trace_index:
-            kinds.append(("traces", trace_index, search(trace_index, trace_fields.time, trace_fields.service,
-                                                        _either(trace_fields.status, error_statuses))))
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(body for _k, _index, body in kinds),
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(kinds):
-            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
-        out: dict[str, list[dict[str, Any]]] = {"logs": [], "traces": []}
-        for (kind, index, _body), resp in zip(kinds, responses):
-            if resp.get("error"):
-                raise GrafanaError(f"ES 查詢 {index} 失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-            out[kind] = [h.get("_source") or {} for h in (resp.get("hits") or {}).get("hits") or []]
-        return out
-
-    def count_logs(self, datasource_uid: str, log_index: str, services: list[str], start: datetime, end: datetime, *,
-                   log_fields: LogFields = LogFields()) -> dict[str, int]:
-        """錯誤日誌撈到 0 筆的時候用：同一個時間窗裡，索引總共有幾筆（"all"）、其中屬於這些系統的有幾筆（"services"，不限等級）。
-        三個數字放在一起就知道是哪一關沒過：索引沒資料、系統名稱對不上、還是等級對不上（或真的沒有錯誤）。"""
-        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-        bodies = [{"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [window]}}},
-                  {"size": 0, "track_total_hits": True,
-                   "query": {"bool": {"filter": [window, _either(log_fields.service, services)]}}}]
-        header = json.dumps({"index": log_index, "ignore_unavailable": True})
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(f"{header}\n{json.dumps(body)}\n" for body in bodies),
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(bodies):
-            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
-        counts = []
-        for resp in responses:
-            if resp.get("error"):
-                raise GrafanaError(f"ES 計數失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-            counts.append(int(((resp.get("hits") or {}).get("total") or {}).get("value", 0)))
-        return {"all": counts[0], "services": counts[1]}
-
-    def _msearch(self, datasource_uid: str, index: str, bodies: list[dict[str, Any]], what: str) -> list[dict[str, Any]]:
-        """同一個索引的多個子查詢一次送出；任何一個子查詢失敗就整個丟 GrafanaError。"""
-        header = json.dumps({"index": index, "ignore_unavailable": True})
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(f"{header}\n{json.dumps(body, ensure_ascii=False)}\n" for body in bodies),
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(bodies):
-            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
-        for resp in responses:
-            if resp.get("error"):
-                raise GrafanaError(f"ES {what}失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-        return responses
-
-    @staticmethod
-    def _total(resp: dict[str, Any]) -> int:
-        return int(((resp.get("hits") or {}).get("total") or {}).get("value", 0))
-
-    def error_profile(self, datasource_uid: str, log_index: str, services: list[str], start: datetime, end: datetime, *,
+    def search_errors(self, datasource_uid: str, services: list[str], start: datetime, end: datetime, size: int = 100, *,
                       log_fields: LogFields = LogFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
-                      warn_levels: tuple[str, ...] = (), first_n: int = 3, warn_n: int = 50) -> dict[str, Any]:
-        """每個系統各問一次：時間窗內錯誤日誌的**總筆數**與**最早的幾筆**（由舊到新）。另外問這些系統的警告（由舊到新）。
+                      extra_filter: str = "") -> list[dict[str, Any]]:
+        """撈時間窗內這些系統的錯誤日誌，最新的在前，最多 size 筆。每筆是 VictoriaLogs 的一列（欄位攤平成一層，
+        例如 "service.name"、"_time"、"_msg"）。
 
-        為什麼要另外問：search_errors 是全部系統一起、從最新的往回取 max_hits 筆。某個系統大量報錯時，其他系統較早、
-        較少的錯誤會整個被擠掉；從那批樣本裡找「最早的一筆」找到的也不是真正的第一筆。這裡每個系統各自由舊到新取，不會互相擠。
-        回傳 {"services": {系統: {"total": 筆數, "first": [文件…]}}, "warnings": {"total": 筆數, "hits": [文件…]}}。
-        warn_levels 是空的就不問警告。"""
-        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-        oldest_first = [{log_fields.time: "asc"}]
-        bodies = [{"size": first_n, "track_total_hits": True, "sort": oldest_first, "query": {"bool": {"filter": [
-            window, _either(log_fields.service, [service]), _has_level(log_fields, error_levels)]}}} for service in services]
+        log_fields.level 是空字串 = 日誌沒有獨立的等級欄位（例如沒拆欄位的容器標準輸出）：改成在訊息文字裡找
+        error_levels 的字樣（不分大小寫，比對完整的詞）。這是比對「詞」，不是比對等級，所以會混入不是錯誤的紀錄
+        （INFO 的訊息裡寫到 error 這個詞也會中）。"""
+        query = f"{_in(log_fields.service, services)} {_has_level(log_fields, error_levels)} | sort by ({TIME_FIELD}) desc | limit {size}"
+        return self._logsql(datasource_uid, query, start, end, extra_filter=extra_filter)
+
+    def count_logs(self, datasource_uid: str, services: list[str], start: datetime, end: datetime, *,
+                   log_fields: LogFields = LogFields(), extra_filter: str = "") -> dict[str, int]:
+        """錯誤日誌撈到 0 筆的時候用：同一個時間窗裡總共有幾筆（"all"）、其中屬於這些系統的有幾筆（"services"，不限等級）。
+        三個數字放在一起就知道是哪一關沒過：這段時間沒資料、系統名稱對不上、還是等級對不上（或真的沒有錯誤）。"""
+        query = f"* | stats count() as total, count() if ({_in(log_fields.service, services)}) as services"
+        rows = self._logsql(datasource_uid, query, start, end, extra_filter=extra_filter)
+        row = rows[0] if rows else {}
+        return {"all": int(row.get("total", 0)), "services": int(row.get("services", 0))}
+
+    def error_profile(self, datasource_uid: str, services: list[str], start: datetime, end: datetime, *,
+                      log_fields: LogFields = LogFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
+                      warn_levels: tuple[str, ...] = (), first_n: int = 3, warn_n: int = 50, extra_filter: str = ""
+                      ) -> dict[str, Any]:
+        """每個系統各自最早的幾筆錯誤日誌（由舊到新），另外撈這些系統的警告（由舊到新）。
+
+        為什麼要另外問：search_errors 是全部系統一起、從最新的往回取。某個系統大量報錯時，其他系統較早、較少的錯誤會整個
+        被擠掉。這裡用 partition by 讓每個系統各自排序、各取最早的 first_n 筆，不會互相擠。
+        回傳 {"services": {系統: [文件…]}, "warnings": [文件…]}；沒有錯誤的系統是空清單。warn_levels 是空的就不問警告。"""
+        base = _in(log_fields.service, services)
+        firsts = self._logsql(datasource_uid, f"{base} {_has_level(log_fields, error_levels)} | sort by ({TIME_FIELD}) "
+                                              f"partition by ({_q(log_fields.service)}) limit {first_n}", start, end,
+                              extra_filter=extra_filter)
+        out: dict[str, Any] = {"services": {service: [] for service in services}, "warnings": []}
+        for row in firsts:
+            out["services"].setdefault(str(row.get(log_fields.service, "")), []).append(row)
         if warn_levels:
-            bodies.append({"size": warn_n, "track_total_hits": True, "sort": oldest_first, "query": {"bool": {"filter": [
-                window, _either(log_fields.service, services), _has_level(log_fields, warn_levels)]}}})
-        responses = self._msearch(datasource_uid, log_index, bodies, "錯誤概況查詢")
-        hits = lambda resp: [h.get("_source") or {} for h in (resp.get("hits") or {}).get("hits") or []]
-        out: dict[str, Any] = {"services": {service: {"total": self._total(resp), "first": hits(resp)}
-                                            for service, resp in zip(services, responses)},
-                               "warnings": {"total": 0, "hits": []}}
-        if warn_levels:
-            out["warnings"] = {"total": self._total(responses[-1]), "hits": hits(responses[-1])}
+            out["warnings"] = self._logsql(datasource_uid, f"{base} {_has_level(log_fields, warn_levels)} | sort by ({TIME_FIELD}) "
+                                                           f"| limit {warn_n}", start, end, extra_filter=extra_filter)
         return out
 
-    def count_phrases(self, datasource_uid: str, log_index: str, items: list[tuple[str, str, int, tuple[str, ...]]],
-                      start: datetime, end: datetime, before_start: datetime, *, log_fields: LogFields = LogFields()
+    def count_phrases(self, datasource_uid: str, items: list[tuple[str, list[str], tuple[str, ...]]], start: datetime,
+                      end: datetime, before_start: datetime, *, log_fields: LogFields = LogFields(), extra_filter: str = ""
                       ) -> list[tuple[int, int]]:
-        """每個 (系統, 片語, 間隔, 等級) 各數兩次：片語在 [start, end]（事故期間）與 [before_start, start)（事故前）出現幾筆。
-        片語比對是 match_phrase 加 slop（訊息欄位要是 text 型別）：片語是樣板裡固定不變的詞，間隔留給被換成 * 的部分。
-        回傳 [(事故期間, 事故前), …]，順序跟 items 一樣。"""
-        def body(service: str, phrase: str, slop: int, levels: tuple[str, ...], window: dict[str, Any]) -> dict[str, Any]:
-            return {"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [
-                {"range": {log_fields.time: {**window, "format": "epoch_millis"}}}, _either(log_fields.service, [service]),
-                _has_level(log_fields, levels), {"match_phrase": {log_fields.message: {"query": phrase, "slop": slop}}}]}}}
-
-        bodies = []
-        for service, phrase, slop, levels in items:
-            bodies.append(body(service, phrase, slop, levels, {"gte": _ms(start), "lte": _ms(end)}))
-            bodies.append(body(service, phrase, slop, levels, {"gte": _ms(before_start), "lt": _ms(start)}))
-        if not bodies:
+        """每個 (系統, 照順序出現的詞, 等級) 各數兩次：在 [start, end]（事故期間）與 [before_start, start)（事故前）出現幾筆。
+        全部寫成同一條查詢的 stats count() if (…)，一次請求。「照順序出現的詞」是樣板裡固定不變的詞（seq）：
+        別種訊息剛好有同樣的詞、順序也一樣時會被算在一起。回傳 [(事故期間, 事故前), …]，順序跟 items 一樣。"""
+        if not items:
             return []
-        totals = [self._total(resp) for resp in self._msearch(datasource_uid, log_index, bodies, "次數比較查詢")]
-        return list(zip(totals[0::2], totals[1::2]))
+        boundary, parts = _rfc3339(start), []
+        for n, (service, words, levels) in enumerate(items):
+            match = f"{_q(log_fields.service)}:={_q(service)} {_has_level(log_fields, levels)} {_seq(words)}"
+            parts.append(f"count() if ({match} {TIME_FIELD}:>={boundary}) as d{n}")
+            parts.append(f"count() if ({match} {TIME_FIELD}:<{boundary}) as b{n}")
+        services = list(dict.fromkeys(service for service, _w, _l in items))
+        rows = self._logsql(datasource_uid, f"{_in(log_fields.service, services)} | stats {', '.join(parts)}", before_start, end,
+                            extra_filter=extra_filter)
+        row = rows[0] if rows else {}
+        return [(int(row.get(f"d{n}", 0)), int(row.get(f"b{n}", 0))) for n in range(len(items))]
 
-    def search_timeline(self, datasource_uid: str, index: str, field: str, values: list[str], start: datetime,
-                        end: datetime, size: int, *, log_fields: LogFields = LogFields()) -> dict[str, dict[str, Any]]:
-        """每個關聯碼（批號、載具…）各查一次：時間窗內帶這個值的所有日誌，**不限等級、不限系統**，由舊到新。
-        回傳 {值: {"hits": [ES 的 _source…], "total": 總筆數}}；一次 _msearch 送完。"""
+    def search_timeline(self, datasource_uid: str, field: str, values: list[str], start: datetime, end: datetime, size: int, *,
+                        extra_filter: str = "") -> dict[str, dict[str, Any]]:
+        """每個關聯碼（批號、載具…）：時間窗內帶這個值的所有日誌，**不限等級、不限系統**，由舊到新各取 size 筆，另外數總筆數。
+        回傳 {值: {"hits": [文件…], "total": 總筆數}}；兩次請求（內容、筆數）。"""
         if not values:
             return {}
-        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-        body = ""
-        for value in values:
-            same = {"bool": {"minimum_should_match": 1, "should": [
-                {"terms": {field: [value]}}, {"terms": {f"{field}.keyword": [value]}}]}}
-            body += (json.dumps({"index": index, "ignore_unavailable": True}) + "\n" + json.dumps({
-                "size": size, "track_total_hits": True, "sort": [{log_fields.time: "asc"}],
-                "query": {"bool": {"filter": [window, same]}}}) + "\n")
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch", content=body,
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(values):
-            raise GrafanaError("ES _msearch（關聯時間線）的回應筆數跟請求對不上")
-        out: dict[str, dict[str, Any]] = {}
-        for value, resp in zip(values, responses):
-            if resp.get("error"):
-                raise GrafanaError(f"ES 查詢 {field}={value} 失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-            hits = resp.get("hits") or {}
-            total = (hits.get("total") or {}).get("value", len(hits.get("hits") or []))
-            out[value] = {"hits": [h.get("_source") or {} for h in hits.get("hits") or []], "total": int(total)}
+        base = _in(field, values)
+        rows = self._logsql(datasource_uid, f"{base} | sort by ({TIME_FIELD}) partition by ({_q(field)}) limit {size}", start, end,
+                            extra_filter=extra_filter)
+        totals = self._logsql(datasource_uid, f"{base} | stats by ({_q(field)}) count() as total", start, end, extra_filter=extra_filter)
+        out: dict[str, dict[str, Any]] = {value: {"hits": [], "total": 0} for value in values}
+        for row in rows:
+            out.setdefault(str(row.get(field, "")), {"hits": [], "total": 0})["hits"].append(row)
+        for row in totals:
+            out.setdefault(str(row.get(field, "")), {"hits": [], "total": 0})["total"] = int(row.get("total", 0))
         return out
 
     # ── 指標（經 Grafana 的 Prometheus 相容資料源代理：Prometheus、VictoriaMetrics、Mimir…）──
@@ -347,26 +302,35 @@ class Grafana:
             series.append({"labels": dict(item.get("metric") or {}), "points": points})
         return series
 
-    # ── Trace（經 Grafana 的 Tempo 資料源代理）──
+    # ── Trace（經 Grafana 的 Jaeger 資料源代理，後面是 VictoriaTraces 的 /select/jaeger）──
+
+    def _jaeger(self, datasource_uid: str, path: str, **kw: Any) -> tuple[int, list[dict[str, Any]]]:
+        status, raw = self._request("GET", f"/api/datasources/proxy/uid/{datasource_uid}{path}", accept=(404,),
+                                    with_status=True, **kw)
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if status != 404 and not isinstance(data, list):
+            raise GrafanaError(f"Trace 查詢的回應沒有 data：{str(raw)[:200]}")
+        return status, [t for t in data or [] if isinstance(t, dict)]
 
     def search_error_traces(self, datasource_uid: str, services: list[str], start: datetime, end: datetime,
                             limit: int) -> list[dict[str, Any]]:
-        """找時間窗內、這些服務參與、而且有錯誤 span 的 Trace（TraceQL），回傳 Tempo 的搜尋結果（traceID、rootServiceName…）。
-        注意：Tempo 收到 Trace 之後要過幾秒才搜尋得到（實測 2.9.0 八秒內搜不到）；debounce 的等待剛好涵蓋這段。"""
-        names = "|".join(_traceql_regex(s) for s in services)
-        query = '{ resource.service.name =~ "' + names + '" && status = error }'
-        raw = self._request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/search", params={
-            "q": query, "start": int(start.timestamp()), "end": int(end.timestamp()) + 1, "limit": limit})
-        traces = raw.get("traces") if isinstance(raw, dict) else None
-        if not isinstance(traces, list):
-            raise GrafanaError(f"Tempo 搜尋的回應沒有 traces：{str(raw)[:200]}")
-        return traces
+        """找時間窗內、這些服務參與、而且有錯誤 span 的 Trace。Jaeger 的搜尋一次只能指定一個服務，所以每個服務問一次，
+        同一條 Trace 只留一份。回傳的每一條已經是完整的 Trace（spans、processes），不用再另外取。
+        VictoriaTraces 收到 Trace 後幾秒內就搜尋得到（實測 v0.5.0 三秒）。"""
+        found: dict[str, dict[str, Any]] = {}
+        for service in services:
+            _status, traces = self._jaeger(datasource_uid, "/api/traces", params={
+                "service": service, "tags": json.dumps({"error": "true"}), "limit": limit,
+                "start": int(start.timestamp() * 1_000_000), "end": int(end.timestamp() * 1_000_000) + 1_000_000})
+            for item in traces:
+                found.setdefault(str(item.get("traceID") or ""), item)
+        found.pop("", None)
+        return list(found.values())
 
     def get_trace(self, datasource_uid: str, trace_id: str) -> dict[str, Any] | None:
-        """取回整條 Trace（OTLP JSON：batches → scopeSpans → spans）。Tempo 已經沒有這條（過了保留期限）回 None。"""
-        status, raw = self._request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/traces/{trace_id}",
-                                    accept=(404,), with_status=True, empty_ok=True)
-        return None if status == 404 or not isinstance(raw, dict) else raw
+        """用編號取回整條 Trace（Jaeger 格式：spans、processes）。找不到（過了保留期限、編號不對）回 None。"""
+        status, traces = self._jaeger(datasource_uid, f"/api/traces/{quote(trace_id, safe='')}")
+        return None if status == 404 or not traces else traces[0]
 
     # ── 註記 ──
 

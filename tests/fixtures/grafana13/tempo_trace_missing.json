@@ -1,9 +1,0 @@
-{
- "request": {
-  "method": "GET",
-  "path": "/api/datasources/proxy/uid/<uid>/api/traces/ffffffffffffffffffffffffffffffff",
-  "params": null
- },
- "status": 404,
- "response": ""
-}

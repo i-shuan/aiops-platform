@@ -1,0 +1,125 @@
+{
+ "versions": {
+  "grafana": "13.0.7",
+  "victoriatraces": "v0.5.0"
+ },
+ "token_role": "Editor",
+ "exchanges": {
+  "search_error_traces": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces",
+     "params": {
+      "service": "web-portal",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795217798000000",
+      "end": "1795221459000000"
+     },
+     "form": null
+    },
+    "status": 200,
+    "response": "{\"data\":[{\"processes\": {\"p1\":{\"serviceName\":\"mes-api\",\"tags\": []},\"p2\":{\"serviceName\":\"web-portal\",\"tags\": []}},\"spans\": [{\"duration\":4990000,\"logs\":[],\"operationName\":\"POST /api/track-in\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"22222222222222222222222222222222\"}],\"spanID\":\"b1b1b1b1b1b1b1b1\",\"startTime\":1795220840005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"database unavailable\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null},{\"duration\":5010000,\"logs\":[],\"operationName\":\"POST /lots/track-in\",\"processID\":\"p2\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795220840000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"503\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"upstream returned 503\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null},{\"duration\":5000000,\"logs\":[],\"operationName\":\"HTTP POST mes-api /api/track-in\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"22222222222222222222222222222222\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795220840003000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"503 Service Unavailable\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null},{\"duration\":4980000,\"logs\":[],\"operationName\":\"SELECT lot_state\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"b1b1b1b1b1b1b1b1\",\"traceID\":\"22222222222222222222222222222222\"}],\"spanID\":\"b2b2b2b2b2b2b2b2\",\"startTime\":1795220840008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"mes-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"connection refused: mes-db:5432\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"mes-api\",\"tags\": []},\"p2\":{\"serviceName\":\"web-portal\",\"tags\": []}},\"spans\": [{\"duration\":4990000,\"logs\":[],\"operationName\":\"POST /api/track-in\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"b1b1b1b1b1b1b1b1\",\"startTime\":1795220838005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"database unavailable\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":5010000,\"logs\":[],\"operationName\":\"POST /lots/track-in\",\"processID\":\"p2\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795220838000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"503\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"upstream returned 503\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":5000000,\"logs\":[],\"operationName\":\"HTTP POST mes-api /api/track-in\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795220838003000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"503 Service Unavailable\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":4980000,\"logs\":[],\"operationName\":\"SELECT lot_state\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"b1b1b1b1b1b1b1b1\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"b2b2b2b2b2b2b2b2\",\"startTime\":1795220838008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"mes-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"connection refused: mes-db:5432\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\": null}],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":2}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces",
+     "params": {
+      "service": "mes-api",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795217798000000",
+      "end": "1795221459000000"
+     },
+     "form": null
+    },
+    "status": 200,
+    "response": "{\"data\":[{\"processes\": {\"p1\":{\"serviceName\":\"mes-api\",\"tags\": []},\"p2\":{\"serviceName\":\"web-portal\",\"tags\": []}},\"spans\": [{\"duration\":4990000,\"logs\":[],\"operationName\":\"POST /api/track-in\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"22222222222222222222222222222222\"}],\"spanID\":\"b1b1b1b1b1b1b1b1\",\"startTime\":1795220840005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"database unavailable\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null},{\"duration\":5010000,\"logs\":[],\"operationName\":\"POST /lots/track-in\",\"processID\":\"p2\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795220840000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"503\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"upstream returned 503\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null},{\"duration\":5000000,\"logs\":[],\"operationName\":\"HTTP POST mes-api /api/track-in\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"22222222222222222222222222222222\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795220840003000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"503 Service Unavailable\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null},{\"duration\":4980000,\"logs\":[],\"operationName\":\"SELECT lot_state\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"b1b1b1b1b1b1b1b1\",\"traceID\":\"22222222222222222222222222222222\"}],\"spanID\":\"b2b2b2b2b2b2b2b2\",\"startTime\":1795220840008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"mes-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"connection refused: mes-db:5432\"}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\":null}],\"traceID\":\"22222222222222222222222222222222\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"mes-api\",\"tags\": []},\"p2\":{\"serviceName\":\"web-portal\",\"tags\": []}},\"spans\": [{\"duration\":4990000,\"logs\":[],\"operationName\":\"POST /api/track-in\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"b1b1b1b1b1b1b1b1\",\"startTime\":1795220838005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"database unavailable\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":5010000,\"logs\":[],\"operationName\":\"POST /lots/track-in\",\"processID\":\"p2\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795220838000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"503\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"upstream returned 503\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":5000000,\"logs\":[],\"operationName\":\"HTTP POST mes-api /api/track-in\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795220838003000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"503 Service Unavailable\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":4980000,\"logs\":[],\"operationName\":\"SELECT lot_state\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"b1b1b1b1b1b1b1b1\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"b2b2b2b2b2b2b2b2\",\"startTime\":1795220838008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"mes-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"connection refused: mes-db:5432\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\": null}],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":2}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces",
+     "params": {
+      "service": "mes-db",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795217798000000",
+      "end": "1795221459000000"
+     },
+     "form": null
+    },
+    "status": 200,
+    "response": "{\"data\":[],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":0}"
+   }
+  ],
+  "search_no_such_service": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces",
+     "params": {
+      "service": "nope",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795217798000000",
+      "end": "1795221459000000"
+     },
+     "form": null
+    },
+    "status": 200,
+    "response": "{\"data\":[],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":0}"
+   }
+  ],
+  "get_trace": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/11111111111111111111111111111111",
+     "params": {},
+     "form": null
+    },
+    "status": 200,
+    "response": "{\"data\":[{\"processes\": {\"p1\":{\"serviceName\":\"mes-api\",\"tags\": []},\"p2\":{\"serviceName\":\"web-portal\",\"tags\": []}},\"spans\": [{\"duration\":4990000,\"logs\":[],\"operationName\":\"POST /api/track-in\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"b1b1b1b1b1b1b1b1\",\"startTime\":1795220838005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"database unavailable\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":5010000,\"logs\":[],\"operationName\":\"POST /lots/track-in\",\"processID\":\"p2\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795220838000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"503\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"upstream returned 503\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":5000000,\"logs\":[],\"operationName\":\"HTTP POST mes-api /api/track-in\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795220838003000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"503 Service Unavailable\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null},{\"duration\":4980000,\"logs\":[],\"operationName\":\"SELECT lot_state\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"b1b1b1b1b1b1b1b1\",\"traceID\":\"11111111111111111111111111111111\"}],\"spanID\":\"b2b2b2b2b2b2b2b2\",\"startTime\":1795220838008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"mes-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"true\"},{\"key\":\"otel.status_description\",\"type\":\"string\",\"value\":\"connection refused: mes-db:5432\"}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\":null}],\"traceID\":\"11111111111111111111111111111111\",\"warnings\": null}],\"errors\":null,\"limit\": 0,\"offset\": 0,\"total\":1}"
+   }
+  ],
+  "get_trace_ok": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/33333333333333333333333333333333",
+     "params": {},
+     "form": null
+    },
+    "status": 200,
+    "response": "{\"data\":[{\"processes\": {\"p1\":{\"serviceName\":\"mes-api\",\"tags\": []},\"p2\":{\"serviceName\":\"web-portal\",\"tags\": []},\"p3\":{\"serviceName\":\"mes-db\",\"tags\": []}},\"spans\": [{\"duration\":100000,\"logs\":[],\"operationName\":\"POST /api/track-in\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"33333333333333333333333333333333\"}],\"spanID\":\"b1b1b1b1b1b1b1b1\",\"startTime\":1795220842005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"33333333333333333333333333333333\",\"warnings\":null},{\"duration\":120000,\"logs\":[],\"operationName\":\"POST /lots/track-in\",\"processID\":\"p2\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795220842000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"33333333333333333333333333333333\",\"warnings\":null},{\"duration\":110000,\"logs\":[],\"operationName\":\"HTTP POST mes-api /api/track-in\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"33333333333333333333333333333333\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795220842003000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"33333333333333333333333333333333\",\"warnings\":null},{\"duration\":10000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p3\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"b2b2b2b2b2b2b2b2\",\"traceID\":\"33333333333333333333333333333333\"}],\"spanID\":\"c1c1c1c1c1c1c1c1\",\"startTime\":1795220842009000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"33333333333333333333333333333333\",\"warnings\":null},{\"duration\":12000,\"logs\":[],\"operationName\":\"SELECT lot_state\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"b1b1b1b1b1b1b1b1\",\"traceID\":\"33333333333333333333333333333333\"}],\"spanID\":\"b2b2b2b2b2b2b2b2\",\"startTime\":1795220842008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"mes-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"33333333333333333333333333333333\",\"warnings\":null}],\"traceID\":\"33333333333333333333333333333333\",\"warnings\": null}],\"errors\":null,\"limit\": 0,\"offset\": 0,\"total\":1}"
+   }
+  ],
+  "get_trace_missing": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/ffffffffffffffffffffffffffffffff",
+     "params": {},
+     "form": null
+    },
+    "status": 404,
+    "response": "{\"data\":[],\"errors\":[{\"code\":404,\"msg\":\"trace not found\"}],\"limit\": 0,\"offset\": 0,\"total\":0}"
+   }
+  ],
+  "get_trace_bad_id": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/not-a-trace-id",
+     "params": {},
+     "form": null
+    },
+    "status": 404,
+    "response": "{\"data\":[],\"errors\":[{\"code\":404,\"msg\":\"trace not found\"}],\"limit\": 0,\"offset\": 0,\"total\":0}"
+   }
+  ]
+ }
+}

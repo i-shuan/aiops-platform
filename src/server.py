@@ -1,6 +1,6 @@
 """常駐服務：收 Grafana 的告警 Webhook，等 debounce 時間到再跑一輪（src/main.process）。`python -m src.server`。
 
-為什麼不收到就跑：上下游的告警會差幾十秒才陸續響、ES 的日誌也要時間落盤；第 0 秒就分析，LLM 拿到的是殘缺的證據，
+為什麼不收到就跑：上下游的告警會差幾十秒才陸續響、日誌也要時間寫進 VictoriaLogs；第 0 秒就分析，LLM 拿到的是殘缺的證據，
 一場事故連發好幾個 Webhook 還會同時跑好幾次。所以收到第一個 Webhook 後固定等 debounce_seconds，
 這段時間進來的告警全部收進同一批，時間到才一起收斂、撈證據、問一次 LLM。視窗不會因為後面一直有告警進來而延後。
 
@@ -34,7 +34,7 @@ log = logging.getLogger("aiops_lite.server")
 # 這個檔案沒有寫死的門檻，都在 config.yaml（選填，預設值見 main.Settings）：
 #   webhook.max_body_bytes       Webhook 內容大小上限（1 MB）
 #   retry_failed_round_seconds   一輪失敗（資料庫斷線）之後多久再試（30 秒）
-#   healthcheck.stuck_seconds    一輪跑多久算卡死（600 秒）。正常的一輪是幾秒；最慢的情況是每個進行中事故各等一次 ES 與 LLM 的逾時，
+#   healthcheck.stuck_seconds    一輪跑多久算卡死（600 秒）。正常的一輪是幾秒；最慢的情況是每個進行中事故各等一次日誌查詢與 LLM 的逾時，
 #                                所以預設抓 10 分鐘：寧可晚一點重啟，也不要把「LLM 很慢」當成卡死而砍掉正在跑的分析。
 #                                調大了 llm.timeout_seconds 的話這個也要跟著調大
 
