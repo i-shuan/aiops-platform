@@ -1,0 +1,616 @@
+{
+ "versions": {
+  "grafana": "13.0.7",
+  "victorialogs": "v1.17.0",
+  "plugin": "victoriametrics-logs-datasource 0.34.0"
+ },
+ "token_role": "Editor",
+ "inserted": {
+  "factory": [
+   {
+    "@timestamp": "2026-11-21T00:26:38.000Z",
+    "dataset": "factory",
+    "service": {
+     "name": "cim-eap"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "T3 timeout waiting S6F12 reply",
+    "eqp_id": "EQP-CVD-07",
+    "lot_id": "LOT24A0031",
+    "carrier_id": "FOUP0912"
+   },
+   {
+    "@timestamp": "2026-11-21T00:27:38.000Z",
+    "dataset": "factory",
+    "service": {
+     "name": "cim-eap"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "T3 timeout waiting S2F42 reply",
+    "eqp_id": "EQP-CVD-07",
+    "lot_id": "LOT24A0031",
+    "carrier_id": "FOUP0912"
+   },
+   {
+    "@timestamp": "2026-11-21T00:28:18.000Z",
+    "dataset": "factory",
+    "service": {
+     "name": "cim-eap"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "equipment disconnected (HSMS NOT SELECTED)",
+    "eqp_id": "EQP-CVD-07",
+    "lot_id": "LOT24A0044",
+    "carrier_id": "FOUP0377"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:38.000Z",
+    "dataset": "factory",
+    "service": {
+     "name": "amhs-mcs"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "transfer job aborted: destination port occupied",
+    "eqp_id": "STK01",
+    "lot_id": "LOT24A0031",
+    "carrier_id": "FOUP0912"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:58.000Z",
+    "dataset": "factory",
+    "service": {
+     "name": "cim-eap"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "T3 timeout waiting S6F12 reply",
+    "eqp_id": "EQP-ETCH-02",
+    "lot_id": "LOT24A0058",
+    "carrier_id": "FOUP0120"
+   },
+   {
+    "@timestamp": "2026-11-21T00:30:18.000Z",
+    "dataset": "factory",
+    "service": {
+     "name": "mq-broker"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "consumer lag exceeded on queue lot.dispatch"
+   },
+   {
+    "@timestamp": "2026-11-21T00:31:38.000Z",
+    "dataset": "factory",
+    "service": {
+     "name": "cim-eap"
+    },
+    "log": {
+     "level": "INFO"
+    },
+    "message": "lot track-in complete",
+    "eqp_id": "EQP-CVD-03",
+    "lot_id": "LOT24A0060",
+    "carrier_id": "FOUP0555"
+   }
+  ],
+  "count-mismatch": [
+   {
+    "@timestamp": "2026-11-21T00:29:58.000Z",
+    "dataset": "count-mismatch",
+    "service": {
+     "name": "cim_eap"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "x"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:57.000Z",
+    "dataset": "count-mismatch",
+    "service": {
+     "name": "AMHS-MCS"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "x"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:56.000Z",
+    "dataset": "count-mismatch",
+    "service": {
+     "name": "rabbitmq"
+    },
+    "log": {
+     "level": "ERROR"
+    },
+    "message": "x"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:55.000Z",
+    "dataset": "count-mismatch",
+    "service": {
+     "name": "instana-agent"
+    },
+    "log": {
+     "level": "INFO"
+    },
+    "message": "x"
+   }
+  ],
+  "count-no-errors": [
+   {
+    "@timestamp": "2026-11-21T00:29:58.000Z",
+    "dataset": "count-no-errors",
+    "service": {
+     "name": "mq-broker"
+    },
+    "log": {
+     "level": "INFO"
+    },
+    "message": "queue lot.dispatch ready"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:57.000Z",
+    "dataset": "count-no-errors",
+    "service": {
+     "name": "cim-eap"
+    },
+    "log": {
+     "level": "WARN"
+    },
+    "message": "connection pool usage 92% (184/200)"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:56.000Z",
+    "dataset": "count-no-errors",
+    "service": {
+     "name": "cim-eap"
+    },
+    "log": {
+     "level": "INFO"
+    },
+    "message": "lot track-in complete"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:55.000Z",
+    "dataset": "count-no-errors",
+    "service": {
+     "name": "amhs-mcs"
+    },
+    "log": {
+     "level": "INFO"
+    },
+    "message": "transfer job done"
+   },
+   {
+    "@timestamp": "2026-11-21T00:29:54.000Z",
+    "dataset": "count-no-errors",
+    "service": {
+     "name": "amhs-mcs"
+    },
+    "log": {
+     "level": "WARN"
+    },
+    "message": "stocker STK01 port P3 slow to respond"
+   }
+  ],
+  "unparsed": [
+   {
+    "@timestamp": "2026-11-21T00:29:58.000Z",
+    "dataset": "unparsed",
+    "stream": "stdout",
+    "kubernetes": {
+     "container_name": "cim-eap",
+     "namespace_name": "factory"
+    },
+    "message": "2026-11-21T00:29:58.000Z | ERROR | worker-1 | publish to eap.events timed out after 5000ms"
+   },
+   {
+    "@timestamp": "2026-11-21T00:30:08.000Z",
+    "dataset": "unparsed",
+    "stream": "stdout",
+    "kubernetes": {
+     "container_name": "cim-eap",
+     "namespace_name": "factory"
+    },
+    "message": "2026-11-21T00:30:08.000Z | INFO  | worker-1 | health probe: 0 error(s) in last minute"
+   },
+   {
+    "@timestamp": "2026-11-21T00:30:18.000Z",
+    "dataset": "unparsed",
+    "stream": "stdout",
+    "kubernetes": {
+     "container_name": "cim-eap",
+     "namespace_name": "factory"
+    },
+    "message": "2026-11-21T00:30:18.000Z | INFO  | worker-1 | lot track-in complete"
+   },
+   {
+    "@timestamp": "2026-11-21T00:30:28.000Z",
+    "dataset": "unparsed",
+    "stream": "stdout",
+    "kubernetes": {
+     "container_name": "mq-broker",
+     "namespace_name": "factory"
+    },
+    "message": "2026-11-21T00:30:28.000Z | FATAL | worker-1 | cannot append to queue eap.events: no space left on device"
+   }
+  ]
+ },
+ "exchanges": {
+  "dump_factory": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} * | sort by (_time)",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:26:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:27:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S2F42 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:28:18Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"equipment disconnected (HSMS NOT SELECTED)\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0377\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0044\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:29:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"transfer job aborted: destination port occupied\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"STK01\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"amhs-mcs\"}\n{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0120\",\"eqp_id\":\"EQP-ETCH-02\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0058\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:30:18Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"consumer lag exceeded on queue lot.dispatch\",\"dataset\":\"factory\",\"log.level\":\"ERROR\",\"service.name\":\"mq-broker\"}\n{\"_time\":\"2026-11-21T00:31:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"lot track-in complete\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0555\",\"eqp_id\":\"EQP-CVD-03\",\"log.level\":\"INFO\",\"lot_id\":\"LOT24A0060\",\"service.name\":\"cim-eap\"}\n"
+   }
+  ],
+  "dump_count-mismatch": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-mismatch\"} * | sort by (_time)",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:29:55Z\",\"_stream_id\":\"0000000000000000aabe0ac7dc98d2bae46c1454b5f309e8\",\"_stream\":\"{dataset=\\\"count-mismatch\\\"}\",\"_msg\":\"x\",\"dataset\":\"count-mismatch\",\"log.level\":\"INFO\",\"service.name\":\"instana-agent\"}\n{\"_time\":\"2026-11-21T00:29:56Z\",\"_stream_id\":\"0000000000000000aabe0ac7dc98d2bae46c1454b5f309e8\",\"_stream\":\"{dataset=\\\"count-mismatch\\\"}\",\"_msg\":\"x\",\"dataset\":\"count-mismatch\",\"log.level\":\"ERROR\",\"service.name\":\"rabbitmq\"}\n{\"_time\":\"2026-11-21T00:29:57Z\",\"_stream_id\":\"0000000000000000aabe0ac7dc98d2bae46c1454b5f309e8\",\"_stream\":\"{dataset=\\\"count-mismatch\\\"}\",\"_msg\":\"x\",\"dataset\":\"count-mismatch\",\"log.level\":\"ERROR\",\"service.name\":\"AMHS-MCS\"}\n{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"0000000000000000aabe0ac7dc98d2bae46c1454b5f309e8\",\"_stream\":\"{dataset=\\\"count-mismatch\\\"}\",\"_msg\":\"x\",\"dataset\":\"count-mismatch\",\"log.level\":\"ERROR\",\"service.name\":\"cim_eap\"}\n"
+   }
+  ],
+  "dump_count-no-errors": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-no-errors\"} * | sort by (_time)",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:29:54Z\",\"_stream_id\":\"00000000000000007c8eabe8dd6256d1a0ebce63f613534f\",\"_stream\":\"{dataset=\\\"count-no-errors\\\"}\",\"_msg\":\"stocker STK01 port P3 slow to respond\",\"dataset\":\"count-no-errors\",\"log.level\":\"WARN\",\"service.name\":\"amhs-mcs\"}\n{\"_time\":\"2026-11-21T00:29:55Z\",\"_stream_id\":\"00000000000000007c8eabe8dd6256d1a0ebce63f613534f\",\"_stream\":\"{dataset=\\\"count-no-errors\\\"}\",\"_msg\":\"transfer job done\",\"dataset\":\"count-no-errors\",\"log.level\":\"INFO\",\"service.name\":\"amhs-mcs\"}\n{\"_time\":\"2026-11-21T00:29:56Z\",\"_stream_id\":\"00000000000000007c8eabe8dd6256d1a0ebce63f613534f\",\"_stream\":\"{dataset=\\\"count-no-errors\\\"}\",\"_msg\":\"lot track-in complete\",\"dataset\":\"count-no-errors\",\"log.level\":\"INFO\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:29:57Z\",\"_stream_id\":\"00000000000000007c8eabe8dd6256d1a0ebce63f613534f\",\"_stream\":\"{dataset=\\\"count-no-errors\\\"}\",\"_msg\":\"connection pool usage 92% (184/200)\",\"dataset\":\"count-no-errors\",\"log.level\":\"WARN\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"00000000000000007c8eabe8dd6256d1a0ebce63f613534f\",\"_stream\":\"{dataset=\\\"count-no-errors\\\"}\",\"_msg\":\"queue lot.dispatch ready\",\"dataset\":\"count-no-errors\",\"log.level\":\"INFO\",\"service.name\":\"mq-broker\"}\n"
+   }
+  ],
+  "dump_unparsed": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"unparsed\"} * | sort by (_time)",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"000000000000000077554d703b9447260b16786348bcbd39\",\"_stream\":\"{dataset=\\\"unparsed\\\"}\",\"_msg\":\"2026-11-21T00:29:58.000Z | ERROR | worker-1 | publish to eap.events timed out after 5000ms\",\"dataset\":\"unparsed\",\"kubernetes.namespace_name\":\"factory\",\"stream\":\"stdout\",\"kubernetes.container_name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:30:08Z\",\"_stream_id\":\"000000000000000077554d703b9447260b16786348bcbd39\",\"_stream\":\"{dataset=\\\"unparsed\\\"}\",\"_msg\":\"2026-11-21T00:30:08.000Z | INFO  | worker-1 | health probe: 0 error(s) in last minute\",\"dataset\":\"unparsed\",\"kubernetes.namespace_name\":\"factory\",\"stream\":\"stdout\",\"kubernetes.container_name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:30:18Z\",\"_stream_id\":\"000000000000000077554d703b9447260b16786348bcbd39\",\"_stream\":\"{dataset=\\\"unparsed\\\"}\",\"_msg\":\"2026-11-21T00:30:18.000Z | INFO  | worker-1 | lot track-in complete\",\"dataset\":\"unparsed\",\"kubernetes.namespace_name\":\"factory\",\"stream\":\"stdout\",\"kubernetes.container_name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:30:28Z\",\"_stream_id\":\"000000000000000077554d703b9447260b16786348bcbd39\",\"_stream\":\"{dataset=\\\"unparsed\\\"}\",\"_msg\":\"2026-11-21T00:30:28.000Z | FATAL | worker-1 | cannot append to queue eap.events: no space left on device\",\"dataset\":\"unparsed\",\"kubernetes.namespace_name\":\"factory\",\"stream\":\"stdout\",\"kubernetes.container_name\":\"mq-broker\"}\n"
+   }
+  ],
+  "dump_count-empty": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-empty\"} * | sort by (_time)",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": ""
+   }
+  ],
+  "search_errors": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 50",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:30:18Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"consumer lag exceeded on queue lot.dispatch\",\"dataset\":\"factory\",\"log.level\":\"ERROR\",\"service.name\":\"mq-broker\"}\n{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0120\",\"eqp_id\":\"EQP-ETCH-02\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0058\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:29:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"transfer job aborted: destination port occupied\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"STK01\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"amhs-mcs\"}\n{\"_time\":\"2026-11-21T00:28:18Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"equipment disconnected (HSMS NOT SELECTED)\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0377\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0044\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:27:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S2F42 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:26:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n"
+   }
+  ],
+  "search_errors_size_2": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 2",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:30:18Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"consumer lag exceeded on queue lot.dispatch\",\"dataset\":\"factory\",\"log.level\":\"ERROR\",\"service.name\":\"mq-broker\"}\n{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0120\",\"eqp_id\":\"EQP-ETCH-02\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0058\",\"service.name\":\"cim-eap\"}\n"
+   }
+  ],
+  "search_errors_window": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 50",
+      "start": "2026-11-21T00:29:08.000000Z",
+      "end": "2026-11-21T00:30:08.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0120\",\"eqp_id\":\"EQP-ETCH-02\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0058\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:29:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"transfer job aborted: destination port occupied\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"STK01\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"amhs-mcs\"}\n"
+   }
+  ],
+  "search_errors_unparsed": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"unparsed\"} \"kubernetes.container_name\":in(\"cim-eap\",\"mq-broker\") (_msg:i(\"error\") or _msg:i(\"fatal\") or _msg:i(\"critical\")) | sort by (_time) desc | limit 50",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:30:28Z\",\"_stream_id\":\"000000000000000077554d703b9447260b16786348bcbd39\",\"_stream\":\"{dataset=\\\"unparsed\\\"}\",\"_msg\":\"2026-11-21T00:30:28.000Z | FATAL | worker-1 | cannot append to queue eap.events: no space left on device\",\"dataset\":\"unparsed\",\"kubernetes.namespace_name\":\"factory\",\"stream\":\"stdout\",\"kubernetes.container_name\":\"mq-broker\"}\n{\"_time\":\"2026-11-21T00:30:08Z\",\"_stream_id\":\"000000000000000077554d703b9447260b16786348bcbd39\",\"_stream\":\"{dataset=\\\"unparsed\\\"}\",\"_msg\":\"2026-11-21T00:30:08.000Z | INFO  | worker-1 | health probe: 0 error(s) in last minute\",\"dataset\":\"unparsed\",\"kubernetes.namespace_name\":\"factory\",\"stream\":\"stdout\",\"kubernetes.container_name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:29:58Z\",\"_stream_id\":\"000000000000000077554d703b9447260b16786348bcbd39\",\"_stream\":\"{dataset=\\\"unparsed\\\"}\",\"_msg\":\"2026-11-21T00:29:58.000Z | ERROR | worker-1 | publish to eap.events timed out after 5000ms\",\"dataset\":\"unparsed\",\"kubernetes.namespace_name\":\"factory\",\"stream\":\"stdout\",\"kubernetes.container_name\":\"cim-eap\"}\n"
+   }
+  ],
+  "error_profile": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) partition by (\"service.name\") limit 2",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:26:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:27:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S2F42 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:29:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"transfer job aborted: destination port occupied\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"STK01\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"amhs-mcs\"}\n{\"_time\":\"2026-11-21T00:30:18Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"consumer lag exceeded on queue lot.dispatch\",\"dataset\":\"factory\",\"log.level\":\"ERROR\",\"service.name\":\"mq-broker\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"WARN\",\"WARNING\") | sort by (_time) | limit 50",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": ""
+   }
+  ],
+  "error_profile_warnings": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-no-errors\"} \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) partition by (\"service.name\") limit 3",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": ""
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-no-errors\"} \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"WARN\",\"WARNING\") | sort by (_time) | limit 50",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:29:54Z\",\"_stream_id\":\"00000000000000007c8eabe8dd6256d1a0ebce63f613534f\",\"_stream\":\"{dataset=\\\"count-no-errors\\\"}\",\"_msg\":\"stocker STK01 port P3 slow to respond\",\"dataset\":\"count-no-errors\",\"log.level\":\"WARN\",\"service.name\":\"amhs-mcs\"}\n{\"_time\":\"2026-11-21T00:29:57Z\",\"_stream_id\":\"00000000000000007c8eabe8dd6256d1a0ebce63f613534f\",\"_stream\":\"{dataset=\\\"count-no-errors\\\"}\",\"_msg\":\"connection pool usage 92% (184/200)\",\"dataset\":\"count-no-errors\",\"log.level\":\"WARN\",\"service.name\":\"cim-eap\"}\n"
+   }
+  ],
+  "count_phrases": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"service.name\":in(\"cim-eap\",\"mq-broker\",\"amhs-mcs\") | stats count() if (\"service.name\":=\"cim-eap\" \"log.level\":in(\"ERROR\") _msg:seq(\"timeout\",\"waiting\",\"reply\") _time:>=2026-11-21T00:29:08.000000Z) as d0, count() if (\"service.name\":=\"cim-eap\" \"log.level\":in(\"ERROR\") _msg:seq(\"timeout\",\"waiting\",\"reply\") _time:<2026-11-21T00:29:08.000000Z) as b0, count() if (\"service.name\":=\"cim-eap\" \"log.level\":in(\"ERROR\") _msg:seq(\"equipment\",\"disconnected\") _time:>=2026-11-21T00:29:08.000000Z) as d1, count() if (\"service.name\":=\"cim-eap\" \"log.level\":in(\"ERROR\") _msg:seq(\"equipment\",\"disconnected\") _time:<2026-11-21T00:29:08.000000Z) as b1, count() if (\"service.name\":=\"mq-broker\" \"log.level\":in(\"ERROR\") _msg:seq(\"consumer\",\"lag\",\"exceeded\",\"on\",\"queue\",\"lot.dispatch\") _time:>=2026-11-21T00:29:08.000000Z) as d2, count() if (\"service.name\":=\"mq-broker\" \"log.level\":in(\"ERROR\") _msg:seq(\"consumer\",\"lag\",\"exceeded\",\"on\",\"queue\",\"lot.dispatch\") _time:<2026-11-21T00:29:08.000000Z) as b2, count() if (\"service.name\":=\"amhs-mcs\" \"log.level\":in(\"ERROR\") _msg:seq(\"no\",\"such\",\"words\") _time:>=2026-11-21T00:29:08.000000Z) as d3, count() if (\"service.name\":=\"amhs-mcs\" \"log.level\":in(\"ERROR\") _msg:seq(\"no\",\"such\",\"words\") _time:<2026-11-21T00:29:08.000000Z) as b3",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"d0\":\"1\",\"b0\":\"2\",\"d1\":\"0\",\"b1\":\"1\",\"d2\":\"1\",\"b2\":\"0\",\"d3\":\"0\",\"b3\":\"0\"}\n"
+   }
+  ],
+  "count_phrases_unparsed": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"unparsed\"} \"kubernetes.container_name\":in(\"cim-eap\") | stats count() if (\"kubernetes.container_name\":=\"cim-eap\" (_msg:i(\"error\")) _msg:seq(\"publish\",\"to\",\"eap.events\",\"timed\",\"out\") _time:>=2026-11-20T23:36:38.000000Z) as d0, count() if (\"kubernetes.container_name\":=\"cim-eap\" (_msg:i(\"error\")) _msg:seq(\"publish\",\"to\",\"eap.events\",\"timed\",\"out\") _time:<2026-11-20T23:36:38.000000Z) as b0, count() if (\"kubernetes.container_name\":=\"cim-eap\" (_msg:i(\"error\")) _msg:seq(\"health\",\"probe\") _time:>=2026-11-20T23:36:38.000000Z) as d1, count() if (\"kubernetes.container_name\":=\"cim-eap\" (_msg:i(\"error\")) _msg:seq(\"health\",\"probe\") _time:<2026-11-20T23:36:38.000000Z) as b1",
+      "start": "2026-11-20T23:06:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"d0\":\"1\",\"b0\":\"0\",\"d1\":\"1\",\"b1\":\"0\"}\n"
+   }
+  ],
+  "count_logs_factory": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} * | stats count() as total, count() if (\"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\")) as services",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"total\":\"7\",\"services\":\"7\"}\n"
+   }
+  ],
+  "count_logs_count-mismatch": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-mismatch\"} * | stats count() as total, count() if (\"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\")) as services",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"total\":\"4\",\"services\":\"0\"}\n"
+   }
+  ],
+  "count_logs_count-no-errors": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-no-errors\"} * | stats count() as total, count() if (\"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\")) as services",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"total\":\"5\",\"services\":\"5\"}\n"
+   }
+  ],
+  "count_logs_count-empty": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"count-empty\"} * | stats count() as total, count() if (\"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\")) as services",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"total\":\"0\",\"services\":\"0\"}\n"
+   }
+  ],
+  "search_timeline": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"lot_id\":in(\"LOT24A0031\",\"LOT24A0060\",\"LOT-NOPE\") | sort by (_time) partition by (\"lot_id\") limit 2",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-21T00:26:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S6F12 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:27:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"T3 timeout waiting S2F42 reply\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0912\",\"eqp_id\":\"EQP-CVD-07\",\"log.level\":\"ERROR\",\"lot_id\":\"LOT24A0031\",\"service.name\":\"cim-eap\"}\n{\"_time\":\"2026-11-21T00:31:38Z\",\"_stream_id\":\"00000000000000007d565a758d67dde2f14e810ed583f330\",\"_stream\":\"{dataset=\\\"factory\\\"}\",\"_msg\":\"lot track-in complete\",\"dataset\":\"factory\",\"carrier_id\":\"FOUP0555\",\"eqp_id\":\"EQP-CVD-03\",\"log.level\":\"INFO\",\"lot_id\":\"LOT24A0060\",\"service.name\":\"cim-eap\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"lot_id\":in(\"LOT24A0031\",\"LOT24A0060\",\"LOT-NOPE\") | stats by (\"lot_id\") count() as total",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": "{\"lot_id\":\"LOT24A0060\",\"total\":\"1\"}\n{\"lot_id\":\"LOT24A0031\",\"total\":\"3\"}\n"
+   }
+  ],
+  "quoted_service_name": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset=\"factory\"} \"service.name\":in(\"a\\\"b\\\\c\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 5",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 200,
+    "response": ""
+   }
+  ],
+  "bad_filter": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<uid>/select/logsql/query",
+     "params": {},
+     "form": {
+      "query": "{dataset= \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 5",
+      "start": "2026-11-20T23:36:38.000000Z",
+      "end": "2026-11-21T00:37:38.000000Z"
+     }
+    },
+    "status": 400,
+    "response": "remoteAddr: \"127.0.0.1:37100, X-Forwarded-For: 127.0.0.1, 127.0.0.1\"; requestURI: /select/logsql/query?end=2026-11-21T00%3A37%3A38.000000Z&query=%7Bdataset%3D+%22service.name%22%3Ain%28%22mq-broker%22%2C%22cim-eap%22%2C%22amhs-mcs%22%29+%22log.level%22%3Ain%28%22ERROR%22%2C%22error%22%2C%22Error%22%2C%22FATAL%22%2C%22fatal%22%2C%22CRITICAL%22%2C%22critical%22%29+%7C+sort+by+%28_time%29+desc+%7C+limit+5&start=2026-11-20T23%3A36%3A38.000000Z; cannot parse query [{dataset= \"service.name\":in(\"mq-broker\",\"cim-eap\",\"amhs-mcs\") \"log.level\":in(\"ERROR\",\"error\",\"Error\",\"FATAL\",\"fatal\",\"CRITICAL\",\"critical\") | sort by (_time) desc | limit 5]: unexpected token \"(\" in _stream filter; want 'or', 'and', '}' or ','; context: [{dataset= \"service.name\":in(]\n"
+   }
+  ]
+ }
+}

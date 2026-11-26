@@ -10,7 +10,7 @@
 grafana:
   url: https://grafana.corp.example      # 必填
   token: ""                              # 必填：Editor 服務帳號的 Token
-  # timeout_seconds: 30                  # 呼叫 Grafana（含 ES 代理）的逾時
+  # timeout_seconds: 30                  # 呼叫 Grafana（含資料源代理）的逾時
   # retries: 2                           # 短暫失敗（連線失敗、逾時、429／502／503／504）重試幾次；0 = 不重試
   # retry_backoff_seconds: 0.5           # 每次重試多等幾秒（第 n 次等 n 倍）
 
@@ -32,12 +32,11 @@ llm:                                     # 整段可以不寫：沒設 url 與 m
   retry_max_seconds: 1800                # 之後每失敗一次等待時間加倍（60、120、240…），最多等到這個秒數；成功就歸零
   # timeout_seconds: 60                  # 等 LLM 回應的逾時；推理型模型比較慢就調大（healthcheck.stuck_seconds 也要跟著調）
   # max_log_samples: 20                  # 給 LLM 看幾筆錯誤日誌樣本
-  # max_trace_samples: 10                # 給 LLM 看幾筆 Trace 錯誤片段
   # max_message_chars: 300               # 單筆日誌訊息截斷長度
   # top_ids: 10                          # 每種識別碼（機台、批號…）只列出現次數前幾名
   # max_timeline_ids: 2                  # 最多替幾個批號／載具做關聯時間線；0 = 不做
   # max_timeline_events: 30              # 每條時間線最多幾筆紀錄
-  # max_log_patterns: 6                  # 最多替幾種錯誤比較「事故前、事故期間各出現幾筆」；0 = 不比較（省一次 ES 查詢）
+  # max_log_patterns: 6                  # 最多替幾種錯誤比較「事故前、事故期間各出現幾筆」；0 = 不比較（省一次日誌查詢）
   # max_warn_patterns: 5                 # 最多給 LLM 看幾種警告（WARN）；0 = 不撈警告
   # max_summary_chars: 300               # LLM 摘要超過這個長度就截斷（註記第 2 行）
   # system_prompt_file: system_prompt.txt  # 自訂系統提示詞的檔案（相對路徑 = 相對於這份設定檔）；
@@ -46,42 +45,37 @@ llm:                                     # 整段可以不寫：沒設 url 與 m
   #                                        # 預設是「字母開頭、夾數字」；模型常寫 HTTP2 這類泛稱而被誤擋時，改成只認你們的編號格式，
   #                                        # 例如 "(EQP|LOT|FOUP)[-A-Z0-9]+"；設成 "" = 不檢查摘要文字（systems／ids 清單照樣檢查）
 
-es:                                      # 整段可以不寫：沒設 datasource_uid = RCA 沒有日誌證據
-  datasource_uid: ""                     # Grafana 上 Elasticsearch 資料源的 uid
-  log_index: "*"
-  trace_index: ""                        # 沒有 Trace 就留空
+logs:                                    # 整段可以不寫：沒設 datasource_uid = RCA 沒有日誌證據
+  type: victorialogs                     # 日誌存在哪一種：victorialogs 或 elasticsearch（都經 Grafana 的資料源代理查）
+  datasource_uid: ""                     # Grafana 上那個資料源的 uid（VictoriaLogs 要先在 Grafana 裝外掛 victoriametrics-logs-datasource）
   id_fields: [eqp_id, lot_id, carrier_id]   # 錯誤日誌裡要統計出現次數的識別碼欄位
-  log_fields:                            # 日誌文件的欄位名稱（巢狀物件或帶點的扁平鍵都可以）；下面是預設值
-    time: "@timestamp"
+  fields:                                # 日誌的欄位名稱；下面是預設值
     service: service.name                # 要跟告警的 service 標籤值一致
     level: log.level                     # 日誌沒有等級欄位（沒拆欄位的容器輸出）就設成 ""：改用訊息文字裡的等級字樣挑錯誤日誌，
-    #                                      # 會漏撈也會誤撈（見 CONFIG.md「日誌沒有等級欄位」）；其他欄位不能留空
-    message: message
-  trace_fields:                          # Trace／span 文件的欄位名稱；下面是預設值
-    time: "@timestamp"
-    service: service.name
-    span: span.name
-    trace_id: trace.id
-    status: status.code
-    error: error.message
+    #                                      # 會誤撈（見 CONFIG.md「日誌沒有等級欄位」）；其他欄位不能留空
+    # time: "@timestamp"                 # 只有 elasticsearch 能設（VictoriaLogs 的時間與訊息固定是 _time、_msg）
+    # message: message                   # 只有 elasticsearch 能設
+  # extra_filter: '{namespace="factory"}'  # 只有 victorialogs：加在每一條查詢最前面的 LogsQL 條件，只看某一部分的日誌
+  # index: "factory-logs-*"              # 只有 elasticsearch：要查的索引；不寫 = "*"
   # error_levels: [ERROR, error, Error, FATAL, fatal, CRITICAL, critical]   # 日誌等級是這些值才算錯誤（大小寫不同要分開列）
   # warn_levels: [WARN, warn, Warn, WARNING, warning, Warning]   # 日誌等級是這些值算警告；[] = 不撈警告。日誌沒有等級欄位時不會撈
   # baseline_minutes: 30                 # 「事故前」看多久：同一種錯誤在事故前這段時間出現幾筆，用來分辨平常就有的與新出現的
-  # error_statuses: [error, ERROR, Error, STATUS_CODE_ERROR]               # span 狀態是這些值才算錯誤
-  # max_hits: 100                        # 每次查詢最多撈幾筆；識別碼的出現次數只統計這幾筆
+  # max_hits: 100                        # 錯誤日誌最多撈幾筆（最新的在前）；識別碼的出現次數只統計這幾筆
   # window_padding_minutes: 10           # 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現）
   # timeline_fields: [lot_id, carrier_id]  # 關聯時間線：哪些識別碼要把跨系統的日誌串起來（要在 id_fields 裡）；[] = 不做。
   #                                        # 工廠沒有 trace id，批號與載具就是關聯碼；只代表先後，不代表因果
 
-tempo:                                   # 整段可以不寫：沒設 datasource_uid = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
-  datasource_uid: ""                     # Grafana 上 Tempo 資料源的 uid
-  # trace_id_field: trace.id             # 錯誤日誌裡記 trace id 的欄位：有的話直接用編號取 Trace（立即取得到）；
-  #                                        # 沒有才用搜尋（Tempo 收到後要幾十秒才搜尋得到）。"" = 不用日誌裡的 id
+traces:                                  # 整段可以不寫：沒設 datasource_uid = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
+  type: victoriatraces                   # Trace 存在哪一種：victoriatraces 或 tempo
+  datasource_uid: ""                     # victoriatraces：Grafana 上 Jaeger 型別資料源的 uid（URL 指到 VictoriaTraces 的 /select/jaeger）
+  #                                        # tempo：Grafana 上 Tempo 資料源的 uid
+  # trace_id_field: trace_id             # 錯誤日誌裡記 trace id 的欄位：有的話直接用編號取 Trace；沒有才用搜尋。
+  #                                        # "" = 不用日誌裡的 id
   # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace
   # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
 
 metrics:                                 # 整段可以不寫：沒設 datasource_uid 或沒有 queries = RCA 沒有指標走勢這包證據
-  datasource_uid: ""                     # Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid
+  datasource_uid: ""                     # Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以）
   queries: []                            # 事故時要查的指標（PromQL／MetricsQL）。每條都要有 $service：事故裡的每個系統各查一次，
   #                                        # $service 換成系統名稱（跟告警的 service 標籤同一個值）。請用 = 比對，不要用 =~
   #   - {name: 請求量（每秒）, expr: 'sum(rate(http_requests_total{service="$service"}[5m]))'}
@@ -93,16 +87,27 @@ metrics:                                 # 整段可以不寫：沒設 datasourc
   # max_points: 12                       # 每條序列給 LLM 看幾個點
   # max_series: 5                        # 一條查詢回很多條序列（例如每個佇列一條）時只留數值最大的幾條
 
+outputs:                                 # 註記以外的兩個出口。整段可以不寫：url 留空 = 佔位（不送，只把本來會送的內容記進 deliveries 表）
+  incident_api:                          # 事故開單、內容更新、結案時 POST 一筆 JSON 給下游（告警中心、派工系統）
+    url: ""                              # 例如 https://alert-center.corp.example/api/incidents
+    token: ""                            # 有填就帶 Authorization: Bearer
+  remediation:                           # 自動修復：告警規則上貼了 aiops_remediation=<流程名稱> 的告警在響時，請下游（Conductor）跑那個流程
+    url: ""
+    token: ""
+    enabled: false                       # false = 就算有 url 也只記錄、不送。跑哪個流程只看規則上的標籤，LLM 的推論不會觸發
+  # timeout_seconds: 10                  # 等下游回應的逾時
+
 # labels:                                # 告警規則上的標籤名稱；改了要同步通知各系統團隊與 Grafana 的通知路由
 #   detect: aiops_detect                 # 值是 true 才納管
 #   severity: aiops_severity             # P0～P3
 #   service: service                     # 系統名稱，要跟 edges 裡的名稱一樣
 #   default_severity: P3                 # 嚴重度標籤沒寫或寫錯時當成哪一級
+#   remediation: aiops_remediation       # 值是修復流程的名稱；沒貼 = 這條告警沒有自動修復
 
 timezone: Asia/Taipei                    # 註記裡顯示的時間
 log_level: INFO                          # DEBUG／INFO／WARNING／ERROR（DEBUG 會記下送給 LLM 的內容與原始回應）
 
-debounce_seconds: 60                     # 收到第一個 Webhook 後等多久才開始分析（等上下游告警到齊、ES 日誌落盤）
+debounce_seconds: 60                     # 收到第一個 Webhook 後等多久才開始分析（等上下游告警到齊、日誌寫進 VictoriaLogs）
 followup_seconds: 60                     # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪
 close_after_seconds: 300                 # 成員告警全部 resolved 之後，再安靜多久才結案
 # retry_failed_round_seconds: 30         # 一輪失敗（例如資料庫斷線）之後多久再試

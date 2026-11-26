@@ -2,11 +2,11 @@
 
   1. 這個事故收斂的告警（系統、規則、開始時間、嚴重度、觸發當下的數值、是否已恢復）
   2. 系統上下游關係邊（設定檔）
-  3. 事故時間窗內的錯誤日誌樣本與 Trace 錯誤片段（ES；有就附，沒有就空）
+  3. 事故時間窗內的錯誤日誌樣本（有就附，沒有就空）
   4. eqp_id／lot_id／carrier_id 在錯誤日誌裡的出現次數
-  5. 關聯時間線（ES）：出現最多次的批號／載具，在各系統的紀錄照時間排好。工廠沒有 trace id，用它代替
-  6. 呼叫鏈（Tempo）：失敗請求實際的呼叫路徑。有埋點的 IT 服務才有
-  7. 指標走勢（Prometheus 相容）：設定的查詢在事故前後的數值變化。有設定才有
+  5. 關聯時間線：出現最多次的批號／載具，在各系統的紀錄照時間排好。工廠沒有 trace id，用它代替
+  6. 呼叫鏈：失敗請求實際的呼叫路徑。有埋點的 IT 服務才有
+  7. 指標走勢（VictoriaMetrics，Prometheus 相容）：設定的查詢在事故前後的數值變化。有設定才有
 
 錯誤日誌交給 LLM 之前先處理過（_profile_logs）：同類去重、各系統最早的錯誤不被擠掉、事故前後各出現幾筆、警告。
 另外由程式產生「證據概況」（overview）：手上有哪些、缺哪些與原因，寫在註記上，也交給 LLM。
@@ -20,7 +20,7 @@ LLM 連不上、逾時、格式不對、或點名了證據裡沒有的系統／�
   - 幻覺檢查只擋「名稱不存在」：LLM 把存在的系統講錯因果，程式看不出來，所以第 2 行固定標 [LLM 推論]。
   - 工廠沒有 Trace 時，「集中在哪台機台／哪個批號」只是錯誤日誌的計數，不是因果證據。
   - 關聯時間線靠各系統日誌的時間戳排序：系統之間時鐘差幾秒，先後順序就可能是錯的。
-  - 呼叫鏈只看得到有埋點、而且沒被取樣掉的請求；Tempo 收到 Trace 後要幾秒才搜尋得到。
+  - 呼叫鏈只看得到有埋點、而且沒被取樣掉的請求。
 """
 from __future__ import annotations
 
@@ -30,12 +30,13 @@ import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
-from src.grafana import ERROR_LEVELS, ERROR_STATUS, WARN_LEVELS, Grafana, GrafanaError, LogFields, TraceFields
+from src.grafana import Grafana, GrafanaError
+from src.logs import ERROR_LEVELS, MESSAGE_FIELD, TIME_FIELD, WARN_LEVELS, LogFields
 from src.grouping import Incident
 
 log = logging.getLogger("aiops_lite.rca")
@@ -69,32 +70,33 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
   {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "confidence": 85, "reason": "一句話"}], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
 
 MAX_CANDIDATES = 3
-DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "error_traces", "timelines", "call_chains", "metrics")
+DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "metrics")
 # 信心分數的分段（提示詞裡跟模型講的同一套）。分數是模型自評「依據有多直接」，不是機率、沒有校準過。
 CONFIDENCE_HIGH, CONFIDENCE_MEDIUM = 70, 40
 NO_DIRECT_EVIDENCE_CAP = 30   # 沒有直接證據指向的系統，分數最高只到這裡（落在「只是推測」那一段）
 LEGACY_CONFIDENCE = {"高": 85, "中": 55, "低": 25}   # 舊格式的高／中／低換成各段的中間值
 
-TRACE_SEARCH_LIMIT = 20  # 向 Tempo 搜尋時最多要幾條，再從裡面挑最近的 max_traces 條
-SPAN_ATTRIBUTES = ("peer.service", "db.system", "server.address", "http.response.status_code", "messaging.destination.name")
+TRACE_SEARCH_LIMIT = 20  # 向 Trace 資料庫搜尋時最多要幾條，再從裡面挑最近的 max_traces 條
+# 呼叫鏈上保留的 span 屬性：能指出「下一站是誰」或「這一段是佇列」的那幾個。佇列的兩種命名都留
+# （新版 messaging.destination.name；舊版 messaging.destination，實測 pika 的自動埋點送的是舊版）。
+SPAN_ATTRIBUTES = ("peer.service", "db.system", "server.address", "http.response.status_code", "messaging.system",
+                   "messaging.destination.name", "messaging.destination")
 
 
 @dataclass(frozen=True)
 class EvidenceLimits:
     """證據要撈多少、給 LLM 看多少（config.yaml 的 es.* 與 llm.max_*；都是選填，下面是預設值）。"""
-    max_hits: int = 100                  # 每次 ES 查詢最多撈幾筆；識別碼的出現次數只統計這幾筆
+    max_hits: int = 100                  # 錯誤日誌最多撈幾筆（最新的在前）；識別碼的出現次數只統計這幾筆
     window_padding_minutes: int = 10     # 事故時間窗往前多看幾分鐘：錯誤日誌常比告警觸發早出現（規則有 for 的等待時間）
     error_levels: tuple[str, ...] = ERROR_LEVELS     # 日誌等級欄位是這些值才算錯誤日誌
-    error_statuses: tuple[str, ...] = ERROR_STATUS   # span 狀態欄位是這些值才算錯誤 span
     max_log_samples: int = 20            # 給 LLM 的錯誤日誌樣本筆數
-    max_trace_samples: int = 10          # 給 LLM 的 Trace 錯誤片段筆數
     max_message_chars: int = 300         # 單筆訊息截斷長度
     top_ids: int = 10                    # 每種識別碼只列出現次數前幾名
     timeline_fields: tuple[str, ...] = ("lot_id", "carrier_id")  # 哪些識別碼要串成跨系統的時間線；空的 = 不做
     max_timeline_ids: int = 2            # 最多替幾個關聯碼做時間線（取錯誤日誌裡出現最多次的）
     max_timeline_events: int = 30        # 每條時間線最多幾筆紀錄
-    trace_id_field: str = "trace.id"     # 錯誤日誌裡記 trace id 的欄位：有的話直接用編號向 Tempo 取（不必等它搜尋得到）
-    max_traces: int = 3                  # 最多取回幾條錯誤 Trace 的呼叫鏈（Tempo）
+    trace_id_field: str = "trace_id"     # 錯誤日誌裡記 trace id 的欄位：有的話直接用編號取那條 Trace（一定跟這次的錯誤有關）
+    max_traces: int = 3                  # 最多整理幾條錯誤 Trace 的呼叫鏈
     max_trace_spans: int = 30            # 每條呼叫鏈最多列幾個 span（失敗的優先）
     baseline_minutes: int = 30           # 「事故前」看多久：同一種錯誤在事故前這段時間出現幾次，用來分辨平常就有的與新出現的
     max_log_patterns: int = 6            # 最多替幾種錯誤比較事故前後的次數；0 = 不比較
@@ -136,7 +138,7 @@ class LlmOptions:
 
 
 def _dig(doc: dict[str, Any], path: str) -> Any:
-    """讀 'service.name' 這種欄位：ES 文件可能是巢狀物件，也可能是帶點的扁平鍵。"""
+    """讀 'service.name' 這種欄位：日誌是帶點的扁平鍵（src/logs.py 保證）；巢狀物件也讀得到。"""
     if path in doc:
         return doc[path]
     cur: Any = doc
@@ -161,12 +163,12 @@ def raw_summary(incident: Incident) -> str:
     return "；".join(f"{svc}：{'、'.join(titles)}" for svc, titles in by_service.items())
 
 
-def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: Grafana, *, es_datasource_uid: str,
-                     log_index: str, trace_index: str, id_fields: list[str], now: datetime,
-                     log_fields: LogFields = LogFields(), trace_fields: TraceFields = TraceFields(),
-                     limits: EvidenceLimits = EvidenceLimits(), tempo_datasource_uid: str = "",
+def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: Grafana, *, logs: Any = None,
+                     traces: Any = None, id_fields: list[str], now: datetime, limits: EvidenceLimits = EvidenceLimits(),
                      metrics: MetricOptions = MetricOptions()) -> dict[str, Any]:
-    """組證據：告警、關係邊、錯誤日誌與識別碼統計（ES）、關聯時間線（ES）、呼叫鏈（Tempo）、指標走勢（Prometheus 相容）。
+    """組證據：告警、關係邊、錯誤日誌與識別碼統計、關聯時間線、呼叫鏈、指標走勢。全部經 Grafana 的資料源代理。
+    logs 是 src/logs.py 的 VictoriaLogs 或 Elasticsearch，traces 是 src/traces.py 的 VictoriaTraces 或 Tempo；None = 沒接。
+    這裡不管後面是哪一種：兩種來源回的日誌與 Trace 是同一種形狀。
     任何一包撈不到（沒設資料源、Grafana 回錯）都不擋分析：那一包留空，並在 notes 寫明原因。"""
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
     start = incident.started_at - timedelta(minutes=limits.window_padding_minutes)
@@ -176,20 +178,21 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
                        "started": iso(m["starts_at"]), "status": m["status"], "values": m["values"]}
                       for m in _members(incident)],
         "edges": [{"upstream": a, "downstream": b} for a, b in edges],
-        "error_logs": [], "error_traces": [], "id_counts": {f: {} for f in id_fields},
+        "error_logs": [], "id_counts": {f: {} for f in id_fields},
         "timelines": [], "call_chains": [], "metrics": [], "notes": [],
         "error_patterns": [], "warnings": [],
         # 每一包的狀態，給 overview() 用：off 沒接／failed 查詢失敗／empty 查了但沒有／ok 有
         "sources": {"logs": "off", "call_chains": "off", "metrics": "off"},
     }
     trace_ids: list[str] = []
-    if es_datasource_uid:
-        trace_ids = _collect_logs(evidence, incident, grafana, es_datasource_uid, log_index, trace_index, id_fields,
-                                  start, end, log_fields, trace_fields, limits)
+    if logs is not None:
+        evidence["log_source"] = {"name": logs.name, "scope_hint": logs.scope_hint}
+        trace_ids = _collect_logs(evidence, incident, logs, id_fields, start, end, limits)
     else:
         evidence["notes"].append("沒有設定日誌資料源：沒有日誌證據")
-    if tempo_datasource_uid and limits.max_traces >= 1:
-        _collect_call_chains(evidence, incident, grafana, tempo_datasource_uid, start, end, limits, trace_ids)
+    if traces is not None and limits.max_traces >= 1:
+        evidence["trace_source"] = traces.name
+        _collect_call_chains(evidence, incident, traces, start, end, limits, trace_ids)
     if metrics.datasource_uid and metrics.queries:
         _collect_metrics(evidence, incident, grafana, metrics, end)
     evidence["window"] = {"start": iso(start), "end": iso(end)}
@@ -266,28 +269,37 @@ def _collect_metrics(evidence: dict[str, Any], incident: Incident, grafana: Graf
         evidence["notes"].append("設定的指標查詢在這段時間都沒有資料")
 
 
-def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana, uid: str, log_index: str,
-                  trace_index: str, id_fields: list[str], start: datetime, end: datetime, log_fields: LogFields,
-                  trace_fields: TraceFields, limits: EvidenceLimits) -> list[str]:
-    """填好日誌相關的幾包證據；回傳錯誤日誌裡看到的 trace id（新的在前、不重複），給呼叫鏈直接取用。"""
+def stamp(raw: Any) -> datetime:
+    """日誌的 _time（RFC3339，小數位數不固定）轉成時間，給排序用。字串直接比會排錯：
+    "…:40.5Z" 會排在 "…:40Z" 前面。讀不懂的當成最早。"""
+    text = re.sub(r"(\.\d{6})\d+", r"\1", str(raw or "").replace("Z", "+00:00"))
     try:
-        found = grafana.search_errors(uid, log_index, trace_index or None, incident.services, start, end,
-                                      limits.max_hits, log_fields=log_fields, trace_fields=trace_fields,
-                                      error_levels=limits.error_levels, error_statuses=limits.error_statuses)
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _collect_logs(evidence: dict[str, Any], incident: Incident, store: Any, id_fields: list[str],
+                  start: datetime, end: datetime, limits: EvidenceLimits) -> list[str]:
+    """填好日誌相關的幾包證據；回傳錯誤日誌裡看到的 trace id（新的在前、不重複），給呼叫鏈直接取用。"""
+    log_fields: LogFields = store.fields
+    try:
+        found = store.search_errors(incident.services, start, end, limits.max_hits, error_levels=limits.error_levels)
     except GrafanaError as e:
         log.warning("事故 %s 撈不到日誌證據：%s", incident.uid, e)
         evidence["notes"].append(f"日誌撈取失敗：{e}")
         evidence["sources"]["logs"] = "failed"
         return []
-    evidence["sources"]["logs"] = "ok" if found["logs"] else "empty"
-    if not found["logs"]:
+    evidence["sources"]["logs"] = "ok" if found else "empty"
+    if not found:
         # 0 筆有三種完全不同的原因，處理方式也不同：多問一次總數，把它分清楚（只在 0 筆時多這一次查詢）
         try:
-            evidence["log_counts"] = grafana.count_logs(uid, log_index, incident.services, start, end, log_fields=log_fields)
+            evidence["log_counts"] = store.count_logs(incident.services, start, end)
         except GrafanaError as e:
             log.warning("事故 %s 數不出日誌筆數：%s", incident.uid, e)
     counts = {f: Counter() for f in id_fields}
-    for doc in found["logs"]:
+    for doc in found:
         for f in id_fields:
             value = _dig(doc, f)
             if value not in (None, ""):
@@ -295,23 +307,19 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
     evidence["id_counts"] = {f: dict(c.most_common(limits.top_ids)) for f, c in counts.items()}
 
     def entry(d: dict[str, Any], with_level: bool = False) -> dict[str, Any]:
-        out = {"time": _dig(d, log_fields.time), "system": _dig(d, log_fields.service)}
+        out = {"time": _dig(d, TIME_FIELD), "system": _dig(d, log_fields.service)}
         if with_level and log_fields.level:
             out["level"] = _dig(d, log_fields.level)
-        out["message"] = str(_dig(d, log_fields.message) or "")[:limits.max_message_chars]
+        out["message"] = str(_dig(d, MESSAGE_FIELD) or "")[:limits.max_message_chars]
         out.update({f: _dig(d, f) for f in id_fields if _dig(d, f) not in (None, "")})
         return out
 
-    evidence["error_logs"] = [entry(d) for d in found["logs"][:limits.max_log_samples]]
-    if found["logs"]:
-        _profile_logs(evidence, incident, grafana, uid, log_index, start, end, log_fields, limits, found["logs"], entry)
-    evidence["error_traces"] = [{
-        "time": _dig(d, trace_fields.time), "system": _dig(d, trace_fields.service), "span": _dig(d, trace_fields.span),
-        "trace_id": _dig(d, trace_fields.trace_id), "error": str(_dig(d, trace_fields.error) or "")[:limits.max_message_chars]}
-        for d in found["traces"][:limits.max_trace_samples]]
-    if not found["logs"] and not found["traces"]:
+    evidence["error_logs"] = [entry(d) for d in found[:limits.max_log_samples]]
+    if found:
+        _profile_logs(evidence, incident, store, start, end, limits, found, entry)
+    if not found:
         evidence["notes"].append("事故時間窗內沒有查到這些系統的錯誤日誌")
-    elif found["logs"] and not log_fields.level:  # 讓 LLM 知道這批樣本怎麼來的，不要把每一筆都當成錯誤
+    elif not log_fields.level:  # 讓 LLM 知道這批樣本怎麼來的，不要把每一筆都當成錯誤
         evidence["notes"].append("日誌沒有等級欄位：錯誤日誌樣本是依訊息文字裡的等級字樣挑的，可能混入不是錯誤的紀錄")
 
     # 關聯時間線：錯誤日誌裡出現最多次的批號／載具，回頭把它在各系統的紀錄（不限等級）照時間排出來。
@@ -322,8 +330,7 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
     for field in dict.fromkeys(f for f, _v in picks):
         values = [v for f, v in picks if f == field]
         try:
-            lines = grafana.search_timeline(uid, log_index, field, values, start, end, limits.max_timeline_events,
-                                            log_fields=log_fields)
+            lines = store.search_timeline(field, values, start, end, limits.max_timeline_events)
         except GrafanaError as e:
             log.warning("事故 %s 撈不到 %s 的時間線：%s", incident.uid, field, e)
             evidence["notes"].append(f"關聯時間線撈取失敗：{e}")
@@ -335,7 +342,7 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
                     "key": field, "id": value, "events": [entry(d, with_level=True) for d in got["hits"]],
                     "systems": sorted({str(_dig(d, log_fields.service)) for d in got["hits"] if _dig(d, log_fields.service)}),
                     "truncated": got["total"] > len(got["hits"])})
-    seen = (str(_dig(d, limits.trace_id_field) or "") for d in found["logs"]) if limits.trace_id_field else ()
+    seen = (str(_dig(d, limits.trace_id_field) or "") for d in found) if limits.trace_id_field else ()
     return list(dict.fromkeys(t for t in seen if t))
 
 
@@ -354,51 +361,43 @@ def log_pattern(message: str) -> str:
     return _STAR_RUN.sub("*", " ".join(text.split()))
 
 
-MAX_PHRASE_SLOP = 12
-
-
-def pattern_phrase(pattern: str) -> tuple[str, int] | None:
-    """把樣板變成可以拿去 ES 數筆數的查詢：(固定不變的詞照順序排成的片語, 容許的間隔)。
-    帶 * 的詞整個丟掉（「attempt=*」「v*」「*ms」在原文裡是完整的一個詞，留半個反而比不到），丟掉的位置用間隔（slop）補：
-    每丟一個詞容許 3 個位置，因為一個 * 在原文裡可能是好幾個詞（10.3.2.15:502 會被拆成兩個）。
-    固定的詞少於兩個就不數（回 None）：只有一個詞的片語會把不相干的訊息都算進來。
+def pattern_words(pattern: str) -> list[str] | None:
+    """把樣板變成可以拿去數筆數的條件：固定不變的詞，照原本的順序（LogsQL 的 seq：這些詞照順序出現，中間可以隔別的字）。
+    帶 * 的詞整個丟掉（「attempt=*」「v*」「*ms」在原文裡是完整的一個詞，留半個反而比不到）；詞兩端的標點去掉。
+    固定的詞少於兩個就不數（回 None）：只有一個詞會把不相干的訊息都算進來。
     這是近似：別種錯誤剛好有同樣的詞、順序也一樣時會被算在一起。"""
-    tokens = pattern.split()
-    kept = [t for t in tokens if "*" not in t and re.search(r"\w", t)]
-    if len(kept) < 2:
-        return None
-    dropped = sum(1 for t in tokens if "*" in t)
-    return " ".join(kept), min(3 * dropped, MAX_PHRASE_SLOP)
+    kept = [re.sub(r"^\W+|\W+$", "", token) for token in pattern.split() if "*" not in token]
+    kept = [word for word in kept if word]
+    return kept if len(kept) >= 2 else None
 
 
-def _profile_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana, uid: str, log_index: str, start: datetime,
-                  end: datetime, log_fields: LogFields, limits: EvidenceLimits, sample: list[dict[str, Any]],
-                  entry: Any) -> None:
+def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, start: datetime, end: datetime,
+                  limits: EvidenceLimits, sample: list[dict[str, Any]], entry: Any) -> None:
     """錯誤日誌的前處理（都是算術與歸類，沒有「算不算異常」的門檻）：
       error_logs      同一種錯誤只留最早的一筆原文，附樣本裡同類的筆數。樣本除了最新的那一批，還加上每個系統最早的幾筆
                       （各系統分開問）：某個系統大量報錯時，別的系統較早、較少的錯誤不會被擠掉
-      error_patterns  幾種主要的錯誤在事故期間與事故前各出現幾筆（ES 計數）；new = 事故前一筆都沒有
+      error_patterns  幾種主要的錯誤在事故期間與事故前各出現幾筆（向日誌資料庫計數）；new = 事故前一筆都沒有
       warnings        這些系統的警告，同樣歸類並比較事故前後
-    多兩次 ES 查詢（概況、計數）。任何一次失敗都只記進 notes，原本的樣本照舊。
+    多三次日誌查詢（各系統最早的錯誤、警告、計數）。任何一次失敗都只記進 notes，原本的樣本照舊。
 
     試過但拿掉的（eval 的 16 個案例量不到差別，見 EVAL.md）：把各系統第一筆錯誤的時間排成一張表、
     列出兩個以上系統都提到的識別碼。"""
-    time_of = lambda d: str(_dig(d, log_fields.time) or "")
+    log_fields: LogFields = store.fields
+    time_of = lambda d: str(_dig(d, TIME_FIELD) or "")
     system_of = lambda d: str(_dig(d, log_fields.service) or "")
-    message_of = lambda d: str(_dig(d, log_fields.message) or "")
+    message_of = lambda d: str(_dig(d, MESSAGE_FIELD) or "")
     warn_levels = limits.warn_levels if log_fields.level and limits.max_warn_patterns > 0 else ()
     try:
-        profile = grafana.error_profile(uid, log_index, incident.services, start, end, log_fields=log_fields,
-                                        error_levels=limits.error_levels, warn_levels=warn_levels,
-                                        first_n=FIRST_ERRORS_PER_SYSTEM, warn_n=WARN_SAMPLE)
+        profile = store.error_profile(incident.services, start, end, error_levels=limits.error_levels, warn_levels=warn_levels,
+                                      first_n=FIRST_ERRORS_PER_SYSTEM, warn_n=WARN_SAMPLE)
     except GrafanaError as e:
         log.warning("事故 %s 查不到錯誤概況：%s", incident.uid, e)
         evidence["notes"].append("錯誤概況查詢失敗：沒有事故前後的次數比較，樣本也只有最新的那一批")
-        profile = {"services": {}, "warnings": {"total": 0, "hits": []}}
+        profile = {"services": {}, "warnings": []}
 
     # 樣本 = 最新的那一批 + 每個系統最早的幾筆（大量報錯的系統不會把別人擠掉）
     pool, seen = [], set()
-    for doc in [*sample, *(d for item in profile["services"].values() for d in item["first"])]:
+    for doc in [*sample, *(d for first in profile["services"].values() for d in first)]:
         key = (time_of(doc), system_of(doc), message_of(doc))
         if key not in seen:
             seen.add(key)
@@ -406,7 +405,7 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
 
     def grouped(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
-        for doc in sorted(docs, key=time_of):
+        for doc in sorted(docs, key=lambda d: stamp(time_of(d))):
             item = groups.setdefault((system_of(doc), log_pattern(message_of(doc))), {"count": 0, "first": doc})
             item["count"] += 1
         return [{"system": system, "pattern": pattern, **item} for (system, pattern), item in groups.items()]
@@ -416,28 +415,27 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
                               for g in errors[:limits.max_log_samples]]
 
     # 要比較事故前後次數的錯誤：每個系統最早出現的那一種先選，其餘照樣本裡的筆數由多到少補滿
-    earliest = {system_of(item["first"][0]): log_pattern(message_of(item["first"][0]))
-                for item in profile["services"].values() if item["first"]}
+    earliest = {system_of(first[0]): log_pattern(message_of(first[0])) for first in profile["services"].values() if first}
     chosen = [g for g in errors if earliest.get(g["system"]) == g["pattern"]]
     chosen += sorted((g for g in errors if g not in chosen), key=lambda g: -g["count"])
     chosen = chosen[:limits.max_log_patterns] if profile["services"] else []
-    warns = sorted(grouped(profile["warnings"]["hits"]), key=lambda g: -g["count"])[:limits.max_warn_patterns]
+    warns = sorted(grouped(profile["warnings"]), key=lambda g: -g["count"])[:limits.max_warn_patterns]
     jobs = [(g, limits.error_levels) for g in chosen] + [(g, limits.warn_levels) for g in warns]
-    countable = [(g, levels, pattern_phrase(g["pattern"])) for g, levels in jobs]
+    countable = [(g, levels, pattern_words(g["pattern"])) for g, levels in jobs]
     before_start = start - timedelta(minutes=limits.baseline_minutes)
     try:
-        counted = grafana.count_phrases(uid, log_index, [(g["system"], *phrase, levels) for g, levels, phrase in countable if phrase],
-                                        start, end, before_start, log_fields=log_fields)
+        counted = store.count_phrases([(g["system"], words, levels) for g, levels, words in countable if words],
+                                      start, end, before_start)
     except GrafanaError as e:
         log.warning("事故 %s 數不出事故前後的次數：%s", incident.uid, e)
         evidence["notes"].append("事故前後的次數比較查詢失敗")
         counted = []
     numbers = iter(counted)
-    for g, _levels, phrase in countable:
-        during, before = next(numbers, (0, 0)) if phrase else (0, 0)
+    for g, _levels, words in countable:
+        during, before = next(numbers, (0, 0)) if words else (0, 0)
         row = {"system": g["system"], "pattern": g["pattern"], "example": message_of(g["first"])[:limits.max_message_chars],
                "first_seen": time_of(g["first"])}
-        if during > 0:   # 片語比不到（0 筆）就不給次數：寧可沒有，也不要給一個錯的 0
+        if during > 0:   # 比不到（0 筆）就不給次數：寧可沒有，也不要給一個錯的 0
             row.update(during=during, before=before, new=before == 0)
         (evidence["warnings"] if g in warns else evidence["error_patterns"]).append(row)
     if evidence["error_patterns"] or evidence["warnings"]:
@@ -445,30 +443,31 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, grafana: Grafana
                                      "before_minutes": limits.baseline_minutes}
 
 
-def _attributes(items: Any) -> dict[str, str]:
-    """OTLP 的 attributes 陣列 → {key: 值}（只取字串化之後的值）。"""
-    out = {}
-    for item in items or []:
-        value = item.get("value") or {}
-        out[str(item.get("key"))] = str(next(iter(value.values()), ""))
-    return out
+ERROR_TAG_VALUES = ("true", "error", "2")   # Jaeger 的 error 標籤、otel.status_code＝ERROR／2：都表示這個 span 失敗
+
+
+def _tags(items: Any) -> dict[str, str]:
+    """Jaeger 的 tags 陣列（[{key, type, value}]）→ {key: 字串化的值}。"""
+    return {str(item.get("key")): str(item.get("value", "")) for item in items or [] if isinstance(item, dict)}
 
 
 def summarize_trace(trace: dict[str, Any], trace_id: str, limits: EvidenceLimits) -> dict[str, Any] | None:
-    """把 Tempo 回的整條 Trace（batches／resourceSpans → scopeSpans → spans）壓成給 LLM 看的呼叫鏈。
-    origin = 失敗、而且底下沒有其他失敗 span 的那一段（最接近源頭的失敗點）。"""
+    """把一條 Trace（Jaeger 格式：spans 帶 processID 與 references，processes 對到服務名稱）壓成給 LLM 看的呼叫鏈。
+    失敗的判定：span 的 error 標籤是 true，或 otel.status_code 是 ERROR。錯誤訊息取 otel.status_description（沒有就取
+    error.message／exception.message）。origin = 失敗、而且底下沒有其他失敗 span 的那一段（最接近源頭的失敗點）。"""
+    processes = trace.get("processes") or {}
     spans = []
-    for batch in trace.get("batches") or trace.get("resourceSpans") or (trace.get("trace") or {}).get("resourceSpans") or []:
-        service = _attributes((batch.get("resource") or {}).get("attributes")).get("service.name", "")
-        for scope in batch.get("scopeSpans") or []:
-            for sp in scope.get("spans") or []:
-                status = sp.get("status") or {}
-                spans.append({"id": sp.get("spanId"), "parent": sp.get("parentSpanId") or None, "service": service,
-                              "name": str(sp.get("name", "")), "start": int(sp.get("startTimeUnixNano") or 0),
-                              "end": int(sp.get("endTimeUnixNano") or 0),
-                              "failed": status.get("code") in ("STATUS_CODE_ERROR", 2, "2"),
-                              "error": str(status.get("message") or "")[:limits.max_message_chars],
-                              "attrs": {k: v for k, v in _attributes(sp.get("attributes")).items() if k in SPAN_ATTRIBUTES}})
+    for sp in trace.get("spans") or []:
+        tags = _tags(sp.get("tags"))
+        parent = next((str(ref.get("spanID")) for ref in sp.get("references") or [] if ref.get("refType") == "CHILD_OF"), None)
+        failed = tags.get("error", "").lower() in ERROR_TAG_VALUES or tags.get("otel.status_code", "").lower() in ERROR_TAG_VALUES
+        message = tags.get("otel.status_description") or tags.get("error.message") or tags.get("exception.message") or ""
+        start = int(sp.get("startTime") or 0)   # 微秒
+        spans.append({"id": str(sp.get("spanID")), "parent": parent, "name": str(sp.get("operationName", "")),
+                      "service": str((processes.get(sp.get("processID")) or {}).get("serviceName", "")),
+                      "start": start, "end": start + int(sp.get("duration") or 0), "failed": failed,
+                      "error": message[:limits.max_message_chars],
+                      "attrs": {k: v for k, v in tags.items() if k in SPAN_ATTRIBUTES}})
     if not spans:
         return None
     by_id = {sp["id"]: sp for sp in spans}
@@ -482,7 +481,7 @@ def summarize_trace(trace: dict[str, Any], trace_id: str, limits: EvidenceLimits
     for sp in keep:
         row = {"service": sp["service"], "span": sp["name"],
                "called_by": by_id[sp["parent"]]["service"] if sp["parent"] in by_id else None,
-               "offset_ms": (sp["start"] - t0) // 1_000_000, "duration_ms": max(0, sp["end"] - sp["start"]) // 1_000_000,
+               "offset_ms": (sp["start"] - t0) // 1000, "duration_ms": max(0, sp["end"] - sp["start"]) // 1000,
                "status": "error" if sp["failed"] else "ok"}
         if sp["failed"]:
             row["error"] = sp["error"]
@@ -495,14 +494,14 @@ def summarize_trace(trace: dict[str, Any], trace_id: str, limits: EvidenceLimits
     return {"trace_id": trace_id, "spans": rows, "systems": sorted(systems), "truncated": len(spans) > len(rows)}
 
 
-def _collect_call_chains(evidence: dict[str, Any], incident: Incident, grafana: Grafana, uid: str, start: datetime,
-                         end: datetime, limits: EvidenceLimits, hinted_ids: list[str]) -> None:
-    """先用錯誤日誌裡的 trace id 直接取（立即取得到，而且一定跟這次的錯誤有關）；不夠才用搜尋補。
-    為什麼不只靠搜尋：實測 Tempo 2.9.0 收到 Trace 後 8～40 秒以上才搜尋得到，剛發生的事故常常搜不到自己的 Trace。"""
-    def add(trace_id: str) -> None:
+def _collect_call_chains(evidence: dict[str, Any], incident: Incident, store: Any, start: datetime, end: datetime,
+                         limits: EvidenceLimits, hinted_ids: list[str]) -> None:
+    """先用錯誤日誌裡的 trace id 直接取（一定跟這次的錯誤有關，而且不用等它搜尋得到）；不夠才用搜尋補，挑離現在最近的幾條。
+    搜尋結果有的已經帶整條 Trace（VictoriaTraces），有的只有編號（Tempo）：只有編號的，要用到時才取。"""
+    def add(trace_id: str, trace: dict[str, Any] | None = None) -> None:
         if trace_id and len(evidence["call_chains"]) < limits.max_traces \
                 and trace_id not in {c["trace_id"] for c in evidence["call_chains"]}:
-            trace = grafana.get_trace(uid, trace_id)
+            trace = trace or store.get_trace(trace_id)
             chain = summarize_trace(trace, trace_id, limits) if trace else None
             if chain:
                 evidence["call_chains"].append(chain)
@@ -511,18 +510,18 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, grafana: 
         for trace_id in hinted_ids[:limits.max_traces * 2]:      # 有些 id 可能被取樣掉、取不回來，多試幾個
             add(trace_id)
         if len(evidence["call_chains"]) < limits.max_traces:
-            # Tempo 的搜尋不保證先回最新的（實測會先回時間窗裡比較舊的）：多搜一些，自己挑離現在最近的幾條
-            found = grafana.search_error_traces(uid, incident.services, start, end, max(TRACE_SEARCH_LIMIT, limits.max_traces))
-            for item in sorted(found, key=lambda t: int(t.get("startTimeUnixNano") or 0), reverse=True):
-                add(str(item.get("traceID") or ""))
+            # 搜尋不保證先回最新的：多搜一些，自己挑離現在最近的幾條
+            found = store.search_error_traces(incident.services, start, end, max(TRACE_SEARCH_LIMIT, limits.max_traces))
+            for item in sorted(found, key=lambda t: t["start"], reverse=True):
+                add(item["id"], item["trace"])
     except GrafanaError as e:
         log.warning("事故 %s 撈不到呼叫鏈：%s", incident.uid, e)
-        evidence["notes"].append(f"呼叫鏈（Tempo）撈取失敗：{e}")
+        evidence["notes"].append(f"呼叫鏈撈取失敗：{e}")
         evidence["sources"]["call_chains"] = "ok" if evidence["call_chains"] else "failed"
         return
     evidence["sources"]["call_chains"] = "ok" if evidence["call_chains"] else "empty"
     if not evidence["call_chains"]:
-        evidence["notes"].append("Tempo 在事故時間窗內沒有這些系統的錯誤 Trace（沒有埋點、被取樣掉、或還沒寫入）")
+        evidence["notes"].append("事故時間窗內沒有這些系統的錯誤 Trace（沒有埋點、被取樣掉、或失敗沒有被標成 error）")
 
 
 # 每一種證據能回答什麼問題。缺的時候寫在註記上：「缺錯誤日誌｜還看不出哪個系統出了什麼錯…」
@@ -541,7 +540,7 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     """這次分析手上有什麼、缺什麼、為什麼缺。全部由程式從實際撈到的結果算出來，不經過 LLM。
     回傳四組：have（有的，白話的句子）、missing（缺的：查了但沒有，或沒有宣告）、failed（查詢失敗）、off（還沒接）。
     後三組的每一項是 (名稱, 原因與下一步)；off 的第二段是 config.yaml 要設的鍵。名稱要在 CAN_ANSWER 裡：
-    只說「沒有日誌」沒有用，要說少了它哪一種分析做不了、是哪一關沒過（索引沒資料、系統名稱對不上、等級對不上）。"""
+    只說「沒有日誌」沒有用，要說少了它哪一種分析做不了、是哪一關沒過（這段時間沒資料、系統名稱對不上、等級對不上）。"""
     out: dict[str, list[Any]] = {"have": [], "missing": [], "failed": [], "off": []}
     sources = evidence.get("sources") or {}
     systems = {a["system"] for a in evidence["anomalies"]}
@@ -557,18 +556,19 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     # 只有一個系統、也沒有宣告它的關係邊：不列為「缺」。系統自己出問題時不需要關係邊，列出來只會把人帶偏
 
     logs = sources.get("logs", "off")
+    log_source = evidence.get("log_source") or {"name": "日誌", "scope_hint": "檢查日誌有沒有在送進來"}
     if logs == "off":
-        out["off"].append(("日誌", "es.datasource_uid"))
+        out["off"].append(("日誌", "logs.datasource_uid"))
     elif logs == "failed":
-        out["failed"].append(("日誌", "Grafana 的 ES 資料源查不動，原因見服務的 log"))
+        out["failed"].append(("日誌", f"Grafana 的 {log_source['name']} 資料源查不動，原因見服務的 log"))
     elif logs == "empty":
         counts = evidence.get("log_counts")
         if counts is None:
             why = "沒有查到這些系統的錯誤日誌"
         elif counts["all"] == 0:
-            why = "索引在這段時間一筆資料都沒有。檢查 es.log_index 的名稱，以及日誌有沒有在送"
+            why = f"這段時間一筆日誌都沒有。{log_source['scope_hint']}"
         elif counts["services"] == 0:
-            why = (f"索引有 {counts['all']} 筆，但沒有一筆的 {log_fields.service} 是這些系統。"
+            why = (f"這段時間有 {counts['all']} 筆日誌，但沒有一筆的 {log_fields.service} 是這些系統。"
                    f"檢查欄位名稱，以及值是否跟告警的系統名稱完全一樣")
         elif log_fields.level:
             levels = "／".join(dict.fromkeys(v.upper() for v in error_levels))
@@ -592,18 +592,16 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
             out["missing"].append(("機台與批號", f"錯誤日誌裡沒有 {'、'.join(evidence['id_counts'])} 這些欄位"))
         if evidence["timelines"]:
             out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
-    if evidence["error_traces"]:
-        out["have"].append(f"ES 裡的 Trace 錯誤片段 {len(evidence['error_traces'])} 筆")
 
     chains = sources.get("call_chains", "off")
     if chains == "ok":
         out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
     elif chains == "empty":
-        out["missing"].append(("呼叫鏈", "Tempo 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error"))
+        out["missing"].append(("呼叫鏈", f"{evidence.get('trace_source', 'Trace 資料源')} 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error"))
     elif chains == "failed":
-        out["failed"].append(("呼叫鏈", "Grafana 的 Tempo 資料源查不動，原因見服務的 log"))
+        out["failed"].append(("呼叫鏈", "Grafana 的 Trace 資料源查不動，原因見服務的 log"))
     else:
-        out["off"].append(("呼叫鏈", "tempo.datasource_uid"))
+        out["off"].append(("呼叫鏈", "traces.datasource_uid"))
 
     metrics = sources.get("metrics", "off")
     if metrics == "ok":
@@ -648,8 +646,7 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     text = (f"{head}【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數）】\n"
-            f"{dump(evidence['error_logs'])}\n"
-            f"【3b. Trace 錯誤片段】\n{dump(evidence['error_traces'])}\n\n"
+            f"{dump(evidence['error_logs'])}\n\n"
             f"【4. 錯誤日誌裡各識別碼的出現次數】\n{dump(evidence['id_counts'])}\n\n")
     windows = evidence.get("count_windows") or {}
     counts_note = (f"during＝事故期間 {windows.get('during_minutes', '?')} 分鐘內的筆數，before＝事故前 {windows.get('before_minutes', '?')} 分鐘內的筆數；"

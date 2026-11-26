@@ -1,7 +1,8 @@
-"""測試共用：讀 Grafana 13.0.7 的真實樣本，以及一個照那些樣本的格式回話的假 Grafana（httpx.MockTransport）。"""
+"""測試共用：讀 Grafana 13.0.7（後面接 Victoria 元件）的真實樣本，以及一個照那些樣本回話的假 Grafana（httpx.MockTransport）。"""
 from __future__ import annotations
 
 import copy
+from datetime import timedelta
 import json
 import os
 import sys
@@ -13,6 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 FIXTURES = Path(__file__).parent / "fixtures" / "grafana13"
+
+from tests import logsql  # noqa: E402
 
 
 def recorded(name: str) -> dict:
@@ -30,31 +33,87 @@ def replay(name: str) -> httpx.Response:
     return httpx.Response(rec["status"], json=rec["response"])
 
 
-class FakeGrafana:
-    """假的 Grafana：ES 代理與註記。回應格式照 tests/fixtures/grafana13/ 的真實樣本。"""
+def victoria(kind: str) -> dict:
+    """victoria_logs.json／victoria_traces.json：record_victoria.py 經 Grafana 13.0.7 的資料源代理，從真的 VictoriaLogs v1.17.0、
+    VictoriaTraces v0.5.0 錄下來的請求與回應（{"exchanges": {名稱: [{"request", "status", "response"}]}}，回應是原樣的文字）。"""
+    return json.loads((FIXTURES / f"victoria_{kind}.json").read_text(encoding="utf-8"))
 
-    def __init__(self):
+
+def recorded_rows(dataset: str) -> list[dict]:
+    """某個 dataset 在真的 VictoriaLogs 裡的每一列（由舊到新）。factory＝6 筆錯誤 + 1 筆 INFO。"""
+    text = victoria("logs")["exchanges"][f"dump_{dataset}"][0]["response"]
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def recorded_trace(name: str = "get_trace") -> dict:
+    """錄下來的一條 Trace（Jaeger 格式）。get_trace＝失敗的那條（1111…）；get_trace_ok＝成功的（3333…）。"""
+    return json.loads(victoria("traces")["exchanges"][name][0]["response"])["data"][0]
+
+
+def log_row(time, service: str, level: str, message: str, **fields: str) -> dict:
+    """照 VictoriaLogs 回的樣子造一列日誌（欄位攤平成一層）。測試要加自己的資料時用，形狀跟 recorded_rows 的一樣。
+    time 可以是字串或 datetime。"""
+    time = time if isinstance(time, str) else time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"_time": time, "_stream": '{dataset="factory"}', "_msg": message, "dataset": "factory", "log.level": level,
+            "service.name": service, **fields}
+
+
+# 樣本是 2026-11-21 00:26～00:31 的資料，告警 webhook 的樣本是 02:41 發的（兩批是分開錄的）。假的 Grafana 會照查詢的時間範圍
+# 篩資料，所以預設把日誌與 Trace 的時間整批往後移這麼多，讓 6 筆錯誤落在 02:37:08～02:40:48（事故開始前的幾分鐘）。
+# 只移時間，其他內容原樣。要原始時間就用 FakeGrafana(shift=timedelta(0))。
+SHIFT = timedelta(hours=2, minutes=10, seconds=30)
+
+
+def shifted(rows: list[dict], by: timedelta) -> list[dict]:
+    return [{**row, "_time": (logsql.when(row["_time"]) + by).strftime("%Y-%m-%dT%H:%M:%SZ")} for row in rows]
+
+
+def shifted_trace(trace: dict, by: timedelta) -> dict:
+    micros = int(by.total_seconds() * 1_000_000)
+    return {**trace, "spans": [{**span, "startTime": span["startTime"] + micros} for span in trace["spans"]]}
+
+
+TRACE_MISSING = victoria("traces")["exchanges"]["get_trace_missing"][0]
+
+
+class FakeGrafana:
+    """假的 Grafana：VictoriaLogs／Jaeger（VictoriaTraces）／Prometheus 相容資料源的代理，加上註記。
+    Elasticsearch（_msearch）與 Tempo（資料源 uid 以 tempo 開頭）則是照錄下來的真實回應原樣回話。
+
+    日誌：self.logs 是 VictoriaLogs 會回的那種列；查詢交給 tests/logsql.py 照條件真的去篩（看不懂的語法回 400）。
+    Trace：self.traces 是 {trace id: Jaeger 格式的 Trace}；搜尋照 service 與 error 標籤挑。
+    預設的資料都是從真的元件錄下來的（tests/fixtures/grafana13/victoria_*.json）。"""
+
+    def __init__(self, shift: timedelta = SHIFT):
         self.annotations: dict[int, dict] = {}
         self.tag_index: dict[int, set[str]] = {}   # 照 Grafana 13.0.7 的實測行為：更新標籤後，舊標籤還查得到
         self.calls: list[tuple[str, str]] = []
         self.fail: set[str] = set()   # 路徑開頭在這裡面的請求回 500
-        self.es = recorded("es_proxy_logs_traces")["response"]
-        self.es_requests: list[str] = []
-        self.error_searches = 0        # 撈錯誤日誌的次數（= 做了幾次證據收集）
-        self.timeline_requests: list[list[dict]] = []
-        self.timeline_docs: dict[str, list[dict]] | None = None   # None = 從錯誤日誌樣本裡挑同一個識別碼的紀錄
+        self.fail_queries: set[str] = set()   # LogsQL 裡含這些字的查詢回 500（讓某一種查詢單獨失敗）
+        self.logs: list[dict] = shifted(recorded_rows("factory"), shift)
+        self.log_queries: list[dict[str, str]] = []   # 每一次日誌查詢送的表單：query、start、end
+        self.traces: dict[str, dict] = {}
+        for name in ("search_error_traces", "get_trace_ok"):
+            for exchange in victoria("traces")["exchanges"][name]:
+                for trace in json.loads(exchange["response"])["data"]:
+                    self.traces[trace["traceID"]] = shifted_trace(trace, shift)
+        self.trace_requests: list[httpx.Request] = []
+        # Elasticsearch 與 Tempo：照錄下來的真實回應回話（不篩資料）。msearch_replies 是照順序用掉的 {"status", "response"}
+        self.msearch_replies: list[dict] = []
+        self.msearch_requests: list[str] = []
         self.tempo_search = recorded("tempo_search")["response"]
-        self.tempo_traces = {"11111111111111111111111111111111": recorded("tempo_trace")["response"]}
-        self.tempo_requests: list[httpx.Request] = []
+        self.tempo_traces = {"11" * 16: recorded("tempo_trace")["response"]}
         self.metric_requests: list[httpx.Request] = []
-        self.count_requests: list[list[dict]] = []
-        self.profile_requests: list[list[dict]] = []
-        self.phrase_requests: list[list[dict]] = []
-        self.before_counts: dict[str, int] = {}     # 片語 -> 事故前出現幾筆（預設 0 = 事故前沒出現過）
-        self.warning_docs: list[dict] = []          # 錯誤概況查詢裡「警告」那個子查詢要回的文件
-        self.profile_docs: list[dict] | None = None   # 錯誤概況查詢看到的錯誤日誌；None = 跟最新樣本同一批
-        self.log_counts = "log_counts_no_errors"   # 換成 log_counts_index_empty／log_counts_service_mismatch 測另外兩種原因
         self.transport = httpx.MockTransport(self.handle)
+
+    def queries(self, containing: str) -> list[str]:
+        """送過的 LogsQL 裡含這段字的那些。"""
+        return [q["query"] for q in self.log_queries if containing in q["query"]]
+
+    @property
+    def error_searches(self) -> int:
+        """撈錯誤日誌的次數（= 做了幾次證據收集）：search_errors 是唯一用「最新的在前」排序的查詢。"""
+        return len(self.queries("sort by (_time) desc"))
 
     def query_range(self, query: str) -> httpx.Response:
         """Prometheus 相容資料源的代理：回 Grafana 13.0.7 + Prometheus 3.5.0 + RabbitMQ 3.12.1 實際錄下來的回應
@@ -69,23 +128,62 @@ class FakeGrafana:
             name = "prom_query_range_empty"
         return replay(name)
 
+    def logsql(self, request: httpx.Request) -> httpx.Response:
+        form = dict(httpx.QueryParams(request.content.decode()))
+        self.log_queries.append(form)
+        if any(part in form["query"] for part in self.fail_queries):
+            return httpx.Response(500, text="boom")
+        try:
+            rows = logsql.run(self.logs, form["query"], logsql.when(form["start"]), logsql.when(form["end"]))
+        except logsql.LogsQLError as e:   # 真的 VictoriaLogs 也是回 400 與一段文字
+            return httpx.Response(400, text=f'remoteAddr: "127.0.0.1:1"; requestURI: /select/logsql/query; {e}')
+        return httpx.Response(200, text="".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                              headers={"Content-Type": "application/stream+json"})
+
+    def jaeger(self, request: httpx.Request) -> httpx.Response:
+        self.trace_requests.append(request)
+        path = request.url.path
+        envelope = lambda traces: {"data": traces, "errors": None, "limit": 0, "offset": 0, "total": 0}
+        if "/api/traces/" in path:
+            trace = self.traces.get(path.rsplit("/", 1)[1])
+            return httpx.Response(200, json=envelope([trace])) if trace else httpx.Response(404, text=TRACE_MISSING["response"])
+        params = request.url.params
+        tags = json.loads(params.get("tags") or "{}")
+        start, end = int(params["start"]), int(params["end"])
+
+        def matches(trace: dict) -> bool:
+            # Jaeger 的搜尋：這個服務有一個 span 帶著全部指定的標籤，而且 Trace 落在時間範圍裡
+            for span in trace["spans"]:
+                own = {t["key"]: str(t["value"]) for t in span.get("tags") or []}
+                if trace["processes"][span["processID"]]["serviceName"] == params["service"] \
+                        and all(own.get(k) == v for k, v in tags.items()) and start <= span["startTime"] <= end:
+                    return True
+            return False
+        return httpx.Response(200, json=envelope([t for t in self.traces.values() if matches(t)][:int(params.get("limit", 20))]))
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls.append((request.method, path))
         if any(path.startswith(p) for p in self.fail):
             return httpx.Response(500, json={"message": "boom"})
-        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/_msearch"):
-            return self.msearch(request.content.decode())
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/select/logsql/query"):
+            return self.logsql(request)
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/v1/query_range"):
             self.metric_requests.append(request)
             return self.query_range(request.url.params["query"])
-        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/search"):
-            self.tempo_requests.append(request)
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/_msearch"):
+            self.msearch_requests.append(request.content.decode())
+            reply = self.msearch_replies.pop(0)
+            return httpx.Response(reply["status"], text=reply["response"], headers={"Content-Type": "application/json"})
+        if path.startswith("/api/datasources/proxy/uid/tempo") and path.endswith("/api/search"):
+            self.trace_requests.append(request)
             return httpx.Response(200, json=self.tempo_search)
-        if path.startswith("/api/datasources/proxy/uid/") and "/api/traces/" in path:
-            self.tempo_requests.append(request)
+        if path.startswith("/api/datasources/proxy/uid/tempo") and "/api/traces/" in path:
+            self.trace_requests.append(request)
             trace = self.tempo_traces.get(path.rsplit("/", 1)[1])
             return httpx.Response(200, json=trace) if trace else httpx.Response(404)   # Tempo 的 404 沒有內容
+        if path.startswith("/api/datasources/proxy/uid/") and "/api/traces" in path:
+            return self.jaeger(request)
         if path == "/api/annotations" and request.method == "POST":
             self.next_id = getattr(self, "next_id", 0) + 1
             new_id = self.next_id
@@ -112,63 +210,13 @@ class FakeGrafana:
         return httpx.Response(404, json={"message": "Not found"})
 
 
-def _msearch(self: FakeGrafana, body: str) -> httpx.Response:
-    """ES 代理。撈錯誤日誌的查詢有三個條件（時間、系統、等級）→ 回錄下來的真實回應；
-    關聯時間線的查詢只有兩個條件（時間、某個識別碼）→ 回帶那個識別碼的紀錄，由舊到新。"""
-    lines = [json.loads(line) for line in body.splitlines() if line.strip()]
-    queries = lines[1::2]
-    filters = lambda q: q["query"]["bool"]["filter"]
-    recorded_logs = [h["_source"] for h in self.es["responses"][0]["hits"]["hits"]]
-    total = lambda docs: {"total": {"value": len(docs), "relation": "eq"}, "max_score": None}
-    if all(q.get("size") == 0 and any("match_phrase" in f for f in filters(q)) for q in queries):
-        # 事故前後的次數比較（Grafana.count_phrases）：兩兩一組（事故期間、事故前）。事故期間 = 樣本裡照順序含這些詞的筆數；
-        # 事故前預設 0，測試可以用 before_counts[片語] 指定。回應的形狀跟錄下來的計數回應（log_counts_*.json）一樣
-        self.phrase_requests.append(queries)
-        responses = []
-        for i, q in enumerate(queries):
-            phrase = next(f["match_phrase"] for f in filters(q) if "match_phrase" in f)["message"]["query"]
-            service = filters(q)[1]["bool"]["should"][0]["terms"]
-            (_field, wanted), = service.items()
-            in_order = lambda text: __import__("re").search(".*".join(map(__import__("re").escape, phrase.split())), text) is not None
-            during = sum(1 for d in recorded_logs if (d.get("service") or {}).get("name") in wanted and in_order(str(d.get("message", ""))))
-            count = during if i % 2 == 0 else self.before_counts.get(phrase, 0)
-            responses.append({"hits": {"total": {"value": count, "relation": "eq"}, "max_score": None, "hits": []}, "status": 200})
-        return httpx.Response(200, json={"responses": responses})
-    if all(q.get("size") == 0 and q.get("track_total_hits") for q in queries):
-        # 錯誤日誌 0 筆之後的計數查詢（Grafana.count_logs）：回錄下來的真實回應，預設是「這些系統有日誌、但沒有錯誤等級的」
-        self.count_requests.append(queries)
-        return replay(self.log_counts)
-    if all(q.get("track_total_hits") and q.get("size", 0) > 0 and len(filters(q)) == 3 for q in queries):
-        # 錯誤概況（Grafana.error_profile）：每個系統各自最早的幾筆與總筆數，最後一個子查詢（有的話）是警告。
-        # 從錄下來的錯誤日誌樣本裡照系統挑、由舊到新排；樣本裡沒有警告，警告用 self.warning_docs 指定
-        self.profile_requests.append(queries)
-        responses = []
-        for q in queries:
-            (_field, wanted), = filters(q)[1]["bool"]["should"][0]["terms"].items()
-            (_level_field, levels), = filters(q)[2]["bool"]["should"][0]["terms"].items() if "bool" in filters(q)[2] else (("", []),)
-            source = self.warning_docs if "WARN" in levels else (recorded_logs if self.profile_docs is None else self.profile_docs)
-            docs = sorted((d for d in source if (d.get("service") or {}).get("name") in wanted), key=lambda d: str(d.get("@timestamp", "")))
-            responses.append({"hits": {**total(docs), "hits": [{"_source": d} for d in docs[:q["size"]]]}, "status": 200})
-        return httpx.Response(200, json={"responses": responses})
-    if any(len(q["query"]["bool"]["filter"]) == 3 for q in queries):
-        self.es_requests.append(body)
-        self.error_searches += 1
-        return httpx.Response(200, json=self.es)
-    self.timeline_requests.append(queries)
-    responses = []
-    for q in queries:
-        (field, values), = q["query"]["bool"]["filter"][1]["bool"]["should"][0]["terms"].items()
-        if self.timeline_docs is not None:
-            docs = self.timeline_docs.get(values[0], [])
-        else:
-            docs = sorted((h["_source"] for h in self.es["responses"][0]["hits"]["hits"] if h["_source"].get(field) == values[0]),
-                          key=lambda d: str(d.get(next(iter(q["sort"][0])), "")))
-        shown = docs[:q["size"]]
-        responses.append({"hits": {"total": {"value": len(docs), "relation": "eq"}, "hits": [{"_source": d} for d in shown]}})
-    return httpx.Response(200, json={"responses": responses})
-
-
-FakeGrafana.msearch = _msearch
+def collect_evidence(incident, edges, grafana, *, logs_datasource_uid: str = "", traces_datasource_uid: str = "",
+                     log_fields=None, logs_filter: str = "", **kw):
+    """測試用的捷徑：用 VictoriaLogs／VictoriaTraces 當來源呼叫 rca.collect_evidence（uid 是空的 = 沒接）。"""
+    from src import logs, rca, traces
+    store = logs.VictoriaLogs(grafana, logs_datasource_uid, log_fields or logs.LogFields(), logs_filter) if logs_datasource_uid else None
+    chains = traces.VictoriaTraces(grafana, traces_datasource_uid) if traces_datasource_uid else None
+    return rca.collect_evidence(incident, edges, grafana, logs=store, traces=chains, **kw)
 
 
 @pytest.fixture

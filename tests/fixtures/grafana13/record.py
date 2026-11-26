@@ -1,4 +1,6 @@
-"""錄製 es_proxy_logs_traces.json 與 annotation_*.json 的腳本（留著是為了交代來源，測試不會執行它）。
+"""錄製 annotation_*.json 與 meta.json 的腳本（留著是為了交代來源，測試不會執行它）。
+這支腳本當時也錄了 Elasticsearch 的樣本（es_proxy_logs_traces.json）；資料來源換成 Victoria 之後那個檔案已經刪掉，
+日誌與 Trace 的樣本改由 record_victoria.py 錄。下面 Elasticsearch 的段落保留原樣，只是為了說明註記樣本是在什麼環境錄的。
 告警 webhook 的樣本（webhook_*.json）是另一支 record_webhooks.py 錄的。
 
 前提：本機拋棄式環境——Grafana 13.0.7（127.0.0.1:23000，admin/admin）、Prometheus（:29090，已回填

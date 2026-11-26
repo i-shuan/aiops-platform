@@ -11,7 +11,7 @@ from src import rca, report
 from src.db import Database
 from src.grafana import Grafana, parse_webhook
 from src.grouping import converge
-from tests.conftest import webhook
+from tests.conftest import collect_evidence, webhook
 
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)   # 樣本裡 MQ 告警的 startsAt
 NOW = T0 + timedelta(seconds=64)
@@ -30,8 +30,7 @@ def incident():
 
 def evidence(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    return rca.collect_evidence(incident(), EDGES, g, es_datasource_uid="es", log_index="factory-logs",
-                                trace_index="factory-traces", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
+    return collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
 
 
 def llm(answer, status=200):
@@ -56,24 +55,23 @@ def test_evidence_has_the_four_packs(fake):
     assert [(a["system"], a["status"], a["values"]) for a in ev["anomalies"]] == [
         ("mq-broker", "firing", {"A": 350, "C": 1}), ("cim-eap", "firing", {"A": 12, "C": 1})]
     assert ev["edges"][0] == {"upstream": "mq-broker", "downstream": "cim-eap"}
-    assert (len(ev["error_logs"]), sum(e.get("similar_in_sample", 1) for e in ev["error_logs"])) == (4, 6) and len(ev["error_traces"]) == 2
-    assert ev["id_counts"]["eqp_id"] == {"EQP-CVD-07": 3, "STK01": 1, "EQP-ETCH-02": 1}
-    assert ev["id_counts"]["lot_id"]["LOT24A0031"] == 3 and ev["id_counts"]["carrier_id"]["FOUP0912"] == 3
-    body = fake.es_requests[0]
-    assert "cim-eap" in body and "mq-broker" in body  # 只撈這個事故的系統
+    # 只撈這個事故的系統（mq-broker、cim-eap）：樣本裡 amhs-mcs 的那一筆錯誤（STK01）不在裡面
+    assert (len(ev["error_logs"]), sum(e.get("similar_in_sample", 1) for e in ev["error_logs"])) == (3, 5)
+    assert ev["id_counts"]["eqp_id"] == {"EQP-CVD-07": 3, "EQP-ETCH-02": 1}
+    assert ev["id_counts"]["lot_id"]["LOT24A0031"] == 2 and ev["id_counts"]["carrier_id"]["FOUP0912"] == 2
+    [query] = fake.queries("sort by (_time) desc")
+    assert query.startswith('"service.name":in("cim-eap","mq-broker") ')
     prompt = rca.build_prompt(ev)
     for part in ("【1.", "【2.", "【3.", "【4.", "EQP-CVD-07", "T3 timeout"):
         assert part in prompt
 
 
-def test_evidence_without_log_datasource_or_when_es_fails_is_still_usable(fake):
+def test_evidence_without_log_datasource_or_when_the_query_fails_is_still_usable(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    ev = rca.collect_evidence(incident(), EDGES, g, es_datasource_uid="", log_index="*", trace_index="",
-                              id_fields=["eqp_id"], now=NOW)
-    assert ev["error_logs"] == [] and "沒有設定日誌資料源" in ev["notes"][0] and fake.es_requests == []
+    ev = collect_evidence(incident(), EDGES, g, logs_datasource_uid="", id_fields=["eqp_id"], now=NOW)
+    assert ev["error_logs"] == [] and "沒有設定日誌資料源" in ev["notes"][0] and fake.log_queries == []
     fake.fail.add("/api/datasources/proxy")
-    ev = rca.collect_evidence(incident(), EDGES, g, es_datasource_uid="es", log_index="*", trace_index="",
-                              id_fields=["eqp_id"], now=NOW)
+    ev = collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW)
     assert ev["error_logs"] == [] and "撈取失敗" in ev["notes"][0] and len(ev["anomalies"]) == 2
 
 

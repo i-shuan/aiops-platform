@@ -1,4 +1,4 @@
-"""Grafana 對接層：全部用 Grafana 13.0.7 的真實樣本（tests/fixtures/grafana13/）驗解析。"""
+"""Grafana 對接層：全部用 Grafana 13.0.7（後面是 VictoriaLogs／VictoriaTraces）的真實樣本（tests/fixtures/grafana13/）驗解析。"""
 from __future__ import annotations
 
 import json
@@ -8,11 +8,21 @@ import httpx
 import pytest
 
 from src.grafana import Grafana, GrafanaError, WebhookError, parse_webhook
-from tests.conftest import recorded, replay, webhook
+from src.logs import LogFields, VictoriaLogs
+from src.traces import VictoriaTraces
+from tests.conftest import FakeGrafana, recorded, recorded_rows, victoria, webhook
 
 
 def client(handler) -> Grafana:
     return Grafana("http://grafana.test", "token", transport=httpx.MockTransport(handler))
+
+
+def vlogs(handler, uid="u", **kw) -> VictoriaLogs:
+    return VictoriaLogs(client(handler), uid, **kw)
+
+
+def vtraces(handler, uid="vt-uid") -> VictoriaTraces:
+    return VictoriaTraces(client(handler), uid)
 
 
 def test_firing_webhook_becomes_an_alert():
@@ -59,28 +69,145 @@ def test_things_that_are_not_grafana_webhooks_are_rejected(payload):
         parse_webhook(payload)
 
 
-def test_es_proxy_returns_error_logs_and_error_spans():
-    seen = {}
+NOW = datetime(2026, 11, 21, 0, 36, 38, tzinfo=timezone.utc)   # 樣本錄製的時間
+HOUR = (NOW - timedelta(hours=1), NOW + timedelta(minutes=1))
+SERVICES = ["mq-broker", "cim-eap", "amhs-mcs"]
+
+
+def answering(exchanges: list[dict], seen: list[httpx.Request]):
+    """照順序回錄下來的真實回應（原樣的文字）。"""
+    queue = list(exchanges)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["path"], seen["body"] = request.url.path, request.content.decode()
-        return replay("es_proxy_logs_traces")
-
-    now = datetime(2026, 11, 21, 0, 36, tzinfo=timezone.utc)
-    found = client(handler).search_errors("es-uid", "factory-logs", "factory-traces", ["cim-eap", "amhs-mcs"],
-                                          now - timedelta(hours=1), now)
-    assert seen["path"] == "/api/datasources/proxy/uid/es-uid/_msearch"
-    lines = [json.loads(line) for line in seen["body"].splitlines()]
-    assert [lines[0]["index"], lines[2]["index"]] == ["factory-logs", "factory-traces"]
-    assert len(found["logs"]) == 6 and len(found["traces"]) == 2
-    assert found["logs"][1]["eqp_id"] == "EQP-ETCH-02" and found["traces"][0]["error"]["message"]
+        seen.append(request)
+        rec = queue.pop(0)
+        return httpx.Response(rec["status"], text=rec["response"])
+    return handler
 
 
-def test_es_error_inside_msearch_is_reported():
-    body = {"responses": [{"error": {"type": "index_not_found_exception"}, "status": 404}]}
-    now = datetime(2026, 11, 21, tzinfo=timezone.utc)
-    with pytest.raises(GrafanaError, match="index_not_found"):
-        client(lambda r: httpx.Response(200, json=body)).search_errors("u", "logs", None, ["a"], now, now)
+def form(request: httpx.Request) -> dict:
+    return dict(httpx.QueryParams(request.content.decode()))
+
+
+def test_error_logs_come_from_the_victorialogs_proxy_newest_first():
+    seen: list[httpx.Request] = []
+    found = vlogs(answering(victoria("logs")["exchanges"]["search_errors"], seen), "vl-uid", extra_filter='{dataset="factory"}').search_errors(
+        SERVICES, *HOUR, 50)
+    [request] = seen
+    assert (request.method, request.url.path) == ("POST", "/api/datasources/proxy/uid/vl-uid/select/logsql/query")
+    assert form(request) == victoria("logs")["exchanges"]["search_errors"][0]["request"]["form"]   # 送的跟錄製時一模一樣
+    assert len(found) == 6 and [d["_time"] for d in found] == sorted((d["_time"] for d in found), reverse=True)
+    assert found[1]["eqp_id"] == "EQP-ETCH-02" and found[1]["service.name"] == "cim-eap" and found[1]["log.level"] == "ERROR"
+    assert found[0]["_msg"] == "consumer lag exceeded on queue lot.dispatch"
+
+
+def test_every_log_query_reads_the_recorded_victorialogs_answer():
+    """每一個查詢方法：送出的請求跟錄製時一樣，而且讀得懂真的 VictoriaLogs 回的內容。"""
+    recorded_logs = victoria("logs")["exchanges"]
+    k8s = LogFields(service="kubernetes.container_name", level="")
+
+    def call(name, method, *args, extra_filter="", log_fields=LogFields(), **kw):
+        seen: list[httpx.Request] = []
+        store = vlogs(answering(recorded_logs[name], seen), "<uid>", fields=log_fields, extra_filter=extra_filter)
+        result = getattr(store, method)(*args, **kw)
+        assert [form(r) for r in seen] == [x["request"]["form"] for x in recorded_logs[name]], name
+        return result
+
+    profile = call("error_profile", "error_profile", SERVICES, *HOUR, warn_levels=("WARN", "WARNING"), first_n=2,
+                   extra_filter='{dataset="factory"}')
+    assert {s: [d["_msg"] for d in docs] for s, docs in profile["services"].items()} == {
+        "mq-broker": ["consumer lag exceeded on queue lot.dispatch"], "amhs-mcs": ["transfer job aborted: destination port occupied"],
+        "cim-eap": ["T3 timeout waiting S6F12 reply", "T3 timeout waiting S2F42 reply"]}   # 每個系統各自最早的兩筆
+    assert profile["warnings"] == []
+    warned = call("error_profile_warnings", "error_profile", SERVICES, *HOUR, warn_levels=("WARN", "WARNING"),
+                  extra_filter='{dataset="count-no-errors"}')
+    assert [d["_msg"] for d in warned["warnings"]] == ["stocker STK01 port P3 slow to respond", "connection pool usage 92% (184/200)"]
+    counts = call("count_phrases", "count_phrases", [
+        ("cim-eap", ["timeout", "waiting", "reply"], ("ERROR",)), ("cim-eap", ["equipment", "disconnected"], ("ERROR",)),
+        ("mq-broker", ["consumer", "lag", "exceeded", "on", "queue", "lot.dispatch"], ("ERROR",)),
+        ("amhs-mcs", ["no", "such", "words"], ("ERROR",))],
+        NOW - timedelta(seconds=450), HOUR[1], HOUR[0], extra_filter='{dataset="factory"}')
+    assert counts == [(1, 2), (0, 1), (1, 0), (0, 0)]   # （事故期間, 事故前）
+    assert call("count_logs_factory", "count_logs", SERVICES, *HOUR, extra_filter='{dataset="factory"}') == {"all": 7, "services": 7}
+    assert call("count_logs_count-mismatch", "count_logs", SERVICES, *HOUR, extra_filter='{dataset="count-mismatch"}') == {
+        "all": 4, "services": 0}
+    assert call("count_logs_count-empty", "count_logs", SERVICES, *HOUR, extra_filter='{dataset="count-empty"}') == {"all": 0, "services": 0}
+    lines = call("search_timeline", "search_timeline", "lot_id", ["LOT24A0031", "LOT24A0060", "LOT-NOPE"], *HOUR, 2,
+                 extra_filter='{dataset="factory"}')
+    assert {v: (len(got["hits"]), got["total"]) for v, got in lines.items()} == {
+        "LOT24A0031": (2, 3), "LOT24A0060": (1, 1), "LOT-NOPE": (0, 0)}
+    assert [d["service.name"] for d in lines["LOT24A0031"]["hits"]] == ["cim-eap", "cim-eap"]   # 由舊到新的前兩筆
+    unparsed = call("search_errors_unparsed", "search_errors", ["cim-eap", "mq-broker"], *HOUR, 50, log_fields=k8s,
+                    extra_filter='{dataset="unparsed"}')
+    # 沒有等級欄位：照訊息文字裡的字樣挑。INFO 的那筆寫了 "0 error(s)" 也會被挑進來（已知限制）
+    assert [d["_msg"].split(" | ")[1].strip() for d in unparsed] == ["FATAL", "INFO", "ERROR"]
+    assert call("quoted_service_name", "search_errors", ['a"b\\c'], *HOUR, 5, extra_filter='{dataset="factory"}') == []
+
+
+def test_a_rejected_log_query_is_reported_without_the_url_noise():
+    """VictoriaLogs 的 400 前面有一大段 remoteAddr 與整條網址；錯誤訊息只留真正的原因。"""
+    [rec] = victoria("logs")["exchanges"]["bad_filter"]
+    assert rec["status"] == 400 and rec["response"].startswith("remoteAddr:")
+    with pytest.raises(GrafanaError) as e:
+        vlogs(answering([rec], []), extra_filter="{dataset=").search_errors(SERVICES, *HOUR, 5)
+    assert "cannot parse query" in str(e.value) and "remoteAddr" not in str(e.value) and "requestURI" not in str(e.value)
+
+
+def test_a_log_answer_that_is_not_json_lines_is_reported():
+    with pytest.raises(GrafanaError, match="不是一行一個 JSON"):
+        vlogs(lambda r: httpx.Response(200, text="<html>login</html>")).search_errors(["a"], *HOUR)
+
+
+def test_fake_logs_answer_like_the_real_one():
+    """假的 Grafana 用 tests/logsql.py 篩資料。這裡拿同一批資料、錄製時送過的每一條查詢去問它，答案要跟真的 VictoriaLogs 一樣
+    （stats by 的列順序 VictoriaLogs 不保證，所以那一種不比順序）。"""
+    recorded_logs = victoria("logs")["exchanges"]
+    fake = FakeGrafana(shift=timedelta(0))
+    fake.logs = [row for name in recorded_logs if name.startswith("dump_") for row in recorded_rows(name[5:])]
+    http = httpx.Client(transport=fake.transport, base_url="http://grafana.test")
+    checked = 0
+    for name, exchanges in recorded_logs.items():
+        for rec in exchanges:
+            got = http.post("/api/datasources/proxy/uid/x/select/logsql/query", data=rec["request"]["form"])
+            assert got.status_code == rec["status"], name
+            if rec["status"] != 200:
+                continue
+            rows = lambda text: [json.loads(line) for line in text.splitlines() if line.strip()]
+            order = (lambda items: sorted(items, key=json.dumps)) if "stats by" in rec["request"]["form"]["query"] else list
+            assert order(rows(got.text)) == order(rows(rec["response"])), name
+            checked += 1
+    assert checked >= 20
+
+
+def test_traces_come_from_the_jaeger_proxy():
+    recorded_traces = victoria("traces")["exchanges"]
+    seen: list[httpx.Request] = []
+    found = vtraces(answering(recorded_traces["search_error_traces"], seen)).search_error_traces(
+        ["web-portal", "mes-api", "mes-db"], *HOUR, 20)
+    assert [r.url.path for r in seen] == ["/api/datasources/proxy/uid/vt-uid/api/traces"] * 3   # Jaeger 的搜尋一次一個服務
+    assert [dict(r.url.params) for r in seen] == [x["request"]["params"] for x in recorded_traces["search_error_traces"]]
+    assert sorted(t["id"] for t in found) == ["11" * 16, "22" * 16]   # 兩個服務都搜到同樣兩條：各留一份；成功的那條沒有
+    assert all(t["trace"]["spans"] and t["trace"]["processes"] for t in found)
+    assert {t["id"]: t["start"] for t in found} == {"11" * 16: 1795220838000000, "22" * 16: 1795220840000000}   # 最早的 span 的開始時間（微秒）
+    one = vtraces(answering(recorded_traces["get_trace"], seen)).get_trace("11" * 16)
+    assert one["traceID"] == "11" * 16 and len(one["spans"]) == 4
+    assert seen[-1].url.path == "/api/datasources/proxy/uid/vt-uid/api/traces/" + "11" * 16
+    assert vtraces(answering(recorded_traces["get_trace_missing"], seen)).get_trace("ff" * 16) is None   # 404
+    assert vtraces(answering(recorded_traces["search_no_such_service"], seen)).search_error_traces(["nope"], *HOUR, 20) == []
+
+
+def test_fake_traces_answer_like_the_real_one():
+    fake = FakeGrafana(shift=timedelta(0))
+    g = VictoriaTraces(Grafana("http://grafana.test", "t", transport=fake.transport), "u")
+    recorded_traces = victoria("traces")["exchanges"]
+    real = lambda name: [t for x in recorded_traces[name] for t in json.loads(x["response"])["data"]]
+    found = g.search_error_traces(["web-portal", "mes-api", "mes-db"], *HOUR, 20)
+    assert sorted((t["trace"] for t in found), key=lambda t: t["traceID"]) == sorted(
+        {t["traceID"]: t for t in real("search_error_traces")}.values(), key=lambda t: t["traceID"])
+    assert g.search_error_traces(["nope"], *HOUR, 20) == []
+    assert g.search_error_traces(["mes-api"], NOW - timedelta(minutes=5), NOW, 20) == []   # Trace 在時間窗之外
+    assert g.get_trace("11" * 16) == real("get_trace")[0] and g.get_trace("33" * 16) == real("get_trace_ok")[0]
+    assert g.get_trace("ff" * 16) is None
 
 
 def test_annotation_is_created_once_then_patched(fake):
@@ -101,16 +228,17 @@ def test_recorded_annotation_responses_have_the_fields_we_read():
 def test_auth_failure_is_reported_and_transient_errors_are_retried(monkeypatch):
     monkeypatch.setattr("src.grafana.time.sleep", lambda s: None)
     now = datetime(2026, 11, 21, tzinfo=timezone.utc)
-    search = lambda g: g.search_errors("u", "logs", "traces", ["a"], now, now)
+    search = lambda g: VictoriaLogs(g, "u").search_errors(["a"], now, now)
     with pytest.raises(GrafanaError, match="HTTP 401"):
         search(client(lambda r: httpx.Response(401, json={"message": "Unauthorized"})))
     attempts = []
 
     def flaky(request: httpx.Request) -> httpx.Response:
         attempts.append(1)
-        return httpx.Response(503) if len(attempts) < 3 else replay("es_proxy_logs_traces")
+        return httpx.Response(503) if len(attempts) < 3 else httpx.Response(
+            200, text=victoria("logs")["exchanges"]["search_errors"][0]["response"])
 
-    assert len(search(client(flaky))["logs"]) == 6 and len(attempts) == 3
+    assert len(search(client(flaky))) == 6 and len(attempts) == 3
     with pytest.raises(GrafanaError, match="重試後仍失敗"):
         search(client(lambda r: httpx.Response(503)))
 

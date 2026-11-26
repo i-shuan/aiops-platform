@@ -11,6 +11,7 @@ import pytest
 from src import db as dbmod
 from src import rca, report
 from src.grafana import Grafana
+from tests.conftest import collect_evidence
 from src.grouping import Alert, converge
 from tests.test_main import rows, world  # noqa: F401（fixture）
 
@@ -28,8 +29,7 @@ def incident(*services):
 
 def evidence(fake, es="es"):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    return rca.collect_evidence(incident(), EDGES, grafana, es_datasource_uid=es, log_index="factory-logs-*",
-                                trace_index="factory-traces", id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
+    return collect_evidence(incident(), EDGES, grafana, logs_datasource_uid=es, id_fields=["eqp_id", "lot_id", "carrier_id"], now=NOW)
 
 
 def answer(*candidates, summary="mq-broker 最可能是源頭"):

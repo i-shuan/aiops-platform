@@ -1,14 +1,11 @@
-"""跟公司 Grafana 講話的唯一出口：只用 config.yaml 的 grafana.url + 一把 Editor Token，不直連任何資料庫、Prometheus 或 ES。
+"""跟公司 Grafana 講話的唯一出口：只用 config.yaml 的 grafana.url + 一把 Editor Token，不直連任何資料庫。
 
-  parse_webhook     解析 Grafana 告警 webhook（Contact Point 推進來的）：哪條規則、哪個系統、嚴重度、firing／resolved
-  search_errors     POST /api/datasources/proxy/uid/<uid>/_msearch  經 Grafana 的 ES 資料源查錯誤日誌與 Trace 片段
-                    （欄位名稱由 LogFields／TraceFields 決定，來自 config.yaml）
-  search_timeline   同一個代理：用批號／載具這類關聯碼把跨系統的日誌撈回來（不限等級），給「關聯時間線」用
-  search_error_traces／get_trace  GET /api/datasources/proxy/uid/<uid>/api/search、/api/traces/<id>
-                    經 Grafana 的 Tempo 資料源找出錯誤 Trace、取回整條呼叫鏈
-  upsert_annotation POST／PATCH /api/annotations                  每個事故一筆註記
+  parse_webhook       解析 Grafana 告警 webhook（Contact Point 推進來的）：哪條規則、哪個系統、嚴重度、firing／resolved
+  Grafana.request     所有 HTTP 呼叫共用（重試、錯誤訊息）。日誌與 Trace 的查詢在 src/logs.py、src/traces.py，都經這裡走資料源代理
+  Grafana.query_range 指標：GET /api/datasources/proxy/uid/<uid>/api/v1/query_range（Prometheus 相容：VictoriaMetrics、Prometheus、Mimir）
+  Grafana.upsert_annotation  POST／PATCH /api/annotations，每個事故一筆註記
 
-格式以 tests/fixtures/grafana13/（Grafana 13.0.7 實際送出、實際回應的內容）為準。
+格式以 tests/fixtures/grafana13/ 為準：Grafana 13.0.7 實際送出與回應的內容。
 """
 from __future__ import annotations
 
@@ -30,52 +27,17 @@ log = logging.getLogger("aiops_lite.grafana")
 RETRY_STATUS = {429, 502, 503, 504}
 SEVERITIES = ("P0", "P1", "P2", "P3")
 TRUE_VALUES = {"true", "1", "yes", "on"}
-WARN_LEVELS = ("WARN", "warn", "Warn", "WARNING", "warning", "Warning")  # es.warn_levels 的預設值
-ERROR_LEVELS = ("ERROR", "error", "Error", "FATAL", "fatal", "CRITICAL", "critical")  # es.error_levels 的預設值
-ERROR_STATUS = ("error", "ERROR", "Error", "STATUS_CODE_ERROR")                       # es.error_statuses 的預設值
 
 
 @dataclass(frozen=True)
 class LabelNames:
-    """告警規則上的標籤名稱（config.yaml 的 labels）。default_severity：嚴重度標籤沒寫或寫錯時當成哪一級。"""
+    """告警規則上的標籤名稱（config.yaml 的 labels）。default_severity：嚴重度標籤沒寫或寫錯時當成哪一級。
+    remediation：規則上有這個標籤，值就是「這條告警響的時候可以跑的修復流程名稱」（見 src/outputs.py）。"""
     detect: str = "aiops_detect"
     severity: str = "aiops_severity"
     service: str = "service"
     default_severity: str = "P3"
-
-
-@dataclass(frozen=True)
-class LogFields:
-    """日誌文件的欄位名稱（config.yaml 的 es.log_fields）；巢狀物件與帶點的扁平鍵都讀得到。"""
-    time: str = "@timestamp"
-    service: str = "service.name"
-    level: str = "log.level"   # "" = 日誌沒有等級欄位：改用訊息文字裡的等級字樣挑錯誤日誌（見 Grafana.search_errors）
-    message: str = "message"
-
-
-@dataclass(frozen=True)
-class TraceFields:
-    """Trace／span 文件的欄位名稱（config.yaml 的 es.trace_fields）。"""
-    time: str = "@timestamp"
-    service: str = "service.name"
-    span: str = "span.name"
-    trace_id: str = "trace.id"
-    status: str = "status.code"
-    error: str = "error.message"
-
-
-def _either(name: str, values: Any) -> dict[str, Any]:
-    """欄位是 keyword 或 text（動態 mapping 會多一個 .keyword）都查得到。"""
-    values = list(values)
-    return {"bool": {"minimum_should_match": 1, "should": [{"terms": {name: values}}, {"terms": {f"{name}.keyword": values}}]}}
-
-
-def _has_level(log_fields: LogFields, levels: tuple[str, ...]) -> dict[str, Any]:
-    """「這筆日誌是這些等級」的查詢條件。有等級欄位就比等級；沒有（level 是空字串）就在訊息文字裡找等級字樣。"""
-    if log_fields.level:
-        return _either(log_fields.level, levels)
-    words = " ".join(dict.fromkeys(level.lower() for level in levels))   # 全文比對不分大小寫：ERROR／error／Error 只送一次
-    return {"match": {log_fields.message: {"query": words, "operator": "or"}}}
+    remediation: str = "aiops_remediation"
 
 
 class GrafanaError(Exception):
@@ -86,10 +48,6 @@ class WebhookError(ValueError):
     """推進來的內容不是 Grafana 告警 webhook 的格式：整包拒收（HTTP 400）。"""
 
 
-def _ms(t: datetime) -> int:
-    return int(t.timestamp() * 1000)
-
-
 def _when(raw: Any) -> datetime | None:
     """Grafana 的時間（RFC3339，可能帶奈秒）；還沒結束的告警 endsAt 是 0001-01-01。"""
     text = str(raw or "")
@@ -97,12 +55,6 @@ def _when(raw: Any) -> datetime | None:
         return None
     # 小數秒最多留 6 位（Grafana 給奈秒，舊版 Python 的 fromisoformat 不吃）
     return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", text.replace("Z", "+00:00"))).astimezone(timezone.utc)
-
-
-def _traceql_regex(name: str) -> str:
-    """服務名稱放進 TraceQL 的 =~ "…" 裡：正規表示式的特殊字元要跳脫，字串裡的反斜線與引號也要跳脫。"""
-    escaped = re.sub(r'([.^$*+?()\[\]{}|\\])', r'\\\1', name)
-    return escaped.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def parse_webhook(payload: Any, names: LabelNames = LabelNames()) -> tuple[list[Alert], list[str]]:
@@ -134,7 +86,8 @@ def parse_webhook(payload: Any, names: LabelNames = LabelNames()) -> tuple[list[
         values = item.get("values") if isinstance(item.get("values"), dict) else {}
         alerts.append(Alert(fingerprint=fingerprint, status=status, rule_uid=str(item.get("ruleUID") or ""),
                             title=title, service=service, severity=severity, starts_at=starts,
-                            ends_at=_when(item.get("endsAt")) if status == "resolved" else None, values=values))
+                            ends_at=_when(item.get("endsAt")) if status == "resolved" else None, values=values,
+                            remediation=str(labels.get(names.remediation, "")).strip()))
     return alerts, problems
 
 
@@ -149,8 +102,8 @@ class Grafana:
     def close(self) -> None:
         self._http.close()
 
-    def _request(self, method: str, path: str, *, accept: tuple[int, ...] = (), with_status: bool = False,
-                 empty_ok: bool = False, **kw: Any) -> Any:
+    def request(self, method: str, path: str, *, accept: tuple[int, ...] = (), with_status: bool = False,
+                 empty_ok: bool = False, raw: bool = False, **kw: Any) -> Any:
         """短暫抖動（連線失敗、逾時、429／502／503／504）重試 retries 次（預設 2），每次多等 retry_backoff_seconds；
         其他錯誤直接丟 GrafanaError。"""
         last = ""
@@ -166,163 +119,17 @@ class Grafana:
                 last = f"HTTP {r.status_code}"
                 continue
             if r.status_code >= 400 and r.status_code not in accept:
-                raise GrafanaError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:300]}")
+                # Victoria 的錯誤訊息前面有一段 remoteAddr 與整條網址（requestURI），真正的原因在最後一段
+                reason = r.text.split("; ", 2)[-1] if r.text.startswith("remoteAddr:") else r.text
+                raise GrafanaError(f"{method} {path} -> HTTP {r.status_code}: {reason.strip()[:300]}")
+            if raw:   # VictoriaLogs 一行回一個 JSON 物件，不是一份 JSON
+                return r.text
             try:
-                data = None if empty_ok and not r.content.strip() else r.json()  # Tempo 的 404 沒有內容
+                data = None if empty_ok and not r.content.strip() else r.json()
             except ValueError as e:
                 raise GrafanaError(f"{method} {path} 回的不是 JSON：{r.text[:200]}") from e
             return (r.status_code, data) if with_status else data
         raise GrafanaError(f"{method} {path} 重試後仍失敗：{last}")
-
-    # ── 日誌與 Trace（經 Grafana 的 ES 資料源代理）──
-
-    def search_errors(self, datasource_uid: str, log_index: str, trace_index: str | None, services: list[str],
-                      start: datetime, end: datetime, size: int = 100, *, log_fields: LogFields = LogFields(),
-                      trace_fields: TraceFields = TraceFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
-                      error_statuses: tuple[str, ...] = ERROR_STATUS) -> dict[str, list[dict[str, Any]]]:
-        """撈時間窗內這些系統的錯誤日誌與錯誤 span，回傳 {"logs": [...], "traces": [...]}（各是 ES 的 _source）。
-
-        log_fields.level 是空字串 = 日誌沒有獨立的等級欄位（例如沒拆欄位的容器標準輸出）：改成在訊息欄位做全文比對，
-        訊息裡有 error_levels 任何一個字樣就算錯誤日誌。這是比對「詞」，不是比對等級，所以會混入不是錯誤的紀錄
-        （INFO 的訊息裡寫到 error 這個詞也會中）；訊息欄位必須是 text 型別（keyword 型別比不到，結果是 0 筆）。"""
-        def window(field: str) -> dict[str, Any]:
-            return {"range": {field: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-
-        def search(index: str, time_field: str, service_field: str, extra: dict[str, Any]) -> str:
-            query = {"bool": {"filter": [window(time_field), _either(service_field, services), extra]}}
-            return (json.dumps({"index": index, "ignore_unavailable": True}) + "\n"
-                    + json.dumps({"size": size, "sort": [{time_field: "desc"}], "query": query}) + "\n")
-
-        kinds = [("logs", log_index, search(log_index, log_fields.time, log_fields.service,
-                                            _has_level(log_fields, error_levels)))]
-        if trace_index:
-            kinds.append(("traces", trace_index, search(trace_index, trace_fields.time, trace_fields.service,
-                                                        _either(trace_fields.status, error_statuses))))
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(body for _k, _index, body in kinds),
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(kinds):
-            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
-        out: dict[str, list[dict[str, Any]]] = {"logs": [], "traces": []}
-        for (kind, index, _body), resp in zip(kinds, responses):
-            if resp.get("error"):
-                raise GrafanaError(f"ES 查詢 {index} 失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-            out[kind] = [h.get("_source") or {} for h in (resp.get("hits") or {}).get("hits") or []]
-        return out
-
-    def count_logs(self, datasource_uid: str, log_index: str, services: list[str], start: datetime, end: datetime, *,
-                   log_fields: LogFields = LogFields()) -> dict[str, int]:
-        """錯誤日誌撈到 0 筆的時候用：同一個時間窗裡，索引總共有幾筆（"all"）、其中屬於這些系統的有幾筆（"services"，不限等級）。
-        三個數字放在一起就知道是哪一關沒過：索引沒資料、系統名稱對不上、還是等級對不上（或真的沒有錯誤）。"""
-        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-        bodies = [{"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [window]}}},
-                  {"size": 0, "track_total_hits": True,
-                   "query": {"bool": {"filter": [window, _either(log_fields.service, services)]}}}]
-        header = json.dumps({"index": log_index, "ignore_unavailable": True})
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(f"{header}\n{json.dumps(body)}\n" for body in bodies),
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(bodies):
-            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
-        counts = []
-        for resp in responses:
-            if resp.get("error"):
-                raise GrafanaError(f"ES 計數失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-            counts.append(int(((resp.get("hits") or {}).get("total") or {}).get("value", 0)))
-        return {"all": counts[0], "services": counts[1]}
-
-    def _msearch(self, datasource_uid: str, index: str, bodies: list[dict[str, Any]], what: str) -> list[dict[str, Any]]:
-        """同一個索引的多個子查詢一次送出；任何一個子查詢失敗就整個丟 GrafanaError。"""
-        header = json.dumps({"index": index, "ignore_unavailable": True})
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch",
-                            content="".join(f"{header}\n{json.dumps(body, ensure_ascii=False)}\n" for body in bodies),
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(bodies):
-            raise GrafanaError("ES _msearch 的回應筆數跟請求對不上")
-        for resp in responses:
-            if resp.get("error"):
-                raise GrafanaError(f"ES {what}失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-        return responses
-
-    @staticmethod
-    def _total(resp: dict[str, Any]) -> int:
-        return int(((resp.get("hits") or {}).get("total") or {}).get("value", 0))
-
-    def error_profile(self, datasource_uid: str, log_index: str, services: list[str], start: datetime, end: datetime, *,
-                      log_fields: LogFields = LogFields(), error_levels: tuple[str, ...] = ERROR_LEVELS,
-                      warn_levels: tuple[str, ...] = (), first_n: int = 3, warn_n: int = 50) -> dict[str, Any]:
-        """每個系統各問一次：時間窗內錯誤日誌的**總筆數**與**最早的幾筆**（由舊到新）。另外問這些系統的警告（由舊到新）。
-
-        為什麼要另外問：search_errors 是全部系統一起、從最新的往回取 max_hits 筆。某個系統大量報錯時，其他系統較早、
-        較少的錯誤會整個被擠掉；從那批樣本裡找「最早的一筆」找到的也不是真正的第一筆。這裡每個系統各自由舊到新取，不會互相擠。
-        回傳 {"services": {系統: {"total": 筆數, "first": [文件…]}}, "warnings": {"total": 筆數, "hits": [文件…]}}。
-        warn_levels 是空的就不問警告。"""
-        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-        oldest_first = [{log_fields.time: "asc"}]
-        bodies = [{"size": first_n, "track_total_hits": True, "sort": oldest_first, "query": {"bool": {"filter": [
-            window, _either(log_fields.service, [service]), _has_level(log_fields, error_levels)]}}} for service in services]
-        if warn_levels:
-            bodies.append({"size": warn_n, "track_total_hits": True, "sort": oldest_first, "query": {"bool": {"filter": [
-                window, _either(log_fields.service, services), _has_level(log_fields, warn_levels)]}}})
-        responses = self._msearch(datasource_uid, log_index, bodies, "錯誤概況查詢")
-        hits = lambda resp: [h.get("_source") or {} for h in (resp.get("hits") or {}).get("hits") or []]
-        out: dict[str, Any] = {"services": {service: {"total": self._total(resp), "first": hits(resp)}
-                                            for service, resp in zip(services, responses)},
-                               "warnings": {"total": 0, "hits": []}}
-        if warn_levels:
-            out["warnings"] = {"total": self._total(responses[-1]), "hits": hits(responses[-1])}
-        return out
-
-    def count_phrases(self, datasource_uid: str, log_index: str, items: list[tuple[str, str, int, tuple[str, ...]]],
-                      start: datetime, end: datetime, before_start: datetime, *, log_fields: LogFields = LogFields()
-                      ) -> list[tuple[int, int]]:
-        """每個 (系統, 片語, 間隔, 等級) 各數兩次：片語在 [start, end]（事故期間）與 [before_start, start)（事故前）出現幾筆。
-        片語比對是 match_phrase 加 slop（訊息欄位要是 text 型別）：片語是樣板裡固定不變的詞，間隔留給被換成 * 的部分。
-        回傳 [(事故期間, 事故前), …]，順序跟 items 一樣。"""
-        def body(service: str, phrase: str, slop: int, levels: tuple[str, ...], window: dict[str, Any]) -> dict[str, Any]:
-            return {"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [
-                {"range": {log_fields.time: {**window, "format": "epoch_millis"}}}, _either(log_fields.service, [service]),
-                _has_level(log_fields, levels), {"match_phrase": {log_fields.message: {"query": phrase, "slop": slop}}}]}}}
-
-        bodies = []
-        for service, phrase, slop, levels in items:
-            bodies.append(body(service, phrase, slop, levels, {"gte": _ms(start), "lte": _ms(end)}))
-            bodies.append(body(service, phrase, slop, levels, {"gte": _ms(before_start), "lt": _ms(start)}))
-        if not bodies:
-            return []
-        totals = [self._total(resp) for resp in self._msearch(datasource_uid, log_index, bodies, "次數比較查詢")]
-        return list(zip(totals[0::2], totals[1::2]))
-
-    def search_timeline(self, datasource_uid: str, index: str, field: str, values: list[str], start: datetime,
-                        end: datetime, size: int, *, log_fields: LogFields = LogFields()) -> dict[str, dict[str, Any]]:
-        """每個關聯碼（批號、載具…）各查一次：時間窗內帶這個值的所有日誌，**不限等級、不限系統**，由舊到新。
-        回傳 {值: {"hits": [ES 的 _source…], "total": 總筆數}}；一次 _msearch 送完。"""
-        if not values:
-            return {}
-        window = {"range": {log_fields.time: {"gte": _ms(start), "lte": _ms(end), "format": "epoch_millis"}}}
-        body = ""
-        for value in values:
-            same = {"bool": {"minimum_should_match": 1, "should": [
-                {"terms": {field: [value]}}, {"terms": {f"{field}.keyword": [value]}}]}}
-            body += (json.dumps({"index": index, "ignore_unavailable": True}) + "\n" + json.dumps({
-                "size": size, "track_total_hits": True, "sort": [{log_fields.time: "asc"}],
-                "query": {"bool": {"filter": [window, same]}}}) + "\n")
-        raw = self._request("POST", f"/api/datasources/proxy/uid/{datasource_uid}/_msearch", content=body,
-                            headers={"Content-Type": "application/x-ndjson"})
-        responses = raw.get("responses") if isinstance(raw, dict) else None
-        if not isinstance(responses, list) or len(responses) != len(values):
-            raise GrafanaError("ES _msearch（關聯時間線）的回應筆數跟請求對不上")
-        out: dict[str, dict[str, Any]] = {}
-        for value, resp in zip(values, responses):
-            if resp.get("error"):
-                raise GrafanaError(f"ES 查詢 {field}={value} 失敗：{json.dumps(resp['error'], ensure_ascii=False)[:300]}")
-            hits = resp.get("hits") or {}
-            total = (hits.get("total") or {}).get("value", len(hits.get("hits") or []))
-            out[value] = {"hits": [h.get("_source") or {} for h in hits.get("hits") or []], "total": int(total)}
-        return out
 
     # ── 指標（經 Grafana 的 Prometheus 相容資料源代理：Prometheus、VictoriaMetrics、Mimir…）──
 
@@ -330,7 +137,7 @@ class Grafana:
                     ) -> list[dict[str, Any]]:
         """區間查詢（Prometheus HTTP API 的 /api/v1/query_range）。回傳每條序列 {"labels": {...}, "points": [(時間, 數值)]}；
         NaN 與無限大的點丟掉（除以零的查詢會回這種值，算不了統計）。查詢語法錯、資料源不對丟 GrafanaError。"""
-        raw = self._request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/v1/query_range", params={
+        raw = self.request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/v1/query_range", params={
             "query": expr, "start": int(start.timestamp()), "end": int(end.timestamp()), "step": step_seconds})
         data = raw.get("data") if isinstance(raw, dict) else None
         if not isinstance(data, dict) or raw.get("status") != "success" or not isinstance(data.get("result"), list):
@@ -347,27 +154,6 @@ class Grafana:
             series.append({"labels": dict(item.get("metric") or {}), "points": points})
         return series
 
-    # ── Trace（經 Grafana 的 Tempo 資料源代理）──
-
-    def search_error_traces(self, datasource_uid: str, services: list[str], start: datetime, end: datetime,
-                            limit: int) -> list[dict[str, Any]]:
-        """找時間窗內、這些服務參與、而且有錯誤 span 的 Trace（TraceQL），回傳 Tempo 的搜尋結果（traceID、rootServiceName…）。
-        注意：Tempo 收到 Trace 之後要過幾秒才搜尋得到（實測 2.9.0 八秒內搜不到）；debounce 的等待剛好涵蓋這段。"""
-        names = "|".join(_traceql_regex(s) for s in services)
-        query = '{ resource.service.name =~ "' + names + '" && status = error }'
-        raw = self._request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/search", params={
-            "q": query, "start": int(start.timestamp()), "end": int(end.timestamp()) + 1, "limit": limit})
-        traces = raw.get("traces") if isinstance(raw, dict) else None
-        if not isinstance(traces, list):
-            raise GrafanaError(f"Tempo 搜尋的回應沒有 traces：{str(raw)[:200]}")
-        return traces
-
-    def get_trace(self, datasource_uid: str, trace_id: str) -> dict[str, Any] | None:
-        """取回整條 Trace（OTLP JSON：batches → scopeSpans → spans）。Tempo 已經沒有這條（過了保留期限）回 None。"""
-        status, raw = self._request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/traces/{trace_id}",
-                                    accept=(404,), with_status=True, empty_ok=True)
-        return None if status == 404 or not isinstance(raw, dict) else raw
-
     # ── 註記 ──
 
     def upsert_annotation(self, annotation_id: int | None, uid_tag: str, body: dict[str, Any]) -> int:
@@ -377,16 +163,16 @@ class Grafana:
         更新註記的標籤之後，用「舊標籤」查還是查得到它（標籤索引沒有跟著更新），儀表板的「進行中」清單會一直列著已結案的事故。
         只有文字、時間變（標籤相同）才原地 PATCH。"""
         if annotation_id is None:
-            found = self._request("GET", "/api/annotations", params={"tags": uid_tag, "limit": 1})
+            found = self.request("GET", "/api/annotations", params={"tags": uid_tag, "limit": 1})
             if isinstance(found, list) and found:
                 annotation_id = int(found[0]["id"])
         if annotation_id is not None:
-            status, current = self._request("GET", f"/api/annotations/{annotation_id}", accept=(403, 404), with_status=True)
+            status, current = self.request("GET", f"/api/annotations/{annotation_id}", accept=(403, 404), with_status=True)
             if status in (403, 404):
                 annotation_id = None  # 被人刪掉了（Grafana 對不存在的 id 有時回 403，有時回 404）：重建；真的沒權限的話下面建立時會報錯
             elif set(current.get("tags") or []) == set(body["tags"]):
-                self._request("PATCH", f"/api/annotations/{annotation_id}", json=body)
+                self.request("PATCH", f"/api/annotations/{annotation_id}", json=body)
                 return annotation_id
             else:
-                self._request("DELETE", f"/api/annotations/{annotation_id}", accept=(403, 404))
-        return int(self._request("POST", "/api/annotations", json=body)["id"])
+                self.request("DELETE", f"/api/annotations/{annotation_id}", accept=(403, 404))
+        return int(self.request("POST", "/api/annotations", json=body)["id"])

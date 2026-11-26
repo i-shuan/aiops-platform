@@ -14,12 +14,16 @@
 
 兩組的方向一致，留出的那組沒有比較差，所以不是只對開發用的案例有效。但請看下面「這些數字不能代表什麼」。
 
+2026-11-26 資料來源從 Elasticsearch 換成 VictoriaLogs（查詢全部重寫，前處理的做法不變）之後，同一組案例各跑 5 次：
+開發用的 49/50（換之前 50/50），留出的 27/30（換之前 27/30）。之後改成兩種日誌來源都支援，同一天用 Elasticsearch 再跑一次：
+開發用的 50/50，留出的 29/30。細節見「換成 VictoriaLogs 之後」與「兩種來源並存之後」。
+
 ## 怎麼算對
 
 每個案例是一組告警、關係邊、原始日誌，加上答案。跑的時候：
 
-1. 把日誌真的寫進 Elasticsearch。
-2. 用 aiops-lite 的程式（Editor Token 經 Grafana 的 ES 資料源代理）收集證據。查詢條件與前處理的改動都會反映在這一步。
+1. 把日誌真的寫進 VictoriaLogs 或 Elasticsearch（`--backend`；2026-11-25 以前的數字都是 Elasticsearch）。
+2. 用 aiops-lite 的程式（Editor Token 經 Grafana 的資料源代理）收集證據。查詢條件與前處理的改動都會反映在這一步。
 3. 同一份證據問真的 LLM 幾次。
 4. 一次回答算對，要同時符合：通過幻覺檢查、排第一的可能原因跟答案一樣、有提到重點字。
    答案是「還無法判定」的案例：不能有 40 分以上的可能原因。
@@ -96,12 +100,39 @@
 沒過的三次都是 h01 被幻覺檢查退回。答對的與該說無法判定的，分數在這 16 個案例上沒有重疊；
 但這只是 16 個人造案例各 5 次，**不能當成分數有校準過的證據**。
 
+**換成 VictoriaLogs 之後**（2026-11-26，VictoriaLogs v1.17.0，計分方式跟上一段一樣）：各跑 5 次，開發用的 49/50，留出的 27/30。
+
+| | 換之前（Elasticsearch） | 換之後（VictoriaLogs） |
+| --- | --- | --- |
+| 開發用的 10 個 | 50/50 | 49/50 |
+| 留出的 6 個 | 27/30 | 27/30 |
+
+- 留出的那組沒有變差：沒過的三次一樣都是 h01 被幻覺檢查退回（模型點名 `mes.internal`）。
+- 開發用的少一次在 s02：模型把日誌訊息裡的 `MES` 列進「點名的系統」，被幻覺檢查退回。同一題其餘 4 次都答對（換之前那一輪是 5/5，
+  更早的一輪是 3/5）。一次的差別在這個樣本數下分不出是不是巧合，沒有為它調整程式。
+- 這次改的是「怎麼向資料庫問」，不是提示詞或前處理的做法；有一處實際上不一樣：事故前後的次數從 Elasticsearch 的片語比對
+  （允許中間隔幾個詞）換成 LogsQL 的 `seq`（固定的詞照順序出現，中間隔多少字都可以）。兩者都是近似，哪一個比較準沒有量。
+- 排第一的分數：答對的案例 55～95，答案是「無法判定」的三個案例（s04、s08、h03）25～39。這 16 個案例上仍然沒有重疊。
+
+**兩種來源並存之後**（2026-11-26）：日誌的查詢搬到 `src/logs.py`，VictoriaLogs 與 Elasticsearch 各一個類別、回同一種形狀；
+提示詞與前處理沒有動。Elasticsearch 的查詢是重新寫的（事故前後次數從片語比對改成 intervals），所以用 `--backend elasticsearch` 各跑 5 次：
+
+| | VictoriaLogs v1.17.0 | Elasticsearch 8.19.23（新的查詢） |
+| --- | --- | --- |
+| 開發用的 10 個 | 49/50 | 50/50 |
+| 留出的 6 個 | 27/30 | 29/30 |
+
+- 兩邊差的 3 次都落在本來就不穩的兩題：s02（VictoriaLogs 那一輪 4/5）與 h01（2/5 對 4/5）。h01 之前在同一份程式上連跑 10 次是 3/10，
+  所以 2/5 與 4/5 都在它平常的範圍裡；**這些數字不能說哪一種來源比較好**。
+- VictoriaLogs 那一欄是搬檔案之前量的。搬完之後對真的 VictoriaLogs 重錄了一次樣本，送出的每一個請求跟搬之前一模一樣，所以沒有重跑。
+- 測試另外把同一批資料寫進兩邊，比對收集到的整包證據一樣（`tests/test_backends.py`）；那只有 7 筆日誌，不能取代這裡的案例。
+
 ## 還會錯的
 
 | 案例 | 情況 | 原因 |
 | --- | --- | --- |
 | h01 憑證過期 | 大約三成答對（10 次對 3 次）。其餘不是被幻覺檢查退回，就是說無法判定 | 模型把日誌裡的主機名稱 `mes.internal` 列進「點名的系統」，但它不是告警或關係邊裡的系統，檢查照規則擋下。這是留出的案例，沒有為它調整程式 |
-| s02 雜訊蓋住真錯誤 | 5 次裡 2 次說「還無法判定」 | 模型有引用到下游的新錯誤（PLC 連線中斷），但仍然保守地不下結論 |
+| s02 雜訊蓋住真錯誤 | 各輪 3/5～5/5 不等。沒過的不是說「還無法判定」，就是被幻覺檢查退回 | 模型有引用到下游的新錯誤（PLC 連線中斷），但有時保守地不下結論；有一次把訊息裡的 `MES` 當成系統名稱點名 |
 
 ## 這些數字不能代表什麼
 
@@ -117,16 +148,18 @@
 
 ## 怎麼跑
 
-需要本機拋棄式的 Elasticsearch、Grafana（Editor Token）與 LLM。`eval/` 是開發工具，不會被服務載入，也不進映像檔；
-它是這個 repo 裡唯一直連 Elasticsearch 的東西，只用來寫測試資料。
+需要本機拋棄式的 VictoriaLogs（或 Elasticsearch）、Grafana（Editor Token；用 VictoriaLogs 要裝它的資料源外掛）與 LLM。`eval/` 是開發工具，不會被服務載入，也不進映像檔；
+它（與錄測試樣本的 `record_victoria.py`、`record_elasticsearch.py`）是這個 repo 裡唯一直連日誌資料庫的東西，只用來寫測試資料。
+VictoriaLogs 不能刪單筆資料：每次執行、每個案例各寫進自己的 `dataset`，查詢時只看那一個；要清乾淨就刪掉它的資料目錄。
 
 ```bash
-export EVAL_ES_URL=http://127.0.0.1:9200 EVAL_GRAFANA_URL=http://127.0.0.1:3000
-export EVAL_GRAFANA_TOKEN=<Editor Token> EVAL_GRAFANA_ADMIN=admin:<密碼>      # ADMIN 只用來建 ES 資料源
+export EVAL_VL_URL=http://127.0.0.1:9428 EVAL_GRAFANA_URL=http://127.0.0.1:3000
+export EVAL_GRAFANA_TOKEN=<Editor Token> EVAL_GRAFANA_ADMIN=admin:<密碼>      # ADMIN 只用來建 VictoriaLogs 資料源
 export LLM_API_KEY=<金鑰> LLM_CHAT_MODEL=<模型>                                 # LLM_API_URL 預設是 OpenAI
 
 python -m eval.run --set tuning  --runs 5 --label before --out before.json
 python -m eval.run --set heldout --runs 5
+python -m eval.run --backend elasticsearch --set tuning --runs 5   # 改用 Elasticsearch：把 EVAL_VL_URL 換成 EVAL_ES_URL
 python -m eval.run --set tuning --drop error_patterns,warnings     # 拿掉某幾種證據再問
 python -m eval.run --only s02 --runs 1 --show-prompt               # 看某個案例實際送給模型的內容
 ```
