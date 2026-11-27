@@ -45,6 +45,11 @@ def recorded_rows(dataset: str) -> list[dict]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
+def recorded_service_graph(name: str) -> list[dict]:
+    """service_graph.json：Tempo 2.9.0 的 service graph 指標寫進 VictoriaMetrics，經 Grafana 13.0.7 查回來的請求與回應。"""
+    return json.loads((FIXTURES / "service_graph.json").read_text(encoding="utf-8"))["exchanges"][name]
+
+
 def recorded_trace(name: str = "get_trace") -> dict:
     """錄下來的一條 Trace（Jaeger 格式）。get_trace＝失敗的那條（1111…）；get_trace_ok＝成功的（3333…）。"""
     return json.loads(victoria("traces")["exchanges"][name][0]["response"])["data"][0]
@@ -98,6 +103,12 @@ class FakeGrafana:
                 for trace in json.loads(exchange["response"])["data"]:
                     self.traces[trace["traceID"]] = shifted_trace(trace, shift)
         self.trace_requests: list[httpx.Request] = []
+        # Tempo 的 service graph（存在指標資料源裡）：(呼叫的, 被呼叫的, 請求數, 失敗數)。回應的格式照 service_graph.json 錄下來的
+        self.service_graph: list[tuple[str, str, int, int]] = []
+        self.service_graph_requests: list[httpx.Request] = []
+        # VictoriaTraces 的 service graph（Jaeger 的 /api/dependencies）：(呼叫的, 被呼叫的)。回應的格式照錄下來的
+        self.dependencies: list[tuple[str, str]] = []
+        self.dependency_requests: list[httpx.Request] = []
         # Elasticsearch 與 Tempo：照錄下來的真實回應回話（不篩資料）。msearch_replies 是照順序用掉的 {"status", "response"}
         self.msearch_replies: list[dict] = []
         self.msearch_requests: list[str] = []
@@ -127,6 +138,15 @@ class FakeGrafana:
         else:
             name = "prom_query_range_empty"
         return replay(name)
+
+    def instant_query(self, query: str) -> httpx.Response:
+        """service graph 的兩條查詢（請求數、失敗數的增量）。拿錄下來的真實回應當樣板，把每條序列的標籤與數值換成 self.service_graph 的。"""
+        real = recorded_service_graph("window_with_traffic")[0]["response"]
+        failed = "request_failed_total" in query
+        sample = real["data"]["result"][0]
+        result = [{**sample, "metric": {"client": caller, "server": callee}, "value": [sample["value"][0], str(bad if failed else total)]}
+                  for caller, callee, total, bad in self.service_graph if not failed or bad]
+        return httpx.Response(200, json={**real, "data": {**real["data"], "result": result}})
 
     def logsql(self, request: httpx.Request) -> httpx.Response:
         form = dict(httpx.QueryParams(request.content.decode()))
@@ -171,6 +191,15 @@ class FakeGrafana:
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/v1/query_range"):
             self.metric_requests.append(request)
             return self.query_range(request.url.params["query"])
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/v1/query"):
+            self.service_graph_requests.append(request)
+            return self.instant_query(request.url.params["query"])
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/dependencies"):
+            self.dependency_requests.append(request)
+            real = recorded_service_graph("victoriatraces_dependencies")[0]["response"]
+            sample = real["data"][0]
+            return httpx.Response(200, json={**real, "data": [{**sample, "parent": a, "child": b} for a, b in self.dependencies],
+                                             "total": len(self.dependencies)})
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/_msearch"):
             self.msearch_requests.append(request.content.decode())
             reply = self.msearch_replies.pop(0)

@@ -73,6 +73,10 @@ traces:                                  # 整段可以不寫：沒設 datasourc
   #                                        # "" = 不用日誌裡的 id
   # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace
   # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
+  # service_graph_datasource_uid: ""     # 只有 type: tempo 能設：Tempo 有開 service graph（metrics-generator）的話，填它把指標寫進去的
+  #                                        # 那個 Prometheus 相容資料源的 uid，程式從那裡讀「誰呼叫誰、有沒有失敗」。
+  #                                        # VictoriaTraces 開了 -servicegraph.enableTask 的話會自動讀，不用設
+  # graph_retention_days: 30             # 學到的系統關係多久沒再看到就丟掉；0 = 不學、不用，不同系統的告警也不會併成同一張
 
 metrics:                                 # 整段可以不寫：沒設 datasource_uid 或沒有 queries = RCA 沒有指標走勢這包證據
   datasource_uid: ""                     # Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以）
@@ -100,7 +104,7 @@ outputs:                                 # 註記以外的兩個出口。整段�
 # labels:                                # 告警規則上的標籤名稱；改了要同步通知各系統團隊與 Grafana 的通知路由
 #   detect: aiops_detect                 # 值是 true 才納管
 #   severity: aiops_severity             # P0～P3
-#   service: service                     # 系統名稱，要跟 edges 裡的名稱一樣
+#   service: service                     # 系統名稱，要跟日誌、Trace 裡的服務名稱一樣
 #   default_severity: P3                 # 嚴重度標籤沒寫或寫錯時當成哪一級
 #   remediation: aiops_remediation       # 值是修復流程的名稱；沒貼 = 這條告警沒有自動修復
 
@@ -118,8 +122,3 @@ close_after_seconds: 300                 # 成員告警全部 resolved 之後，
 
 # annotation:
 #   max_rule_links: 5                    # 註記第 3 行最多列幾條「調整優先權」的規則連結
-
-edges:                                   # 選填：系統層級的上下游關係 [上游, 下游]。不寫也能分析；寫了，有關係的系統同時告警時
-                                         # 會併成同一張事故，LLM 也多一個「誰可能影響誰」的線索。下面兩條是範例
-  - [mq-broker, cim-eap]
-  - [cim-eap, amhs-mcs]

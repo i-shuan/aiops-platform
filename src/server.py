@@ -201,8 +201,8 @@ def main() -> int:
         log.error("設定錯誤：%s", e)
         return 2
     server, worker, db = serve(settings)
-    log.info("aiops-lite 啟動：port=%d debounce=%ds followup=%ds close_after=%ds edges=%d", settings.port,
-             settings.debounce_seconds, settings.followup_seconds, settings.close_after_seconds, len(settings.edges))
+    log.info("aiops-lite 啟動：port=%d debounce=%ds followup=%ds close_after=%ds", settings.port,
+             settings.debounce_seconds, settings.followup_seconds, settings.close_after_seconds)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

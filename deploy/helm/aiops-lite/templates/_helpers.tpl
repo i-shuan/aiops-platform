@@ -30,6 +30,7 @@ logs:
 traces:
   type: {{ .Values.traces.type | quote }}
   datasource_uid: {{ .Values.traces.datasourceUid | quote }}
+  service_graph_datasource_uid: {{ .Values.traces.serviceGraphDatasourceUid | quote }}
 outputs:
   incident_api:
     url: {{ .Values.outputs.incidentApi.url | quote }}
@@ -46,12 +47,4 @@ log_level: {{ .Values.logLevel | quote }}
 debounce_seconds: {{ int .Values.timing.debounceSeconds }}
 followup_seconds: {{ int .Values.timing.followupSeconds }}
 close_after_seconds: {{ int .Values.timing.closeAfterSeconds }}
-{{- if .Values.edges }}
-edges:
-{{- range .Values.edges }}
-  - [{{ index . 0 | quote }}, {{ index . 1 | quote }}]
-{{- end }}
-{{- else }}
-edges: []
-{{- end }}
 {{- end -}}

@@ -17,6 +17,7 @@ config.yaml 的 traces.type 決定用哪一個（main.py 的 trace_store）。
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 from datetime import datetime
@@ -75,8 +76,26 @@ def _attributes(items: Any) -> dict[str, str]:
     return out
 
 
+SPAN_KINDS = {"SPAN_KIND_SERVER": "server", "SPAN_KIND_CLIENT": "client", "SPAN_KIND_PRODUCER": "producer", "SPAN_KIND_CONSUMER": "consumer",
+              "SPAN_KIND_INTERNAL": "internal", 1: "internal", 2: "server", 3: "client", 4: "producer", 5: "consumer"}
+
+
+def _hex(raw: Any) -> str:
+    """Tempo 經 Grafana 回的 trace id／span id 是 base64；轉成十六進位（Jaeger 的寫法，也是用編號取 Trace 時要的寫法）。
+    本來就是十六進位的原樣回傳。"""
+    text = str(raw or "")
+    if not text or re.fullmatch(r"[0-9a-fA-F]{16}|[0-9a-fA-F]{32}", text):
+        return text.lower()
+    try:
+        return base64.b64decode(text, validate=True).hex()
+    except ValueError:
+        return text
+
+
 def _from_otlp(raw: dict[str, Any], trace_id: str) -> dict[str, Any]:
-    """Tempo 回的 OTLP JSON（batches／resourceSpans → scopeSpans → spans，時間是奈秒）→ Jaeger 的形狀。"""
+    """Tempo 回的 OTLP JSON（batches／resourceSpans → scopeSpans → spans，時間是奈秒）→ Jaeger 的形狀。
+    span 的種類放進 span.kind 標籤；「連結」（links：這一段接續另一條 Trace 的某一段，訊息佇列常見）轉成 FOLLOWS_FROM 的 reference，
+    跟 VictoriaTraces 回的寫法一樣。"""
     spans, processes = [], {}
     for n, batch in enumerate(raw.get("batches") or raw.get("resourceSpans") or (raw.get("trace") or {}).get("resourceSpans") or []):
         process = f"p{n + 1}"
@@ -88,12 +107,17 @@ def _from_otlp(raw: dict[str, Any], trace_id: str) -> dict[str, Any]:
                 tags = {**_attributes(sp.get("attributes")), "error": "true" if failed else "false"}
                 if status.get("message"):
                     tags["otel.status_description"] = str(status["message"])
+                if sp.get("kind") in SPAN_KINDS:
+                    tags["span.kind"] = SPAN_KINDS[sp["kind"]]
                 start = int(sp.get("startTimeUnixNano") or 0)
                 parent = sp.get("parentSpanId")
-                spans.append({"traceID": trace_id, "spanID": str(sp.get("spanId")), "operationName": str(sp.get("name", "")),
+                references = [{"refType": "CHILD_OF", "spanID": _hex(parent), "traceID": trace_id}] if parent else []
+                references += [{"refType": "FOLLOWS_FROM", "spanID": _hex(link.get("spanId")), "traceID": _hex(link.get("traceId"))}
+                               for link in sp.get("links") or [] if isinstance(link, dict) and link.get("traceId")]
+                spans.append({"traceID": trace_id, "spanID": _hex(sp.get("spanId")), "operationName": str(sp.get("name", "")),
                               "processID": process, "startTime": start // 1000,
                               "duration": max(0, int(sp.get("endTimeUnixNano") or 0) - start) // 1000,
-                              "references": [{"refType": "CHILD_OF", "spanID": str(parent), "traceID": trace_id}] if parent else [],
+                              "references": references,
                               "tags": [{"key": k, "type": "string", "value": v} for k, v in tags.items()]})
     return {"traceID": trace_id, "spans": spans, "processes": processes}
 

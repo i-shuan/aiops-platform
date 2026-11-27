@@ -233,3 +233,36 @@ def test_answers_without_the_kind_field_keep_working_and_the_prompt_asks_for_why
     assert candidates == [{"source": "MariaDb", "confidence": 80, "reason": "日誌寫的"}]
     for part in ("為什麼會發生", "kind", "inference", "一律給 39 以下", "不要只寫哪個系統是源頭", "有多少證據就分析多少"):
         assert part in rca.SYSTEM_PROMPT
+
+
+# ── 下一步建議：LLM 寫給值班人員看的文字，程式不會執行（使用者要求，2026-11-27）──
+
+def with_actions(*actions):
+    return json.dumps({"summary": "instana-agent 的感測器連不上 MariaDb", "systems": [], "ids": [], "actions": list(actions),
+                       "candidates": [{"source": "MariaDb", "kind": "evidence", "confidence": 80, "reason": "日誌寫 Cannot connect to MariaDb"}]},
+                      ensure_ascii=False)
+
+
+def test_next_steps_are_listed_cut_and_limited():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    steps = rca.read_actions(with_actions("確認 db-host:3306 的 MariaDb 有沒有在聽連線", "  檢查 instana-agent 的\n感測器帳密  ", "x" * 500, "第四條"), ev)
+    assert steps[:2] == ["確認 db-host:3306 的 MariaDb 有沒有在聽連線", "檢查 instana-agent 的 感測器帳密"]
+    assert len(steps) == rca.MAX_ACTIONS and len(steps[2]) == rca.ACTION_CHARS
+    assert rca.actions_text(steps[:2]) == "下一步建議｜1) 確認 db-host:3306 的 MariaDb 有沒有在聽連線；2) 檢查 instana-agent 的 感測器帳密"
+    assert rca.actions_text([]) == ""
+    for missing in (json.dumps({"summary": "x"}), with_actions(), json.dumps({"summary": "x", "actions": "重啟"}), with_actions(7, None, "")):
+        assert rca.read_actions(missing, ev) == []                       # 選填：沒有、不是清單、不是文字，都當成沒有
+
+
+def test_a_step_that_names_equipment_not_in_the_evidence_is_dropped_but_the_analysis_stays():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    answer = with_actions("重啟機台 EQP-LITHO-11", "確認 db-host:3306 的連線")
+    assert rca.read_actions(answer, ev) == ["確認 db-host:3306 的連線"]   # 編出來的機台：那一條拿掉
+    summary, candidates = rca.read_answer(answer, ev)
+    assert summary and candidates                                        # 根因分析不受影響
+    assert rca.read_actions(answer, ev, id_pattern="") == ["重啟機台 EQP-LITHO-11", "確認 db-host:3306 的連線"]   # 關掉樣式檢查就不擋
+
+
+def test_the_prompt_asks_for_concrete_reasons_and_concrete_next_steps():
+    for part in ("actions", "下一步建議", "機制是什麼", "為什麼不是它", "不會被自動執行", "對任何事故都成立的話"):
+        assert part in rca.SYSTEM_PROMPT

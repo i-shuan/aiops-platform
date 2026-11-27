@@ -10,7 +10,7 @@
 
 image:
   repository: aiops-lite
-  tag: "0.6.3"
+  tag: "0.7.0"
   pullPolicy: IfNotPresent
 
 grafana:
@@ -59,6 +59,10 @@ logs:            # datasourceUid 留空 = RCA 沒有日誌證據
 traces:          # datasourceUid 留空 = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
   type: victoriatraces # victoriatraces 或 tempo
   datasourceUid: ""    # victoriatraces：Jaeger 型別資料源（URL 指到 VictoriaTraces 的 /select/jaeger）的 uid；tempo：Tempo 資料源的 uid
+  # 選填，只有 type: tempo 能填：Tempo 有開 service graph 的話，填它把指標寫進去的那個 Prometheus 相容資料源的 uid。
+  # VictoriaTraces 開了 -servicegraph.enableTask 的話會自動讀，這裡留空。
+  # 系統之間的關係全部由程式學，沒有手寫的 edges 了
+  serviceGraphDatasourceUid: ""
 
 outputs:         # 註記以外的兩個出口；url 留空 = 佔位（不送，只把本來會送的內容記進資料庫的 deliveries 表）
   incidentApi: {url: "", token: ""}                    # 事故開單／更新／結案時 POST 給下游（告警中心、派工系統）
@@ -88,13 +92,6 @@ timing:
   debounceSeconds: 60      # 收到第一個 Webhook 後等多久才開始分析：等上下游告警到齊、等日誌寫進 VictoriaLogs
   followupSeconds: 60      # 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪（結案、補寫註記、重試 LLM）
   closeAfterSeconds: 300   # 成員告警全部 resolved 之後，再安靜多久才結案（剛恢復又響不會另開一張）
-
-# 選填：系統層級的上下游關係（[上游, 下游]）。不寫也能分析；寫了的好處是有關係的系統同時告警時會併成同一張事故，
-# LLM 也多一個「誰可能影響誰」的線索。例如：
-#   edges:
-#     - [mq-broker, cim-eap]
-#     - [cim-eap, amhs-mcs]
-edges: []
 
 resources:
   requests: {cpu: 100m, memory: 256Mi}

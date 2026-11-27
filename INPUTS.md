@@ -8,10 +8,11 @@ aiops-lite 自己不產生資料，也不直連任何外部系統。它能做到
 | # | 輸入 | 從哪來 | 用在哪 | 必要嗎 |
 | --- | --- | --- | --- | --- |
 | 1 | 告警 | 各系統在 Grafana 設的規則，經 Webhook 推進來 | 觸發一切；RCA 的第 1 包證據 | **必要**。沒有告警，平台什麼都不做 |
-| 2 | 關係邊 | `config.yaml` 的 `edges`，人工宣告 | 跨系統收斂；第 2 包證據 | 建議。沒有的話只有同一個系統的告警會併 |
+| 2 | 系統關係 | 程式自己學：Tempo 的 service graph、事故的呼叫鏈、錯誤日誌裡提到的系統（沒有手寫的 `edges` 了） | 跨系統收斂；第 2 包證據 | 自動。什麼都沒看到的系統各開一張事故 |
 | 3 | 日誌 | VictoriaLogs 或 Elasticsearch（`logs.type`），經 Grafana 的資料源代理（VictoriaLogs 要在 Grafana 裝外掛 `victoriametrics-logs-datasource`） | 第 3 包（錯誤日誌）、第 4 包（機台與批號統計）、第 5 包（批號時間線） | 建議。沒有的話摘要多半是「證據不足」 |
 | 4 | Trace | VictoriaTraces（經 Grafana 內建的 Jaeger 型別資料源，URL 指到它的 `/select/jaeger`）或 Tempo（`traces.type`） | 第 6 包（呼叫鏈） | 選用。有埋點的 IT 服務才有 |
 | 5 | 指標 | VictoriaMetrics，經 Grafana 的 Prometheus 型別資料源（Prometheus、Mimir 也可以） | 第 7 包（指標走勢） | 選用。補上日誌與 Trace 看不到的情況 |
+| — | 以前學到的呼叫關係 | aiops-lite 自己的資料庫（從以前事故的呼叫鏈累積） | 第 8 包：跟這張事故的系統有關的「誰呼叫過誰」 | 自動。沒有送 Trace 的系統不會有；`traces.graph_retention_days: 0` 關掉 |
 | 6 | LLM | OpenAI 相容的端點 | 把證據寫成一句摘要 | 選用。沒有的話註記第 2 行是 `[未經分析]` 的原始摘要；有設定但連不上時，第 2 行寫原因與重試時間，底下直接列收集到的證據 |
 | 7 | Grafana Token | Editor 角色的服務帳號 | 以上 3～5 項的查詢、寫註記 | **必要** |
 
@@ -121,20 +122,22 @@ Elasticsearch 的查詢都是 `_msearch`（一個請求裡放多個子查詢）�
 - **組合條件**（有訊息但沒有消費者）最不容易誤報，因為它描述的是一個明確的故障狀態。
 - 「沒有結果」代表條件不成立，Grafana 規則要把 No Data 設成 OK，不然會變成另一種告警。
 
-## 2. 關係邊（建議）
+## 2. 系統關係（自動）
 
-`config.yaml` 的 `edges`，每條是 `[上游, 下游]`。
+沒有手寫的設定。程式從三個地方學，看到才記（`observed_calls` 表），各自標來源：Tempo 的 service graph
+（`traces.service_graph_datasource_uid`）、事故的呼叫鏈、錯誤日誌裡原樣提到的已知系統名稱。
 
-- 收斂時不分方向：兩個有告警的系統之間有邊就併成一張事故。
-- 交給 LLM 時帶方向：上游的問題會影響下游。
+- 收斂：兩個系統都在告警，而且這段時間它們之間有失敗的呼叫、或一方的錯誤日誌指名另一方，才併成一張事故。
+- 交給 LLM 時帶方向與來源：被呼叫的出問題會影響呼叫它的；service graph 的還帶這段時間的請求數與失敗數。
 
 **最理想**
 
-- 名稱跟告警的 `service` 完全一樣。
-- 涵蓋不會出現在 Trace 與日誌裡的基礎設施（MQ broker、資料庫），這些只能靠宣告。
-- 有人負責在系統改接線時更新。
+- Trace 資料庫開了 service graph：Tempo 的最完整（全量、即時、有失敗數，沒埋點的資料庫與訊息佇列另一端的消費者也看得到）；
+  VictoriaTraces 的只有誰呼叫誰，合併事故仍然要靠失敗的 Trace 或錯誤日誌。
+- 告警的 `service`、日誌的服務名稱、Trace 的服務名稱三邊完全一樣，程式才對得起來。
+- 訊息佇列有傳遞 Trace（父子接法或連結接法都可以），消費端的 span 種類標成 consumer：這樣才知道這一段是經訊息佇列、方向是發送端影響消費端。
 
-**限制**：邊沒有型別，同步呼叫與佇列的傳播方式不同，目前分不出來；不會自動學習。
+**限制**：沒有 Trace、日誌也沒提到別人的系統，不會跟任何人併成同一張；從日誌學只認得已經看過的系統名稱；剛上線、又沒有 service graph 時圖是空的，要有事故才慢慢長出來。
 
 ## 3. 日誌（建議）
 
@@ -267,11 +270,11 @@ OpenAI 相容的 chat completions 端點。拿到上面七包證據，回一句�
 | 輸出 | 什麼時候 | 內容 |
 | --- | --- | --- |
 | Grafana 註記 | 事故內容有變 | 事故卡、根因分析與 1～3 個可能原因、證據那一行；有修復流程時多一行 `自動修復｜…` |
-| 事故 API（`outputs.incident_api.url`） | 事故開單（opened）、內容更新（updated）、結案（closed）；同樣的內容只送一次 | POST 一筆 JSON，`schema` 是 `aiops-lite.incident.v1` |
+| 事故 API（`outputs.incident_api.url`） | 事故開單（opened）、內容更新（updated）、結案（closed）；同樣的內容只送一次 | POST 一筆 JSON，`schema` 是 `aiops-lite.incident.v2` |
 | 自動修復（`outputs.remediation.url`，要 `enabled: true`） | 規則上貼了 `aiops_remediation=<流程名稱>` 的告警在響、事故還沒結案；同一張事故、同一條告警、同一個流程只送一次 | POST 一筆 JSON，`schema` 是 `aiops-lite.remediation.v1` |
 
 事故 API 的欄位：`event`；`incident`{`uid`、`status`、`severity`、`services`、`started_at`、`ended_at`、`alert_count`、
-`alerts`[{`fingerprint`、`rule_uid`、`title`、`service`、`severity`、`status`、`starts_at`}]}；`root_cause`{`analyzed`、`summary`、`candidates`[]}；
+`alerts`[{`fingerprint`、`rule_uid`、`title`、`service`、`severity`、`status`、`starts_at`}]}；`root_cause`{`analyzed`、`summary`、`candidates`[]、`suggestions`（下一步建議的文字，沒有就是空字串；只給人看，下游不要拿來自動執行）}；
 `evidence`；`grafana`{`url`、`annotation_id`、`tag`}。
 
 修復請求的欄位：`workflow`、`incident_uid`、`service`、`alert`{`fingerprint`、`rule_uid`、`title`、`severity`}、

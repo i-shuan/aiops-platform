@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import timedelta
 
 import httpx
 
@@ -45,8 +46,8 @@ def test_when_the_llm_is_down_the_evidence_is_listed_under_an_honest_label(world
 
 def test_errors_that_were_already_there_come_after_the_new_ones_and_the_chain_gets_the_last_line(world):  # noqa: F811
     w = world
-    start = T0 - rca.timedelta(minutes=10)
-    w.fake.logs += [log_row(start - rca.timedelta(minutes=5, seconds=n), "mq-broker", "ERROR", "consumer lag exceeded on queue lot.dispatch")
+    start = T0 - timedelta(minutes=10)
+    w.fake.logs += [log_row(start - timedelta(minutes=5, seconds=n), "mq-broker", "ERROR", "consumer lag exceeded on queue lot.dispatch")
                     for n in range(4)]                               # 這一種事故前就有 4 筆
     trace = shifted_trace(recorded_trace(), SHIFT)
     trace["processes"]["p1"]["serviceName"] = "cim-eap"
@@ -92,7 +93,7 @@ def test_waiting_rounds_do_not_rewrite_the_annotation_and_recovery_replaces_ever
 
 def test_without_logs_the_alerts_line_is_still_there_and_long_messages_are_cut(world):  # noqa: F811
     w = world
-    w.fake.logs = [log_row(T0 - rca.timedelta(seconds=30), "mq-broker", "ERROR", "<b>disk</b> " + "x" * 500)]
+    w.fake.logs = [log_row(T0 - timedelta(seconds=30), "mq-broker", "ERROR", "<b>disk</b> " + "x" * 500)]
     w.receive("firing_mq")
     w.run(64, llm=httpx.MockTransport(down))
     lines, _ = note_lines(w)

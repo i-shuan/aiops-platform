@@ -37,7 +37,7 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `debounce_seconds` | 60 | 收到第一個 Webhook 後等多久才開始分析 |
 | `followup_seconds` | 60 | 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪 |
 | `close_after_seconds` | 300 | 成員告警全部 resolved 之後，再安靜多久才結案 |
-| `edges` | 空 | 系統層級的上下游關係 `[上游, 下游]` |
+| `traces.service_graph_datasource_uid` | 空 | 只有 `traces.type: tempo` 能設：Tempo 有開 service graph 的話，它存指標的那個 Prometheus 相容資料源的 uid；空 = 沒有這個來源。VictoriaTraces 的 service graph 從 `traces.datasource_uid` 自動讀，不用設。`edges` 已經移除（還寫著會啟動報錯）：系統之間的關係全部由程式學 |
 
 設定跟來源對不上（例如 `logs.type: victorialogs` 卻寫了 `logs.index`，或 elasticsearch 寫了 `extra_filter`）啟動時直接報錯。
 更早的 `es`、`tempo` 兩個區段已經改名：設定檔裡還留著的話，啟動時報錯並指出要改成 `logs`（加上 `type: elasticsearch`）、
@@ -89,6 +89,7 @@ Tempo 的 OTLP 由程式轉），分析的程式不分來源。測試把同一�
 | `traces.trace_id_field` | `trace_id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號取（最多試 `max_traces` 的兩倍個），不夠才用搜尋補。Tempo 收到 Trace 後 8～40 秒以上才搜尋得到（2.9.0 實測），日誌帶 trace id 特別有用；VictoriaTraces 三秒內搜尋得到 |
 | `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取（連搜尋都不做） |
 | `traces.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
+| `traces.graph_retention_days` | 30 | 0～365 | 學到的系統關係多久沒再看到就丟掉；0 = 不學、不用，不同系統的告警也不會併成同一張。30 是估的，沒有依據，未驗證泛化 |
 | `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以） |
 | `metrics.queries` | `[]` | 最多 20 條 | 事故時要查的指標（PromQL／MetricsQL），每條 `{name, expr, services}`。`expr` 一定要有 `$service`（換成系統名稱，已跳脫）；`services` 選填，有寫就只對那幾個系統查。名稱不能重複 |
 | `metrics.lookback_minutes` | 60 | 5～1440 | 事故開始前往回看多久當基準（取中位數）。太短會把事故前的爬升算進基準 |
@@ -146,7 +147,7 @@ Tempo 的 OTLP 由程式轉），分析的程式不分來源。測試把同一�
   （`channel`、`status` = placeholder／sent／failed、`payload`、`detail`、`attempts`）。佔位記過的之後不補送：之後才把出口打開，只對打開之後的事故生效。
 - **失敗**：每一輪重試，最多 10 次。出口失敗不影響註記；那一輪會標成 degraded 並續跑。
 - **註記**：規則有貼修復標籤時多一行 `自動修復｜流程名稱（系統：已送出）`，狀態另有「佔位，沒有送出」「送出失敗，會再試」「送出失敗，已放棄」。
-- **格式**是這個專案自己定的（`aiops-lite.incident.v1`、`aiops-lite.remediation.v1`，欄位見 `INPUTS.md`），
+- **格式**是這個專案自己定的（`aiops-lite.incident.v2`、`aiops-lite.remediation.v1`，欄位見 `INPUTS.md`），
   **沒有跟任何真的告警中心或 Conductor 對過**；只支援 Bearer 認證。
 
 ### 日誌沒有等級欄位（`logs.fields.level: ""`）
@@ -162,7 +163,7 @@ logs:
   fields: {service: kubernetes.container_name, level: ""}
 ```
 
-告警的 `service` 標籤值、`edges` 裡的名稱都要跟 `kubernetes.container_name` 的值一樣。
+告警的 `service` 標籤值要跟 `kubernetes.container_name` 的值一樣。
 
 **怎麼挑**：在訊息本文裡找 `logs.error_levels` 的詞，任何一個出現就算錯誤日誌（不分大小寫，預設收成 error、fatal、critical 三個詞；
 VictoriaLogs 的寫法是 `_msg:i("error") or _msg:i("fatal") or …`，Elasticsearch 是對訊息欄位的 match 查詢）。
@@ -204,7 +205,7 @@ Elasticsearch 的設定把 `extra_filter` 那一行換成 `type: elasticsearch` 
 | 嚴重度只有 P0～P3 與它們的排序 | `src/grafana.py` 的 `SEVERITIES`、`src/grouping.py` 的 `SEVERITY_RANK` | 儀表板用 `P0`、`P1` 標籤查註記；改了儀表板失效、舊事故對不上 |
 | 註記標籤 `aiops`、`aiops-incident:<uid>`、`open`／`closed`、系統名稱 | `src/report.py` | 儀表板的查詢、「註記建過就不重複建」的查找都依賴這些標籤 |
 | 註記的版面（標題、摘要、證據的幾行、時間）與「進行中／已結案」的文字 | `src/report.py` | 對外的呈現契約；`[LLM 推論]`／`[未經分析]` 的標示不能被設定拿掉 |
-| 證據的判斷與用字：註記上一行（已有、缺的與原因、沒接的），交給模型的完整版另外寫每種證據少了會看不出什麼 | `src/rca.py` 的 `overview`、`overview_brief`、`overview_text`、`CAN_ANSWER` | 照實際撈到的結果產生，沒有可調的門檻；用字是給值班人員看的固定說法 |
+| 證據的判斷與用字：註記上一行（已有、缺的與原因、沒接的），交給模型的完整版另外寫每種證據少了會看不出什麼 | `src/evidence.py` 的 `overview`、`overview_brief`、`overview_text`、`CAN_ANSWER` | 照實際撈到的結果產生，沒有可調的門檻；用字是給值班人員看的固定說法 |
 | 規則編輯連結的路徑 `/alerting/<uid>/edit` | `src/report.py` | 由 Grafana 的版本決定，不是我們的設定 |
 | 資料表與欄位名稱、成員告警的時間欄位 | `src/db.py` | 改了要搬資料；程式只會自動「補欄位」 |
 | 事故 uid 的長度（12 碼） | `src/grouping.py` | 內部識別；改了舊註記的標籤對不上 |
@@ -212,21 +213,24 @@ Elasticsearch 的設定把 `extra_filter` 那一行換成 `type: elasticsearch` 
 | 標籤值 `true／1／yes／on` 視為開啟 | `src/grafana.py` 的 `TRUE_VALUES` | 值的寫法慣例 |
 | 退避的指數上限（2 的 30 次方）、錯誤訊息截斷長度（200、300 字） | `src/main.py` 的 `backoff_seconds`、`src/grafana.py`、`src/rca.py` | 防溢位與 log 長度的內部護欄 |
 | 註記查找的 `limit: 1`、LogsQL 查詢的寫法（`in`、`seq`、`partition by`、`stats count() if`）、Elasticsearch 查詢的寫法（`_msearch`、`terms`、`intervals`）、每筆日誌的 `_time`／`_msg` | `src/grafana.py`、`src/logs.py` 的 `TIME_FIELD`、`MESSAGE_FIELD` 與各查詢方法 | 查詢的實作細節；`_time`、`_msg` 是 VictoriaLogs 固定的欄位名稱，Elasticsearch 的文件由程式轉成同一種形狀 |
-| 設定檔路徑 `/etc/aiops/config.yaml` 與唯一的環境變數 `AIOPS_CONFIG_FILE` | `src/main.py` | 設定的唯一入口，本身不能再放進設定檔 |
-| 各設定值的合法範圍、log 等級的可選值 | `src/main.py` | 驗證規則 |
+| 設定檔路徑 `/etc/aiops/config.yaml` 與唯一的環境變數 `AIOPS_CONFIG_FILE` | `src/config.py` | 設定的唯一入口，本身不能再放進設定檔 |
+| 各設定值的合法範圍、log 等級的可選值 | `src/config.py` | 驗證規則 |
 | Webhook 的必要欄位（`status`、`fingerprint`、`startsAt`、`labels`、`ruleUID`、`values`） | `src/grafana.py` 的 `parse_webhook` | Grafana 的 webhook 格式，不是我們定的 |
-| 搜尋 Trace 時一次要 20 條（VictoriaTraces 是每個系統 20 條）、再挑最近的 | `src/rca.py` 的 `TRACE_SEARCH_LIMIT` | 搜尋結果不保證先回最新的；要調的是最後取幾條（`traces.max_traces`） |
+| 搜尋 Trace 時一次要 20 條（VictoriaTraces 是每個系統 20 條）、再挑最近的 | `src/evidence.py` 的 `TRACE_SEARCH_LIMIT` | 搜尋結果不保證先回最新的；要調的是最後取幾條（`traces.max_traces`） |
 | Trace 搜尋用服務名稱（OTel 的 `service.name`）比對分析單位：VictoriaTraces 是 Jaeger 的 `service` 參數加 `error=true`，Tempo 是 TraceQL 的 `resource.service.name` 加 `status = error` | `src/traces.py` 的 `search_error_traces` | Jaeger 查詢介面一次只能指定一個服務。把 `labels.service` 換成 function 或 cluster 時呼叫鏈會撈不到（見 README「改用別的單位分析」） |
-| 哪些 span 算失敗：`error` 標籤是 true，或 `otel.status_code` 是 ERROR；錯誤訊息取 `otel.status_description` | `src/rca.py` 的 `ERROR_TAG_VALUES`、`summarize_trace` | OTLP 的 status=ERROR 進 VictoriaTraces 之後就是這兩個標籤（實測 v0.5.0）；Tempo 回的 OTLP 由 `src/traces.py` 的 `_from_otlp` 轉成同樣的標籤。是格式，不是調整項 |
-| 指標查詢最多 20 條、佔位字是 `$service` | `src/main.py` 的 `MAX_METRIC_QUERIES`、`src/rca.py` 的 `SERVICE_PLACEHOLDER` | 每張事故要查「查詢數 × 系統數」次，上限是保護指標資料庫；佔位字是設定檔的寫法約定 |
-| 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/rca.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
-| 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/rca.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
-| 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的條件（樣板裡固定不變的詞照順序出現：LogsQL 的 `seq`、Elasticsearch 的 intervals；固定的詞少於兩個就不數） | `src/rca.py` 的 `log_pattern`、`pattern_words` | 歸類與計數的實作。是近似：別種訊息剛好有同樣的詞、順序也一樣時會被算在一起；未驗證泛化 |
+| 哪些 span 算失敗：`error` 標籤是 true，或 `otel.status_code` 是 ERROR；錯誤訊息取 `otel.status_description` | `src/evidence.py` 的 `ERROR_TAG_VALUES`、`summarize_trace` | OTLP 的 status=ERROR 進 VictoriaTraces 之後就是這兩個標籤（實測 v0.5.0）；Tempo 回的 OTLP 由 `src/traces.py` 的 `_from_otlp` 轉成同樣的標籤。是格式，不是調整項 |
+| 指標查詢最多 20 條、佔位字是 `$service` | `src/config.py` 的 `MAX_METRIC_QUERIES`、`src/evidence.py` 的 `SERVICE_PLACEHOLDER` | 每張事故要查「查詢數 × 系統數」次，上限是保護指標資料庫；佔位字是設定檔的寫法約定 |
+| 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/evidence.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
+| 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/evidence.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
+| 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的條件（樣板裡固定不變的詞照順序出現：LogsQL 的 `seq`、Elasticsearch 的 intervals；固定的詞少於兩個就不數） | `src/evidence.py` 的 `log_pattern`、`pattern_words` | 歸類與計數的實作。是近似：別種訊息剛好有同樣的詞、順序也一樣時會被算在一起；未驗證泛化 |
 | 可能原因最多 3 個；信心分數 0～100，分段是 70／40；沒有直接證據指向的系統分數最高 30 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE_HIGH`、`CONFIDENCE_MEDIUM`、`NO_DIRECT_EVIDENCE_CAP`、`DIRECT_EVIDENCE` | 3 個是註記版面的上限。分段是提示詞裡跟模型講的定義，上限 30 落在「只是推測」那一段；分數不是機率、沒有校準。「有沒有直接證據」是名稱的字串比對。都只在 `EVAL.md` 的人造案例跑過，未驗證泛化 |
 | 用「名稱原樣出現在證據文字裡」當憑據時，名稱至少要 3 個字 | `src/rca.py` 的 `MIN_NAME_CHARS` | 一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化 |
+| 一次最多給 LLM 看 20 條系統關係（最近看到的優先）；判斷要不要合併時最多取回 5 條失敗的 Trace；用名稱比對日誌文字時名稱至少 3 個字 | `src/evidence.py` 的 `MAX_RELATIONS`、`src/main.py` 的 `MAX_LINK_TRACES`、`src/graph.py` 的 `MIN_NAME_CHARS` | 版面與查詢量的上限，未驗證泛化 |
+| service graph 的指標名稱（`traces_service_graph_request_total`、`…_failed_total`）與標籤（`client`、`server`、`connection_type`） | `src/graph.py` | Tempo 2.9.0 實測的名稱；公司的 Tempo 版本不同、或改過指標前綴就會對不上 |
+| 下一步建議最多 3 條、每條最多 120 字；一條 Trace 最多追 3 條它連結到的 Trace（訊息佇列的發送端） | `src/rca.py` 的 `MAX_ACTIONS`、`ACTION_CHARS`、`src/evidence.py` 的 `MAX_LINKED_TRACES` | 版面與查詢量的上限，沒有依據的數字，未驗證泛化 |
 | LLM 沒有分析時註記上直接列的證據：最多 5 行、每行引用的原文最多 120 字 | `src/rca.py` 的 `MAX_FACT_LINES`、`FACT_CHARS` | 版面的上限，不是判斷門檻；順序是固定規則（事故前沒出現過的先列），不代表誰是源頭 |
 | 出口送失敗最多試 10 次（每一輪一次）；出口的 JSON 格式與 `schema` 名稱；`deliveries` 表的狀態用字 | `src/outputs.py` 的 `MAX_ATTEMPTS`、`incident_payload`、`remediation_payloads` | 10 是沒有依據的數字，未驗證泛化；調之前先看下游多久會恢復。格式是對下游的契約，改了要跟對方一起改 |
-| 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
+| 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/evidence.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |
 | LLM 回答的格式（`summary`、`systems`、`ids` 的 JSON） | `src/rca.py` 的 `check_answer` | 幻覺檢查靠這個格式；自訂提示詞時啟動會檢查有沒有保留 |
 | 嚴重度的判定方式 | — | 程式沒有「判定規則」：嚴重度直接讀告警的標籤，事故取成員裡最高的，只升不降 |
 

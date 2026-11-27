@@ -28,7 +28,7 @@ Grafana 規則用哪個資料源算次數，跟 aiops-lite 用哪個來源查證
 | aiops-lite | 收告警、收斂、經 Grafana 去 VictoriaLogs 撈錯誤日誌樣本並統計機台／批號出現次數、交給 LLM、寫註記 | **不洗資料、不拆欄位、不算告警用的數字** |
 
 aiops-lite 這一側唯一要配合的是 `config.yaml`：日誌存在哪一種（`logs.type`）、欄位名稱（`logs.fields`、`logs.id_fields`）、錯誤等級的寫法（`logs.error_levels`）、
-關係邊（`edges`）要跟實際的資料對上。改的是設定，不是程式。
+系統之間的關係由程式從 Trace 與日誌學，不用手寫；要的是各處的系統名稱一致。
 
 **為什麼統計不放在 Fluent Bit**
 
@@ -373,7 +373,7 @@ WHERE finished_at > NOW() - INTERVAL '5 minutes'
 ## 進 aiops-lite 前的檢查清單
 
 - [ ] 每條規則都貼了 `aiops_detect=true`、`aiops_severity`（P0～P3）、`service`。
-- [ ] `service` 的值在三個地方一致：規則標籤、`config.yaml` 的 `edges`、日誌的服務欄位（預設 `service.name`）。
+- [ ] `service` 的值在三個地方一致：規則標籤、日誌的服務欄位（預設 `service.name`）、有 Trace 的話還有 Trace 的服務名稱。
 - [ ] 規則查詢回傳的是一個數字（SQL 聚合成一列、LogsQL 用 `stats count()` 或對數值欄位聚合）。
 - [ ] 規則的 No data 行為已經明確選定。
 - [ ] 每個來源都有一條「資料還在進來」的規則。

@@ -48,6 +48,7 @@ incidents = sa.Table(
     sa.Column("candidates", sa.Text),      # 可以是 NULL（舊資料、沒有經過 LLM）
     sa.Column("evidence_note", sa.Text),   # 可以是 NULL（舊資料、還沒收集過證據）
     sa.Column("actions_note", sa.Text),    # 註記上「自動修復｜…」那一行；可以是 NULL（沒有修復流程）
+    sa.Column("suggestions", sa.Text),     # 註記上「下一步建議｜…」那一行（LLM 寫的）；可以是 NULL
     sa.Column("updated_at", TS, nullable=False),
 )
 
@@ -74,6 +75,19 @@ deliveries = sa.Table(
     sa.Column("attempts", sa.Integer, nullable=False, default=0),
     sa.Column("updated_at", TS, nullable=False),
     sa.UniqueConstraint("channel", "dedupe_key"),
+)
+
+calls = sa.Table(
+    "observed_calls", metadata,   # 系統之間的關係，全部是看到才記的（見 src/graph.py）：誰呼叫誰、誰的錯誤日誌提到誰
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("caller", sa.String(255), nullable=False),
+    sa.Column("callee", sa.String(255), nullable=False),
+    sa.Column("source", sa.String(16), nullable=False),          # service_graph／trace／log（怎麼知道的，見 src/graph.py）
+    sa.Column("kind", sa.String(16), nullable=False, default="", server_default="''"),   # messaging＝經訊息佇列（caller 送給 callee）；其餘是空的
+    sa.Column("first_seen", TS, nullable=False),
+    sa.Column("last_seen", TS, nullable=False, index=True),
+    sa.Column("times", sa.Integer, nullable=False, default=1),   # 看到幾次（每一輪最多算一次，不是請求數）
+    sa.UniqueConstraint("caller", "callee", "source"),
 )
 
 MEMBER_TIMES = ("starts_at", "ends_at")
@@ -153,7 +167,8 @@ class Database:
             ended_at=_utc(row["ended_at"]), resolved_at=_utc(row["resolved_at"]), alert_count=row["alert_count"],
             summary=row["summary"], analyzed=bool(row["analyzed"]), annotation_id=row["annotation_id"],
             annotated=bool(row["annotated"]), llm_failures=row["llm_failures"], llm_next_try=_utc(row["llm_next_try"]),
-            evidence_note=row["evidence_note"] or "", candidates=row["candidates"] or "", actions_note=row["actions_note"] or "")
+            evidence_note=row["evidence_note"] or "", candidates=row["candidates"] or "", actions_note=row["actions_note"] or "",
+            suggestions=row["suggestions"] or "")
 
     def _select(self, where: Any) -> list[Incident]:
         with self.engine.connect() as conn:
@@ -184,7 +199,7 @@ class Database:
                     "resolved_at": inc.resolved_at, "alert_count": inc.alert_count, "summary": inc.summary,
                     "analyzed": inc.analyzed, "annotation_id": inc.annotation_id, "annotated": inc.annotated,
                     "llm_failures": inc.llm_failures, "llm_next_try": inc.llm_next_try,
-                    "evidence_note": inc.evidence_note, "candidates": inc.candidates, "actions_note": inc.actions_note,
+                    "evidence_note": inc.evidence_note, "candidates": inc.candidates, "actions_note": inc.actions_note, "suggestions": inc.suggestions,
                     "updated_at": now}
                 done = conn.execute(sa.update(incidents).where(incidents.c.uid == inc.uid).values(**values))
                 if done.rowcount == 0:
@@ -225,6 +240,40 @@ class Database:
             uids = [r[0] for r in conn.execute(sa.select(deliveries.c.incident_uid).where(
                 deliveries.c.status == "failed", deliveries.c.attempts < max_attempts).distinct())]
         return self._select(incidents.c.uid.in_(uids)) if uids else []
+
+    # ── 觀察到的呼叫關係 ──
+
+    def record_calls(self, pairs: list[tuple[str, str]], source: str, now: datetime, retention_days: int,
+                     messaging: Any = ()) -> None:
+        """記下這次看到的關係（已經有的更新最後看到的時間與次數），順便清掉太久沒再看到的。
+        messaging 是其中經訊息佇列的那幾條（caller 送訊息給 callee）。"""
+        messaging = set(messaging)
+        with self.engine.begin() as conn:
+            for caller, callee in sorted(set(pairs)):
+                same = sa.and_(calls.c.caller == caller, calls.c.callee == callee, calls.c.source == source)
+                kind = "messaging" if (caller, callee) in messaging else ""
+                done = conn.execute(sa.update(calls).where(same).values(last_seen=now, times=calls.c.times + 1, kind=kind))
+                if done.rowcount == 0:
+                    conn.execute(sa.insert(calls).values(caller=caller, callee=callee, source=source, kind=kind, first_seen=now,
+                                                         last_seen=now, times=1))
+            conn.execute(sa.delete(calls).where(calls.c.last_seen < now - timedelta(days=retention_days)))
+
+    def calls_touching(self, services: list[str], now: datetime, retention_days: int, limit: int) -> list[dict[str, Any]]:
+        """跟這些系統有關（它呼叫別人、或別人呼叫它）、而且還沒過期的關係，最近看到的在前。"""
+        with self.engine.connect() as conn:
+            rows = conn.execute(sa.select(calls).where(
+                sa.or_(calls.c.caller.in_(services), calls.c.callee.in_(services)),
+                calls.c.last_seen >= now - timedelta(days=retention_days)).order_by(calls.c.last_seen.desc(), calls.c.id).limit(limit)).mappings().all()
+        return [{"caller": r["caller"], "callee": r["callee"], "source": r["source"], "kind": r["kind"] or "",
+                 "last_seen": _iso(r["last_seen"]), "times": r["times"]} for r in rows]
+
+    def known_systems(self, limit: int = 500) -> set[str]:
+        """看過的系統名稱：圖上的節點，加上最近告警過的系統。用來在錯誤日誌裡找「提到了誰」。"""
+        with self.engine.connect() as conn:
+            names = {n for row in conn.execute(sa.select(calls.c.caller, calls.c.callee)) for n in row}
+            recent = conn.execute(sa.select(incidents.c.services).order_by(incidents.c.started_at.desc()).limit(limit))
+            names |= {name for (raw,) in recent for name in json.loads(raw)}
+        return names
 
     # ── 執行紀錄 ──
 
