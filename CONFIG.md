@@ -37,7 +37,7 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `debounce_seconds` | 60 | 收到第一個 Webhook 後等多久才開始分析 |
 | `followup_seconds` | 60 | 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪 |
 | `close_after_seconds` | 300 | 成員告警全部 resolved 之後，再安靜多久才結案 |
-| `edges` | 空 | 系統層級的上下游關係 `[上游, 下游]` |
+| `traces.service_graph_datasource_uid` | 空 | Tempo 有開 service graph 的話，它存指標的那個 Prometheus 相容資料源的 uid；空 = 沒有這個來源。`edges` 已經移除（還寫著會啟動報錯）：系統之間的關係全部由程式學 |
 
 設定跟來源對不上（例如 `logs.type: victorialogs` 卻寫了 `logs.index`，或 elasticsearch 寫了 `extra_filter`）啟動時直接報錯。
 更早的 `es`、`tempo` 兩個區段已經改名：設定檔裡還留著的話，啟動時報錯並指出要改成 `logs`（加上 `type: elasticsearch`）、
@@ -89,7 +89,7 @@ Tempo 的 OTLP 由程式轉），分析的程式不分來源。測試把同一�
 | `traces.trace_id_field` | `trace_id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號取（最多試 `max_traces` 的兩倍個），不夠才用搜尋補。Tempo 收到 Trace 後 8～40 秒以上才搜尋得到（2.9.0 實測），日誌帶 trace id 特別有用；VictoriaTraces 三秒內搜尋得到 |
 | `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取（連搜尋都不做） |
 | `traces.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
-| `traces.graph_retention_days` | 30 | 0～365 | 從事故的呼叫鏈學到的「誰呼叫誰」多久沒再看到就丟掉；0 = 不學也不用。30 是估的，沒有依據，未驗證泛化 |
+| `traces.graph_retention_days` | 30 | 0～365 | 學到的系統關係多久沒再看到就丟掉；0 = 不學、不用，不同系統的告警也不會併成同一張。30 是估的，沒有依據，未驗證泛化 |
 | `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以） |
 | `metrics.queries` | `[]` | 最多 20 條 | 事故時要查的指標（PromQL／MetricsQL），每條 `{name, expr, services}`。`expr` 一定要有 `$service`（換成系統名稱，已跳脫）；`services` 選填，有寫就只對那幾個系統查。名稱不能重複 |
 | `metrics.lookback_minutes` | 60 | 5～1440 | 事故開始前往回看多久當基準（取中位數）。太短會把事故前的爬升算進基準 |
@@ -163,7 +163,7 @@ logs:
   fields: {service: kubernetes.container_name, level: ""}
 ```
 
-告警的 `service` 標籤值、`edges` 裡的名稱都要跟 `kubernetes.container_name` 的值一樣。
+告警的 `service` 標籤值要跟 `kubernetes.container_name` 的值一樣。
 
 **怎麼挑**：在訊息本文裡找 `logs.error_levels` 的詞，任何一個出現就算錯誤日誌（不分大小寫，預設收成 error、fatal、critical 三個詞；
 VictoriaLogs 的寫法是 `_msg:i("error") or _msg:i("fatal") or …`，Elasticsearch 是對訊息欄位的 match 查詢）。
@@ -225,7 +225,8 @@ Elasticsearch 的設定把 `extra_filter` 那一行換成 `type: elasticsearch` 
 | 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的條件（樣板裡固定不變的詞照順序出現：LogsQL 的 `seq`、Elasticsearch 的 intervals；固定的詞少於兩個就不數） | `src/rca.py` 的 `log_pattern`、`pattern_words` | 歸類與計數的實作。是近似：別種訊息剛好有同樣的詞、順序也一樣時會被算在一起；未驗證泛化 |
 | 可能原因最多 3 個；信心分數 0～100，分段是 70／40；沒有直接證據指向的系統分數最高 30 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE_HIGH`、`CONFIDENCE_MEDIUM`、`NO_DIRECT_EVIDENCE_CAP`、`DIRECT_EVIDENCE` | 3 個是註記版面的上限。分段是提示詞裡跟模型講的定義，上限 30 落在「只是推測」那一段；分數不是機率、沒有校準。「有沒有直接證據」是名稱的字串比對。都只在 `EVAL.md` 的人造案例跑過，未驗證泛化 |
 | 用「名稱原樣出現在證據文字裡」當憑據時，名稱至少要 3 個字 | `src/rca.py` 的 `MIN_NAME_CHARS` | 一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化 |
-| 一次最多給 LLM 看 20 條以前看過的呼叫關係（最近看到的優先） | `src/rca.py` 的 `MAX_OBSERVED_CALLS` | 版面的上限，未驗證泛化 |
+| 一次最多給 LLM 看 20 條系統關係（最近看到的優先）；判斷要不要合併時最多取回 5 條失敗的 Trace；用名稱比對日誌文字時名稱至少 3 個字 | `src/rca.py` 的 `MAX_RELATIONS`、`src/main.py` 的 `MAX_LINK_TRACES`、`src/graph.py` 的 `MIN_NAME_CHARS` | 版面與查詢量的上限，未驗證泛化 |
+| service graph 的指標名稱（`traces_service_graph_request_total`、`…_failed_total`）與標籤（`client`、`server`、`connection_type`） | `src/graph.py` | Tempo 2.9.0 實測的名稱；公司的 Tempo 版本不同、或改過指標前綴就會對不上 |
 | LLM 沒有分析時註記上直接列的證據：最多 5 行、每行引用的原文最多 120 字 | `src/rca.py` 的 `MAX_FACT_LINES`、`FACT_CHARS` | 版面的上限，不是判斷門檻；順序是固定規則（事故前沒出現過的先列），不代表誰是源頭 |
 | 出口送失敗最多試 10 次（每一輪一次）；出口的 JSON 格式與 `schema` 名稱；`deliveries` 表的狀態用字 | `src/outputs.py` 的 `MAX_ATTEMPTS`、`incident_payload`、`remediation_payloads` | 10 是沒有依據的數字，未驗證泛化；調之前先看下游多久會恢復。格式是對下游的契約，改了要跟對方一起改 |
 | 呼叫鏈帶哪些 span 屬性（`peer.service`、`db.system` 等） | `src/rca.py` 的 `SPAN_ATTRIBUTES` | 只取能指出「下一站是誰」的屬性，避免把請求內容送給 LLM |

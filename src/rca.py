@@ -169,7 +169,22 @@ def raw_summary(incident: Incident) -> str:
     return "；".join(f"{svc}：{'、'.join(titles)}" for svc, titles in by_service.items())
 
 
-def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: Grafana, *, logs: Any = None,
+SOURCE_TEXT = {"service_graph": "Tempo 的 service graph 看到 downstream 呼叫 upstream", "trace": "以前事故的呼叫鏈裡 downstream 呼叫過 upstream",
+               "log": "downstream 的錯誤日誌提到過 upstream（不一定是呼叫）"}
+
+
+def relation(edge: Any) -> dict[str, Any]:
+    """證據裡的一條系統關係。(上游, 下游) 的 tuple 原樣轉；db.calls_touching 的列（caller 呼叫 callee）轉成
+    upstream＝被呼叫的、downstream＝呼叫的（被呼叫的出問題會影響呼叫它的），並帶上來源、最後看到的時間、這一輪的請求數與失敗數。"""
+    if not isinstance(edge, dict):
+        upstream, downstream = edge
+        return {"upstream": upstream, "downstream": downstream}
+    out = {"upstream": edge["callee"], "downstream": edge["caller"]}
+    out.update({k: edge[k] for k in ("source", "last_seen", "times", "requests", "failed", "kind") if edge.get(k) not in (None, "")})
+    return out
+
+
+def collect_evidence(incident: Incident, edges: list[Any], grafana: Grafana, *, logs: Any = None,
                      traces: Any = None, id_fields: list[str], now: datetime, limits: EvidenceLimits = EvidenceLimits(),
                      metrics: MetricOptions = MetricOptions()) -> dict[str, Any]:
     """組證據：告警、關係邊、錯誤日誌與識別碼統計、關聯時間線、呼叫鏈、指標走勢。全部經 Grafana 的資料源代理。
@@ -183,7 +198,7 @@ def collect_evidence(incident: Incident, edges: list[tuple[str, str]], grafana: 
         "anomalies": [{"system": m["service"], "rule": m["title"], "severity": m["severity"],
                        "started": iso(m["starts_at"]), "status": m["status"], "values": m["values"]}
                       for m in _members(incident)],
-        "edges": [{"upstream": a, "downstream": b} for a, b in edges],
+        "edges": [relation(e) for e in edges],
         "error_logs": [], "id_counts": {f: {} for f in id_fields},
         "timelines": [], "call_chains": [], "metrics": [], "notes": [],
         "error_patterns": [], "warnings": [],
@@ -597,8 +612,6 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
         if evidence["timelines"]:
             out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
 
-    if evidence.get("observed_calls"):
-        out["have"].append(f"以前事故看過的呼叫關係 {len(evidence['observed_calls'])} 條")
     chains = sources.get("call_chains", "off")
     if chains == "ok":
         out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
@@ -646,15 +659,19 @@ def overview_brief(groups: dict[str, list[Any]]) -> str:
     return "證據｜" + "；".join(parts)
 
 
-MAX_OBSERVED_CALLS = 20   # 一次最多給 LLM 看幾條以前看過的呼叫關係（最近看到的優先）。版面的上限，未驗證泛化
+MAX_RELATIONS = 20   # 一次最多給 LLM 看幾條系統關係（最近看到的優先）。版面的上限，未驗證泛化
 
 
-def calls_in(evidence: dict[str, Any]) -> list[tuple[str, str]]:
+def calls_in(evidence: dict[str, Any], *, failed_only: bool = False) -> list[tuple[str, str]]:
     """這次的呼叫鏈裡實際出現的「誰呼叫誰」（系統層級，同一個系統內部的呼叫不算）。
-    來源只有 Trace：是真的發生過的呼叫，不是從指標或日誌推的。peer.service 屬性指到的對象（常見的是資料庫）也算。"""
+    來源只有 Trace：是真的發生過的呼叫，不是從指標或日誌推的。peer.service 屬性指到的對象（常見的是資料庫）也算。
+    failed_only：只留「被呼叫的那一段自己失敗」的呼叫。失敗的 Trace 裡也有成功的呼叫（例如請求失敗了，但順手送出去的訊息有送到），
+    判斷要不要合併事故時那種不算。"""
     pairs: list[tuple[str, str]] = []
     for chain in evidence.get("call_chains") or []:
         for span in chain["spans"]:
+            if failed_only and span.get("status") != "error":
+                continue
             service, caller = span.get("service") or "", span.get("called_by") or ""
             if caller and service and caller != service:
                 pairs.append((caller, service))
@@ -709,7 +726,8 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     dump = lambda x: json.dumps(x, ensure_ascii=False, indent=1)
     head = f"【0. 證據概況（程式統計的事實：已有的證據；缺的、查詢失敗的、沒接的各自讓哪一種分析做不了）】\n{summary_of_evidence}\n\n" if summary_of_evidence else ""
     text = (f"{head}【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
-            f"【2. 系統上下游關係（upstream 的問題會影響 downstream）】\n{dump(evidence['edges'])}\n\n"
+            f"【2. 系統上下游關係（upstream 的問題會影響 downstream。有 source 的是程式觀察到的：service_graph、trace＝downstream 實際呼叫過 upstream；"
+            f"log＝downstream 的錯誤日誌提到過 upstream，方向不一定對。requests、failed 是這段時間這條呼叫的請求數與失敗數）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數）】\n"
             f"{dump(evidence['error_logs'])}\n\n"
             f"【4. 錯誤日誌裡各識別碼的出現次數】\n{dump(evidence['id_counts'])}\n\n")
@@ -730,10 +748,6 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     if evidence.get("call_chains"):
         text += ("【6. 呼叫鏈：失敗請求實際的呼叫路徑（called_by 是呼叫它的系統；origin=true 是底下沒有其他失敗呼叫的失敗點）】\n"
                  f"{dump(evidence['call_chains'])}\n\n")
-    if evidence.get("observed_calls"):
-        text += ("【8. 以前的事故裡實際看到的呼叫關係（caller 呼叫過 callee；times 是有幾次事故看到，last_seen 是最後一次。"
-                 "只說明這幾個系統之間有這條呼叫路徑，不代表這次的問題經過它）】\n"
-                 f"{dump(evidence['observed_calls'])}\n\n")
     if evidence.get("metrics"):
         text += ("【7. 指標走勢：各系統的數值在事故前後的變化（baseline 是事故開始前的中位數；during 是事故開始後；"
                  "points 是整段時間平均抽樣的點，時間是 UTC。只說明數值怎麼變，不代表因果）】\n"
@@ -775,7 +789,7 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     summary = " ".join(str(answer["summary"]).split())
     if not summary:
         raise ValueError("summary 是空的")
-    systems = {a["system"] for a in evidence["anomalies"]} | {s for e in evidence["edges"] for s in e.values()}
+    systems = {a["system"] for a in evidence["anomalies"]} | {e[k] for e in evidence["edges"] for k in ("upstream", "downstream")}
     # 時間線與呼叫鏈裡實際出現的系統也算有憑據（例如呼叫鏈指到一個沒有告警、也不在關係邊裡的資料庫）
     systems |= {s for group in (evidence.get("timelines") or [], evidence.get("call_chains") or [])
                 for item in group for s in item.get("systems") or []}

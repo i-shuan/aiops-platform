@@ -61,7 +61,8 @@ def test_zero_debounce_runs_immediately():
 def live(fake, db_url):
     settings = Settings(grafana_url="http://grafana.test", grafana_token="t", webhook_token="hook-secret",
                         database_url=db_url, port=0, debounce_seconds=1, followup_seconds=1,
-                        close_after_seconds=0, retry_failed_round_seconds=1, edges=(("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")))
+                        close_after_seconds=0, retry_failed_round_seconds=1, service_graph_datasource_uid="sg-uid")
+    fake.service_graph = [("cim-eap", "mq-broker", 6, 4), ("amhs-mcs", "cim-eap", 6, 4)]   # 這三個系統之間的呼叫正在失敗：會併成一張
     summaries = []
 
     def run_round():

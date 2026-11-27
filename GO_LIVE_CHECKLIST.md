@@ -146,13 +146,11 @@ aiops-lite 有一個收告警的網址（`http://<release>.<namespace>.svc:8080/
 
 `deploy/helm/aiops-lite/values.yaml` 可以進 Git，裡面不放密碼。要看的只有這幾項：
 
-- [ ] **關係邊 `edges`**：改成現場的系統上下游，寫法是 `[上游, 下游]`。系統名稱要跟告警規則的 `service` 標籤**完全一樣（分大小寫）**。3～5 條就夠，不要把機台寫進來
-
-  ```yaml
-  edges:
-    - [mq-broker, cim-eap]
-    - [cim-eap, amhs-mcs]
-  ```
+- [ ] **系統之間的關係不用寫**（`edges` 已經移除，設定檔裡還有的話要刪掉，不然啟動報錯）。程式自己學：
+      Tempo 有開 service graph 的話，把它存指標的那個資料源 uid 填進 `traces.serviceGraphDatasourceUid`
+      （Grafana 的 Explore 選 Tempo，有 Service Graph 分頁且畫得出圖就是有開；uid 看 Tempo 資料源設定頁連到哪個 Prometheus 型別的資料源）。
+      沒開也沒關係，會從事故的呼叫鏈與錯誤日誌學，只是學得慢。上線後看學到了什麼：
+      `SELECT caller, callee, source, times, last_seen FROM observed_calls ORDER BY last_seen DESC;`
 
 - [ ] **等待時間 `timing`**：先用預設值上線，看實際情況再調
 
@@ -290,7 +288,7 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 ## 5. 要先跟其他團隊講好的事
 
 - [ ] **統一欄位規範**（`FACTORY_METRICS.md`）：三個系統的日誌欄位名稱要一樣，aiops-lite 的欄位對照只有一組
-- [ ] **`service` 的值三處一致**：告警規則的標籤、`edges`、日誌的 `service.name`（有 Trace 的話還有 Trace 的服務名稱）
+- [ ] **`service` 的值三處一致**：告警規則的標籤、日誌的 `service.name`、Tempo service graph 上的名稱（有 Trace 的話還有 Trace 的服務名稱）
 - [ ] **整合的單位與命名**：aiops-lite 以 `service` 為單位收斂，一個 Grafana 對一份、只能 1 個副本。
       多個 cluster 或廠區共用同一個 Grafana 的話，先決定做法（`service` 帶 cluster 名、或各部署一份），因為 `service` 的命名與 `edges` 都要照著寫；
       兩個 cluster 有同名的 `service` 會被併成同一張事故（說明見 `README.md` 的「整合的單位」）

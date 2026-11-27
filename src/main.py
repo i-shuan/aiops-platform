@@ -29,6 +29,7 @@ import yaml
 
 from src import grouping, rca, report
 from src.db import Database
+from src import graph
 from src import logs as logstores
 from src import outputs as outlets
 from src import traces as tracestores
@@ -72,7 +73,8 @@ class Settings:
     logs_index: str = "*"                      # 只有 Elasticsearch：要查的索引（logs.index）
     traces_type: str = "victoriatraces"        # Trace 的來源：victoriatraces（Grafana 的 Jaeger 型別資料源）／tempo
     traces_datasource_uid: str = ""            # Grafana 上那個資料源的 uid；空的 = 沒有呼叫鏈證據
-    graph_retention_days: int = 30             # 從呼叫鏈學到的呼叫關係多久沒再看到就丟掉（traces.graph_retention_days）；0 = 不學也不用
+    graph_retention_days: int = 30             # 學到的系統關係多久沒再看到就丟掉（traces.graph_retention_days）；0 = 不學、不用、也不跨系統合併
+    service_graph_datasource_uid: str = ""     # 存 Tempo service graph 指標的那個 Prometheus 相容資料源的 uid；空的 = 沒有這個來源
     metrics: rca.MetricOptions = rca.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
     log_fields: LogFields = LogFields()
@@ -88,7 +90,6 @@ class Settings:
     healthcheck_stuck_seconds: int = 600       # 同一輪跑超過這麼久，/healthz 回 503
     rounds_retention_days: int = 90            # rounds 表保留幾天
     annotation_max_rule_links: int = 5         # 註記最後一行最多列幾條規則連結
-    edges: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def load(cls, path: str | None = None) -> "Settings":
@@ -100,12 +101,15 @@ class Settings:
     def from_dict(cls, raw: dict[str, Any], base_dir: Path | None = None) -> "Settings":
         """base_dir：llm.system_prompt_file 寫相對路徑時相對於哪裡（= 設定檔所在的資料夾）。"""
         known = {"grafana", "webhook", "database", "llm", "logs", "traces", "outputs", "labels", "healthcheck", "annotation", "metrics", "timezone",
-                 "log_level", "edges", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
+                 "log_level", "retry_failed_round_seconds", "rounds_retention_days", *TIMING_DEFAULTS}
         moved = [f"{old}（改成 {new}）" for old, new in (("es", "logs，並加上 type: elasticsearch"), ("tempo", "traces，並加上 type: tempo"))
                  if old in raw]
         if moved:
             raise ConfigError(f"設定的區段改名了：{'、'.join(moved)}。logs 底下的 log_index 改叫 index、log_fields 改叫 fields，"
                               f"trace_index 與 trace_fields 沒有了，見 config.example.yaml")
+        if "edges" in raw:
+            raise ConfigError("edges 已經移除：系統之間的關係現在全部由程式從 Tempo 的 service graph、事故的呼叫鏈與錯誤日誌學，"
+                              "不用也不能手寫。請把設定檔裡的 edges 整段刪掉（見 README 的「系統之間的關係」）")
         check_keys(raw, known, "")
         grafana = section(raw, "grafana", {"url", "token", "timeout_seconds", "retries", "retry_backoff_seconds"})
         webhook = section(raw, "webhook", {"token", "port", "host", "max_body_bytes"})
@@ -117,7 +121,7 @@ class Settings:
                                    "max_warn_patterns"})
         logs = section(raw, "logs", {"type", "datasource_uid", "extra_filter", "index", "id_fields", "fields", "error_levels", "warn_levels",
                                      "max_hits", "window_padding_minutes", "timeline_fields", "baseline_minutes"})
-        traces = section(raw, "traces", {"type", "datasource_uid", "graph_retention_days", "max_traces", "max_spans", "trace_id_field"})
+        traces = section(raw, "traces", {"type", "datasource_uid", "graph_retention_days", "service_graph_datasource_uid", "max_traces", "max_spans", "trace_id_field"})
         labels = section(raw, "labels", {"detect", "severity", "service", "default_severity", "remediation"})
         metrics = section(raw, "metrics", {"datasource_uid", "queries", "lookback_minutes", "step_seconds", "max_points",
                                            "max_series"})
@@ -197,6 +201,7 @@ class Settings:
             id_fields=tuple(ids), traces_type=one_of(traces, "type", "victoriatraces", TRACE_STORES, "traces."),
             traces_datasource_uid=text(traces, "datasource_uid", "", "traces."),
             graph_retention_days=integer(traces, "graph_retention_days", cls.graph_retention_days, 0, 365, "traces."),
+            service_graph_datasource_uid=text(traces, "service_graph_datasource_uid", "", "traces."),
             metrics=metric_options(metrics),
             log_fields=log_field_names(logs, logs_type), outputs=output_options(raw),
             evidence=rca.EvidenceLimits(
@@ -216,7 +221,7 @@ class Settings:
                 max_log_patterns=integer(llm, "max_log_patterns", d_ev.max_log_patterns, 0, 20, "llm."),
                 warn_levels=warn_levels(logs, d_ev.warn_levels),
                 max_warn_patterns=integer(llm, "max_warn_patterns", d_ev.max_warn_patterns, 0, 20, "llm.")),
-            labels=names, tz=tz, log_level=level, edges=parse_edges(raw.get("edges") or []),   # 選填：沒寫、留空都是沒有關係邊
+            labels=names, tz=tz, log_level=level,
             retry_failed_round_seconds=integer(raw, "retry_failed_round_seconds", cls.retry_failed_round_seconds, 1),
             healthcheck_stuck_seconds=integer(health, "stuck_seconds", cls.healthcheck_stuck_seconds, 30, prefix="healthcheck."),
             rounds_retention_days=integer(raw, "rounds_retention_days", cls.rounds_retention_days, 1),
@@ -411,19 +416,6 @@ def metric_options(raw: dict[str, Any]) -> rca.MetricOptions:
         max_series=integer(raw, "max_series", d.max_series, 1, 20, "metrics."))
 
 
-def parse_edges(items: Any) -> tuple[tuple[str, str], ...]:
-    if not isinstance(items, list):
-        raise ConfigError("edges 要是清單")
-    edges = []
-    for item in items:
-        pair = [p.strip() for p in item.split("->")] if isinstance(item, str) else item
-        if (not isinstance(pair, list) or len(pair) != 2 or not all(isinstance(p, str) and p.strip() for p in pair)
-                or pair[0].strip() == pair[1].strip()):
-            raise ConfigError(f"關係邊 {item!r} 寫錯：要是 [上游, 下游] 兩個不同的系統名稱")
-        edges.append((pair[0].strip(), pair[1].strip()))
-    return tuple(edges)
-
-
 def split_batch(alerts: list[grouping.Alert]) -> tuple[list[grouping.Alert], list[grouping.Alert]]:
     """把一個視窗內依序收到的告警整理成 (響過的, 最新狀態是 resolved 的)；同一個 fingerprint 各留最後一筆。"""
     firing: dict[str, grouping.Alert] = {}
@@ -440,13 +432,67 @@ def backoff_seconds(failures: int, initial: int, maximum: int) -> int:
     return min(initial * 2 ** min(max(failures - 1, 0), 30), maximum)
 
 
+MAX_LINK_TRACES = 5   # 判斷要不要合併時，最多取回幾條失敗的 Trace 來看誰呼叫誰。版面與查詢量的上限，未驗證泛化
+
+
+def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[grouping.Alert],
+            open_incidents: list[grouping.Incident], now: datetime) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
+    """這一輪開始時看一次系統之間的關係。回傳 (可以拿來合併事故的連結, 這段時間 service graph 上的呼叫)。
+
+    合併的條件（src/graph.py 的 failing_links）：兩個系統都在告警，而且這段時間它們之間有失敗的呼叫、或一方的錯誤日誌指名另一方。
+    只在有新告警的輪次才看。先看 service graph（有設的話，兩次查詢）；它已經把在告警的系統連成一塊，就不再查 Trace 與日誌；
+    還有連不起來的，才去查失敗的 Trace 與錯誤日誌。查不動就當成沒有連結（各開各的），不擋這一輪。
+    看到的關係順手記進資料庫（observed_calls），之後的事故可以拿來當線索。狀態都在資料庫，不留在記憶體。"""
+    if not settings.graph_retention_days or not firing:
+        return [], []   # 沒有新的告警：成員不會變，不用看（沒有變化的續跑輪次不對外呼叫任何東西）
+    alerting = {a.service for a in firing} | {s for inc in open_incidents for s in inc.services}
+    started = min([a.starts_at for a in firing] + [inc.started_at for inc in open_incidents])
+    start = started - timedelta(minutes=settings.evidence.window_padding_minutes)
+    graph_edges = graph.read_service_graph(grafana, settings.service_graph_datasource_uid, start, now)
+    trace_calls: list[tuple[str, str]] = []    # 失敗的 Trace 裡看到的全部呼叫：記進圖裡
+    failing_calls: list[tuple[str, str]] = []  # 其中自己失敗的那幾條：才能拿來合併
+    mentioned: list[tuple[str, str]] = []
+    linked = graph.failing_links(alerting, graph_edges=graph_edges, trace_calls=[], log_mentions=[])
+    if len(grouping.group_alerts([grouping.Alert(n, "firing", "", "", n, "P3", now, None) for n in alerting], linked)) >= 2:
+        names = sorted(alerting)
+        traces, logs = trace_store(settings, grafana), log_store(settings, grafana)
+        try:
+            if traces is not None:
+                found = sorted(traces.search_error_traces(names, start, now, rca.TRACE_SEARCH_LIMIT), key=lambda t: t["start"], reverse=True)
+                chains = [rca.summarize_trace(t["trace"] or traces.get_trace(t["id"]) or {}, t["id"], settings.evidence)
+                          for t in found[:MAX_LINK_TRACES]]
+                seen = {"call_chains": [c for c in chains if c]}
+                trace_calls, failing_calls = rca.calls_in(seen), rca.calls_in(seen, failed_only=True)
+            if logs is not None:
+                rows = logs.search_errors(names, start, now, settings.evidence.max_hits, error_levels=settings.evidence.error_levels)
+                mentioned = graph.mentions([{"system": r.get(logs.fields.service), "message": r.get(logstores.MESSAGE_FIELD)} for r in rows], alerting)
+        except GrafanaError as e:
+            log.warning("查不到系統之間這段時間的呼叫，這一輪不跨系統合併：%s", e)
+    for pairs, source in (([(e["caller"], e["callee"]) for e in graph_edges], "service_graph"), (trace_calls, "trace"), (mentioned, "log")):
+        if pairs:
+            db.record_calls(pairs, source, now, settings.graph_retention_days)
+    return graph.failing_links(alerting, graph_edges=graph_edges, trace_calls=failing_calls, log_mentions=mentioned), graph_edges
+
+
+def relations_for(settings: Settings, db: Database, incident: grouping.Incident, graph_edges: list[dict[str, Any]],
+                  now: datetime) -> list[dict[str, Any]]:
+    """跟這張事故的系統有關、學到過的關係（給 LLM 當線索）。service graph 的邊帶上這段時間的請求數與失敗數。"""
+    if not settings.graph_retention_days:
+        return []
+    live = {(e["caller"], e["callee"]): e for e in graph_edges}
+    out = []
+    for row in db.calls_touching(incident.services, now, settings.graph_retention_days, rca.MAX_RELATIONS):
+        numbers = live.get((row["caller"], row["callee"])) if row["source"] == "service_graph" else None
+        out.append({**row, **({k: numbers[k] for k in ("requests", "failed", "kind")} if numbers else {})})
+    return out
+
+
 def process(settings: Settings, *, now: datetime | None = None, grafana_transport: httpx.BaseTransport | None = None,
             llm_transport: httpx.BaseTransport | None = None, outputs_transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
     """跑一輪，回傳這一輪的摘要（needs_followup = 還有事要做，沒有新 Webhook 也要再跑）。
     transport 參數只是 HTTP 連線的注入點（預設真的連出去）。"""
     started = datetime.now(timezone.utc)
     now = (now or started).astimezone(timezone.utc)
-    edges = list(settings.edges)
     db = Database(settings.database_url)
     grafana = Grafana(settings.grafana_url, settings.grafana_token, transport=grafana_transport,
                       timeout=settings.grafana_timeout_seconds, retries=settings.grafana_retries,
@@ -460,8 +506,19 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
     try:
         ids, batch = db.pending()
         firing, resolved = split_batch(batch)
-        incidents = grouping.converge(db.open_incidents(), firing, resolved, edges, now=now,
+        still_open = db.open_incidents()
+        links, graph_edges = observe(settings, grafana, db, firing, still_open, now)
+        incidents = grouping.converge(still_open, firing, resolved, links, now=now,
                                       close_after_seconds=settings.close_after_seconds)
+        fetched: dict[str, list[dict[str, Any]]] = {}   # 這一輪讀到的 service graph，只活在這一輪
+
+        def graph_now(inc: grouping.Incident) -> list[dict[str, Any]]:
+            """要分析事故時才需要 service graph 上這段時間的請求數與失敗數。這一輪開頭讀過就用那一份，沒讀過才讀（一輪最多一次）。"""
+            if "edges" not in fetched:
+                fetched["edges"] = graph_edges if firing else graph.read_service_graph(
+                    grafana, settings.service_graph_datasource_uid if settings.graph_retention_days else "",
+                    inc.started_at - timedelta(minutes=settings.evidence.window_padding_minutes), now)
+            return fetched["edges"]
         known = {i.uid for i in incidents}
         incidents += [i for i in db.unannotated_incidents() if i.uid not in known]
         known = {i.uid for i in incidents}
@@ -489,16 +546,15 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 log.debug("事故 %s 的 LLM 分析退避中，%s 之前不再試", inc.uid, inc.llm_next_try.isoformat())
                 continue
             evidence = rca.collect_evidence(
-                inc, edges, grafana, logs=log_store(settings, grafana), traces=trace_store(settings, grafana),
-                id_fields=list(settings.id_fields), now=now, limits=settings.evidence, metrics=settings.metrics)
+                inc, relations_for(settings, db, inc, graph_now(inc), now), grafana, logs=log_store(settings, grafana),
+                traces=trace_store(settings, grafana), id_fields=list(settings.id_fields), now=now, limits=settings.evidence,
+                metrics=settings.metrics)
             if settings.graph_retention_days:
-                # 動態的系統關係：這次呼叫鏈裡看到的「誰呼叫誰」記進資料庫，以前記過、跟這張事故有關的拿出來給 LLM 當線索。
-                # 只當線索，不拿來合併事故（大家都連的元件會把不相干的告警拉成同一張）。這次的呼叫鏈已經在證據裡，不重複列
-                seen_now = rca.calls_in(evidence)
-                if seen_now:
-                    db.record_calls(seen_now, now, settings.graph_retention_days)
-                known = db.calls_touching(inc.services, now, settings.graph_retention_days, rca.MAX_OBSERVED_CALLS)
-                evidence["observed_calls"] = [c for c in known if (c["caller"], c["callee"]) not in set(seen_now)]
+                # 這次的證據裡看到的關係記下來，之後的事故用得到：呼叫鏈裡誰呼叫誰；錯誤日誌裡提到了哪個已知的系統
+                for pairs, source in ((rca.calls_in(evidence), "trace"),
+                                      (graph.mentions(evidence["error_logs"], db.known_systems() | set(inc.services)), "log")):
+                    if pairs:
+                        db.record_calls(pairs, source, now, settings.graph_retention_days)
             before = (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates)
             # 「證據」那幾行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
             groups = rca.overview(evidence, settings.log_fields, settings.evidence.error_levels)

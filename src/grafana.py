@@ -3,6 +3,7 @@
   parse_webhook       解析 Grafana 告警 webhook（Contact Point 推進來的）：哪條規則、哪個系統、嚴重度、firing／resolved
   Grafana.request     所有 HTTP 呼叫共用（重試、錯誤訊息）。日誌與 Trace 的查詢在 src/logs.py、src/traces.py，都經這裡走資料源代理
   Grafana.query_range 指標：GET /api/datasources/proxy/uid/<uid>/api/v1/query_range（Prometheus 相容：VictoriaMetrics、Prometheus、Mimir）
+  Grafana.query_instant  同一種資料源的單點查詢（/api/v1/query），讀 Tempo service graph 的指標用
   Grafana.upsert_annotation  POST／PATCH /api/annotations，每個事故一筆註記
 
 格式以 tests/fixtures/grafana13/ 為準：Grafana 13.0.7 實際送出與回應的內容。
@@ -153,6 +154,23 @@ class Grafana:
                     points.append((datetime.fromtimestamp(float(ts), timezone.utc), number))
             series.append({"labels": dict(item.get("metric") or {}), "points": points})
         return series
+
+    def query_instant(self, datasource_uid: str, expr: str, at: datetime) -> list[dict[str, Any]]:
+        """單一時間點的查詢（Prometheus HTTP API 的 /api/v1/query）。回傳每條序列 {"labels": {...}, "value": 數值}；
+        NaN 與無限大的丟掉。查詢語法錯、資料源不對丟 GrafanaError。"""
+        raw = self.request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/v1/query", params={
+            "query": expr, "time": int(at.timestamp())})
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if not isinstance(data, dict) or raw.get("status") != "success" or not isinstance(data.get("result"), list):
+            raise GrafanaError(f"指標查詢的回應不是預期的格式：{str(raw)[:200]}")
+        if data.get("resultType") != "vector":
+            raise GrafanaError(f"單點查詢要回 vector，這條回的是 {data.get('resultType')}")
+        out = []
+        for item in data["result"]:
+            number = float((item.get("value") or [0, "nan"])[1])
+            if math.isfinite(number):
+                out.append({"labels": dict(item.get("metric") or {}), "value": number})
+        return out
 
     # ── 註記 ──
 

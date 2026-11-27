@@ -24,7 +24,9 @@ def world(fake, db_url):
     settings = Settings(grafana_url="http://grafana.test", grafana_token="t", webhook_token="w",
                         database_url=db_url, llm_api_url="http://llm.test/v1", llm_model="m",
                         logs_datasource_uid="vl-uid",
-                        close_after_seconds=300, edges=(("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")))
+                        close_after_seconds=300, service_graph_datasource_uid="sg-uid")
+    # 系統之間的關係不再手寫：這個世界裡 Tempo 的 service graph 看到 cim-eap 呼叫 mq-broker、amhs-mcs 呼叫 cim-eap，而且都有失敗
+    fake.service_graph = [("cim-eap", "mq-broker", 6, 4), ("amhs-mcs", "cim-eap", 6, 4)]
     llm_calls = []
 
     def llm(request: httpx.Request) -> httpx.Response:
@@ -215,9 +217,6 @@ log_level: debug
 debounce_seconds: 90
 followup_seconds: 30
 close_after_seconds: 600
-edges:
-  - [mq-broker, cim-eap]
-  - cim-eap -> amhs-mcs
 """
 MINIMAL = "grafana: {url: 'http://g', token: 't'}\nwebhook: {token: 'w'}\n"
 
@@ -237,12 +236,11 @@ def test_every_setting_comes_from_the_one_yaml_file(tmp_path):
     assert (s.log_fields.service, s.log_fields.level, s.traces_datasource_uid) == ("app", "severity", "jaeger-1")
     assert (s.tz, s.log_level) == ("Asia/Tokyo", "DEBUG")
     assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds) == (90, 30, 600)
-    assert s.edges == (("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs"))
 
 
 def test_only_the_required_settings_need_to_be_written(tmp_path):
     s = Settings.load(config(tmp_path, MINIMAL))
-    assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds, s.edges) == (60, 60, 300, ())
+    assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds) == (60, 60, 300)
     assert (s.port, s.tz, s.database_url, s.llm_api_url, s.logs_datasource_uid) == (8080, "Asia/Taipei", "sqlite:///aiops-lite.db", "", "")
     assert (s.log_fields.service, s.log_fields.level, s.logs_filter) == ("service.name", "log.level", "") and s.id_fields == ("eqp_id", "lot_id", "carrier_id")
 
@@ -253,7 +251,7 @@ def test_the_example_config_is_valid_and_matches_the_defaults(tmp_path):
     s = Settings.load(config(tmp_path, text.replace('token: ""', 'token: "x"')))
     d = Settings(grafana_url="", grafana_token="", webhook_token="")
     assert (s.log_fields, s.logs_filter, s.id_fields, s.tz) == (d.log_fields, d.logs_filter, d.id_fields, d.tz)
-    assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds) == (60, 60, 300) and len(s.edges) == 2
+    assert (s.debounce_seconds, s.followup_seconds, s.close_after_seconds) == (60, 60, 300)
 
 
 def test_config_path_defaults_and_the_single_environment_variable(tmp_path, monkeypatch):
@@ -296,23 +294,14 @@ def test_secrets_do_not_appear_when_settings_are_printed(tmp_path):
     (MINIMAL + "debounce_seconds: true\n", "debounce_seconds"),
     (MINIMAL + "debounce_second: 60\n", "不認得的設定"),
     (MINIMAL + "followup_seconds: 0\n", "followup_seconds"),
-    (MINIMAL + "edges: [[a]]\n", "關係邊"),
-    (MINIMAL + "edges: [[a, a]]\n", "關係邊"),
-    (MINIMAL + "edges: [a - b]\n", "關係邊"),
-    (MINIMAL + "edges: {a: b}\n", "edges 要是清單"),
+    (MINIMAL + "edges: [[a, b]]\n", "edges 已經移除"),     # 關係全部由程式學，不能手寫
+    (MINIMAL + "edges: []\n", "edges 已經移除"),
     ("- a\n", "最外層要是物件"),
     ("grafana: {url: [x", "不是合法的 YAML"),
 ])
 def test_config_mistakes_are_rejected_at_startup(tmp_path, text, message):
     with pytest.raises(ConfigError, match=message):
         Settings.load(config(tmp_path, text))
-
-
-def test_edges_are_optional(tmp_path):
-    """關係邊是加分的：沒寫、或只寫了 edges: 後面留空，都當成沒有，不是設定錯誤。"""
-    assert Settings.load(config(tmp_path, MINIMAL)).edges == ()
-    assert Settings.load(config(tmp_path, MINIMAL + "edges:\n")).edges == ()
-    assert Settings.load(config(tmp_path, MINIMAL + "edges: []\n")).edges == ()
 
 
 def test_zero_debounce_is_allowed_but_zero_followup_is_not(tmp_path):
