@@ -72,6 +72,7 @@ class Settings:
     logs_index: str = "*"                      # 只有 Elasticsearch：要查的索引（logs.index）
     traces_type: str = "victoriatraces"        # Trace 的來源：victoriatraces（Grafana 的 Jaeger 型別資料源）／tempo
     traces_datasource_uid: str = ""            # Grafana 上那個資料源的 uid；空的 = 沒有呼叫鏈證據
+    graph_retention_days: int = 30             # 從呼叫鏈學到的呼叫關係多久沒再看到就丟掉（traces.graph_retention_days）；0 = 不學也不用
     metrics: rca.MetricOptions = rca.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
     log_fields: LogFields = LogFields()
@@ -116,7 +117,7 @@ class Settings:
                                    "max_warn_patterns"})
         logs = section(raw, "logs", {"type", "datasource_uid", "extra_filter", "index", "id_fields", "fields", "error_levels", "warn_levels",
                                      "max_hits", "window_padding_minutes", "timeline_fields", "baseline_minutes"})
-        traces = section(raw, "traces", {"type", "datasource_uid", "max_traces", "max_spans", "trace_id_field"})
+        traces = section(raw, "traces", {"type", "datasource_uid", "graph_retention_days", "max_traces", "max_spans", "trace_id_field"})
         labels = section(raw, "labels", {"detect", "severity", "service", "default_severity", "remediation"})
         metrics = section(raw, "metrics", {"datasource_uid", "queries", "lookback_minutes", "step_seconds", "max_points",
                                            "max_series"})
@@ -195,6 +196,7 @@ class Settings:
             logs_filter=text(logs, "extra_filter", "", "logs."), logs_index=text(logs, "index", "*", "logs.") or "*",
             id_fields=tuple(ids), traces_type=one_of(traces, "type", "victoriatraces", TRACE_STORES, "traces."),
             traces_datasource_uid=text(traces, "datasource_uid", "", "traces."),
+            graph_retention_days=integer(traces, "graph_retention_days", cls.graph_retention_days, 0, 365, "traces."),
             metrics=metric_options(metrics),
             log_fields=log_field_names(logs, logs_type), outputs=output_options(raw),
             evidence=rca.EvidenceLimits(
@@ -489,6 +491,14 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             evidence = rca.collect_evidence(
                 inc, edges, grafana, logs=log_store(settings, grafana), traces=trace_store(settings, grafana),
                 id_fields=list(settings.id_fields), now=now, limits=settings.evidence, metrics=settings.metrics)
+            if settings.graph_retention_days:
+                # 動態的系統關係：這次呼叫鏈裡看到的「誰呼叫誰」記進資料庫，以前記過、跟這張事故有關的拿出來給 LLM 當線索。
+                # 只當線索，不拿來合併事故（大家都連的元件會把不相干的告警拉成同一張）。這次的呼叫鏈已經在證據裡，不重複列
+                seen_now = rca.calls_in(evidence)
+                if seen_now:
+                    db.record_calls(seen_now, now, settings.graph_retention_days)
+                known = db.calls_touching(inc.services, now, settings.graph_retention_days, rca.MAX_OBSERVED_CALLS)
+                evidence["observed_calls"] = [c for c in known if (c["caller"], c["callee"]) not in set(seen_now)]
             before = (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates)
             # 「證據」那幾行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
             groups = rca.overview(evidence, settings.log_fields, settings.evidence.error_levels)

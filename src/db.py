@@ -76,6 +76,17 @@ deliveries = sa.Table(
     sa.UniqueConstraint("channel", "dedupe_key"),
 )
 
+calls = sa.Table(
+    "observed_calls", metadata,   # 從事故的呼叫鏈裡看到的「誰呼叫誰」，一次一次累積（見 rca.calls_in）。只給 LLM 當線索，不拿來合併事故
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("caller", sa.String(255), nullable=False),
+    sa.Column("callee", sa.String(255), nullable=False),
+    sa.Column("first_seen", TS, nullable=False),
+    sa.Column("last_seen", TS, nullable=False, index=True),
+    sa.Column("times", sa.Integer, nullable=False, default=1),   # 有幾次收集證據時看到這條呼叫（不是請求數）
+    sa.UniqueConstraint("caller", "callee"),
+)
+
 MEMBER_TIMES = ("starts_at", "ends_at")
 
 
@@ -225,6 +236,26 @@ class Database:
             uids = [r[0] for r in conn.execute(sa.select(deliveries.c.incident_uid).where(
                 deliveries.c.status == "failed", deliveries.c.attempts < max_attempts).distinct())]
         return self._select(incidents.c.uid.in_(uids)) if uids else []
+
+    # ── 觀察到的呼叫關係 ──
+
+    def record_calls(self, pairs: list[tuple[str, str]], now: datetime, retention_days: int) -> None:
+        """記下這次看到的呼叫（已經有的更新最後看到的時間與次數），順便清掉太久沒再看到的。"""
+        with self.engine.begin() as conn:
+            for caller, callee in sorted(set(pairs)):
+                done = conn.execute(sa.update(calls).where(calls.c.caller == caller, calls.c.callee == callee)
+                                    .values(last_seen=now, times=calls.c.times + 1))
+                if done.rowcount == 0:
+                    conn.execute(sa.insert(calls).values(caller=caller, callee=callee, first_seen=now, last_seen=now, times=1))
+            conn.execute(sa.delete(calls).where(calls.c.last_seen < now - timedelta(days=retention_days)))
+
+    def calls_touching(self, services: list[str], now: datetime, retention_days: int, limit: int) -> list[dict[str, Any]]:
+        """跟這些系統有關（它呼叫別人、或別人呼叫它）、而且還沒過期的呼叫關係，最近看到的在前。"""
+        with self.engine.connect() as conn:
+            rows = conn.execute(sa.select(calls).where(
+                sa.or_(calls.c.caller.in_(services), calls.c.callee.in_(services)),
+                calls.c.last_seen >= now - timedelta(days=retention_days)).order_by(calls.c.last_seen.desc(), calls.c.id).limit(limit)).mappings().all()
+        return [{"caller": r["caller"], "callee": r["callee"], "last_seen": _iso(r["last_seen"]), "times": r["times"]} for r in rows]
 
     # ── 執行紀錄 ──
 

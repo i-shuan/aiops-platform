@@ -12,6 +12,7 @@ aiops-lite 自己不產生資料，也不直連任何外部系統。它能做到
 | 3 | 日誌 | VictoriaLogs 或 Elasticsearch（`logs.type`），經 Grafana 的資料源代理（VictoriaLogs 要在 Grafana 裝外掛 `victoriametrics-logs-datasource`） | 第 3 包（錯誤日誌）、第 4 包（機台與批號統計）、第 5 包（批號時間線） | 建議。沒有的話摘要多半是「證據不足」 |
 | 4 | Trace | VictoriaTraces（經 Grafana 內建的 Jaeger 型別資料源，URL 指到它的 `/select/jaeger`）或 Tempo（`traces.type`） | 第 6 包（呼叫鏈） | 選用。有埋點的 IT 服務才有 |
 | 5 | 指標 | VictoriaMetrics，經 Grafana 的 Prometheus 型別資料源（Prometheus、Mimir 也可以） | 第 7 包（指標走勢） | 選用。補上日誌與 Trace 看不到的情況 |
+| — | 以前學到的呼叫關係 | aiops-lite 自己的資料庫（從以前事故的呼叫鏈累積） | 第 8 包：跟這張事故的系統有關的「誰呼叫過誰」 | 自動。沒有送 Trace 的系統不會有；`traces.graph_retention_days: 0` 關掉 |
 | 6 | LLM | OpenAI 相容的端點 | 把證據寫成一句摘要 | 選用。沒有的話註記第 2 行是 `[未經分析]` 的原始摘要；有設定但連不上時，第 2 行寫原因與重試時間，底下直接列收集到的證據 |
 | 7 | Grafana Token | Editor 角色的服務帳號 | 以上 3～5 項的查詢、寫註記 | **必要** |
 

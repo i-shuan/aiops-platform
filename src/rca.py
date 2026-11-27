@@ -597,6 +597,8 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
         if evidence["timelines"]:
             out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
 
+    if evidence.get("observed_calls"):
+        out["have"].append(f"以前事故看過的呼叫關係 {len(evidence['observed_calls'])} 條")
     chains = sources.get("call_chains", "off")
     if chains == "ok":
         out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
@@ -642,6 +644,24 @@ def overview_brief(groups: dict[str, list[Any]]) -> str:
     if groups["off"]:
         parts.append(f"沒接{'、'.join(name for name, _key in groups['off'])}")
     return "證據｜" + "；".join(parts)
+
+
+MAX_OBSERVED_CALLS = 20   # 一次最多給 LLM 看幾條以前看過的呼叫關係（最近看到的優先）。版面的上限，未驗證泛化
+
+
+def calls_in(evidence: dict[str, Any]) -> list[tuple[str, str]]:
+    """這次的呼叫鏈裡實際出現的「誰呼叫誰」（系統層級，同一個系統內部的呼叫不算）。
+    來源只有 Trace：是真的發生過的呼叫，不是從指標或日誌推的。peer.service 屬性指到的對象（常見的是資料庫）也算。"""
+    pairs: list[tuple[str, str]] = []
+    for chain in evidence.get("call_chains") or []:
+        for span in chain["spans"]:
+            service, caller = span.get("service") or "", span.get("called_by") or ""
+            if caller and service and caller != service:
+                pairs.append((caller, service))
+            target = (span.get("attributes") or {}).get("peer.service") or ""
+            if service and target and target != service:
+                pairs.append((service, target))
+    return list(dict.fromkeys(pairs))
 
 
 MAX_FACT_LINES = 5   # LLM 沒有分析時，註記上最多直接列幾行證據（版面的上限，不是判斷門檻）
@@ -710,6 +730,10 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     if evidence.get("call_chains"):
         text += ("【6. 呼叫鏈：失敗請求實際的呼叫路徑（called_by 是呼叫它的系統；origin=true 是底下沒有其他失敗呼叫的失敗點）】\n"
                  f"{dump(evidence['call_chains'])}\n\n")
+    if evidence.get("observed_calls"):
+        text += ("【8. 以前的事故裡實際看到的呼叫關係（caller 呼叫過 callee；times 是有幾次事故看到，last_seen 是最後一次。"
+                 "只說明這幾個系統之間有這條呼叫路徑，不代表這次的問題經過它）】\n"
+                 f"{dump(evidence['observed_calls'])}\n\n")
     if evidence.get("metrics"):
         text += ("【7. 指標走勢：各系統的數值在事故前後的變化（baseline 是事故開始前的中位數；during 是事故開始後；"
                  "points 是整段時間平均抽樣的點，時間是 UTC。只說明數值怎麼變，不代表因果）】\n"

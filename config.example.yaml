@@ -73,6 +73,8 @@ traces:                                  # 整段可以不寫：沒設 datasourc
   #                                        # "" = 不用日誌裡的 id
   # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace
   # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
+  # graph_retention_days: 30             # 從呼叫鏈學到的「誰呼叫誰」多久沒再看到就丟掉；0 = 不學也不用。
+  #                                        # 學到的只給 LLM 當線索，不會拿來合併事故（合併只認下面手寫的 edges）
 
 metrics:                                 # 整段可以不寫：沒設 datasource_uid 或沒有 queries = RCA 沒有指標走勢這包證據
   datasource_uid: ""                     # Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以）
