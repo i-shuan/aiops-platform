@@ -467,7 +467,7 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 
 | 項目 | 怎麼驗的 | 結果 |
 | --- | --- | --- |
-| 自動測試 | 345 個，SQLite 與 PostgreSQL 16 各跑一遍。Grafana、VictoriaLogs、VictoriaTraces、Elasticsearch、Tempo、Prometheus 的回應是實際錄下來的（`tests/fixtures/grafana13/`）；假的 Grafana 照查詢條件篩資料，篩出來的結果逐條跟真的 VictoriaLogs 比過 | 全過 |
+| 自動測試 | 345 個，SQLite 與 PostgreSQL 16 各跑一遍。Grafana、VictoriaLogs、VictoriaTraces、Elasticsearch、Tempo、VictoriaMetrics 的回應是實際錄下來的（`tests/fixtures/grafana13/`）；假的 Grafana 照查詢條件篩資料，篩出來的結果逐條跟真的 VictoriaLogs 比過 | 全過 |
 | 兩種日誌來源給的證據一樣 | 同一批資料寫進 VictoriaLogs v1.17.0 與 Elasticsearch 8.19.23，經 Grafana 用實際的查詢程式各收集一次 | 每一種查詢的結果、整包證據都一樣（只差時間的小數寫法）。Tempo 2.9.0 與 VictoriaTraces 收到的同一條 Trace，轉出來的呼叫鏈也一樣 |
 | 三個 Victoria 元件經 Grafana 查得到 | 2026-11-26。Grafana 13.0.7 + VictoriaLogs v1.17.0 + VictoriaTraces v0.5.0 + VictoriaMetrics v1.110.0（單機版官方執行檔），Editor Token 經資料源代理 | 三者都通 |
 | 完整流程：三系統連鎖 | 真的服務、Webhook、三個 Victoria 元件、真的 LLM（各問一次）。日誌 + VictoriaMetrics 的佇列指標 | 收成一張事故；排第一是 mq-broker（信心 95）；證據那一行列出指標走勢 1 條 |

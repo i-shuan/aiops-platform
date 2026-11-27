@@ -90,7 +90,7 @@ Tempo 的 OTLP 由程式轉），分析的程式不分來源。測試把同一�
 | `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈（只取失敗的）；0 = 不取（連搜尋都不做） |
 | `traces.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
 | `traces.graph_retention_days` | 30 | 0～365 | 學到的系統關係多久沒再看到就丟掉；0 = 不學、不用，不同系統的告警也不會併成同一張。30 是估的，沒有依據，未驗證泛化 |
-| `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以） |
+| `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；指標一律是 VictoriaMetrics，其他資料庫沒有驗證） |
 | `metrics.queries` | `[]` | 最多 20 條 | 事故時要查的指標（PromQL／MetricsQL），每條 `{name, expr, services}`。`expr` 一定要有 `$service`（換成系統名稱，已跳脫）；`services` 選填，有寫就只對那幾個系統查。名稱不能重複 |
 | `metrics.lookback_minutes` | 60 | 5～1440 | 事故開始前往回看多久當基準（取中位數）。太短會把事故前的爬升算進基準 |
 | `metrics.step_seconds` | 60 | 5～3600 | 取樣間隔；不要小於指標的抓取間隔 |

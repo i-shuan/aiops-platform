@@ -127,7 +127,7 @@ class FakeGrafana:
         return len(self.queries("sort by (_time) desc"))
 
     def query_range(self, query: str) -> httpx.Response:
-        """Prometheus 相容資料源的代理：回 Grafana 13.0.7 + Prometheus 3.5.0 + RabbitMQ 3.12.1 實際錄下來的回應
+        """指標資料源的代理：回 Grafana 13.0.7 + VictoriaMetrics v1.110.0 實際錄下來的回應（序列來自 RabbitMQ 3.12.1）
         （prom_query_range_*.json）。只有 mq-broker 有佇列的指標；其他系統查得到但沒有資料；語法錯的回 400。"""
         if "[1m)" in query:
             name = "prom_query_range_bad_query"

@@ -11,7 +11,7 @@ aiops-lite 自己不產生資料，也不直連任何外部系統。它能做到
 | 2 | 系統關係 | 程式自己學：Tempo 的 service graph、事故的呼叫鏈、錯誤日誌裡提到的系統（沒有手寫的 `edges` 了） | 跨系統收斂；第 2 包證據 | 自動。什麼都沒看到的系統各開一張事故 |
 | 3 | 日誌 | VictoriaLogs 或 Elasticsearch（`logs.type`），經 Grafana 的資料源代理（VictoriaLogs 要在 Grafana 裝外掛 `victoriametrics-logs-datasource`） | 第 3 包（錯誤日誌）、第 4 包（機台與批號統計）、第 5 包（批號時間線） | 建議。沒有的話摘要多半是「證據不足」 |
 | 4 | Trace | VictoriaTraces（經 Grafana 內建的 Jaeger 型別資料源，URL 指到它的 `/select/jaeger`）或 Tempo（`traces.type`） | 第 6 包（呼叫鏈） | 選用。有埋點的 IT 服務才有 |
-| 5 | 指標 | VictoriaMetrics，經 Grafana 的 Prometheus 型別資料源（Prometheus、Mimir 也可以） | 第 7 包（指標走勢） | 選用。補上日誌與 Trace 看不到的情況 |
+| 5 | 指標 | VictoriaMetrics，經 Grafana 的 Prometheus 型別資料源（指標一律是 VictoriaMetrics，其他資料庫沒有驗證） | 第 7 包（指標走勢） | 選用。補上日誌與 Trace 看不到的情況 |
 | — | 以前學到的呼叫關係 | aiops-lite 自己的資料庫（從以前事故的呼叫鏈累積） | 第 8 包：跟這張事故的系統有關的「誰呼叫過誰」 | 自動。沒有送 Trace 的系統不會有；`traces.graph_retention_days: 0` 關掉 |
 | 6 | LLM | OpenAI 相容的端點 | 把證據寫成一句摘要 | 選用。沒有的話註記第 2 行是 `[未經分析]` 的原始摘要；有設定但連不上時，第 2 行寫原因與重試時間，底下直接列收集到的證據 |
 | 7 | Grafana Token | Editor 角色的服務帳號 | 以上 3～5 項的查詢、寫註記 | **必要** |
@@ -314,7 +314,8 @@ OpenAI 相容的 chat completions 端點。拿到上面七包證據，回一句�
 - 指標走勢：Grafana 13.0.7、Prometheus 3.5.0、RabbitMQ 3.12.1（內建的 `rabbitmq_prometheus`）。一個佇列先正常收送 180 秒，
   然後消費者停掉、生產者繼續每秒約 10 筆送 110 秒，佇列真的堆到 1007 筆。aiops-lite 用 Editor Token 經 Grafana 查到：
   待處理訊息數的基準 0、事故期間最大 1007；消費者數的基準 1、最後 0；發佈速率前後都是每秒約 10 筆。
-  （測試用的指標回應樣本 `prom_query_range_*.json` 仍然是這一次從 Prometheus 錄的。）
+  （測試用的指標回應樣本 `prom_query_range_*.json` 原本是這一次從 Prometheus 錄的；2026-11-27 把同一批序列寫進 VictoriaMetrics v1.110.0 重錄，數值一樣。
+  差別只有兩處：回應多一個 `stats` 欄位；查詢寫錯時 VictoriaMetrics 回 422、Prometheus 回 400，錯誤說明的寫法也不同。）
 - 同一份證據交給真的 LLM（`gpt-6-luna`）各一次：
   - 有指標走勢：「可能源頭是 mq-broker 的 eap.events 消費端失效，佇列堆積並影響 amhs-mcs；消費端失效原因證據不足」。
   - 沒有指標走勢：「證據不足以判定源頭」。
