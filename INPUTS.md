@@ -132,7 +132,8 @@ Elasticsearch 的查詢都是 `_msearch`（一個請求裡放多個子查詢）�
 
 **最理想**
 
-- 公司的 Tempo 開了 service graph：全量、即時，沒埋點的資料庫與訊息佇列另一端的消費者也看得到。
+- Trace 資料庫開了 service graph：Tempo 的最完整（全量、即時、有失敗數，沒埋點的資料庫與訊息佇列另一端的消費者也看得到）；
+  VictoriaTraces 的只有誰呼叫誰，合併事故仍然要靠失敗的 Trace 或錯誤日誌。
 - 告警的 `service`、日誌的服務名稱、Trace 的服務名稱三邊完全一樣，程式才對得起來。
 - 訊息佇列用父子接法傳遞 Trace（消費端接在同一條 Trace 上）。
 

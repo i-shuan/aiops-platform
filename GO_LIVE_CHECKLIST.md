@@ -149,6 +149,7 @@ aiops-lite 有一個收告警的網址（`http://<release>.<namespace>.svc:8080/
 - [ ] **系統之間的關係不用寫**（`edges` 已經移除，設定檔裡還有的話要刪掉，不然啟動報錯）。程式自己學：
       Tempo 有開 service graph 的話，把它存指標的那個資料源 uid 填進 `traces.serviceGraphDatasourceUid`
       （Grafana 的 Explore 選 Tempo，有 Service Graph 分頁且畫得出圖就是有開；uid 看 Tempo 資料源設定頁連到哪個 Prometheus 型別的資料源）。
+      用 VictoriaTraces 的話不用填：它啟動時有加 `-servicegraph.enableTask=true` 就會自動讀到。
       沒開也沒關係，會從事故的呼叫鏈與錯誤日誌學，只是學得慢。上線後看學到了什麼：
       `SELECT caller, callee, source, times, last_seen FROM observed_calls ORDER BY last_seen DESC;`
 

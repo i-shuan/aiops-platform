@@ -106,6 +106,9 @@ class FakeGrafana:
         # Tempo 的 service graph（存在指標資料源裡）：(呼叫的, 被呼叫的, 請求數, 失敗數)。回應的格式照 service_graph.json 錄下來的
         self.service_graph: list[tuple[str, str, int, int]] = []
         self.service_graph_requests: list[httpx.Request] = []
+        # VictoriaTraces 的 service graph（Jaeger 的 /api/dependencies）：(呼叫的, 被呼叫的)。回應的格式照錄下來的
+        self.dependencies: list[tuple[str, str]] = []
+        self.dependency_requests: list[httpx.Request] = []
         # Elasticsearch 與 Tempo：照錄下來的真實回應回話（不篩資料）。msearch_replies 是照順序用掉的 {"status", "response"}
         self.msearch_replies: list[dict] = []
         self.msearch_requests: list[str] = []
@@ -191,6 +194,12 @@ class FakeGrafana:
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/v1/query"):
             self.service_graph_requests.append(request)
             return self.instant_query(request.url.params["query"])
+        if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/api/dependencies"):
+            self.dependency_requests.append(request)
+            real = recorded_service_graph("victoriatraces_dependencies")[0]["response"]
+            sample = real["data"][0]
+            return httpx.Response(200, json={**real, "data": [{**sample, "parent": a, "child": b} for a, b in self.dependencies],
+                                             "total": len(self.dependencies)})
         if path.startswith("/api/datasources/proxy/uid/") and path.endswith("/_msearch"):
             self.msearch_requests.append(request.content.decode())
             reply = self.msearch_replies.pop(0)

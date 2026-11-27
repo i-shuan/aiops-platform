@@ -1,7 +1,9 @@
 """系統之間的關係：全部從資料來，沒有手寫的設定（使用者的決定，2026-11-27）。
 
 三個來源，都只記「真的看到的東西」，存進資料庫的 observed_calls 表（db.record_calls），各自標來源：
-  service_graph  Tempo 的 service graph 指標（Tempo 收 Trace 時統計的誰呼叫誰，有請求數與失敗數）。公司的 Tempo 有開才有
+  service_graph  Trace 資料庫自己統計的誰呼叫誰。兩種都要對方有開才有：
+                 Tempo：metrics-generator 的 service graph 指標，存在另一個 Prometheus 相容的資料源，有請求數與失敗數（service_graph）
+                 VictoriaTraces：-servicegraph.enableTask，從同一個 Jaeger 資料源的 /api/dependencies 讀，只有誰呼叫誰（dependencies）
   trace          事故時撈到的呼叫鏈裡的父子關係（rca.calls_in）
   log            某個系統的錯誤日誌裡，原樣出現另一個已知系統的名稱（mentions）。方向不一定是呼叫，比前兩種弱
 
@@ -48,6 +50,19 @@ def service_graph(grafana: Grafana, datasource_uid: str, start: datetime, end: d
     return sorted(edges.values(), key=lambda e: (e["caller"], e["callee"]))
 
 
+def dependencies(grafana: Grafana, datasource_uid: str, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """VictoriaTraces 的 service graph（Jaeger 相容的 /api/dependencies）：[{"caller", "callee", "requests": None, "failed": None, "kind": ""}]。
+    它只告訴我們誰呼叫誰：沒有失敗數；callCount 會重複計算（實測 v0.5.0，6 條 Trace 回報 108 次），所以不用；
+    沒埋點的對象（只出現在 peer.service 的資料庫）不會在上面。沒開 -servicegraph.enableTask 的話回空的。"""
+    raw = grafana.request("GET", f"/api/datasources/proxy/uid/{datasource_uid}/api/dependencies", params={
+        "endTs": int(end.timestamp() * 1000), "lookback": min(MAX_RANGE_MINUTES * 60_000, max(60_000, int((end - start).total_seconds() * 1000)))})
+    data = raw.get("data") if isinstance(raw, dict) else None
+    if not isinstance(data, list):
+        raise GrafanaError(f"相依關係查詢的回應沒有 data：{str(raw)[:200]}")
+    pairs = sorted({(str(d.get("parent") or ""), str(d.get("child") or "")) for d in data if isinstance(d, dict)})
+    return [{"caller": a, "callee": b, "requests": None, "failed": None, "kind": ""} for a, b in pairs if a and b and a != b]
+
+
 def mentions(logs: list[dict[str, Any]], names: set[str]) -> list[tuple[str, str]]:
     """錯誤日誌裡「A 的訊息原樣提到 B」的 (A, B)。logs 是證據裡的日誌樣本（system、message）；names 是已知的系統名稱。
     比對完整的名稱、不分大小寫（前後不能是字母、數字、底線、連字號、點，免得 mes 對到 mes-api）。只認已知的名稱：
@@ -67,16 +82,18 @@ def failing_links(alerting: set[str], *, graph_edges: list[dict[str, Any]], trac
     """可以拿來合併事故的連結：兩端都在告警，而且這段時間 (1) service graph 上這條呼叫有失敗，或 (2) Trace 裡這條呼叫自己失敗
     （trace_calls 要傳 rca.calls_in(..., failed_only=True) 的結果），
     或 (3) 一方的錯誤日誌指名另一方。回傳不分方向的 (a, b)。純函式。"""
-    pairs = [(e["caller"], e["callee"]) for e in graph_edges if e["failed"] > 0] + list(trace_calls) + list(log_mentions)
+    pairs = [(e["caller"], e["callee"]) for e in graph_edges if (e["failed"] or 0) > 0] + list(trace_calls) + list(log_mentions)
     return list(dict.fromkeys(tuple(sorted(p)) for p in pairs if p[0] in alerting and p[1] in alerting and p[0] != p[1]))
 
 
-def read_service_graph(grafana: Grafana, datasource_uid: str, start: datetime, end: datetime) -> list[dict[str, Any]]:
-    """service_graph 的不擋路版本：沒設資料源回空清單；查不動記一行 log、回空清單（這一輪就當成沒有這個來源）。"""
-    if not datasource_uid:
-        return []
+def read_service_graph(grafana: Grafana, *, traces_type: str, traces_uid: str, metrics_uid: str, start: datetime, end: datetime
+                       ) -> list[dict[str, Any]]:
+    """照 Trace 的來源讀它的 service graph，不擋路：沒有可讀的回空清單；查不動記一行 log、回空清單（這一輪當成沒有這個來源）。
+    Tempo：要另外設 traces.service_graph_datasource_uid（存指標的資料源）。VictoriaTraces：用同一個 traces.datasource_uid。"""
     try:
-        return service_graph(grafana, datasource_uid, start, end)
+        if metrics_uid:
+            return service_graph(grafana, metrics_uid, start, end)
+        return dependencies(grafana, traces_uid, start, end) if traces_type == "victoriatraces" and traces_uid else []
     except GrafanaError as e:
         log.warning("讀不到 service graph：%s", e)
         return []

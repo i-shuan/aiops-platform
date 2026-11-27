@@ -74,7 +74,8 @@ class Settings:
     traces_type: str = "victoriatraces"        # Trace 的來源：victoriatraces（Grafana 的 Jaeger 型別資料源）／tempo
     traces_datasource_uid: str = ""            # Grafana 上那個資料源的 uid；空的 = 沒有呼叫鏈證據
     graph_retention_days: int = 30             # 學到的系統關係多久沒再看到就丟掉（traces.graph_retention_days）；0 = 不學、不用、也不跨系統合併
-    service_graph_datasource_uid: str = ""     # 存 Tempo service graph 指標的那個 Prometheus 相容資料源的 uid；空的 = 沒有這個來源
+    service_graph_datasource_uid: str = ""     # 只有 Tempo：存 service graph 指標的那個 Prometheus 相容資料源的 uid；空的 = 沒有這個來源
+    #                                            # （VictoriaTraces 的 service graph 從 traces_datasource_uid 讀，不用另外設）
     metrics: rca.MetricOptions = rca.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
     log_fields: LogFields = LogFields()
@@ -201,7 +202,7 @@ class Settings:
             id_fields=tuple(ids), traces_type=one_of(traces, "type", "victoriatraces", TRACE_STORES, "traces."),
             traces_datasource_uid=text(traces, "datasource_uid", "", "traces."),
             graph_retention_days=integer(traces, "graph_retention_days", cls.graph_retention_days, 0, 365, "traces."),
-            service_graph_datasource_uid=text(traces, "service_graph_datasource_uid", "", "traces."),
+            service_graph_datasource_uid=service_graph_uid(traces),
             metrics=metric_options(metrics),
             log_fields=log_field_names(logs, logs_type), outputs=output_options(raw),
             evidence=rca.EvidenceLimits(
@@ -340,6 +341,14 @@ def output_options(raw: dict[str, Any]) -> outlets.OutputOptions:
         remediation_enabled=enabled, timeout_seconds=number(out, "timeout_seconds", 10.0, 1, 120, "outputs."))
 
 
+def service_graph_uid(traces: dict[str, Any]) -> str:
+    uid = text(traces, "service_graph_datasource_uid", "", "traces.")
+    if uid and traces.get("type", "victoriatraces") != "tempo":
+        raise ConfigError("traces.service_graph_datasource_uid 只有 traces.type 是 tempo 的時候才有用："
+                          "VictoriaTraces 的 service graph 從 traces.datasource_uid 讀，不用另外設")
+    return uid
+
+
 LOG_STORES = ("victorialogs", "elasticsearch")
 TRACE_STORES = ("victoriatraces", "tempo")
 
@@ -435,6 +444,11 @@ def backoff_seconds(failures: int, initial: int, maximum: int) -> int:
 MAX_LINK_TRACES = 5   # 判斷要不要合併時，最多取回幾條失敗的 Trace 來看誰呼叫誰。版面與查詢量的上限，未驗證泛化
 
 
+def service_graph_of(settings: Settings, grafana: Grafana, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    return graph.read_service_graph(grafana, traces_type=settings.traces_type, traces_uid=settings.traces_datasource_uid,
+                                    metrics_uid=settings.service_graph_datasource_uid, start=start, end=end)
+
+
 def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[grouping.Alert],
             open_incidents: list[grouping.Incident], now: datetime) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
     """這一輪開始時看一次系統之間的關係。回傳 (可以拿來合併事故的連結, 這段時間 service graph 上的呼叫)。
@@ -448,7 +462,7 @@ def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[gro
     alerting = {a.service for a in firing} | {s for inc in open_incidents for s in inc.services}
     started = min([a.starts_at for a in firing] + [inc.started_at for inc in open_incidents])
     start = started - timedelta(minutes=settings.evidence.window_padding_minutes)
-    graph_edges = graph.read_service_graph(grafana, settings.service_graph_datasource_uid, start, now)
+    graph_edges = service_graph_of(settings, grafana, start, now)
     trace_calls: list[tuple[str, str]] = []    # 失敗的 Trace 裡看到的全部呼叫：記進圖裡
     failing_calls: list[tuple[str, str]] = []  # 其中自己失敗的那幾條：才能拿來合併
     mentioned: list[tuple[str, str]] = []
@@ -483,7 +497,7 @@ def relations_for(settings: Settings, db: Database, incident: grouping.Incident,
     out = []
     for row in db.calls_touching(incident.services, now, settings.graph_retention_days, rca.MAX_RELATIONS):
         numbers = live.get((row["caller"], row["callee"])) if row["source"] == "service_graph" else None
-        out.append({**row, **({k: numbers[k] for k in ("requests", "failed", "kind")} if numbers else {})})
+        out.append({**row, **({k: numbers[k] for k in ("requests", "failed", "kind") if numbers[k] is not None} if numbers else {})})
     return out
 
 
@@ -515,9 +529,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
         def graph_now(inc: grouping.Incident) -> list[dict[str, Any]]:
             """要分析事故時才需要 service graph 上這段時間的請求數與失敗數。這一輪開頭讀過就用那一份，沒讀過才讀（一輪最多一次）。"""
             if "edges" not in fetched:
-                fetched["edges"] = graph_edges if firing else graph.read_service_graph(
-                    grafana, settings.service_graph_datasource_uid if settings.graph_retention_days else "",
-                    inc.started_at - timedelta(minutes=settings.evidence.window_padding_minutes), now)
+                fetched["edges"] = graph_edges if firing or not settings.graph_retention_days else service_graph_of(
+                    settings, grafana, inc.started_at - timedelta(minutes=settings.evidence.window_padding_minutes), now)
             return fetched["edges"]
         known = {i.uid for i in incidents}
         incidents += [i for i in db.unannotated_incidents() if i.uid not in known]

@@ -2,7 +2,8 @@
  "versions": {
   "grafana": "13.0.7",
   "tempo": "2.9.0（metrics_generator：service-graphs）",
-  "victoriametrics": "v1.110.0"
+  "victoriametrics": "v1.110.0",
+  "victoriatraces": "v0.5.0（-servicegraph.enableTask=true）"
  },
  "recorded_at": "2026-11-27T09:09:30Z",
  "token_role": "Editor",
@@ -191,6 +192,57 @@
      "status": "error",
      "errorType": "422",
      "error": "error when executing query=\"sum by (client (increase(x[1m)\" for (time=1795770540643, step=300000): ModifierExpr: identList: unexpected token \"(\"; want \",\", \")\"; unparsed data: \"(increase(x[1m)\""
+    }
+   }
+  ],
+  "victoriatraces_dependencies": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/dependencies",
+     "params": {
+      "endTs": "1795771505693",
+      "lookback": "900000"
+     }
+    },
+    "status": 200,
+    "response": {
+     "data": [
+      {
+       "parent": "web-portal",
+       "child": "mes-api",
+       "callCount": 216
+      },
+      {
+       "parent": "mes-api",
+       "child": "report-worker",
+       "callCount": 216
+      }
+     ],
+     "errors": null,
+     "limit": 0,
+     "offset": 0,
+     "total": 2
+    }
+   }
+  ],
+  "victoriatraces_dependencies_before_any_traffic": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/dependencies",
+     "params": {
+      "endTs": "1795515905693",
+      "lookback": "3600000"
+     }
+    },
+    "status": 200,
+    "response": {
+     "data": [],
+     "errors": null,
+     "limit": 0,
+     "offset": 0,
+     "total": 0
     }
    }
   ]

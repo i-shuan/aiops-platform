@@ -74,8 +74,43 @@ def test_no_traffic_is_an_empty_graph_and_a_failing_query_does_not_stop_the_roun
     broken = Grafana("http://grafana.test", "t", transport=httpx.MockTransport(lambda r: httpx.Response(422, json=bad["response"])), retries=0)
     with pytest.raises(GrafanaError, match="HTTP 422"):
         graph.service_graph(broken, "vm-uid", NOW - timedelta(minutes=5), NOW)
-    assert graph.read_service_graph(broken, "vm-uid", NOW - timedelta(minutes=5), NOW) == []   # 查不動：這一輪當成沒有這個來源
-    assert graph.read_service_graph(broken, "", NOW - timedelta(minutes=5), NOW) == []          # 沒設資料源：不查
+    window = {"start": NOW - timedelta(minutes=5), "end": NOW}
+    read = lambda **kw: graph.read_service_graph(broken, **{"traces_type": "tempo", "traces_uid": "t", "metrics_uid": "", **kw}, **window)
+    assert read(metrics_uid="vm-uid") == []                         # 查不動：這一輪當成沒有這個來源
+    assert read() == []                                             # Tempo 沒設存指標的資料源：不查
+    assert read(traces_type="victoriatraces") == []                 # VictoriaTraces 查不動：一樣當成沒有
+    assert read(traces_type="victoriatraces", traces_uid="") == []  # 沒接 Trace：不查
+
+
+def test_victoriatraces_dependencies_give_who_calls_whom_without_numbers():
+    seen = []
+    edges = graph.dependencies(replaying("victoriatraces_dependencies", seen), "vt-uid", NOW - timedelta(minutes=15), NOW)
+    assert edges == [{"caller": "mes-api", "callee": "report-worker", "requests": None, "failed": None, "kind": ""},
+                     {"caller": "web-portal", "callee": "mes-api", "requests": None, "failed": None, "kind": ""}]
+    real = recorded_service_graph("victoriatraces_dependencies")[0]["response"]["data"]
+    assert all(d["callCount"] > 9 for d in real)       # 錄製時只送了十幾條 Trace，它回報上百次：次數會重複計算，所以不用
+    assert not any("mes-db" in (d["parent"], d["child"]) for d in real)   # 沒埋點的資料庫不在上面（Tempo 的有）
+    assert seen[0].url.path == "/api/datasources/proxy/uid/vt-uid/api/dependencies" and seen[0].url.params["lookback"] == "900000"
+    assert graph.dependencies(replaying("victoriatraces_dependencies_before_any_traffic"), "vt-uid", NOW - timedelta(days=3), NOW - timedelta(days=2)) == []
+    # 沒有失敗數：光靠它不能合併，只能當線索
+    assert graph.failing_links({"mes-api", "web-portal"}, graph_edges=edges, trace_calls=[], log_mentions=[]) == []
+
+
+def test_with_victoriatraces_the_graph_is_learned_from_its_dependencies_and_merging_still_needs_a_failing_trace(world):  # noqa: F811
+    w = world
+    settings = replace(w.settings, service_graph_datasource_uid="", traces_datasource_uid="vt-uid")   # traces.type 預設是 victoriatraces
+    w.fake.dependencies = [("web-portal", "mes-api"), ("mes-api", "report-worker")]
+    w.fake.traces = {}                                                 # 這段時間沒有失敗的 Trace
+    alert_for(w, "web-portal", "fp-portal")
+    alert_for(w, "mes-api", "fp-api")
+    w.run(64, settings=settings)
+    assert incidents_of(w) == [["mes-api"], ["web-portal"]]           # 有呼叫關係、但沒看到失敗：不併
+    assert learned(w) == [("mes-api", "report-worker", "service_graph"), ("web-portal", "mes-api", "service_graph")]
+    assert len(w.fake.dependency_requests) == 1 and w.fake.service_graph_requests == []
+    prompt = w.llm_calls[0]["messages"][1]["content"]
+    section = prompt.split("【2. 系統上下游關係")[1].split("【3.")[0]
+    relations = json.loads(section[section.index("["):])
+    assert all(r["source"] == "service_graph" and "requests" not in r and "failed" not in r for r in relations)   # 沒有數字就不給
 
 
 # ── 從錯誤日誌學 ──
@@ -247,8 +282,10 @@ def test_edges_can_no_longer_be_written_by_hand_and_the_graph_settings_are_check
         Settings.from_dict({**MINIMAL, "edges": [["mq-broker", "cim-eap"]]})
     d = Settings.from_dict(MINIMAL)
     assert (d.graph_retention_days, d.service_graph_datasource_uid) == (30, "") and not hasattr(d, "edges")
-    s = Settings.from_dict({**MINIMAL, "traces": {"service_graph_datasource_uid": "vm-1", "graph_retention_days": 0}})
+    s = Settings.from_dict({**MINIMAL, "traces": {"type": "tempo", "service_graph_datasource_uid": "vm-1", "graph_retention_days": 0}})
     assert (s.service_graph_datasource_uid, s.graph_retention_days) == ("vm-1", 0)
+    with pytest.raises(ConfigError, match="只有 traces.type 是 tempo"):     # VictoriaTraces 的從同一個資料源讀，不用另外設
+        Settings.from_dict({**MINIMAL, "traces": {"service_graph_datasource_uid": "vm-1"}})
     for bad in (-1, 400, "30"):
         with pytest.raises(ConfigError, match="traces.graph_retention_days"):
             Settings.from_dict({**MINIMAL, "traces": {"graph_retention_days": bad}})

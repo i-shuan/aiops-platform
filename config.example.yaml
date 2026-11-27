@@ -73,8 +73,9 @@ traces:                                  # 整段可以不寫：沒設 datasourc
   #                                        # "" = 不用日誌裡的 id
   # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace
   # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
-  service_graph_datasource_uid: ""       # 選填：Tempo 有開 service graph（metrics-generator）的話，填它把指標寫進去的那個
-  #                                        # Prometheus 相容資料源的 uid。程式會從那裡讀「誰呼叫誰、有沒有失敗」
+  # service_graph_datasource_uid: ""     # 只有 type: tempo 能設：Tempo 有開 service graph（metrics-generator）的話，填它把指標寫進去的
+  #                                        # 那個 Prometheus 相容資料源的 uid，程式從那裡讀「誰呼叫誰、有沒有失敗」。
+  #                                        # VictoriaTraces 開了 -servicegraph.enableTask 的話會自動讀，不用設
   # graph_retention_days: 30             # 學到的系統關係多久沒再看到就丟掉；0 = 不學、不用，不同系統的告警也不會併成同一張
 
 metrics:                                 # 整段可以不寫：沒設 datasource_uid 或沒有 queries = RCA 沒有指標走勢這包證據

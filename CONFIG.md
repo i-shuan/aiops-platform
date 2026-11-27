@@ -37,7 +37,7 @@ Helm 部署時，常用設定是 `values.yaml` 上的欄位；下面標「進階
 | `debounce_seconds` | 60 | 收到第一個 Webhook 後等多久才開始分析 |
 | `followup_seconds` | 60 | 有進行中事故時，沒有新 Webhook 也每隔多久再跑一輪 |
 | `close_after_seconds` | 300 | 成員告警全部 resolved 之後，再安靜多久才結案 |
-| `traces.service_graph_datasource_uid` | 空 | Tempo 有開 service graph 的話，它存指標的那個 Prometheus 相容資料源的 uid；空 = 沒有這個來源。`edges` 已經移除（還寫著會啟動報錯）：系統之間的關係全部由程式學 |
+| `traces.service_graph_datasource_uid` | 空 | 只有 `traces.type: tempo` 能設：Tempo 有開 service graph 的話，它存指標的那個 Prometheus 相容資料源的 uid；空 = 沒有這個來源。VictoriaTraces 的 service graph 從 `traces.datasource_uid` 自動讀，不用設。`edges` 已經移除（還寫著會啟動報錯）：系統之間的關係全部由程式學 |
 
 設定跟來源對不上（例如 `logs.type: victorialogs` 卻寫了 `logs.index`，或 elasticsearch 寫了 `extra_filter`）啟動時直接報錯。
 更早的 `es`、`tempo` 兩個區段已經改名：設定檔裡還留著的話，啟動時報錯並指出要改成 `logs`（加上 `type: elasticsearch`）、

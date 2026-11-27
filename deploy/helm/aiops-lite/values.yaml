@@ -59,7 +59,8 @@ logs:            # datasourceUid 留空 = RCA 沒有日誌證據
 traces:          # datasourceUid 留空 = 沒有呼叫鏈證據（有埋點的 IT 服務才需要）
   type: victoriatraces # victoriatraces 或 tempo
   datasourceUid: ""    # victoriatraces：Jaeger 型別資料源（URL 指到 VictoriaTraces 的 /select/jaeger）的 uid；tempo：Tempo 資料源的 uid
-  # 選填：Tempo 有開 service graph 的話，填它把指標寫進去的那個 Prometheus 相容資料源的 uid（誰呼叫誰、有沒有失敗從這裡讀）。
+  # 選填，只有 type: tempo 能填：Tempo 有開 service graph 的話，填它把指標寫進去的那個 Prometheus 相容資料源的 uid。
+  # VictoriaTraces 開了 -servicegraph.enableTask 的話會自動讀，這裡留空。
   # 系統之間的關係全部由程式學，沒有手寫的 edges 了
   serviceGraphDatasourceUid: ""
 
