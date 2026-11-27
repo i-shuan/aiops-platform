@@ -304,6 +304,28 @@ def test_config_mistakes_are_rejected_at_startup(tmp_path, text, message):
         Settings.load(config(tmp_path, text))
 
 
+def test_next_steps_from_the_llm_reach_the_annotation_and_never_trigger_anything(world):
+    """LLM 的下一步建議寫在可能原因底下。它只是文字：就算寫了「重啟」，也不會有任何修復請求。"""
+    w = world
+
+    def llm(request):
+        answer = {**LLM_ANSWER, "ids": [], "summary": "mq-broker 佇列積壓，拖慢 cim-eap",
+                  "candidates": [{"source": "mq-broker", "kind": "evidence", "confidence": 80, "reason": "它的錯誤日誌寫 consumer lag exceeded"}],
+                  "actions": ["確認 mq-broker 的 lot.dispatch 佇列有沒有消費者", "重啟 mq-broker 的消費者"]}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer, ensure_ascii=False)}}]})
+    w.receive("firing_mq", "firing_cim")
+    w.run(64, llm=httpx.MockTransport(llm))
+    [inc] = rows(w, dbmod.incidents)
+    assert inc["suggestions"] == "下一步建議｜1) 確認 mq-broker 的 lot.dispatch 佇列有沒有消費者；2) 重啟 mq-broker 的消費者"
+    lines = w.fake.annotations[inc["annotation_id"]]["text"].split("<br>")
+    assert lines[2].startswith("1. mq-broker：") and lines[3] == inc["suggestions"] and lines[4].startswith("證據｜")
+    assert [r for r in rows(w, dbmod.deliveries) if r["channel"] == "remediation"] == []   # 建議不會變成修復請求
+    [sent] = [json.loads(r["payload"]) for r in rows(w, dbmod.deliveries) if r["channel"] == "incident_api"]
+    assert sent["schema"] == "aiops-lite.incident.v2" and sent["root_cause"]["suggestions"].startswith("1) 確認 mq-broker")
+    w.run(64 + 61, llm=httpx.MockTransport(lambda r: (_ for _ in ()).throw(httpx.ConnectError("down"))))
+    assert rows(w, dbmod.incidents)[0]["suggestions"] == inc["suggestions"]             # 沒有重新分析的輪次：建議照舊
+
+
 def test_zero_debounce_is_allowed_but_zero_followup_is_not(tmp_path):
     assert Settings.load(config(tmp_path, MINIMAL + "debounce_seconds: 0\n")).debounce_seconds == 0
     assert Settings.load(config(tmp_path, MINIMAL + "close_after_seconds: 0\n")).close_after_seconds == 0

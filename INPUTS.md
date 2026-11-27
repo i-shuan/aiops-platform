@@ -135,10 +135,9 @@ Elasticsearch 的查詢都是 `_msearch`（一個請求裡放多個子查詢）�
 - Trace 資料庫開了 service graph：Tempo 的最完整（全量、即時、有失敗數，沒埋點的資料庫與訊息佇列另一端的消費者也看得到）；
   VictoriaTraces 的只有誰呼叫誰，合併事故仍然要靠失敗的 Trace 或錯誤日誌。
 - 告警的 `service`、日誌的服務名稱、Trace 的服務名稱三邊完全一樣，程式才對得起來。
-- 訊息佇列用父子接法傳遞 Trace（消費端接在同一條 Trace 上）。
+- 訊息佇列有傳遞 Trace（父子接法或連結接法都可以），消費端的 span 種類標成 consumer：這樣才知道這一段是經訊息佇列、方向是發送端影響消費端。
 
-**限制**：沒有 Trace、日誌也沒提到別人的系統，不會跟任何人併成同一張；訊息佇列用「連結」接法的接不起來（還沒做追連結）；
-從日誌學只認得已經看過的系統名稱；剛上線、又沒有 service graph 時圖是空的，要有事故才慢慢長出來。
+**限制**：沒有 Trace、日誌也沒提到別人的系統，不會跟任何人併成同一張；從日誌學只認得已經看過的系統名稱；剛上線、又沒有 service graph 時圖是空的，要有事故才慢慢長出來。
 
 ## 3. 日誌（建議）
 
@@ -271,11 +270,11 @@ OpenAI 相容的 chat completions 端點。拿到上面七包證據，回一句�
 | 輸出 | 什麼時候 | 內容 |
 | --- | --- | --- |
 | Grafana 註記 | 事故內容有變 | 事故卡、根因分析與 1～3 個可能原因、證據那一行；有修復流程時多一行 `自動修復｜…` |
-| 事故 API（`outputs.incident_api.url`） | 事故開單（opened）、內容更新（updated）、結案（closed）；同樣的內容只送一次 | POST 一筆 JSON，`schema` 是 `aiops-lite.incident.v1` |
+| 事故 API（`outputs.incident_api.url`） | 事故開單（opened）、內容更新（updated）、結案（closed）；同樣的內容只送一次 | POST 一筆 JSON，`schema` 是 `aiops-lite.incident.v2` |
 | 自動修復（`outputs.remediation.url`，要 `enabled: true`） | 規則上貼了 `aiops_remediation=<流程名稱>` 的告警在響、事故還沒結案；同一張事故、同一條告警、同一個流程只送一次 | POST 一筆 JSON，`schema` 是 `aiops-lite.remediation.v1` |
 
 事故 API 的欄位：`event`；`incident`{`uid`、`status`、`severity`、`services`、`started_at`、`ended_at`、`alert_count`、
-`alerts`[{`fingerprint`、`rule_uid`、`title`、`service`、`severity`、`status`、`starts_at`}]}；`root_cause`{`analyzed`、`summary`、`candidates`[]}；
+`alerts`[{`fingerprint`、`rule_uid`、`title`、`service`、`severity`、`status`、`starts_at`}]}；`root_cause`{`analyzed`、`summary`、`candidates`[]、`suggestions`（下一步建議的文字，沒有就是空字串；只給人看，下游不要拿來自動執行）}；
 `evidence`；`grafana`{`url`、`annotation_id`、`tag`}。
 
 修復請求的欄位：`workflow`、`incident_uid`、`service`、`alert`{`fingerprint`、`rule_uid`、`title`、`severity`}、

@@ -50,7 +50,8 @@ def render(incident: Incident, grafana_url: str, tz: str, max_links: int = 5) ->
     links = "、".join(rule_link(grafana_url, uid, f"{title}（{sev}）") for (uid, title), sev in ranked[:max_links])
     more = f" 等 {len(ranked)} 條" if len(ranked) > max_links else ""
     lines = lambda text: [html.escape(" ".join(line.split())) for line in text.splitlines() if line.strip()]
-    causes, proof = lines(incident.candidates), lines(incident.evidence_note) + lines(incident.actions_note)
+    causes = lines(incident.candidates) + lines(incident.suggestions)   # 可能的原因，接著是 LLM 的下一步建議
+    proof = lines(incident.evidence_note) + lines(incident.actions_note)
     last = f"{span}｜調整優先權：{links}{more}"
     return {
         "time": int(incident.started_at.timestamp() * 1000),

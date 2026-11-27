@@ -59,7 +59,7 @@ def test_service_graph_is_read_from_the_recorded_tempo_metrics():
     seen = []
     edges = graph.service_graph(replaying("window_with_traffic", seen), "vm-uid", NOW - timedelta(minutes=15), NOW)
     assert edges == [{"caller": "mes-api", "callee": "mes-db", "requests": 9, "failed": 6, "kind": "database"},        # 沒埋點的資料庫也在
-                     {"caller": "mes-api", "callee": "report-worker", "requests": 9, "failed": 0, "kind": "messaging_system"},   # 經過訊息佇列的
+                     {"caller": "mes-api", "callee": "report-worker", "requests": 9, "failed": 0, "kind": "messaging"},   # 經過訊息佇列的（Tempo 標 messaging_system）
                      {"caller": "web-portal", "callee": "mes-api", "requests": 9, "failed": 6, "kind": ""}]
     assert not any(e["caller"] == "user" for e in edges)                 # Tempo 把入口請求畫成 client="user"：不是系統，不記
     assert [r.url.path for r in seen] == ["/api/datasources/proxy/uid/vm-uid/api/v1/query"] * 2

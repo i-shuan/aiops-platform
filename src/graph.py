@@ -27,6 +27,7 @@ from src.grafana import Grafana, GrafanaError
 log = logging.getLogger("aiops_lite.graph")
 
 REQUESTS, FAILED = "traces_service_graph_request_total", "traces_service_graph_request_failed_total"
+KINDS = {"messaging_system": "messaging", "database": "database"}   # Tempo 標的連線種類 → 我們用的寫法
 VIRTUAL_CLIENT = "user"   # Tempo 把「沒有上游的入口請求」畫成 client="user" 的虛擬節點：不是系統，不記
 MIN_NAME_CHARS = 3        # 用名稱比對日誌文字時，名稱至少要這麼長（跟 rca.MIN_NAME_CHARS 同一個理由）。未驗證泛化
 MAX_RANGE_MINUTES = 1440
@@ -45,7 +46,7 @@ def service_graph(grafana: Grafana, datasource_uid: str, start: datetime, end: d
             if not caller or not callee or caller == callee or caller == VIRTUAL_CLIENT:
                 continue
             edge = edges.setdefault((caller, callee), {"caller": caller, "callee": callee, "requests": 0, "failed": 0,
-                                                       "kind": str(labels.get("connection_type") or "")})
+                                                       "kind": KINDS.get(str(labels.get("connection_type") or ""), "")})
             edge[key] += round(series["value"])
     return sorted(edges.values(), key=lambda e: (e["caller"], e["callee"]))
 

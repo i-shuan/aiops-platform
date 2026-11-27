@@ -1,0 +1,340 @@
+{
+ "versions": {
+  "grafana": "13.0.7",
+  "victoriatraces": "v0.5.0",
+  "tempo": "2.9.0"
+ },
+ "token_role": "Editor",
+ "trace_ids": {
+  "vt": {
+   "eap": "dd9e65bee67764e4a6b62a09e83b689a",
+   "service-a": "5c06efc8513c099391de9b225859e78f",
+   "service-b": "a2c4065572575a94baccffb6eac19a9c",
+   "service-c": "4eae8c85b6af2e13ab2910e6c0a59bc5"
+  },
+  "tempo": {
+   "eap": "5fa408c27305ddb3cd86d40709620dd3",
+   "service-a": "846422033b053e67c78c301060fe9155",
+   "service-b": "b97026cc215ff9d2c54e82cb6b22fdff",
+   "service-c": "3da7610a3563f116ff79cf40eeba95db"
+  }
+ },
+ "exchanges": {
+  "vt_service-b": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/a2c4065572575a94baccffb6eac19a9c"
+    },
+    "status": 200,
+    "response": {
+     "data": [
+      {
+       "processes": {
+        "p1": {
+         "serviceName": "service-b",
+         "tags": []
+        }
+       },
+       "spans": [
+        {
+         "duration": 10000,
+         "logs": [],
+         "operationName": "process eap.events",
+         "processID": "p1",
+         "references": [
+          {
+           "refType": "FOLLOWS_FROM",
+           "spanID": "a2a2a2a2a2a2a2a2",
+           "traceID": "dd9e65bee67764e4a6b62a09e83b689a"
+          }
+         ],
+         "spanID": "c1c1c1c1c1c1c1c1",
+         "startTime": 1795776104292282,
+         "tags": [
+          {
+           "key": "span.kind",
+           "type": "string",
+           "value": "consumer"
+          },
+          {
+           "key": "otel.scope.name",
+           "type": "string",
+           "value": "links"
+          },
+          {
+           "key": "messaging.destination.name",
+           "type": "string",
+           "value": "eap.events"
+          },
+          {
+           "key": "messaging.system",
+           "type": "string",
+           "value": "rabbitmq"
+          },
+          {
+           "key": "error",
+           "type": "string",
+           "value": "true"
+          },
+          {
+           "key": "otel.status_description",
+           "type": "string",
+           "value": "handler crashed"
+          }
+         ],
+         "traceID": "a2c4065572575a94baccffb6eac19a9c",
+         "warnings": null
+        }
+       ],
+       "traceID": "a2c4065572575a94baccffb6eac19a9c",
+       "warnings": null
+      }
+     ],
+     "errors": null,
+     "limit": 0,
+     "offset": 0,
+     "total": 1
+    }
+   }
+  ],
+  "vt_eap": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/dd9e65bee67764e4a6b62a09e83b689a"
+    },
+    "status": 200,
+    "response": {
+     "data": [
+      {
+       "processes": {
+        "p1": {
+         "serviceName": "eap",
+         "tags": []
+        }
+       },
+       "spans": [
+        {
+         "duration": 20000,
+         "logs": [],
+         "operationName": "handle S6F11",
+         "processID": "p1",
+         "references": [],
+         "spanID": "a1a1a1a1a1a1a1a1",
+         "startTime": 1795776104261282,
+         "tags": [
+          {
+           "key": "span.kind",
+           "type": "string",
+           "value": "server"
+          },
+          {
+           "key": "otel.scope.name",
+           "type": "string",
+           "value": "links"
+          },
+          {
+           "key": "error",
+           "type": "string",
+           "value": "false"
+          }
+         ],
+         "traceID": "dd9e65bee67764e4a6b62a09e83b689a",
+         "warnings": null
+        },
+        {
+         "duration": 2000,
+         "logs": [],
+         "operationName": "publish eap.events",
+         "processID": "p1",
+         "references": [
+          {
+           "refType": "CHILD_OF",
+           "spanID": "a1a1a1a1a1a1a1a1",
+           "traceID": "dd9e65bee67764e4a6b62a09e83b689a"
+          }
+         ],
+         "spanID": "a2a2a2a2a2a2a2a2",
+         "startTime": 1795776104266282,
+         "tags": [
+          {
+           "key": "span.kind",
+           "type": "string",
+           "value": "producer"
+          },
+          {
+           "key": "otel.scope.name",
+           "type": "string",
+           "value": "links"
+          },
+          {
+           "key": "messaging.destination.name",
+           "type": "string",
+           "value": "eap.events"
+          },
+          {
+           "key": "messaging.system",
+           "type": "string",
+           "value": "rabbitmq"
+          },
+          {
+           "key": "error",
+           "type": "string",
+           "value": "false"
+          }
+         ],
+         "traceID": "dd9e65bee67764e4a6b62a09e83b689a",
+         "warnings": null
+        }
+       ],
+       "traceID": "dd9e65bee67764e4a6b62a09e83b689a",
+       "warnings": null
+      }
+     ],
+     "errors": null,
+     "limit": 0,
+     "offset": 0,
+     "total": 1
+    }
+   }
+  ],
+  "tempo_service-b": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/b97026cc215ff9d2c54e82cb6b22fdff"
+    },
+    "status": 200,
+    "response": {
+     "batches": [
+      {
+       "resource": {
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "service-b"
+          }
+         }
+        ]
+       },
+       "scopeSpans": [
+        {
+         "scope": {
+          "name": "links"
+         },
+         "spans": [
+          {
+           "traceId": "uXAmzCFf+dLFToLLayL9/w==",
+           "spanId": "wcHBwcHBwcE=",
+           "name": "process eap.events",
+           "kind": "SPAN_KIND_CONSUMER",
+           "startTimeUnixNano": "1795776104413253405",
+           "endTimeUnixNano": "1795776104423253405",
+           "attributes": [
+            {
+             "key": "messaging.system",
+             "value": {
+              "stringValue": "rabbitmq"
+             }
+            },
+            {
+             "key": "messaging.destination.name",
+             "value": {
+              "stringValue": "eap.events"
+             }
+            }
+           ],
+           "links": [
+            {
+             "traceId": "X6QIwnMF3bPNhtQHCWIN0w==",
+             "spanId": "oqKioqKioqI="
+            }
+           ],
+           "status": {
+            "message": "handler crashed",
+            "code": "STATUS_CODE_ERROR"
+           }
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "tempo_eap": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/traces/5fa408c27305ddb3cd86d40709620dd3"
+    },
+    "status": 200,
+    "response": {
+     "batches": [
+      {
+       "resource": {
+        "attributes": [
+         {
+          "key": "service.name",
+          "value": {
+           "stringValue": "eap"
+          }
+         }
+        ]
+       },
+       "scopeSpans": [
+        {
+         "scope": {
+          "name": "links"
+         },
+         "spans": [
+          {
+           "traceId": "X6QIwnMF3bPNhtQHCWIN0w==",
+           "spanId": "oaGhoaGhoaE=",
+           "name": "handle S6F11",
+           "kind": "SPAN_KIND_SERVER",
+           "startTimeUnixNano": "1795776104382253405",
+           "endTimeUnixNano": "1795776104402253405",
+           "status": {
+            "code": "STATUS_CODE_OK"
+           }
+          },
+          {
+           "traceId": "X6QIwnMF3bPNhtQHCWIN0w==",
+           "spanId": "oqKioqKioqI=",
+           "parentSpanId": "oaGhoaGhoaE=",
+           "name": "publish eap.events",
+           "kind": "SPAN_KIND_PRODUCER",
+           "startTimeUnixNano": "1795776104387253405",
+           "endTimeUnixNano": "1795776104389253405",
+           "attributes": [
+            {
+             "key": "messaging.system",
+             "value": {
+              "stringValue": "rabbitmq"
+             }
+            },
+            {
+             "key": "messaging.destination.name",
+             "value": {
+              "stringValue": "eap.events"
+             }
+            }
+           ],
+           "status": {
+            "code": "STATUS_CODE_OK"
+           }
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  ]
+ }
+}

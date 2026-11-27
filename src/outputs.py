@@ -62,13 +62,15 @@ def incident_payload(incident: Incident, grafana_url: str, event: str) -> dict[s
     alerts = sorted(({"fingerprint": fp, "rule_uid": m["rule_uid"], "title": m["title"], "service": m["service"],
                       "severity": m["severity"], "status": m["status"], "starts_at": _iso(m["starts_at"])}
                      for fp, m in incident.signals.items()), key=lambda a: (a["starts_at"] or "", a["fingerprint"]))
-    return {"schema": "aiops-lite.incident.v1", "event": event,
+    return {"schema": "aiops-lite.incident.v2", "event": event,   # v2：root_cause 多了 suggestions
             "incident": {"uid": incident.uid, "status": incident.status, "severity": incident.severity, "services": incident.services,
                          "started_at": _iso(incident.started_at), "ended_at": _iso(incident.ended_at),
                          "alert_count": incident.alert_count, "alerts": alerts},
             # analyzed=false 時 summary 是原始摘要（[未經分析]）；candidates 是註記上列的 1～3 個可能原因（信心分數不是機率）
             "root_cause": {"analyzed": incident.analyzed, "summary": incident.summary,
-                           "candidates": [line for line in incident.candidates.splitlines() if line.strip()]},
+                           "candidates": [line for line in incident.candidates.splitlines() if line.strip()],
+                           # LLM 建議值班人員接著確認或處理什麼。只是給人看的文字：下游不應該拿它自動執行任何操作
+                           "suggestions": incident.suggestions.removeprefix("下一步建議｜")},
             "evidence": incident.evidence_note,
             "grafana": {"url": grafana_url, "annotation_id": incident.annotation_id, "tag": f"aiops-incident:{incident.uid}"}}
 

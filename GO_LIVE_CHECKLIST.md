@@ -272,7 +272,7 @@ helm upgrade --install aiops-lite deploy/helm/aiops-lite -f secrets.values.yaml
 
 - [ ] 網址，以及從 aiops-lite 的 Pod 連不連得到
 - [ ] 認證方式：目前只支援 `Authorization: Bearer <token>`，下游要別的就得改程式
-- [ ] 欄位對應：送的是這個專案自己定的格式（`aiops-lite.incident.v1`），拿一筆佔位的 `payload` 給對方看；對不上就要改程式
+- [ ] 欄位對應：送的是這個專案自己定的格式（`aiops-lite.incident.v2`），拿一筆佔位的 `payload` 給對方看；對不上就要改程式
 - [ ] 重複收到同一張事故怎麼辦：同一張事故會送 `opened`、之後每次內容變了送 `updated`、結案送 `closed`，下游要能用事故的 `uid` 認出是同一張。
       同樣的內容只送一次；送失敗每一輪再試、最多 10 次
 

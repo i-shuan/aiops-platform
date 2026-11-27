@@ -55,6 +55,7 @@ class Incident:
     llm_next_try: datetime | None = None  # 退避中：這個時間之前不再查日誌、不再打 LLM
     candidates: str = ""             # 註記上根因分析底下的列點（LLM 列的、程式檢查過的）；沒有就是空的
     evidence_note: str = ""          # 註記上「證據｜…」那一行：已有哪些、缺哪些與原因、沒接哪些（程式產生）
+    suggestions: str = ""            # 註記上「下一步建議｜…」那一行：LLM 建議值班人員接著確認或處理什麼（只是文字，程式不會執行）
     actions_note: str = ""           # 註記上「自動修復｜…」那一行：請下游跑了哪些修復流程、狀態（程式產生；沒有就是空的）
     changed: bool = field(default=False, compare=False)  # 這一輪有沒有變（只活在記憶體，不存檔）
     fresh: bool = field(default=False, compare=False)    # 這一輪成員或嚴重度變了（只活在記憶體）：要重新分析
