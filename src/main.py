@@ -23,7 +23,7 @@ import httpx
 
 from src import grouping, rca, report
 from src.db import Database
-from src import graph
+from src import graph, promql
 from src import logs as logstores
 from src import outputs as outlets
 from src import traces as tracestores
@@ -122,35 +122,16 @@ def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[gro
     return graph.failing_links(alerting, graph_edges=graph_edges, trace_calls=failing_calls, log_mentions=mentioned), graph_edges
 
 
-EDGE_NUMBERS = ("requests", "failed", "kind", "rps", "rps_baseline", "error_rate_pct", "error_rate_baseline_pct",
-                "p95_ms", "p95_baseline_ms", "p95_ratio", "avg_ms", "avg_baseline_ms", "avg_ratio", "latency_from")
-
-
 def relations_for(settings: Settings, db: Database, incident: grouping.Incident, graph_edges: list[dict[str, Any]],
                   now: datetime) -> list[dict[str, Any]]:
-    """跟這張事故的系統有關、學到過的關係（給 LLM 當線索），最多 rca.MAX_RELATIONS 條。
-    範圍是兩跳：直接連到事故系統的（hops=1），再加上那些鄰居自己連到的（hops=2）。
-    service graph 的邊帶上這段時間的數字（請求數、失敗數；Tempo 的還有延遲與事故前的基線）。
-    排序只是算術，沒有門檻：一跳的在前；同一跳裡 p95（沒有就看平均）變成基線的幾倍由大到小，沒有倍數的照最近看到的。"""
+    """跟這張事故的系統有關、學到過的關係（給 LLM 當線索），最多 rca.MAX_RELATIONS 條。這裡只讀資料庫：
+    直接連到事故系統的（一跳），再加上那些鄰居自己連到的（兩跳）；要取哪幾條、照什麼順序交給 graph.prune（純函式）。"""
     if not settings.graph_retention_days:
         return []
-    live = {(e["caller"], e["callee"]): e for e in graph_edges}
     first = db.calls_touching(incident.services, now, settings.graph_retention_days, rca.MAX_RELATIONS)
     neighbors = sorted({n for row in first for n in (row["caller"], row["callee"])} - set(incident.services))
     second = db.calls_touching(neighbors, now, settings.graph_retention_days, rca.MAX_RELATIONS) if neighbors else []
-    out, seen = [], set()
-    for hops, rows in ((1, first), (2, second)):
-        for row in rows:
-            key = (row["caller"], row["callee"], row["source"])
-            if key in seen:
-                continue
-            seen.add(key)
-            numbers = live.get((row["caller"], row["callee"])) if row["source"] == "service_graph" else None
-            out.append({**row, "hops": hops,
-                        **({k: numbers[k] for k in EDGE_NUMBERS if numbers.get(k) is not None} if numbers else {})})
-    ratio = lambda e: e.get("p95_ratio", e.get("avg_ratio"))
-    order = sorted(range(len(out)), key=lambda i: (out[i]["hops"], ratio(out[i]) is None, -(ratio(out[i]) or 0), i))
-    return [out[i] for i in order][:rca.MAX_RELATIONS]
+    return graph.prune(first, second, graph_edges, rca.MAX_RELATIONS)
 
 
 def process(settings: Settings, *, now: datetime | None = None, grafana_transport: httpx.BaseTransport | None = None,
@@ -185,10 +166,10 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 return []
             if firing and not settings.service_graph_datasource_uid:
                 return graph_edges   # VictoriaTraces 只有誰呼叫誰、沒有延遲：這一輪開頭讀過的那一份就夠，不重讀
-            start = inc.started_at - timedelta(minutes=settings.evidence.window_padding_minutes)
-            if start not in fetched:
-                fetched[start] = service_graph_of(settings, grafana, start, now, with_latency=True)
-            return fetched[start]
+            window = promql.Window.of_incident(inc.started_at, inc.last_seen_at, now, padding_minutes=settings.evidence.window_padding_minutes)
+            if window.start not in fetched:   # 跟這張事故的證據同一個時間窗（evidence.collect_evidence 用同一個 Window）
+                fetched[window.start] = service_graph_of(settings, grafana, window.start, window.end, with_latency=True)
+            return fetched[window.start]
         known = {i.uid for i in incidents}
         incidents += [i for i in db.unannotated_incidents() if i.uid not in known]
         known = {i.uid for i in incidents}

@@ -17,29 +17,31 @@
 from __future__ import annotations
 
 import logging
-import math
 import re
 from datetime import datetime
 from typing import Any
 
+from src import promql
 from src.grafana import Grafana, GrafanaError
+from src.promql import MAX_RANGE_MINUTES, Window
 
 log = logging.getLogger("aiops_lite.graph")
 
 REQUESTS, FAILED = "traces_service_graph_request_total", "traces_service_graph_request_failed_total"
 # 延遲直方圖：server 端是被呼叫的那一段自己量的；client 端是呼叫的那一段量的（含網路）。
-# 沒有埋點的資料庫、外部服務沒有 server 端的 span，只有 client 端的數字（Tempo 2.9.0 實測，見 service_graph.json）
+# Tempo 2.9.0 實測：沒埋點的資料庫，它把呼叫端量的耗時也填進 server 那一份（兩端一模一樣，見 service_graph.json）
 LATENCY = {"server": "traces_service_graph_request_server_seconds", "client": "traces_service_graph_request_client_seconds"}
 QUANTILE = 0.95
+BY = "client, server, connection_type"
 KINDS = {"messaging_system": "messaging", "database": "database"}   # Tempo 標的連線種類 → 我們用的寫法
 VIRTUAL_CLIENT = "user"   # Tempo 把「沒有上游的入口請求」畫成 client="user" 的虛擬節點：不是系統，不記
 MIN_NAME_CHARS = 3        # 用名稱比對日誌文字時，名稱至少要這麼長（跟 rca.MIN_NAME_CHARS 同一個理由）。未驗證泛化
-MAX_RANGE_MINUTES = 1440
+# 一條邊在這段時間的數字（latency() 算的）。查詢層算、裁切層照搬、證據層原樣交給 LLM：三個地方用同一份清單
+EDGE_FIELDS = ("rps", "rps_baseline", "error_rate_pct", "error_rate_baseline_pct", "p95_ms", "p95_baseline_ms", "p95_ratio",
+               "avg_ms", "avg_baseline_ms", "avg_ratio", "latency_from")
 
 
-def _minutes(start: datetime, end: datetime) -> int:
-    return min(MAX_RANGE_MINUTES, max(1, math.ceil((end - start).total_seconds() / 60)))
-
+# ── 查詢與算術 ──
 
 def _per_edge(grafana: Grafana, datasource_uid: str, expr: str, at: datetime) -> dict[tuple[str, str], float]:
     """一條單點查詢的結果照 (呼叫的, 被呼叫的) 加總。不是系統的（client="user" 的虛擬入口、自己呼叫自己）丟掉。"""
@@ -58,10 +60,10 @@ def service_graph(grafana: Grafana, datasource_uid: str, start: datetime, end: d
     兩次單點查詢（請求數、失敗數的增量）。kind 是 Tempo 標的連線種類（database／messaging_system／空字串）。
     baseline_minutes > 0 時每條呼叫再帶上延遲與基線（latency()）：拿不到就只有請求數與失敗數，不擋路。
     格式以 tests/fixtures/grafana13/service_graph.json 為準（Tempo 2.9.0 的 metrics-generator 寫進 VictoriaMetrics，經 Grafana 查）。"""
-    minutes = _minutes(start, end)
+    window = Window(start, end, baseline_minutes)
     edges: dict[tuple[str, str], dict[str, Any]] = {}
     for metric, key in ((REQUESTS, "requests"), (FAILED, "failed")):
-        for series in grafana.query_instant(datasource_uid, f"sum by (client, server, connection_type) (increase({metric}[{minutes}m]))", end):
+        for series in grafana.query_instant(datasource_uid, promql.increase(metric, BY, window.minutes), end):
             labels = series["labels"]
             caller, callee = str(labels.get("client") or ""), str(labels.get("server") or "")
             if not caller or not callee or caller == callee or caller == VIRTUAL_CLIENT:
@@ -71,8 +73,7 @@ def service_graph(grafana: Grafana, datasource_uid: str, start: datetime, end: d
             edge[key] += round(series["value"])
     if baseline_minutes > 0 and edges:
         try:
-            numbers = latency(grafana, datasource_uid, start, end, baseline_minutes,
-                              {key: (e["requests"], e["failed"]) for key, e in edges.items()})
+            numbers = latency(grafana, datasource_uid, window, {key: (e["requests"], e["failed"]) for key, e in edges.items()})
         except GrafanaError as e:   # 優雅降級：延遲拿不到，請求數與失敗數照用
             log.warning("讀不到 service graph 的延遲（只用請求數與失敗數）：%s", e)
             numbers = {}
@@ -81,57 +82,58 @@ def service_graph(grafana: Grafana, datasource_uid: str, start: datetime, end: d
     return sorted(edges.values(), key=lambda e: (e["caller"], e["callee"]))
 
 
-def latency(grafana: Grafana, datasource_uid: str, start: datetime, end: datetime, baseline_minutes: int,
+def latency(grafana: Grafana, datasource_uid: str, window: Window,
             counts: dict[tuple[str, str], tuple[int, int]]) -> dict[tuple[str, str], dict[str, Any]]:
-    """每條呼叫在事故期間（[start, end]）與基線（事故前 baseline_minutes 分鐘，[start - baseline, start)）的數字。只做算術，沒有門檻：
+    """每條呼叫在事故期間（window.start～end）與基線（事故前 window.baseline_minutes 分鐘）的數字。只做算術，沒有門檻：
       rps、rps_baseline                每秒請求數（請求數的增量 ÷ 秒數）
       error_rate_pct、…_baseline_pct   失敗數 ÷ 請求數 × 100
       p95_ms、p95_baseline_ms           histogram_quantile(0.95)。是在直方圖的桶裡線性內插出來的：Tempo 預設的桶是 0.1、0.2、0.4…12.8 秒，
                                        100 毫秒以下的差別分不出來（12 毫秒與 45 毫秒都算成桶內的同一段）
       avg_ms、avg_baseline_ms           平均（耗時總和 ÷ 次數）。不受桶寬影響，補 p95 在快的呼叫上量不準的地方
       p95_ratio、avg_ratio              事故期間 ÷ 基線（基線是 0 或沒有就不算）
-      latency_from                      數字取自哪一端：server（被呼叫的那一段自己量的）；server 端沒有資料（沒埋點的資料庫、外部服務）
-                                        改用 client（呼叫的那一段量的，含網路）
+      latency_from                      數字取自哪一端：server（被呼叫的那一段自己量的）；server 端沒有資料改用 client
+                                        （呼叫的那一段量的，含網路）
     counts 是事故期間的 (請求數, 失敗數)，service_graph() 已經查過。事故期間與基線用同一端，兩邊才比得了。
     拿不到的欄位不放（不寫 0、不寫 null）。共 10 次單點查詢（基線的請求數與失敗數；兩端 × 兩段時間 × p95 與平均）。"""
-    by = "client, server, connection_type"
-    increase = lambda metric, minutes: f"sum by ({by}) (increase({metric}[{minutes}m]))"
-    windows = {"": (end, _minutes(start, end)), "_baseline": (start, baseline_minutes)}   # (查詢的時間點, 往回看幾分鐘)
-    raw = {name: _per_edge(grafana, datasource_uid, increase(metric, baseline_minutes), start)
+    raw = _latency_queries(grafana, datasource_uid, window)
+    return {key: edge_numbers(key, requests, failed, raw, window) for key, (requests, failed) in counts.items()}
+
+
+def _latency_queries(grafana: Grafana, datasource_uid: str, window: Window) -> dict[str, dict[tuple[str, str], float]]:
+    """查詢：照 (呼叫的, 被呼叫的) 分好的原始數值，鍵是 requests_baseline、p95_server、avg_client_baseline 這種名稱。"""
+    points = {"": (window.end, window.minutes), "_baseline": (window.start, window.baseline_minutes)}   # (查詢的時間點, 往回看幾分鐘)
+    raw = {name: _per_edge(grafana, datasource_uid, promql.increase(metric, BY, window.baseline_minutes), window.start)
            for metric, name in ((REQUESTS, "requests_baseline"), (FAILED, "failed_baseline"))}
-    for suffix, (at, minutes) in windows.items():
-        for side, metric in LATENCY.items():
-            raw[f"p95_{side}{suffix}"] = _per_edge(grafana, datasource_uid,
-                                                   f"histogram_quantile({QUANTILE}, sum by ({by}, le) (increase({metric}_bucket[{minutes}m])))", at)
-            raw[f"avg_{side}{suffix}"] = _per_edge(grafana, datasource_uid,
-                                                   f"{increase(metric + '_sum', minutes)} / {increase(metric + '_count', minutes)}", at)
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for key, (requests, failed) in counts.items():
-        row: dict[str, Any] = {}
-        before_requests = raw["requests_baseline"].get(key)
-        for suffix, n, bad, seconds in (("", requests, failed, windows[""][1] * 60),
-                                        ("_baseline", before_requests, raw["failed_baseline"].get(key, 0.0), baseline_minutes * 60)):
-            if n is not None:
-                row[f"rps{suffix}"] = _round(n / seconds)
-                if n > 0:
-                    row[f"error_rate{suffix}_pct"] = _round(100 * bad / n)
-        side = next((s for s in LATENCY if key in raw[f"p95_{s}"] or key in raw[f"p95_{s}_baseline"]), None)
-        if side:
-            row["latency_from"] = side
-            for stat in ("p95", "avg"):
-                value, before = raw[f"{stat}_{side}"].get(key), raw[f"{stat}_{side}_baseline"].get(key)
-                if value is not None:
-                    row[f"{stat}_ms"] = _round(value * 1000)
-                if before is not None:
-                    row[f"{stat}_baseline_ms"] = _round(before * 1000)
-                if value is not None and before:
-                    row[f"{stat}_ratio"] = _round(value / before)
-        out[key] = row
-    return out
+    for suffix, (at, minutes) in points.items():
+        for side, histogram in LATENCY.items():
+            raw[f"p95_{side}{suffix}"] = _per_edge(grafana, datasource_uid, promql.quantile(QUANTILE, histogram, BY, minutes), at)
+            raw[f"avg_{side}{suffix}"] = _per_edge(grafana, datasource_uid, promql.mean(histogram, BY, minutes), at)
+    return raw
 
 
-def _round(value: float) -> float:
-    return float(f"{value:.4g}")   # 四位有效數字（跟指標走勢同一個寫法）
+def edge_numbers(key: tuple[str, str], requests: int, failed: int, raw: dict[str, dict[tuple[str, str], float]],
+                 window: Window) -> dict[str, Any]:
+    """算術（純函式）：一條呼叫的原始數值 → 給 LLM 的數字。欄位見 latency()。"""
+    row: dict[str, Any] = {}
+    for suffix, n, bad, seconds in (("", requests, failed, window.minutes * 60),
+                                    ("_baseline", raw["requests_baseline"].get(key), raw["failed_baseline"].get(key, 0.0),
+                                     window.baseline_minutes * 60)):
+        if n is not None:
+            row[f"rps{suffix}"] = promql.round4(n / seconds)
+            if n > 0:
+                row[f"error_rate{suffix}_pct"] = promql.round4(100 * bad / n)
+    side = next((s for s in LATENCY if key in raw[f"p95_{s}"] or key in raw[f"p95_{s}_baseline"]), None)
+    if side:
+        row["latency_from"] = side
+        for stat in ("p95", "avg"):
+            value, before = raw[f"{stat}_{side}"].get(key), raw[f"{stat}_{side}_baseline"].get(key)
+            if value is not None:
+                row[f"{stat}_ms"] = promql.round4(value * 1000)
+            if before is not None:
+                row[f"{stat}_baseline_ms"] = promql.round4(before * 1000)
+            if (r := promql.ratio(value, before)) is not None:
+                row[f"{stat}_ratio"] = r
+    return row
 
 
 def dependencies(grafana: Grafana, datasource_uid: str, start: datetime, end: datetime) -> list[dict[str, Any]]:
@@ -182,3 +184,25 @@ def read_service_graph(grafana: Grafana, *, traces_type: str, traces_uid: str, m
     except GrafanaError as e:
         log.warning("讀不到 service graph：%s", e)
         return []
+
+
+# ── 子圖裁切（給 LLM 之前：取哪幾條、照什麼順序）──
+
+def prune(first: list[dict[str, Any]], second: list[dict[str, Any]], live: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """純函式。first 是直接連到告警系統的關係（hops=1），second 是那些鄰居自己連到的（hops=2），都是 db.calls_touching 的列；
+    live 是這段時間 service graph 上的邊（帶次數與延遲）。回傳最多 limit 條，service graph 來源的列帶上這段時間的數字。
+    排序只是算術，沒有門檻：一跳的在前；同一跳裡 p95（沒有就看平均）變成基線的幾倍由大到小，沒有倍數的照原本的順序（最近看到的在前）。"""
+    numbers_of = {(e["caller"], e["callee"]): e for e in live}
+    out, seen = [], set()
+    for hops, rows in ((1, first), (2, second)):
+        for row in rows:
+            key = (row["caller"], row["callee"], row["source"])
+            if key in seen:
+                continue
+            seen.add(key)
+            numbers = numbers_of.get((row["caller"], row["callee"])) if row["source"] == "service_graph" else None
+            out.append({**row, "hops": hops, **({k: numbers[k] for k in ("requests", "failed", "kind", *EDGE_FIELDS)
+                                                 if numbers.get(k) is not None} if numbers else {})})
+    growth = lambda e: e.get("p95_ratio", e.get("avg_ratio"))
+    order = sorted(range(len(out)), key=lambda i: (out[i]["hops"], growth(out[i]) is None, -(growth(out[i]) or 0), i))
+    return [out[i] for i in order][:limit]

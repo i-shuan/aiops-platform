@@ -32,7 +32,7 @@
 ## 2. 檔案與依賴方向
 
 ```
-grouping（不依賴任何模組）
+grouping、promql（不依賴任何模組）
    ▲
 report、db、grafana、outputs
    ▲
@@ -57,7 +57,8 @@ server（HTTP 服務與排程；流程只呼叫 main 的那一輪，另外直接
 | `src/grafana.py` | 解析 Webhook、對 Grafana 的 HTTP（重試、錯誤訊息）、指標查詢、註記 |
 | `src/logs.py` | 日誌的兩種來源（VictoriaLogs、Elasticsearch）：同一組方法，回同一種形狀 |
 | `src/traces.py` | Trace 的兩種來源（VictoriaTraces、Tempo）：同一組方法，回同一種形狀（Jaeger 的） |
-| `src/graph.py` | 系統之間的關係：讀 Tempo 的 service graph（含延遲邊列表：事故期間與事故前的請求量、失敗率、p95、平均）、從日誌找提到的系統、判斷哪些連結可以合併事故 |
+| `src/graph.py` | 系統之間的關係。查詢與算術：讀 Tempo 的 service graph（含延遲邊列表：事故期間與事故前的請求量、失敗率、p95、平均）、從日誌找提到的系統、判斷哪些連結可以合併事故；子圖裁切：`prune`（兩跳、排序、上限，純函式）。格式化給 LLM 在 `evidence.relation` |
+| `src/promql.py` | 時間窗（事故期間與事故前的基線，全部共用同一個定義）、PromQL 組裝、捨入與倍數（純函式，不連線） |
 | `src/grouping.py` | 收斂（純函式）：同實體合併、有連結的併成一張、併入進行中事故、結案 |
 | `src/evidence.py` | 收集證據（日誌、呼叫鏈含訊息佇列的連結、指標走勢、系統關係）與證據概況 |
 | `src/rca.py` | 組 Prompt、呼叫 LLM、幻覺檢查、下一步建議 |
@@ -77,6 +78,7 @@ server（HTTP 服務與排程；流程只呼叫 main 的那一輪，另外直接
  * **要改提示詞、或改證據交給 LLM 之前的處理？** 先照 `EVAL.md` 跑一次量出現況，改完再跑。留出的案例變差就不合併；不准為了讓留出的案例過關去調程式。前處理只能歸類與計數，不准貼「暴增」「雜訊」這類要門檻的標籤。
  * **要讓日誌成為 RCA 證據？** 不寫程式：照 `FACTORY_METRICS.md` 的統一欄位規範送進 VictoriaLogs 或 Elasticsearch，範例在 `deploy/fluent-bit/`。
  * **要加新的設定項？** `src/config.py` 的 `Settings` 與 `from_dict`（要有範圍檢查），同步更新 `config.example.yaml`、`CONFIG.md`、Helm `values.yaml`。
+ * **要算時間窗或組 PromQL？** 用 `src/promql.py`（`Window`、`increase`／`quantile`／`mean`、`round4`、`ratio`），不要在各模組各寫一份。
  * **要加新的證據來源？** 對 Grafana 的呼叫寫在 `src/grafana.py`，收集與整理寫在 `src/evidence.py`；撈不到要寫進 `evidence["notes"]`，不准讓整輪失敗。
  * **要支援另一種日誌或 Trace 的資料庫？** 在 `src/logs.py`／`src/traces.py` 加一個類別，方法與回傳的形狀跟現有的一樣，`main.py` 的 `log_store`／`trace_store` 加一個選項。
    `evidence.py`、`rca.py` 不准出現任何一種資料庫的名字或查詢語法。要有「同一批資料、兩種來源、整包證據一樣」的測試（`tests/test_backends.py`），樣本要從真的元件錄。

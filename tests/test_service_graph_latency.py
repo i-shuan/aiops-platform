@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from src import graph, rca
+from src import graph, promql, rca
 from src.db import Database
 from src.grafana import Grafana
 from src.grouping import Alert, converge
@@ -109,15 +109,15 @@ def test_the_edge_list_has_rps_error_rate_p95_and_the_baseline_from_real_tempo_m
     db, portal, queue = got[("mes-api", "mes-db")], got[("web-portal", "mes-api")], got[("mes-api", "report-worker")]
     # 沒埋點的資料庫也有完整的一組數字。Tempo 2.9.0 實測：它的 server 端與 client 端數字一模一樣（server 那一份是拿呼叫端量的填的）
     assert {k: db[k] for k in ("requests", "failed", "kind", "latency_from")} == {"requests": 100, "failed": 4, "kind": "database", "latency_from": "server"}
-    assert db["rps"] == graph._round(100 / (minutes * 60)) and db["rps_baseline"] == graph._round(20 / 1800)     # 事故 20 個請求 × 5 次；基線 20 × 1 次
+    assert db["rps"] == promql.round4(100 / (minutes * 60)) and db["rps_baseline"] == promql.round4(20 / 1800)     # 事故 20 個請求 × 5 次；基線 20 × 1 次
     assert (db["error_rate_pct"], db["error_rate_baseline_pct"]) == (4.0, 0.0)
-    assert (db["p95_ms"], db["p95_baseline_ms"], db["p95_ratio"]) == (3111.0, 95.0, graph._round(3111.0 / 95.0))
+    assert (db["p95_ms"], db["p95_baseline_ms"], db["p95_ratio"]) == (3111.0, 95.0, promql.round4(3111.0 / 95.0))
     assert (db["avg_ms"], db["avg_baseline_ms"]) == (2000.0, 12.55)
-    assert db["avg_ratio"] == graph._round(1.99955 / 0.01255) == 159.3   # 倍數用原始值算（錄到的 1.99955 秒 ÷ 0.01255 秒），不用四捨五入後的
+    assert db["avg_ratio"] == promql.round4(1.99955 / 0.01255) == 159.3   # 倍數用原始值算（錄到的 1.99955 秒 ÷ 0.01255 秒），不用四捨五入後的
     # 已知限制：基線的呼叫 15～25 毫秒，p95 卻是 95 毫秒（落在預設最小的桶 0～100 毫秒裡，內插出來的）；平均才是 12.55
     assert db["p95_baseline_ms"] == 95.0 and db["avg_baseline_ms"] < 25
     # 上下游的請求量：資料庫的每秒請求數是上游的 5 倍（每個請求查 5 次）。程式不說這是 N+1，只給數字
-    assert db["requests"] == 5 * portal["requests"] and db["rps"] == graph._round(5 * portal["requests"] / (minutes * 60))
+    assert db["requests"] == 5 * portal["requests"] and db["rps"] == promql.round4(5 * portal["requests"] / (minutes * 60))
     assert (portal["error_rate_pct"], portal["p95_ratio"] > 100) == (20.0, True)
     assert queue["kind"] == "messaging" and queue["p95_ratio"] == 1.0          # 經訊息佇列的那一段沒有變慢
     assert got[("orders-api", "orders-db")]["rps"] == 0.0 and "p95_ms" not in got[("orders-api", "orders-db")]   # 這段時間沒請求：沒有延遲可算，不寫 0

@@ -334,20 +334,21 @@ close_after_seconds: 300  # 成員告警全部 resolved 之後，再安靜多久
 | 檔案 | 行數 | 負責內容 |
 | --- | --- | --- |
 | `src/server.py` | 218 | 常駐服務：收 Webhook（Bearer 驗證、先落地再回 200）、debounce 排程、單一工作執行緒、續跑 |
-| `src/main.py` | 298 | 「一輪」的流程：照設定建來源物件、學系統關係、收斂、叫 rca、寫註記、叫 outputs |
+| `src/main.py` | 306 | 「一輪」的流程：照設定建來源物件、學系統關係、收斂、叫 rca、寫註記、叫 outputs |
 | `src/config.py` | 393 | 讀 config.yaml（嚴格檢查：鍵名、型別、範圍、必填） |
 | `src/grafana.py` | 195 | 解析告警 Webhook、對 Grafana 的 HTTP 呼叫（重試、錯誤訊息）、指標查詢、寫註記 |
 | `src/logs.py` | 272 | 日誌的兩種來源（VictoriaLogs、Elasticsearch）：同一組查詢方法，回同一種形狀 |
-| `src/traces.py` | 169 | Trace 的兩種來源（VictoriaTraces、Tempo）：Tempo 的 OTLP 轉成跟 VictoriaTraces 一樣的形狀 |
+| `src/traces.py` | 151 | Trace 的兩種來源（VictoriaTraces、Tempo）：Tempo 的 OTLP 轉成跟 VictoriaTraces 一樣的形狀 |
 | `src/outputs.py` | 157 | 註記以外的兩個出口：事故 API、自動修復；佔位、不重送、失敗重試 |
-| `src/graph.py` | 100 | 系統之間的關係：讀 service graph（Tempo 指標、VictoriaTraces 相依關係）、從日誌找提到的系統、判斷哪些連結可以合併事故 |
+| `src/graph.py` | 208 | 系統之間的關係：讀 service graph（Tempo 指標含延遲與基線、VictoriaTraces 相依關係）、從日誌找提到的系統、判斷哪些連結可以合併事故、子圖裁切（兩跳、排序、上限） |
+| `src/promql.py` | 71 | 時間窗（事故期間與事故前的基線）、PromQL 組裝、捨入與倍數；純函式，日誌次數比較、service graph、主流程共用 |
 | `src/grouping.py` | 172 | 同實體合併、拓撲鏈收斂、併入進行中事故、嚴重度只升不降、全部 resolved 且安靜夠久才結案 |
-| `src/evidence.py` | 707 | 收集證據（告警、系統關係、日誌、識別碼統計、批號時間線、呼叫鏈含訊息佇列的連結、指標走勢）與證據概況 |
-| `src/rca.py` | 385 | 不寫推理演算法：組 Prompt、呼叫 LLM、檢查回答（幻覺檢查、信心上限、下一步建議）、失敗退回原始摘要 |
+| `src/evidence.py` | 698 | 收集證據（告警、系統關係、日誌、識別碼統計、批號時間線、呼叫鏈含訊息佇列的連結、指標走勢）與證據概況 |
+| `src/rca.py` | 381 | 不寫推理演算法：組 Prompt、呼叫 LLM、檢查回答（幻覺檢查、信心上限、下一步建議）、失敗退回原始摘要 |
 | `src/report.py` | 65 | 註記的固定格式（標題、摘要、證據的幾行、時間與調整優先權連結；台灣時間、HTML 跳脫） |
 | `src/db.py` | 286 | SQLAlchemy Core（SQLite／PostgreSQL），啟動自動建表：待處理告警、事故、每輪執行紀錄、出口的處理紀錄 |
 
-合計約 3,417 行。
+合計約 3,573 行。
 
 ## 各系統要做的事（平台零直連）
 

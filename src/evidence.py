@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from src import promql
 from src.grafana import Grafana, GrafanaError
+from src.graph import EDGE_FIELDS
 from src.grouping import Incident
 from src.logs import ERROR_LEVELS, MESSAGE_FIELD, TIME_FIELD, WARN_LEVELS, LogFields
 
@@ -106,11 +108,6 @@ SOURCE_TEXT = {"service_graph": "Tempo 的 service graph 看到 downstream 呼�
                "log": "downstream 的錯誤日誌提到過 upstream（不一定是呼叫）"}
 
 
-# service graph 的邊在這段時間的數字（graph.latency()）：原樣帶進證據
-EDGE_FIELDS = ("rps", "rps_baseline", "error_rate_pct", "error_rate_baseline_pct", "p95_ms", "p95_baseline_ms", "p95_ratio",
-               "avg_ms", "avg_baseline_ms", "avg_ratio", "latency_from")
-
-
 def relation(edge: Any) -> dict[str, Any]:
     """證據裡的一條系統關係。(上游, 下游) 的 tuple 原樣轉；db.calls_touching 的列（caller 呼叫 callee）轉成
     upstream＝被呼叫的、downstream＝呼叫的（被呼叫的出問題會影響呼叫它的），並帶上來源、最後看到的時間、這一輪的請求數與失敗數。"""
@@ -133,8 +130,9 @@ def collect_evidence(incident: Incident, edges: list[Any], grafana: Grafana, *, 
     這裡不管後面是哪一種：兩種來源回的日誌與 Trace 是同一種形狀。
     任何一包撈不到（沒設資料源、Grafana 回錯）都不擋分析：那一包留空，並在 notes 寫明原因。"""
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
-    start = incident.started_at - timedelta(minutes=limits.window_padding_minutes)
-    end = max(incident.last_seen_at, now)
+    window = promql.Window.of_incident(incident.started_at, incident.last_seen_at, now, padding_minutes=limits.window_padding_minutes,
+                                       baseline_minutes=limits.baseline_minutes)
+    start, end = window.start, window.end
     evidence: dict[str, Any] = {
         "anomalies": [{"system": m["service"], "rule": m["title"], "severity": m["severity"],
                        "started": iso(m["starts_at"]), "status": m["status"], "values": m["values"]}
@@ -164,14 +162,8 @@ def collect_evidence(incident: Incident, edges: list[Any], grafana: Grafana, *, 
     return evidence
 
 
-def promql_string(value: str) -> str:
-    """把系統名稱放進 PromQL 雙引號字串之前的跳脫。系統名稱來自告警的標籤（外部輸入），不跳脫的話名稱裡的引號
-    可以把查詢截斷、接上別的條件。"""
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-
-
-def _round(value: float) -> float:
-    return float(f"{value:.4g}")   # 四位有效數字：給 LLM 看走勢夠用，不會被一長串小數淹沒
+promql_string = promql.string   # 舊名稱（rca 照這個名字再匯出）
+_round = promql.round4
 
 
 def summarize_series(points: list[tuple[datetime, float]], incident_start: datetime, max_points: int) -> dict[str, Any] | None:
@@ -420,7 +412,7 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
     warns = sorted(grouped(warnings), key=lambda g: -g["count"])[:limits.max_warn_patterns]
     jobs = [(g, limits.error_levels) for g in chosen] + [(g, limits.warn_levels) for g in warns]
     countable = [(g, levels, pattern_words(g["pattern"])) for g, levels in jobs]
-    before_start = start - timedelta(minutes=limits.baseline_minutes)
+    before_start = promql.Window(start, end, limits.baseline_minutes).baseline_start   # 跟 service graph 的基線同一段
     try:
         counted = store.count_phrases([(g["system"], words, levels) for g, levels, words in countable if words],
                                       start, end, before_start)
