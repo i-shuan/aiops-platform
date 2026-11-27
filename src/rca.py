@@ -78,6 +78,9 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 不要寫任何筆數、次數、時間：那些由程式另外顯示。
 - 「關聯時間線」只代表同一個批號或載具在各系統出現的先後，不代表因果；各系統的時鐘可能有幾秒誤差。
 - 「呼叫鏈」是實際發生的呼叫：最下游、而且底下沒有其他失敗呼叫的那一段，比上游更接近源頭。
+  標 sample=slowest 的呼叫鏈不是失敗的請求：這段時間沒有失敗的請求，列的是搜尋到的請求裡耗時最長的幾條，看 duration_ms 花在哪一段。
+  它只是樣本，單看它不能說這條請求不正常。
+- 「請求的日誌」是用呼叫鏈的編號找到的、同一個請求在各系統留下的日誌（不限等級）：它一定跟這個請求有關，比照時間撈到的日誌更直接。
 - 「指標走勢」是數值在事故前後的變化（baseline 是事故前的中位數）：它說明哪個數值先變、變了多少，本身不代表因果。
 - 「關係邊」只說明誰可能影響誰。某個系統在上游，不能當成它就是源頭的依據；要有指向它的證據：它自己的錯誤日誌或警告、它的指標變化、
   呼叫鏈停在它，或別的系統的錯誤訊息明確寫連不上它、等不到它（連線被拒、逾時並指名它）。
@@ -107,7 +110,7 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 
 MAX_CANDIDATES = 3
 MIN_NAME_CHARS = 3   # 名稱至少這麼長，才用「原樣出現在證據文字裡」當憑據：一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化
-DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "metrics")
+DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "trace_logs", "metrics")
 # 信心分數的分段（提示詞裡跟模型講的同一套）。分數是模型自評「依據有多直接」，不是機率、沒有校準過。
 CONFIDENCE_HIGH, CONFIDENCE_MEDIUM = 70, 40
 NO_DIRECT_EVIDENCE_CAP = 30   # 沒有直接證據指向的系統，分數最高只到這裡（落在「只是推測」那一段）
@@ -189,8 +192,13 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
         text += ("【5. 關聯時間線：同一個批號／載具在各系統的紀錄，由舊到新（只代表先後，不代表因果；各系統時鐘可能有誤差）】\n"
                  f"{dump(evidence['timelines'])}\n\n")
     if evidence.get("call_chains"):
-        text += ("【6. 呼叫鏈：失敗請求實際的呼叫路徑（called_by 是呼叫它的系統；origin=true 是底下沒有其他失敗呼叫的失敗點）】\n"
+        slowest = any(chain.get("sample") == "slowest" for chain in evidence["call_chains"])
+        text += ("【6. 呼叫鏈：" + ("這段時間沒有失敗的請求，這是搜尋到的請求裡耗時最長的幾條（sample=slowest；只是樣本）。" if slowest else "失敗請求")
+                 + "實際的呼叫路徑（called_by 是呼叫它的系統；origin=true 是底下沒有其他失敗呼叫的失敗點；duration_ms 是那一段花的時間）】\n"
                  f"{dump(evidence['call_chains'])}\n\n")
+    if evidence.get("trace_logs"):
+        text += ("【6b. 請求的日誌：用上面呼叫鏈的編號找到的、同一個請求在各系統留下的日誌，不限等級，由舊到新】\n"
+                 f"{dump(evidence['trace_logs'])}\n\n")
     if evidence.get("metrics"):
         text += ("【7. 指標走勢：各系統的數值在事故前後的變化（baseline 是事故開始前的中位數；during 是事故開始後；"
                  "points 是整段時間平均抽樣的點，時間是 UTC。只說明數值怎麼變，不代表因果）】\n"
@@ -234,7 +242,7 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
         raise ValueError("summary 是空的")
     systems = {a["system"] for a in evidence["anomalies"]} | {e[k] for e in evidence["edges"] for k in ("upstream", "downstream")}
     # 時間線與呼叫鏈裡實際出現的系統也算有憑據（例如呼叫鏈指到一個沒有告警、也不在關係邊裡的資料庫）
-    systems |= {s for group in (evidence.get("timelines") or [], evidence.get("call_chains") or [])
+    systems |= {s for group in (evidence.get("timelines") or [], evidence.get("call_chains") or [], evidence.get("trace_logs") or [])
                 for item in group for s in item.get("systems") or []}
     ids = {v for counts in evidence["id_counts"].values() for v in counts}
     # 比對用的文字 = 送給模型的那些內容。pattern（數字換成 * 的樣板）模型看不到，也不能當憑據：k*s 不是真的名稱

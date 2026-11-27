@@ -1,0 +1,475 @@
+{
+ "versions": {
+  "grafana": "13.0.7",
+  "victorialogs": "v1.17.0",
+  "victoriatraces": "v0.5.0",
+  "elasticsearch": "8.19.23",
+  "tempo": "2.9.0"
+ },
+ "token_role": "Editor",
+ "base": "2026-11-27T12:50:34+00:00",
+ "trace_ids": {
+  "slow": "aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1",
+  "medium": "bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2",
+  "fast": "cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3"
+ },
+ "durations_ms": {
+  "slow": 4200,
+  "medium": 300,
+  "fast": 90
+ },
+ "dataset": "rec-slow-6b097c9a",
+ "index": "rec-slow-6b097c9a",
+ "inserted": [
+  {
+   "@timestamp": "2026-11-27T12:49:04.001Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history carrier=FOUP0912 started",
+   "trace_id": "aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:08.185Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)",
+   "trace_id": "aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:08.180Z",
+   "service": {
+    "name": "orders-db"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "seq scan on lot_history finished, 2400000 rows",
+   "trace_id": "aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:08.200Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history done in 4200ms status=200",
+   "trace_id": "aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:24.001Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history carrier=FOUP0912 started",
+   "trace_id": "bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:24.300Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history done in 300ms status=200",
+   "trace_id": "bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:44.001Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history carrier=FOUP0912 started",
+   "trace_id": "cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:44.090Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history done in 90ms status=200",
+   "trace_id": "cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:14.000Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "connection pool usage 70% (14/20 active)"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:34.000Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "connection pool usage 71% (14/20 active)"
+  },
+  {
+   "@timestamp": "2026-11-27T12:49:54.000Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "connection pool usage 72% (14/20 active)"
+  }
+ ],
+ "exchanges": {
+  "vt_search_traces": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<vt>/api/traces",
+     "params": {
+      "service": "orders-api",
+      "limit": "20",
+      "start": "1795783234000000",
+      "end": "1795783835000000"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"data\":[{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":70000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783784005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":60000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783784008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":90000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783784000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":280000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783764005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":270000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783764008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":300000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783764000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":4180000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783744005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4170000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783744008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4200000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783744000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":70000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783702005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":60000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783702008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":90000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783702000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":280000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783682005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":270000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783682008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":300000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783682000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":4180000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783662005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4170000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783662008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4200000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783662000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\": null}],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":6}"
+   }
+  ],
+  "vt_search_error_traces": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<vt>/api/traces",
+     "params": {
+      "service": "orders-api",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795783234000000",
+      "end": "1795783835000000"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"data\":[],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":0}"
+   }
+  ],
+  "tempo_search_traces": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/search",
+     "params": {
+      "q": "{ resource.service.name =~ \"orders-api\" }",
+      "start": "1795783234",
+      "end": "1795783835",
+      "limit": "20"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"traces\":[{\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783784000000000\",\"durationMs\":90,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783784000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783784005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783784000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783784005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783764000000000\",\"durationMs\":300,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783764000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783764005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783764000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783764005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783744000000000\",\"durationMs\":4200,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783744000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783744005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783744000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783744005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783702000000000\",\"durationMs\":90,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783702000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783702005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783702000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783702005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783682000000000\",\"durationMs\":300,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783682000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783682005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783682000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783682005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783662000000000\",\"durationMs\":4200,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783662000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783662005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783662000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783662005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}}],\"metrics\":{\"inspectedBytes\":\"38781\",\"completedJobs\":3,\"totalJobs\":3}}"
+   }
+  ],
+  "tempo_search_error_traces": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/search",
+     "params": {
+      "q": "{ resource.service.name =~ \"orders-api\" && status = error }",
+      "start": "1795783234",
+      "end": "1795783835",
+      "limit": "20"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"traces\":[],\"metrics\":{\"inspectedBytes\":\"34344\",\"completedJobs\":3,\"totalJobs\":3}}"
+   }
+  ],
+  "vl_logs_of_traces": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22trace_id%22%3Ain%28%22aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1%22%2C%22cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3%22%2C%22ffffffffffffffffffffffffffffffff%22%29+%7C+sort+by+%28_time%29+partition+by+%28%22trace_id%22%29+limit+10&start=2026-11-27T12%3A40%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-27T12:49:04.001Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history carrier=FOUP0912 started\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:08.18Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"seq scan on lot_history finished, 2400000 rows\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-db\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:08.185Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:08.2Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history done in 4200ms status=200\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:44.001Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history carrier=FOUP0912 started\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"}\n{\"_time\":\"2026-11-27T12:49:44.09Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history done in 90ms status=200\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22trace_id%22%3Ain%28%22aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1%22%2C%22cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3%22%2C%22ffffffffffffffffffffffffffffffff%22%29+%7C+stats+by+%28%22trace_id%22%29+count%28%29+as+total&start=2026-11-27T12%3A40%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": "{\"trace_id\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"total\":\"2\"}\n{\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"total\":\"4\"}\n"
+   }
+  ],
+  "es_logs_of_traces": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783234000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"]}}, {\"terms\": {\"trace_id.keyword\": [\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"]}}]}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783234000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"]}}, {\"terms\": {\"trace_id.keyword\": [\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"]}}]}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783234000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"ffffffffffffffffffffffffffffffff\"]}}, {\"terms\": {\"trace_id.keyword\": [\"ffffffffffffffffffffffffffffffff\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":4,\"responses\":[{\"took\":3,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":4,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"fvwOHaIBmdbPoubKu6DV\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:04.001Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history carrier=FOUP0912 started\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783744001]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"gPwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:08.180Z\", \"service\": {\"name\": \"orders-db\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"seq scan on lot_history finished, 2400000 rows\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783748180]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"f_wOHaIBmdbPoubKu6DV\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:08.185Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783748185]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"gfwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:08.200Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history done in 4200ms status=200\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783748200]}]},\"status\":200},{\"took\":3,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":2,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"hPwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:44.001Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history carrier=FOUP0912 started\", \"trace_id\": \"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"},\"sort\":[1795783784001]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"hfwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:44.090Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history done in 90ms status=200\", \"trace_id\": \"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"},\"sort\":[1795783784090]}]},\"status\":200},{\"took\":2,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   }
+  ],
+  "es_logs_of_unknown_trace": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783234000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"11111111111111111111111111111111\"]}}, {\"terms\": {\"trace_id.keyword\": [\"11111111111111111111111111111111\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":2,\"responses\":[{\"took\":2,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   }
+  ],
+  "collect_evidence_victoria": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22service.name%22%3Ain%28%22orders-api%22%29+%22log.level%22%3Ain%28%22ERROR%22%2C%22error%22%2C%22Error%22%2C%22FATAL%22%2C%22fatal%22%2C%22CRITICAL%22%2C%22critical%22%29+%7C+sort+by+%28_time%29+desc+%7C+limit+100&start=2026-11-27T12%3A39%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": ""
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%2A+%7C+stats+count%28%29+as+total%2C+count%28%29+if+%28%22service.name%22%3Ain%28%22orders-api%22%29%29+as+services&start=2026-11-27T12%3A39%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": "{\"total\":\"11\",\"services\":\"10\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22service.name%22%3Ain%28%22orders-api%22%29+%22log.level%22%3Ain%28%22ERROR%22%2C%22error%22%2C%22Error%22%2C%22FATAL%22%2C%22fatal%22%2C%22CRITICAL%22%2C%22critical%22%29+%7C+sort+by+%28_time%29+partition+by+%28%22service.name%22%29+limit+3&start=2026-11-27T12%3A39%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": ""
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22service.name%22%3Ain%28%22orders-api%22%29+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+%7C+sort+by+%28_time%29+%7C+limit+50&start=2026-11-27T12%3A39%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-27T12:49:08.185Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:14Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"connection pool usage 70% (14/20 active)\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\"}\n{\"_time\":\"2026-11-27T12:49:34Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"connection pool usage 71% (14/20 active)\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\"}\n{\"_time\":\"2026-11-27T12:49:54Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"connection pool usage 72% (14/20 active)\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22service.name%22%3Ain%28%22orders-api%22%29+%7C+stats+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22connection%22%2C%22pool%22%2C%22usage%22%2C%22active%22%29+_time%3A%3E%3D2026-11-27T12%3A39%3A34.000000Z%29+as+d0%2C+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22connection%22%2C%22pool%22%2C%22usage%22%2C%22active%22%29+_time%3A%3C2026-11-27T12%3A39%3A34.000000Z%29+as+b0%2C+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22slow%22%2C%22query%22%2C%22SELECT%22%2C%22FROM%22%2C%22lot_history%22%2C%22WHERE%22%2C%22carrier_id%22%2C%22no%22%2C%22index%22%2C%22used%22%2C%22rows%22%2C%22examined%22%29+_time%3A%3E%3D2026-11-27T12%3A39%3A34.000000Z%29+as+d1%2C+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22slow%22%2C%22query%22%2C%22SELECT%22%2C%22FROM%22%2C%22lot_history%22%2C%22WHERE%22%2C%22carrier_id%22%2C%22no%22%2C%22index%22%2C%22used%22%2C%22rows%22%2C%22examined%22%29+_time%3A%3C2026-11-27T12%3A39%3A34.000000Z%29+as+b1&start=2026-11-27T12%3A09%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": "{\"d0\":\"3\",\"b0\":\"0\",\"d1\":\"1\",\"b1\":\"0\"}\n"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<vt>/api/traces",
+     "params": {
+      "service": "orders-api",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795783174000000",
+      "end": "1795783835000000"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"data\":[],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":0}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<vt>/api/traces",
+     "params": {
+      "service": "orders-api",
+      "limit": "20",
+      "start": "1795783174000000",
+      "end": "1795783835000000"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"data\":[{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":70000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783784005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":60000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783784008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":90000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783784000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null}],\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":280000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783764005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":270000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783764008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":300000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783764000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null}],\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":4180000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783744005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4170000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783744008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4200000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783744000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null}],\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":70000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783702005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":60000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783702008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null},{\"duration\":90000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783702000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\":null}],\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":280000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783682005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":270000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783682008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null},{\"duration\":300000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783682000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\":null}],\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"warnings\": null},{\"processes\": {\"p1\":{\"serviceName\":\"orders-api\",\"tags\": []},\"p2\":{\"serviceName\":\"orders-db\",\"tags\": []}},\"spans\": [{\"duration\":4180000,\"logs\":[],\"operationName\":\"SELECT lot_history\",\"processID\":\"p1\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a1a1a1a1a1a1a1a1\",\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTime\":1795783662005000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"client\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"db.system\",\"type\":\"string\",\"value\":\"postgresql\"},{\"key\":\"peer.service\",\"type\":\"string\",\"value\":\"orders-db\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4170000,\"logs\":[],\"operationName\":\"query\",\"processID\":\"p2\",\"references\": [{\"refType\":\"CHILD_OF\",\"spanID\":\"a2a2a2a2a2a2a2a2\",\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\"}],\"spanID\":\"d1d1d1d1d1d1d1d1\",\"startTime\":1795783662008000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null},{\"duration\":4200000,\"logs\":[],\"operationName\":\"GET /orders/history\",\"processID\":\"p1\",\"references\": [],\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTime\":1795783662000000,\"tags\": [{\"key\":\"span.kind\",\"type\":\"string\",\"value\":\"server\"},{\"key\":\"otel.scope.name\",\"type\":\"string\",\"value\":\"demo\"},{\"key\":\"http.response.status_code\",\"type\":\"string\",\"value\":\"200\"},{\"key\":\"error\",\"type\":\"string\",\"value\":\"false\"}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\":null}],\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"warnings\": null}],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":6}"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22trace_id%22%3Ain%28%22aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1%22%2C%22aa6b097c48a1a1a1a1a1a1a1a1a1a1a1%22%2C%22bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2%22%29+%7C+sort+by+%28_time%29+partition+by+%28%22trace_id%22%29+limit+30&start=2026-11-27T12%3A39%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-27T12:49:04.001Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history carrier=FOUP0912 started\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:08.18Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"seq scan on lot_history finished, 2400000 rows\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-db\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:08.185Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:08.2Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history done in 4200ms status=200\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T12:49:24.001Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history carrier=FOUP0912 started\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"}\n{\"_time\":\"2026-11-27T12:49:24.3Z\",\"_stream_id\":\"0000000000000000e3881d9943c685a5788818d87119133b\",\"_stream\":\"{dataset=\\\"rec-slow-6b097c9a\\\"}\",\"_msg\":\"GET /orders/history done in 300ms status=200\",\"dataset\":\"rec-slow-6b097c9a\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b097c9a%22%7D+%22trace_id%22%3Ain%28%22aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1%22%2C%22aa6b097c48a1a1a1a1a1a1a1a1a1a1a1%22%2C%22bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2%22%29+%7C+stats+by+%28%22trace_id%22%29+count%28%29+as+total&start=2026-11-27T12%3A39%3A34.000000Z&end=2026-11-27T12%3A50%3A34.000000Z"
+    },
+    "status": 200,
+    "response": "{\"trace_id\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"total\":\"2\"}\n{\"trace_id\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"total\":\"4\"}\n"
+   }
+  ],
+  "collect_evidence_es_tempo": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 100, \"sort\": [{\"@timestamp\": \"desc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\"]}}, {\"terms\": {\"log.level.keyword\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":3,\"responses\":[{\"took\":3,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":3,\"responses\":[{\"took\":2,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":11,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":2,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":10,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 3, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\"]}}, {\"terms\": {\"log.level.keyword\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\"]}}]}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 50, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":4,\"responses\":[{\"took\":3,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":3,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":4,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"f_wOHaIBmdbPoubKu6DV\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:08.185Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783748185]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"hvwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:14.000Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"connection pool usage 70% (14/20 active)\"},\"sort\":[1795783754000]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"h_wOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:34.000Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"connection pool usage 71% (14/20 active)\"},\"sort\":[1795783774000]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"iPwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:54.000Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"connection pool usage 72% (14/20 active)\"},\"sort\":[1795783794000]}]},\"status\":200}]}"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"connection\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"pool\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"usage\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"active\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795781374000, \"lt\": 1795783174000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"connection\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"pool\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"usage\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"active\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"slow\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"query\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"SELECT\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"FROM\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"lot_history\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"WHERE\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"carrier_id\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"no\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"index\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"used\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"rows\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"examined\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795781374000, \"lt\": 1795783174000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"slow\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"query\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"SELECT\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"FROM\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"lot_history\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"WHERE\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"carrier_id\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"no\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"index\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"used\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"rows\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"examined\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":4,\"responses\":[{\"took\":4,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":1,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":3,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":1,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":1,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/search",
+     "params": {
+      "q": "{ resource.service.name =~ \"orders-api\" && status = error }",
+      "start": "1795783174",
+      "end": "1795783835",
+      "limit": "20"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"traces\":[],\"metrics\":{\"inspectedBytes\":\"34344\",\"completedJobs\":3,\"totalJobs\":3}}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/search",
+     "params": {
+      "q": "{ resource.service.name =~ \"orders-api\" }",
+      "start": "1795783174",
+      "end": "1795783835",
+      "limit": "20"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"traces\":[{\"traceID\":\"cc6b097c9ac3c3c3c3c3c3c3c3c3c3c3\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783784000000000\",\"durationMs\":90,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783784000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783784005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783784000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783784005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783764000000000\",\"durationMs\":300,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783764000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783764005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783764000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783764005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783744000000000\",\"durationMs\":4200,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783744000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783744005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783744000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783744005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"cc6b097c48c3c3c3c3c3c3c3c3c3c3c3\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783702000000000\",\"durationMs\":90,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783702000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783702005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783702000000000\",\"durationNanos\":\"90000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783702005000000\",\"durationNanos\":\"70000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"bb6b097c48b2b2b2b2b2b2b2b2b2b2b2\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783682000000000\",\"durationMs\":300,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783682000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783682005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783682000000000\",\"durationNanos\":\"300000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783682005000000\",\"durationNanos\":\"280000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}},{\"traceID\":\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\",\"rootServiceName\":\"orders-api\",\"rootTraceName\":\"GET /orders/history\",\"startTimeUnixNano\":\"1795783662000000000\",\"durationMs\":4200,\"spanSet\":{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783662000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783662005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2},\"spanSets\":[{\"spans\":[{\"spanID\":\"a1a1a1a1a1a1a1a1\",\"startTimeUnixNano\":\"1795783662000000000\",\"durationNanos\":\"4200000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},{\"spanID\":\"a2a2a2a2a2a2a2a2\",\"startTimeUnixNano\":\"1795783662005000000\",\"durationNanos\":\"4180000000\",\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]}],\"matched\":2}],\"serviceStats\":{\"orders-api\":{\"spanCount\":2},\"orders-db\":{\"spanCount\":1}}}],\"metrics\":{\"inspectedBytes\":\"38781\",\"completedJobs\":3,\"totalJobs\":3}}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/traces/aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1",
+     "params": {},
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"batches\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"demo\"},\"spans\":[{\"traceId\":\"qmsJfJqhoaGhoaGhoaGhoQ==\",\"spanId\":\"oaGhoaGhoaE=\",\"name\":\"GET /orders/history\",\"kind\":\"SPAN_KIND_SERVER\",\"startTimeUnixNano\":\"1795783744000000000\",\"endTimeUnixNano\":\"1795783748200000000\",\"attributes\":[{\"key\":\"http.response.status_code\",\"value\":{\"stringValue\":\"200\"}}],\"status\":{\"code\":\"STATUS_CODE_OK\"}},{\"traceId\":\"qmsJfJqhoaGhoaGhoaGhoQ==\",\"spanId\":\"oqKioqKioqI=\",\"parentSpanId\":\"oaGhoaGhoaE=\",\"name\":\"SELECT lot_history\",\"kind\":\"SPAN_KIND_CLIENT\",\"startTimeUnixNano\":\"1795783744005000000\",\"endTimeUnixNano\":\"1795783748185000000\",\"attributes\":[{\"key\":\"db.system\",\"value\":{\"stringValue\":\"postgresql\"}},{\"key\":\"peer.service\",\"value\":{\"stringValue\":\"orders-db\"}}],\"status\":{\"code\":\"STATUS_CODE_OK\"}}]}]},{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-db\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"demo\"},\"spans\":[{\"traceId\":\"qmsJfJqhoaGhoaGhoaGhoQ==\",\"spanId\":\"0dHR0dHR0dE=\",\"parentSpanId\":\"oqKioqKioqI=\",\"name\":\"query\",\"kind\":\"SPAN_KIND_SERVER\",\"startTimeUnixNano\":\"1795783744008000000\",\"endTimeUnixNano\":\"1795783748178000000\",\"status\":{\"code\":\"STATUS_CODE_OK\"}}]}]}]}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/traces/aa6b097c48a1a1a1a1a1a1a1a1a1a1a1",
+     "params": {},
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"batches\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"demo\"},\"spans\":[{\"traceId\":\"qmsJfEihoaGhoaGhoaGhoQ==\",\"spanId\":\"oaGhoaGhoaE=\",\"name\":\"GET /orders/history\",\"kind\":\"SPAN_KIND_SERVER\",\"startTimeUnixNano\":\"1795783662000000000\",\"endTimeUnixNano\":\"1795783666200000000\",\"attributes\":[{\"key\":\"http.response.status_code\",\"value\":{\"stringValue\":\"200\"}}],\"status\":{\"code\":\"STATUS_CODE_OK\"}},{\"traceId\":\"qmsJfEihoaGhoaGhoaGhoQ==\",\"spanId\":\"oqKioqKioqI=\",\"parentSpanId\":\"oaGhoaGhoaE=\",\"name\":\"SELECT lot_history\",\"kind\":\"SPAN_KIND_CLIENT\",\"startTimeUnixNano\":\"1795783662005000000\",\"endTimeUnixNano\":\"1795783666185000000\",\"attributes\":[{\"key\":\"db.system\",\"value\":{\"stringValue\":\"postgresql\"}},{\"key\":\"peer.service\",\"value\":{\"stringValue\":\"orders-db\"}}],\"status\":{\"code\":\"STATUS_CODE_OK\"}}]}]},{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-db\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"demo\"},\"spans\":[{\"traceId\":\"qmsJfEihoaGhoaGhoaGhoQ==\",\"spanId\":\"0dHR0dHR0dE=\",\"parentSpanId\":\"oqKioqKioqI=\",\"name\":\"query\",\"kind\":\"SPAN_KIND_SERVER\",\"startTimeUnixNano\":\"1795783662008000000\",\"endTimeUnixNano\":\"1795783666178000000\",\"status\":{\"code\":\"STATUS_CODE_OK\"}}]}]}]}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/traces/bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2",
+     "params": {},
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"batches\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-api\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"demo\"},\"spans\":[{\"traceId\":\"u2sJfJqysrKysrKysrKysg==\",\"spanId\":\"oaGhoaGhoaE=\",\"name\":\"GET /orders/history\",\"kind\":\"SPAN_KIND_SERVER\",\"startTimeUnixNano\":\"1795783764000000000\",\"endTimeUnixNano\":\"1795783764300000000\",\"attributes\":[{\"key\":\"http.response.status_code\",\"value\":{\"stringValue\":\"200\"}}],\"status\":{\"code\":\"STATUS_CODE_OK\"}},{\"traceId\":\"u2sJfJqysrKysrKysrKysg==\",\"spanId\":\"oqKioqKioqI=\",\"parentSpanId\":\"oaGhoaGhoaE=\",\"name\":\"SELECT lot_history\",\"kind\":\"SPAN_KIND_CLIENT\",\"startTimeUnixNano\":\"1795783764005000000\",\"endTimeUnixNano\":\"1795783764285000000\",\"attributes\":[{\"key\":\"db.system\",\"value\":{\"stringValue\":\"postgresql\"}},{\"key\":\"peer.service\",\"value\":{\"stringValue\":\"orders-db\"}}],\"status\":{\"code\":\"STATUS_CODE_OK\"}}]}]},{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"orders-db\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"demo\"},\"spans\":[{\"traceId\":\"u2sJfJqysrKysrKysrKysg==\",\"spanId\":\"0dHR0dHR0dE=\",\"parentSpanId\":\"oqKioqKioqI=\",\"name\":\"query\",\"kind\":\"SPAN_KIND_SERVER\",\"startTimeUnixNano\":\"1795783764008000000\",\"endTimeUnixNano\":\"1795783764278000000\",\"status\":{\"code\":\"STATUS_CODE_OK\"}}]}]}]}"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 30, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"]}}, {\"terms\": {\"trace_id.keyword\": [\"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"]}}]}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 30, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\"]}}, {\"terms\": {\"trace_id.keyword\": [\"aa6b097c48a1a1a1a1a1a1a1a1a1a1a1\"]}}]}}]}}}\n{\"index\": \"rec-slow-6b097c9a\", \"ignore_unavailable\": true}\n{\"size\": 30, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795783174000, \"lte\": 1795783834000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"]}}, {\"terms\": {\"trace_id.keyword\": [\"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":5,\"responses\":[{\"took\":3,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":4,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"fvwOHaIBmdbPoubKu6DV\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:04.001Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history carrier=FOUP0912 started\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783744001]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"gPwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:08.180Z\", \"service\": {\"name\": \"orders-db\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"seq scan on lot_history finished, 2400000 rows\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783748180]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"f_wOHaIBmdbPoubKu6DV\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:08.185Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783748185]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"gfwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:08.200Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history done in 4200ms status=200\", \"trace_id\": \"aa6b097c9aa1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795783748200]}]},\"status\":200},{\"took\":2,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":4,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":2,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"gvwOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:24.001Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history carrier=FOUP0912 started\", \"trace_id\": \"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"},\"sort\":[1795783764001]},{\"_index\":\"rec-slow-6b097c9a\",\"_id\":\"g_wOHaIBmdbPoubKu6DW\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T12:49:24.300Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history done in 300ms status=200\", \"trace_id\": \"bb6b097c9ab2b2b2b2b2b2b2b2b2b2b2\"},\"sort\":[1795783764300]}]},\"status\":200}]}"
+   }
+  ]
+ }
+}

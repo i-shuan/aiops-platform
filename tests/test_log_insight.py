@@ -190,10 +190,19 @@ def test_if_the_extra_queries_fail_the_original_samples_are_kept_and_it_is_noted
     assert any("事故前後的次數比較查詢失敗" in n for n in ev["notes"])
 
 
-def test_no_extra_queries_when_there_are_no_error_logs(fake):
+def test_without_error_logs_the_warnings_are_still_collected(fake):
+    """延遲類的事故常常只有警告：沒有錯誤日誌也要撈警告（之前是有錯誤才撈，只有警告的事故 LLM 什麼日誌都看不到）。"""
     fake.logs = [row for row in fake.logs if row["log.level"] != "ERROR"]
     ev = collect(fake)
-    assert fake.queries(PROFILE) == [] and fake.queries(COUNTS) == [] and ev["error_patterns"] == []
+    assert ev["error_logs"] == [] and ev["error_patterns"] == [] and len(fake.queries(PROFILE)) == 1
+    assert ev["warnings"] and all(w["system"] in ("mq-broker", "cim-eap", "amhs-mcs") for w in ev["warnings"])
+    assert f"警告 {len(ev['warnings'])} 種" in rca.overview_text(rca.overview(ev))
+
+
+def test_no_extra_queries_when_these_systems_have_no_logs_at_all(fake):
+    fake.logs = []
+    ev = collect(fake)
+    assert fake.queries(PROFILE) == [] and fake.queries(COUNTS) == [] and ev["error_patterns"] == [] and ev["warnings"] == []
 
 
 # ── 設定 ──

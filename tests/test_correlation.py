@@ -197,7 +197,7 @@ def test_trace_failure_or_no_traces_is_noted_and_never_blocks(fake):
     assert ev["call_chains"] == [] and any("呼叫鏈撈取失敗" in n for n in ev["notes"]) and (len(ev["error_logs"]), sum(e.get("similar_in_sample", 1) for e in ev["error_logs"])) == (3, 5)
     fake.fail.clear()
     fake.traces = {}
-    assert any("沒有這些系統的錯誤 Trace" in n for n in collect(fake, traces="vt-uid")["notes"])
+    assert any("沒有這些系統的 Trace" in n for n in collect(fake, traces="vt-uid")["notes"])
 
 
 def test_long_traces_keep_failed_spans_first_and_other_ways_to_mark_failure_are_read():

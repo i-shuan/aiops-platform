@@ -5,7 +5,8 @@
 
 config.yaml 的 traces.type 決定用哪一個（main.py 的 trace_store）。
 
-  search_error_traces   時間窗內、這些服務參與、而且有失敗 span 的 Trace：[{"id", "start"（微秒）, "trace"（有的話）}]
+  search_error_traces   時間窗內、這些服務參與、而且有失敗 span 的 Trace：[{"id", "start"（微秒）, "duration"（微秒）, "trace"（有的話）}]
+  search_traces         同上但不限失敗：時間窗內這些服務參與的 Trace。兩種資料庫的搜尋都不能照耗時排序，回來的只是其中一批
   get_trace             用編號取回整條 Trace；找不到回 None
 
 一條 Trace 的形狀固定是 Jaeger 的那一種（VictoriaTraces 原本回的樣子）：
@@ -40,20 +41,29 @@ class VictoriaTraces:
             raise GrafanaError(f"Trace 查詢的回應沒有 data：{str(raw)[:200]}")
         return status, [t for t in data or [] if isinstance(t, dict)]
 
-    def search_error_traces(self, services: list[str], start: datetime, end: datetime, limit: int) -> list[dict[str, Any]]:
+    def _search(self, services: list[str], start: datetime, end: datetime, limit: int, tags: dict[str, str]) -> list[dict[str, Any]]:
         """Jaeger 的搜尋一次只能指定一個服務，所以每個服務問一次，同一條 Trace 只留一份。回來的已經是完整的 Trace。
         VictoriaTraces 收到 Trace 後幾秒內就搜尋得到（實測 v0.5.0 三秒）。"""
         found: dict[str, dict[str, Any]] = {}
         for service in services:
             _status, traces = self._get("/api/traces", params={
-                "service": service, "tags": json.dumps({"error": "true"}), "limit": limit,
+                "service": service, **({"tags": json.dumps(tags)} if tags else {}), "limit": limit,
                 "start": int(start.timestamp() * 1_000_000), "end": int(end.timestamp() * 1_000_000) + 1_000_000})
             for trace in traces:
                 trace_id = str(trace.get("traceID") or "")
                 if trace_id:
-                    began = min((int(sp.get("startTime") or 0) for sp in trace.get("spans") or []), default=0)
-                    found.setdefault(trace_id, {"id": trace_id, "start": began, "trace": trace})
+                    spans = [(int(sp.get("startTime") or 0), int(sp.get("duration") or 0)) for sp in trace.get("spans") or []]
+                    began = min((s for s, _d in spans), default=0)
+                    found.setdefault(trace_id, {"id": trace_id, "start": began, "trace": trace,
+                                                "duration": max((s + d for s, d in spans), default=0) - began})
         return list(found.values())
+
+    def search_error_traces(self, services: list[str], start: datetime, end: datetime, limit: int) -> list[dict[str, Any]]:
+        return self._search(services, start, end, limit, {"error": "true"})
+
+    def search_traces(self, services: list[str], start: datetime, end: datetime, limit: int) -> list[dict[str, Any]]:
+        """不限失敗。每個服務最多回 limit 條，是哪幾條由 VictoriaTraces 決定（不能照耗時排序）。"""
+        return self._search(services, start, end, limit, {})
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         status, traces = self._get(f"/api/traces/{quote(trace_id, safe='')}")
@@ -128,18 +138,26 @@ class Tempo:
     def __init__(self, grafana: Grafana, datasource_uid: str):
         self.grafana, self.uid = grafana, datasource_uid
 
-    def search_error_traces(self, services: list[str], start: datetime, end: datetime, limit: int) -> list[dict[str, Any]]:
-        """TraceQL 搜尋，一次問完所有服務。回來的只有摘要（編號與開始時間），整條 Trace 要另外用 get_trace 取。
+    def _search(self, services: list[str], start: datetime, end: datetime, limit: int, condition: str) -> list[dict[str, Any]]:
+        """TraceQL 搜尋，一次問完所有服務。回來的只有摘要（編號、開始時間、耗時），整條 Trace 要另外用 get_trace 取。
         注意：Tempo 收到 Trace 之後要過一陣子才搜尋得到（實測 2.9.0 要 8～40 秒以上）；用編號直接取則立刻取得到。"""
         names = "|".join(_traceql_regex(s) for s in services)
         raw = self.grafana.request("GET", f"/api/datasources/proxy/uid/{self.uid}/api/search", params={
-            "q": '{ resource.service.name =~ "' + names + '" && status = error }',
+            "q": '{ resource.service.name =~ "' + names + '"' + condition + ' }',
             "start": int(start.timestamp()), "end": int(end.timestamp()) + 1, "limit": limit})
         traces = raw.get("traces") if isinstance(raw, dict) else None
         if not isinstance(traces, list):
             raise GrafanaError(f"Tempo 搜尋的回應沒有 traces：{str(raw)[:200]}")
-        return [{"id": str(t["traceID"]), "start": int(t.get("startTimeUnixNano") or 0) // 1000, "trace": None}
+        return [{"id": str(t["traceID"]), "start": int(t.get("startTimeUnixNano") or 0) // 1000,
+                 "duration": int(t.get("durationMs") or 0) * 1000, "trace": None}
                 for t in traces if isinstance(t, dict) and t.get("traceID")]
+
+    def search_error_traces(self, services: list[str], start: datetime, end: datetime, limit: int) -> list[dict[str, Any]]:
+        return self._search(services, start, end, limit, " && status = error")
+
+    def search_traces(self, services: list[str], start: datetime, end: datetime, limit: int) -> list[dict[str, Any]]:
+        """不限失敗。最多回 limit 條，是哪幾條由 Tempo 決定（TraceQL 的搜尋不能照耗時排序）。"""
+        return self._search(services, start, end, limit, "")
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         """Tempo 已經沒有這條（過了保留期限、被取樣掉）回 None。Tempo 的 404 沒有內容。"""
