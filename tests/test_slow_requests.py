@@ -1,12 +1,12 @@
-"""延遲類的事故：沒有錯誤日誌、沒有失敗的請求，只有警告與變慢的請求。三件事一起驗：
-  1. 沒有錯誤日誌也照樣撈警告
-  2. 沒有失敗的 Trace 時，改取搜尋到的請求裡耗時最長的幾條（只是排序，沒有門檻）
-  3. 呼叫鏈 → 日誌：用 trace id 撈同一個請求的日誌，不限等級
+"""延遲類的事故：沒有錯誤日誌、沒有失敗的請求，只有警告。驗三件事：
+  1. 錯誤與警告是同一次查詢撈回來的：沒有錯誤日誌，警告照樣在
+  2. 沒有失敗的 Trace 就沒有呼叫鏈：不會改挑「最慢的幾條」充數（2026-11-27 拿掉：沒有對照組的單一樣本會把偶發的慢當成線索；
+     延遲看 service graph 的統計，見 test_service_graph_latency.py）
+  3. 呼叫鏈 → 日誌：用 trace id 撈同一個請求的日誌，不限等級（INFO 只在這時撈）
 樣本是 record_slow_requests.py 從真的元件錄的（slow_requests.json）：同一批資料送進 VictoriaLogs＋VictoriaTraces 與
 Elasticsearch＋Tempo，經 Grafana 13.0.7 的資料源代理查回來。測試照順序重播，並檢查程式送出的請求跟錄的時候一模一樣。
 
 已知限制（沒有粉飾）：
-  - 兩種 Trace 資料庫的搜尋都不能照耗時排序，「最慢」只是搜尋回來那一批（預設 20 條）裡最慢的。
   - 日誌要有記 trace id，而且寫法跟 Trace 資料庫的編號一樣；沒有的話第 3 件事什麼都撈不到，也不會提。
   - 兩種日誌資料庫回的時間寫法不同（VictoriaLogs 去掉小數秒尾端的 0），送給 LLM 的字因此不完全一樣；內容相同。
 """
@@ -24,13 +24,13 @@ from src.grafana import Grafana
 from src.grouping import Alert, converge
 from src.logs import Elasticsearch, LogFields, VictoriaLogs
 from src.traces import Tempo, VictoriaTraces
-from tests.conftest import collect_evidence, log_row
-from tests.test_correlation import NOW, collect, incident, trace_copy
+from tests.conftest import log_row
+from tests.test_correlation import NOW, collect, incident
 
 FIX = json.loads((pathlib.Path(__file__).parent / "fixtures/grafana13/slow_requests.json").read_text(encoding="utf-8"))
 BASE = datetime.fromisoformat(FIX["base"])
 WINDOW = (BASE - timedelta(minutes=10), BASE)
-SLOW, MEDIUM, FAST = (FIX["trace_ids"][k] for k in ("slow", "medium", "fast"))
+SLOW, FAST = FIX["trace_ids"]["slow"], FIX["trace_ids"]["fast"]
 SLOW_QUERY = "slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)"
 
 
@@ -49,6 +49,8 @@ def replaying(name: str) -> Grafana:
 
 vlogs = lambda g: VictoriaLogs(g, "vl", LogFields(), f'{{dataset="{FIX["dataset"]}"}}')
 eslogs = lambda g: Elasticsearch(g, "es", LogFields(), FIX["index"])
+# 時間的寫法：VictoriaLogs 把小數秒尾端的 0 去掉（.180Z → .18Z、.000Z → Z），Elasticsearch 回原文。比較前統一
+trim = lambda text: re.sub(r"\.(\d*?)0*Z", lambda m: f".{m.group(1)}Z" if m.group(1) else "Z", text)
 
 
 def slow_incident():
@@ -63,12 +65,9 @@ def evidence_from(stack: str) -> dict:
     return rca.collect_evidence(slow_incident(), [], g, logs=logs, traces=traces, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)
 
 
-# ── 不限失敗的搜尋：兩種 Trace 資料庫 ──
+# ── 兩種 Trace 資料庫：成功的請求不會被搜成「失敗的」──
 
-def test_searching_without_the_error_filter_returns_durations_from_both_trace_stores():
-    for name, store in (("vt", VictoriaTraces(replaying("vt_search_traces"), "vt")), ("tempo", Tempo(replaying("tempo_search_traces"), "tempo"))):
-        found = {t["id"]: t["duration"] for t in store.search_traces(["orders-api"], *WINDOW, 20)}
-        assert {i: found[i] for i in (SLOW, MEDIUM, FAST)} == {SLOW: 4_200_000, MEDIUM: 300_000, FAST: 90_000}, name   # 微秒
+def test_successful_requests_are_not_returned_by_the_failed_trace_search_of_either_store():
     assert VictoriaTraces(replaying("vt_search_error_traces"), "vt").search_error_traces(["orders-api"], *WINDOW, 20) == []
     assert Tempo(replaying("tempo_search_error_traces"), "tempo").search_error_traces(["orders-api"], *WINDOW, 20) == []
 
@@ -89,67 +88,36 @@ def test_logs_of_a_request_are_found_by_trace_id_at_any_level_in_both_log_stores
 
 # ── 整包證據：兩組來源一樣 ──
 
-def test_a_latency_incident_gets_warnings_slowest_requests_and_their_logs_from_either_stack():
+def test_a_latency_incident_gets_its_warnings_and_no_made_up_call_chains_from_either_stack():
     a, b = evidence_from("victoria"), evidence_from("es_tempo")
-    # 時間的寫法不一樣：VictoriaLogs 把小數秒尾端的 0 去掉（.180Z → .18Z、.000Z → Z），Elasticsearch 回原文。
-    # 是同一個時間，只是送給 LLM 的字不同；比較前把兩邊都寫成去掉尾端 0 的樣子
-    trim = lambda text: re.sub(r"\.(\d*?)0*Z", lambda m: f".{m.group(1)}Z" if m.group(1) else "Z", text)
-    same = lambda ev: json.loads(trim(json.dumps({k: v for k, v in ev.items() if k not in ("log_source", "trace_source")},
-                                                 ensure_ascii=False)))
+    same = lambda ev: json.loads(trim(json.dumps({k: v for k, v in ev.items() if k not in ("log_source", "trace_source")}, ensure_ascii=False)))
     assert same(a) == same(b)
     assert (a["log_source"]["name"], a["trace_source"], b["log_source"]["name"], b["trace_source"]) == ("VictoriaLogs", "VictoriaTraces", "Elasticsearch", "Tempo")
-    assert a["error_logs"] == [] and a["sources"] == {"logs": "empty", "call_chains": "ok", "metrics": "off"}
-    # 1. 沒有錯誤日誌，警告照樣在
-    assert sorted(w["example"] for w in a["warnings"]) == ["connection pool usage 70% (14/20 active)", SLOW_QUERY]
-    # 2. 沒有失敗的請求：取耗時最長的，由長到短，而且標明只是樣本
-    assert [c["sample"] for c in a["call_chains"]] == ["slowest"] * 3
-    took = [c["spans"][0]["duration_ms"] for c in a["call_chains"]]
-    assert took == sorted(took, reverse=True) and took[0] == 4200 and a["call_chains"][0]["trace_id"] == SLOW
-    assert a["call_chains"][0]["systems"] == ["orders-api", "orders-db"] and all(sp["status"] == "ok" for c in a["call_chains"] for sp in c["spans"])
-    assert any("沒有失敗的 Trace" in n and "只是樣本" in n for n in a["notes"])
-    # 3. 呼叫鏈帶出同一個請求的日誌：警告與 INFO 都在，包含沒有告警的 orders-db
-    [of_slow] = [t for t in a["trace_logs"] if t["trace_id"] == SLOW]
-    assert of_slow["systems"] == ["orders-api", "orders-db"] and not of_slow["truncated"]
-    assert [(e["system"], e["level"]) for e in of_slow["events"]] == [("orders-api", "INFO"), ("orders-db", "INFO"), ("orders-api", "WARN"), ("orders-api", "INFO")]
-    assert of_slow["events"][2]["message"] == SLOW_QUERY
+    assert a["error_logs"] == [] and a["sources"] == {"logs": "empty", "call_chains": "empty", "metrics": "off"}
+    assert sorted(w["example"] for w in a["warnings"]) == ["connection pool usage 70% (14/20 active)", SLOW_QUERY]   # 1. 警告照樣在
+    assert a["call_chains"] == [] and "trace_logs" not in a                                                          # 2. 不挑最慢的充數
+    assert any("沒有這些系統的錯誤 Trace" in n for n in a["notes"])
 
 
-def test_the_note_and_the_prompt_say_what_these_chains_are_and_the_database_counts_as_evidence():
+def test_the_note_and_the_prompt_show_the_warnings_and_say_there_were_no_failed_requests():
     ev = evidence_from("victoria")
-    view = rca.overview(ev)
-    text = rca.overview_text(view)
-    assert "警告 2 種" in text and "沒有失敗的請求，改列耗時最長的請求的呼叫鏈 3 條" in text and "失敗請求的呼叫鏈" not in text
-    assert f"呼叫鏈對應的日誌 {sum(len(t['events']) for t in ev['trace_logs'])} 筆" in text
+    text = rca.overview_text(rca.overview(ev))
+    assert "警告 2 種" in text and "VictoriaTraces 裡沒有這些系統的失敗請求" in text
     assert "缺錯誤日誌｜" in text and "log.level 沒有一筆是 ERROR／FATAL／CRITICAL" in text   # 缺的照實寫，不因為有警告就不提
     prompt = rca.build_prompt(ev, text)
-    assert "這段時間沒有失敗的請求，這是搜尋到的請求裡耗時最長的幾條（sample=slowest；只是樣本）" in prompt
-    assert "【6b. 請求的日誌" in prompt and SLOW_QUERY in prompt and "【3e. 警告" in prompt
-    # orders-db 沒有告警、不在關係邊：它在呼叫鏈與請求的日誌裡，是直接證據，分數不壓到 30
-    answer = json.dumps({"summary": "orders-api 的 lot_history 查詢沒有用到索引，請求變慢", "systems": ["orders-api", "orders-db"], "ids": [],
-                         "candidates": [{"source": "orders-db", "kind": "evidence", "confidence": 72, "reason": "慢查詢全表掃描"}]})
-    _summary, [candidate] = rca.read_answer(answer, ev)
-    assert (candidate["source"], candidate["confidence"]) == ("orders-db", 72)
+    assert "【3e. 警告" in prompt and SLOW_QUERY in prompt and "【6." not in prompt and "slowest" not in prompt
 
 
 # ── 不該多做的時候不多做（假的 Grafana 照查詢條件篩資料）──
 
-def test_failed_requests_still_come_first_and_no_second_search_is_made(fake):
+def test_only_failed_traces_are_searched_for_even_when_none_are_found(fake):
     ev = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid")
-    assert ev["call_chains"] and all("sample" not in c for c in ev["call_chains"])
+    assert ev["call_chains"] and all(set(c) == {"trace_id", "spans", "systems", "truncated"} for c in ev["call_chains"])
+    fake.traces = {"33" * 16: fake.traces["33" * 16]}                              # 只剩錄下來的那條成功的 Trace
+    ev = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid")
+    assert ev["call_chains"] == []
     searches = [r for r in fake.trace_requests if r.url.path.endswith("/api/traces")]
-    assert searches and all("tags" in r.url.params for r in searches)            # 只做了限失敗的搜尋
-    assert "失敗請求的呼叫鏈" in rca.overview_text(rca.overview(ev))
-
-
-def test_only_ok_traces_means_the_slowest_of_them_are_listed(fake):
-    ok = fake.traces["33" * 16]                                                   # 錄下來的那條成功的 Trace
-    fake.traces = {"33" * 16: ok}
-    ev = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid")
-    assert [(c["trace_id"], c["sample"]) for c in ev["call_chains"]] == [("33" * 16, "slowest")]
-    fake.traces = {}
-    ev = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid")
-    assert ev["call_chains"] == [] and any("沒有這些系統的 Trace" in n for n in ev["notes"])
-    assert "裡沒有這些系統的請求（失敗的與一般的都沒有）" in rca.overview_text(rca.overview(ev))
+    assert searches and all(json.loads(r.url.params["tags"]) == {"error": "true"} for r in searches)   # 從來沒有不限失敗的搜尋
 
 
 def test_logs_carrying_the_trace_id_are_attached_and_a_failed_lookup_is_only_noted(fake):
@@ -161,6 +129,13 @@ def test_logs_carrying_the_trace_id_are_attached_and_a_failed_lookup_is_only_not
     assert [(e["system"], e["level"], e["message"]) for e in logs_of["events"]] == [
         ("mes-api", "INFO", "track-in accepted, calling mes-db"), ("mes-db", "WARN", "too many connections (max 200)")]
     assert logs_of["systems"] == ["mes-api", "mes-db"]
+    text = rca.overview_text(rca.overview(ev))
+    assert f"呼叫鏈對應的日誌 {sum(len(t['events']) for t in ev['trace_logs'])} 筆" in text
+    assert "【6b. 請求的日誌" in rca.build_prompt(ev, text)
+    # mes-db 沒有告警：它在請求的日誌裡，是直接證據，分數不壓到 30
+    answer = json.dumps({"summary": "mes-db 連線數滿了，mes-api 的 track-in 等不到連線", "systems": ["mes-db"], "ids": [],
+                         "candidates": [{"source": "mes-db", "kind": "evidence", "confidence": 72, "reason": "too many connections"}]})
+    assert [(c["source"], c["confidence"]) for c in rca.read_answer(answer, ev)[1]] == [("mes-db", 72)]
     # 關掉欄位：不查。日誌裡沒有這個欄位：沒有這一包，也不寫成「缺」
     asked = len(fake.queries('"trace_id"'))
     off = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=rca.EvidenceLimits(trace_id_field=""))

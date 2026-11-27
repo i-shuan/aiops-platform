@@ -68,9 +68,13 @@ def backoff_seconds(failures: int, initial: int, maximum: int) -> int:
 MAX_LINK_TRACES = 5   # 判斷要不要合併時，最多取回幾條失敗的 Trace 來看誰呼叫誰。版面與查詢量的上限，未驗證泛化
 
 
-def service_graph_of(settings: Settings, grafana: Grafana, start: datetime, end: datetime) -> list[dict[str, Any]]:
+def service_graph_of(settings: Settings, grafana: Grafana, start: datetime, end: datetime,
+                     with_latency: bool = False) -> list[dict[str, Any]]:
+    """with_latency：分析時要的版本，每條呼叫多帶延遲與基線（基線跟日誌的事故前次數比較同一段：事故前 logs.baseline_minutes 分鐘）。
+    判斷要不要合併時只要失敗數，不多查。"""
     return graph.read_service_graph(grafana, traces_type=settings.traces_type, traces_uid=settings.traces_datasource_uid,
-                                    metrics_uid=settings.service_graph_datasource_uid, start=start, end=end)
+                                    metrics_uid=settings.service_graph_datasource_uid, start=start, end=end,
+                                    baseline_minutes=settings.evidence.baseline_minutes if with_latency else 0)
 
 
 def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[grouping.Alert],
@@ -118,17 +122,35 @@ def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[gro
     return graph.failing_links(alerting, graph_edges=graph_edges, trace_calls=failing_calls, log_mentions=mentioned), graph_edges
 
 
+EDGE_NUMBERS = ("requests", "failed", "kind", "rps", "rps_baseline", "error_rate_pct", "error_rate_baseline_pct",
+                "p95_ms", "p95_baseline_ms", "p95_ratio", "avg_ms", "avg_baseline_ms", "avg_ratio", "latency_from")
+
+
 def relations_for(settings: Settings, db: Database, incident: grouping.Incident, graph_edges: list[dict[str, Any]],
                   now: datetime) -> list[dict[str, Any]]:
-    """跟這張事故的系統有關、學到過的關係（給 LLM 當線索）。service graph 的邊帶上這段時間的請求數與失敗數。"""
+    """跟這張事故的系統有關、學到過的關係（給 LLM 當線索），最多 rca.MAX_RELATIONS 條。
+    範圍是兩跳：直接連到事故系統的（hops=1），再加上那些鄰居自己連到的（hops=2）。
+    service graph 的邊帶上這段時間的數字（請求數、失敗數；Tempo 的還有延遲與事故前的基線）。
+    排序只是算術，沒有門檻：一跳的在前；同一跳裡 p95（沒有就看平均）變成基線的幾倍由大到小，沒有倍數的照最近看到的。"""
     if not settings.graph_retention_days:
         return []
     live = {(e["caller"], e["callee"]): e for e in graph_edges}
-    out = []
-    for row in db.calls_touching(incident.services, now, settings.graph_retention_days, rca.MAX_RELATIONS):
-        numbers = live.get((row["caller"], row["callee"])) if row["source"] == "service_graph" else None
-        out.append({**row, **({k: numbers[k] for k in ("requests", "failed", "kind") if numbers[k] is not None} if numbers else {})})
-    return out
+    first = db.calls_touching(incident.services, now, settings.graph_retention_days, rca.MAX_RELATIONS)
+    neighbors = sorted({n for row in first for n in (row["caller"], row["callee"])} - set(incident.services))
+    second = db.calls_touching(neighbors, now, settings.graph_retention_days, rca.MAX_RELATIONS) if neighbors else []
+    out, seen = [], set()
+    for hops, rows in ((1, first), (2, second)):
+        for row in rows:
+            key = (row["caller"], row["callee"], row["source"])
+            if key in seen:
+                continue
+            seen.add(key)
+            numbers = live.get((row["caller"], row["callee"])) if row["source"] == "service_graph" else None
+            out.append({**row, "hops": hops,
+                        **({k: numbers[k] for k in EDGE_NUMBERS if numbers.get(k) is not None} if numbers else {})})
+    ratio = lambda e: e.get("p95_ratio", e.get("avg_ratio"))
+    order = sorted(range(len(out)), key=lambda i: (out[i]["hops"], ratio(out[i]) is None, -(ratio(out[i]) or 0), i))
+    return [out[i] for i in order][:rca.MAX_RELATIONS]
 
 
 def process(settings: Settings, *, now: datetime | None = None, grafana_transport: httpx.BaseTransport | None = None,
@@ -154,14 +176,19 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
         links, graph_edges = observe(settings, grafana, db, firing, still_open, now)
         incidents = grouping.converge(still_open, firing, resolved, links, now=now,
                                       close_after_seconds=settings.close_after_seconds)
-        fetched: dict[str, list[dict[str, Any]]] = {}   # 這一輪讀到的 service graph，只活在這一輪
+        fetched: dict[datetime, list[dict[str, Any]]] = {}   # 這一輪讀到的 service graph（照時間窗的起點），只活在這一輪
 
         def graph_now(inc: grouping.Incident) -> list[dict[str, Any]]:
-            """要分析事故時才需要 service graph 上這段時間的請求數與失敗數。這一輪開頭讀過就用那一份，沒讀過才讀（一輪最多一次）。"""
-            if "edges" not in fetched:
-                fetched["edges"] = graph_edges if firing or not settings.graph_retention_days else service_graph_of(
-                    settings, grafana, inc.started_at - timedelta(minutes=settings.evidence.window_padding_minutes), now)
-            return fetched["edges"]
+            """要分析事故時才讀 service graph 上這段時間的數字（請求數、失敗數、延遲與事故前的基線）。
+            時間窗跟這張事故的證據一樣；同一個起點這一輪只讀一次。"""
+            if not settings.graph_retention_days:
+                return []
+            if firing and not settings.service_graph_datasource_uid:
+                return graph_edges   # VictoriaTraces 只有誰呼叫誰、沒有延遲：這一輪開頭讀過的那一份就夠，不重讀
+            start = inc.started_at - timedelta(minutes=settings.evidence.window_padding_minutes)
+            if start not in fetched:
+                fetched[start] = service_graph_of(settings, grafana, start, now, with_latency=True)
+            return fetched[start]
         known = {i.uid for i in incidents}
         incidents += [i for i in db.unannotated_incidents() if i.uid not in known]
         known = {i.uid for i in incidents}

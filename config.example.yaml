@@ -71,7 +71,7 @@ traces:                                  # 整段可以不寫：沒設 datasourc
   #                                        # tempo：Grafana 上 Tempo 資料源的 uid
   # trace_id_field: trace_id             # 日誌裡記 trace id 的欄位：錯誤日誌帶的編號直接取 Trace；呼叫鏈也用它撈回同一個請求的日誌。
   #                                        # "" = 不用日誌裡的 id
-  # max_traces: 3                        # 每個事故最多取回幾條 Trace（失敗的優先；沒有失敗的才取最慢的）
+  # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace（只取失敗的）
   # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
   # service_graph_datasource_uid: ""     # 只有 type: tempo 能設：Tempo 有開 service graph（metrics-generator）的話，填它把指標寫進去的
   #                                        # 那個 Prometheus 相容資料源的 uid，程式從那裡讀「誰呼叫誰、有沒有失敗」。

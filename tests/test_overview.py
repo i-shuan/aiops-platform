@@ -125,7 +125,7 @@ def test_queried_but_empty_traces_and_metrics_say_why(fake):
     ev = collect(fake, incident("amhs-mcs"), traces="vt-uid",
                  metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
     text = line(ev)
-    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。VictoriaTraces 裡沒有這些系統的請求（失敗的與一般的都沒有）" in text
+    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。VictoriaTraces 裡沒有這些系統的失敗請求" in text
     assert "缺指標走勢｜還看不出數值是怎麼變壞的（流量、佇列、資源）。設定的查詢在這段時間都沒有資料" in text
 
 

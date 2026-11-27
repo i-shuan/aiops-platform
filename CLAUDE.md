@@ -57,7 +57,7 @@ server（HTTP 服務與排程；流程只呼叫 main 的那一輪，另外直接
 | `src/grafana.py` | 解析 Webhook、對 Grafana 的 HTTP（重試、錯誤訊息）、指標查詢、註記 |
 | `src/logs.py` | 日誌的兩種來源（VictoriaLogs、Elasticsearch）：同一組方法，回同一種形狀 |
 | `src/traces.py` | Trace 的兩種來源（VictoriaTraces、Tempo）：同一組方法，回同一種形狀（Jaeger 的） |
-| `src/graph.py` | 系統之間的關係：讀 Tempo 的 service graph、從日誌找提到的系統、判斷哪些連結可以合併事故 |
+| `src/graph.py` | 系統之間的關係：讀 Tempo 的 service graph（含延遲邊列表：事故期間與事故前的請求量、失敗率、p95、平均）、從日誌找提到的系統、判斷哪些連結可以合併事故 |
 | `src/grouping.py` | 收斂（純函式）：同實體合併、有連結的併成一張、併入進行中事故、結案 |
 | `src/evidence.py` | 收集證據（日誌、呼叫鏈含訊息佇列的連結、指標走勢、系統關係）與證據概況 |
 | `src/rca.py` | 組 Prompt、呼叫 LLM、幻覺檢查、下一步建議 |

@@ -45,7 +45,7 @@ class EvidenceLimits:
     max_timeline_events: int = 30        # 每條時間線最多幾筆紀錄
     trace_id_field: str = "trace_id"     # 日誌裡記 trace id 的欄位。兩個方向都用：錯誤日誌帶的編號直接取那條 Trace；
                                          # 取到的呼叫鏈也用編號回頭撈同一個請求的日誌（不限等級）。空的 = 兩個方向都不做
-    max_traces: int = 3                  # 最多整理幾條 Trace 的呼叫鏈（失敗的優先；沒有失敗的才取搜尋到的裡面耗時最長的）
+    max_traces: int = 3                  # 最多整理幾條錯誤 Trace 的呼叫鏈（只取失敗的）
     max_trace_spans: int = 30            # 每條呼叫鏈最多列幾個 span（失敗的優先）
     baseline_minutes: int = 30           # 「事故前」看多久：同一種錯誤在事故前這段時間出現幾次，用來分辨平常就有的與新出現的
     max_log_patterns: int = 6            # 最多替幾種錯誤比較事故前後的次數；0 = 不比較
@@ -106,6 +106,11 @@ SOURCE_TEXT = {"service_graph": "Tempo 的 service graph 看到 downstream 呼�
                "log": "downstream 的錯誤日誌提到過 upstream（不一定是呼叫）"}
 
 
+# service graph 的邊在這段時間的數字（graph.latency()）：原樣帶進證據
+EDGE_FIELDS = ("rps", "rps_baseline", "error_rate_pct", "error_rate_baseline_pct", "p95_ms", "p95_baseline_ms", "p95_ratio",
+               "avg_ms", "avg_baseline_ms", "avg_ratio", "latency_from")
+
+
 def relation(edge: Any) -> dict[str, Any]:
     """證據裡的一條系統關係。(上游, 下游) 的 tuple 原樣轉；db.calls_touching 的列（caller 呼叫 callee）轉成
     upstream＝被呼叫的、downstream＝呼叫的（被呼叫的出問題會影響呼叫它的），並帶上來源、最後看到的時間、這一輪的請求數與失敗數。"""
@@ -115,7 +120,8 @@ def relation(edge: Any) -> dict[str, Any]:
     # 一般的呼叫：被呼叫的出問題會影響呼叫它的。經訊息佇列的反過來：送訊息的（或佇列）出問題，收的那一端才會受影響
     asynchronous = edge.get("kind") == "messaging"
     out = {"upstream": edge["caller"], "downstream": edge["callee"]} if asynchronous else {"upstream": edge["callee"], "downstream": edge["caller"]}
-    out.update({k: edge[k] for k in ("source", "last_seen", "times", "requests", "failed", "kind") if edge.get(k) not in (None, "")})
+    out.update({k: edge[k] for k in ("source", "last_seen", "times", "requests", "failed", "kind", "hops", *EDGE_FIELDS)
+                if edge.get(k) not in (None, "")})
     return out
 
 
@@ -134,6 +140,7 @@ def collect_evidence(incident: Incident, edges: list[Any], grafana: Grafana, *, 
                        "started": iso(m["starts_at"]), "status": m["status"], "values": m["values"]}
                       for m in _members(incident)],
         "edges": [relation(e) for e in edges],
+        "baseline_minutes": limits.baseline_minutes,   # 「事故前」的長度：日誌的次數比較與 service graph 的基線同一段
         "error_logs": [], "id_counts": {f: {} for f in id_fields},
         "timelines": [], "call_chains": [], "metrics": [], "notes": [],
         "error_patterns": [], "warnings": [],
@@ -525,16 +532,15 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, store: An
                          limits: EvidenceLimits, hinted_ids: list[str]) -> None:
     """先用錯誤日誌裡的 trace id 直接取（一定跟這次的錯誤有關，而且不用等它搜尋得到）；不夠才用搜尋補，挑離現在最近的幾條。
     搜尋結果有的已經帶整條 Trace（VictoriaTraces），有的只有編號（Tempo）：只有編號的，要用到時才取。
-    一條失敗的都沒有（延遲類的告警常常是這樣：請求沒有失敗，只是慢）：改成不限失敗再搜一次，取回來的那一批裡耗時最長的幾條，
-    標 sample="slowest"。這只是排序，沒有「多慢才算慢」的門檻；而且兩種資料庫的搜尋都不能照耗時排序，
-    所以是「搜尋回來的那一批裡最慢的」，不保證是這段時間全部請求裡最慢的。"""
-    def add(trace_id: str, trace: dict[str, Any] | None = None, sample: str = "") -> None:
+    只取失敗的 Trace。延遲類的事故（請求沒有失敗、只是慢）看 service graph 的延遲統計（關係邊上的 p95），
+    不挑「最慢的幾條」：沒有對照組的單一樣本會把偶發的慢（GC、網路抖動）當成線索。"""
+    def add(trace_id: str, trace: dict[str, Any] | None = None) -> None:
         if trace_id and len(evidence["call_chains"]) < limits.max_traces \
                 and trace_id not in {c["trace_id"] for c in evidence["call_chains"]}:
             trace = trace or store.get_trace(trace_id)
             chain = summarize_trace(trace, trace_id, limits, senders_of(trace, store)) if trace else None
             if chain:
-                evidence["call_chains"].append({**chain, "sample": sample} if sample else chain)
+                evidence["call_chains"].append(chain)
 
     try:
         for trace_id in hinted_ids[:limits.max_traces * 2]:      # 有些 id 可能被取樣掉、取不回來，多試幾個
@@ -544,10 +550,6 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, store: An
             found = store.search_error_traces(incident.services, start, end, max(TRACE_SEARCH_LIMIT, limits.max_traces))
             for item in sorted(found, key=lambda t: t["start"], reverse=True):
                 add(item["id"], item["trace"])
-        if not evidence["call_chains"]:
-            found = store.search_traces(incident.services, start, end, max(TRACE_SEARCH_LIMIT, limits.max_traces))
-            for item in sorted(found, key=lambda t: t["duration"], reverse=True):
-                add(item["id"], item["trace"], sample="slowest")
     except GrafanaError as e:
         log.warning("事故 %s 撈不到呼叫鏈：%s", incident.uid, e)
         evidence["notes"].append(f"呼叫鏈撈取失敗：{e}")
@@ -555,9 +557,7 @@ def _collect_call_chains(evidence: dict[str, Any], incident: Incident, store: An
         return
     evidence["sources"]["call_chains"] = "ok" if evidence["call_chains"] else "empty"
     if not evidence["call_chains"]:
-        evidence["notes"].append("事故時間窗內沒有這些系統的 Trace（沒有埋點或被取樣掉）")
-    elif all(chain.get("sample") == "slowest" for chain in evidence["call_chains"]):
-        evidence["notes"].append("沒有失敗的 Trace：呼叫鏈列的是搜尋到的請求裡耗時最長的幾條（只是樣本，不代表它們不正常）")
+        evidence["notes"].append("事故時間窗內沒有這些系統的錯誤 Trace（沒有埋點、被取樣掉、或失敗沒有被標成 error）")
 
 
 # 每一種證據能回答什麼問題。缺的時候寫在註記上：「缺錯誤日誌｜還看不出哪個系統出了什麼錯…」
@@ -631,15 +631,11 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
 
     chains = sources.get("call_chains", "off")
     if chains == "ok":
-        slowest = [c for c in evidence["call_chains"] if c.get("sample") == "slowest"]
-        if slowest:
-            out["have"].append(f"沒有失敗的請求，改列耗時最長的請求的呼叫鏈 {len(slowest)} 條")
-        else:
-            out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
+        out["have"].append(f"失敗請求的呼叫鏈 {len(evidence['call_chains'])} 條")
         if evidence.get("trace_logs"):
             out["have"].append(f"呼叫鏈對應的日誌 {sum(len(t['events']) for t in evidence['trace_logs'])} 筆")
     elif chains == "empty":
-        out["missing"].append(("呼叫鏈", f"{evidence.get('trace_source', 'Trace 資料源')} 裡沒有這些系統的請求（失敗的與一般的都沒有）。可能沒有埋點或被取樣掉"))
+        out["missing"].append(("呼叫鏈", f"{evidence.get('trace_source', 'Trace 資料源')} 裡沒有這些系統的失敗請求。可能沒有埋點、被取樣掉，或失敗沒有被標成 error"))
     elif chains == "failed":
         out["failed"].append(("呼叫鏈", "Grafana 的 Trace 資料源查不動，原因見服務的 log"))
     else:
@@ -682,7 +678,7 @@ def overview_brief(groups: dict[str, list[Any]]) -> str:
     return "證據｜" + "；".join(parts)
 
 
-MAX_RELATIONS = 20   # 一次最多給 LLM 看幾條系統關係（最近看到的優先）。版面的上限，未驗證泛化
+MAX_RELATIONS = 20   # 一次最多給 LLM 看幾條系統關係（兩跳內；一跳的優先，同一跳照延遲變成基線的幾倍排）。版面的上限，未驗證泛化
 
 
 def calls_in(evidence: dict[str, Any], *, failed_only: bool = False, messaging_only: bool = False) -> list[tuple[str, str]]:

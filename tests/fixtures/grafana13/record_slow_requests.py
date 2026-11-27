@@ -1,11 +1,13 @@
 """錄製 slow_requests.json 的腳本（留著是為了交代來源，測試不會執行它）。
 
 情境：延遲類的告警。orders-api 變慢但沒有任何請求失敗、沒有任何錯誤日誌；只有警告（慢查詢），而且日誌帶 trace_id。
+（2026-11-27 起不再挑「最慢的 Trace」：延遲看 service graph 的統計，見 record_service_graph.py。這裡的 Trace 只是讓兩種
+ Trace 資料庫都「有資料、但沒有失敗的」，確認不會被當成呼叫鏈。）
   Trace   三條都成功：orders-api → orders-db，耗時 4200／300／90 毫秒
   日誌    每條 Trace 各有幾筆帶 trace_id 的日誌（INFO、WARN），另外有幾筆不帶 trace_id 的 WARN
 同一批資料送進兩組元件：VictoriaLogs v1.17.0＋VictoriaTraces v0.5.0，以及 Elasticsearch 8.19.23＋Tempo 2.9.0。
 寫入是這支腳本唯一直連的地方；查詢全部**用 Editor 服務帳號的 Token 經 Grafana 13.0.7 的資料源代理**，請求與回應原樣記下來：
-  search_traces（不限失敗的搜尋）、用 trace id 查日誌（search_timeline 換一個欄位）、兩組各一次完整的 collect_evidence。
+  限失敗的 Trace 搜尋（應該是空的）、用 trace id 查日誌（search_timeline 換一個欄位）、兩組各一次完整的 collect_evidence。
 
 用法：python record_slow_requests.py <Editor Token 的檔案>
 前提：Grafana :23000（admin/admin）、VictoriaLogs :29428、VictoriaTraces :29429、Elasticsearch :29200、Tempo :23200（OTLP/HTTP :24318）。
@@ -143,11 +145,8 @@ def record(name, call):
 vlogs = VictoriaLogs(grafana, uids["vl"], LogFields(), f'{{dataset="{DATASET}"}}')
 eslogs = Elasticsearch(grafana, uids["es"], LogFields(), INDEX)
 vtraces, tempo = VictoriaTraces(grafana, uids["vt"]), Tempo(grafana, uids["tempo"])
-brief = lambda found: sorted((t["id"], t["duration"]) for t in found)
-record("vt_search_traces", lambda: brief(vtraces.search_traces(SERVICES, START, END, 20)))
-record("vt_search_error_traces", lambda: brief(vtraces.search_error_traces(SERVICES, START, END, 20)))
-record("tempo_search_traces", lambda: brief(tempo.search_traces(SERVICES, START, END, 20)))
-record("tempo_search_error_traces", lambda: brief(tempo.search_error_traces(SERVICES, START, END, 20)))
+record("vt_search_error_traces", lambda: vtraces.search_error_traces(SERVICES, START, END, 20))
+record("tempo_search_error_traces", lambda: tempo.search_error_traces(SERVICES, START, END, 20))
 wanted = [IDS["slow"], IDS["fast"], "ff" * 16]
 record("vl_logs_of_traces", lambda: vlogs.search_timeline("trace_id", wanted, START, END, 10))
 record("es_logs_of_traces", lambda: eslogs.search_timeline("trace_id", wanted, START, END, 10))
@@ -166,6 +165,6 @@ for name, logs, traces in (("victoria", vlogs, vtraces), ("es_tempo", eslogs, te
     "inserted": DOCS, "exchanges": exchanges}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 admin.delete(f"/api/datasources/uid/{uids['es']}")
 for name, ev in collected.items():
-    print(f"\n== {name}: chains={[(c['trace_id'][:6], c.get('sample'), c['spans'][0]['duration_ms']) for c in ev['call_chains']]} "
+    print(f"\n== {name}: chains={len(ev['call_chains'])} "
           f"warnings={[w['example'][:40] for w in ev['warnings']]} trace_logs={[(t['trace_id'][:6], len(t['events'])) for t in ev.get('trace_logs', [])]} "
           f"notes={ev['notes']}")

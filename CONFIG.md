@@ -82,12 +82,12 @@ Tempo 的 OTLP 由程式轉），分析的程式不分來源。測試把同一�
 | `logs.timeline_fields` | `id_fields` 裡的 `lot_id`、`carrier_id` | `id_fields` 的子集；`[]` = 不做 | 哪些識別碼要把跨系統的日誌串成時間線。工廠沒有 trace id，批號與載具就是關聯碼 |
 | `llm.max_timeline_ids` | 2 | 0～20 | 最多替幾個關聯碼做時間線（取錯誤日誌裡出現最多次的）；0 = 不做 |
 | `llm.max_timeline_events` | 30 | 1～500 | 每條時間線最多幾筆紀錄（由舊到新；超過會標示被截斷） |
-| `logs.baseline_minutes` | 30 | 5～1440 | 「事故前」看多久。同一種錯誤在這段時間出現幾筆，會跟事故期間的筆數一起交給 LLM |
+| `logs.baseline_minutes` | 30 | 5～1440 | 「事故前」看多久。同一種錯誤在這段時間出現幾筆，會跟事故期間的筆數一起交給 LLM；Tempo service graph 的延遲基線也用這一段 |
 | `llm.max_log_patterns` | 6 | 0～20 | 最多替幾種錯誤比較事故前後的筆數；0 = 不比較 |
 | `logs.warn_levels` | WARN、warn、Warn、WARNING、warning、Warning | 文字清單，可以是空的 | 日誌等級是這些值算警告；空清單 = 不撈警告。日誌沒有等級欄位（`logs.fields.level` 是空的）時不撈 |
 | `llm.max_warn_patterns` | 5 | 0～20 | 最多給 LLM 看幾種警告；0 = 不撈警告 |
 | `traces.trace_id_field` | `trace_id` | 欄位名稱；`""` = 不用 | 日誌裡記 trace id 的欄位，兩個方向都用：錯誤日誌帶的編號直接取那條 Trace（最多試 `max_traces` 的兩倍個），不夠才用搜尋補；取到的呼叫鏈也用編號回頭撈同一個請求的日誌（不限等級）。Tempo 收到 Trace 後 8～40 秒以上才搜尋得到（2.9.0 實測），日誌帶 trace id 特別有用；VictoriaTraces 三秒內搜尋得到 |
-| `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條 Trace 的呼叫鏈（失敗的優先；一條失敗的都沒有才取搜尋到的裡面最慢的）；0 = 不取（連搜尋都不做） |
+| `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈（只取失敗的）；0 = 不取（連搜尋都不做） |
 | `traces.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
 | `traces.graph_retention_days` | 30 | 0～365 | 學到的系統關係多久沒再看到就丟掉；0 = 不學、不用，不同系統的告警也不會併成同一張。30 是估的，沒有依據，未驗證泛化 |
 | `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以） |
@@ -225,8 +225,8 @@ Elasticsearch 的設定把 `extra_filter` 那一行換成 `type: elasticsearch` 
 | 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的條件（樣板裡固定不變的詞照順序出現：LogsQL 的 `seq`、Elasticsearch 的 intervals；固定的詞少於兩個就不數） | `src/evidence.py` 的 `log_pattern`、`pattern_words` | 歸類與計數的實作。是近似：別種訊息剛好有同樣的詞、順序也一樣時會被算在一起；未驗證泛化 |
 | 可能原因最多 3 個；信心分數 0～100，分段是 70／40；沒有直接證據指向的系統分數最高 30 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE_HIGH`、`CONFIDENCE_MEDIUM`、`NO_DIRECT_EVIDENCE_CAP`、`DIRECT_EVIDENCE` | 3 個是註記版面的上限。分段是提示詞裡跟模型講的定義，上限 30 落在「只是推測」那一段；分數不是機率、沒有校準。「有沒有直接證據」是名稱的字串比對。都只在 `EVAL.md` 的人造案例跑過，未驗證泛化 |
 | 用「名稱原樣出現在證據文字裡」當憑據時，名稱至少要 3 個字 | `src/rca.py` 的 `MIN_NAME_CHARS` | 一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化 |
-| 一次最多給 LLM 看 20 條系統關係（最近看到的優先）；判斷要不要合併時最多取回 5 條失敗的 Trace；用名稱比對日誌文字時名稱至少 3 個字 | `src/evidence.py` 的 `MAX_RELATIONS`、`src/main.py` 的 `MAX_LINK_TRACES`、`src/graph.py` 的 `MIN_NAME_CHARS` | 版面與查詢量的上限，未驗證泛化 |
-| service graph 的指標名稱（`traces_service_graph_request_total`、`…_failed_total`）與標籤（`client`、`server`、`connection_type`） | `src/graph.py` | Tempo 2.9.0 實測的名稱；公司的 Tempo 版本不同、或改過指標前綴就會對不上 |
+| 一次最多給 LLM 看 20 條系統關係（兩跳內；一跳的在前，同一跳照延遲變成基線的幾倍排，沒有倍數的照最近看到的）；判斷要不要合併時最多取回 5 條失敗的 Trace；用名稱比對日誌文字時名稱至少 3 個字 | `src/evidence.py` 的 `MAX_RELATIONS`、`src/main.py` 的 `MAX_LINK_TRACES`、`src/graph.py` 的 `MIN_NAME_CHARS` | 版面與查詢量的上限，未驗證泛化 |
+| service graph 的指標名稱（`traces_service_graph_request_total`、`…_failed_total`、`…_request_server_seconds`、`…_request_client_seconds`）與標籤（`client`、`server`、`connection_type`）；延遲取第 95 百分位；事故前的基線長度跟 `logs.baseline_minutes` 同一個值 | `src/graph.py` 的 `REQUESTS`、`FAILED`、`LATENCY`、`QUANTILE` | Tempo 2.9.0 實測的名稱；公司的 Tempo 版本不同、或改過指標前綴就會對不上 |
 | 下一步建議最多 3 條、每條最多 120 字；一條 Trace 最多追 3 條它連結到的 Trace（訊息佇列的發送端） | `src/rca.py` 的 `MAX_ACTIONS`、`ACTION_CHARS`、`src/evidence.py` 的 `MAX_LINKED_TRACES` | 版面與查詢量的上限，沒有依據的數字，未驗證泛化 |
 | LLM 沒有分析時註記上直接列的證據：最多 5 行、每行引用的原文最多 120 字 | `src/rca.py` 的 `MAX_FACT_LINES`、`FACT_CHARS` | 版面的上限，不是判斷門檻；順序是固定規則（事故前沒出現過的先列），不代表誰是源頭 |
 | 出口送失敗最多試 10 次（每一輪一次）；出口的 JSON 格式與 `schema` 名稱；`deliveries` 表的狀態用字 | `src/outputs.py` 的 `MAX_ATTEMPTS`、`incident_payload`、`remediation_payloads` | 10 是沒有依據的數字，未驗證泛化；調之前先看下游多久會恢復。格式是對下游的契約，改了要跟對方一起改 |

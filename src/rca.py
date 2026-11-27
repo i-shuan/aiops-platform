@@ -77,8 +77,6 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 不要寫任何筆數、次數、時間：那些由程式另外顯示。
 - 「關聯時間線」只代表同一個批號或載具在各系統出現的先後，不代表因果；各系統的時鐘可能有幾秒誤差。
 - 「呼叫鏈」是實際發生的呼叫：最下游、而且底下沒有其他失敗呼叫的那一段，比上游更接近源頭。
-  標 sample=slowest 的呼叫鏈不是失敗的請求：這段時間沒有失敗的請求，列的是搜尋到的請求裡耗時最長的幾條，看 duration_ms 花在哪一段。
-  它只是樣本，單看它不能說這條請求不正常。
 - 「請求的日誌」是用呼叫鏈的編號找到的、同一個請求在各系統留下的日誌（不限等級）：它一定跟這個請求有關，比照時間撈到的日誌更直接。
 - 「指標走勢」是數值在事故前後的變化（baseline 是事故前的中位數）：它說明哪個數值先變、變了多少，本身不代表因果。
 - 「關係邊」只說明誰可能影響誰。某個系統在上游，不能當成它就是源頭的依據；要有指向它的證據：它自己的錯誤日誌或警告、它的指標變化、
@@ -172,7 +170,7 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     text = (f"{head}【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream。有 source 的是程式觀察到的：service_graph、trace＝downstream 實際呼叫過 upstream；"
             f"log＝downstream 的錯誤日誌提到過 upstream，方向不一定對。kind 是 messaging 的是經訊息佇列的非同步關係：upstream 送訊息給 downstream，"
-            f"upstream 或佇列出問題會讓 downstream 收不到或處理失敗，downstream 出問題通常不會回頭影響 upstream。requests、failed 是這段時間這條呼叫的請求數與失敗數）】\n{dump(evidence['edges'])}\n\n"
+            f"upstream 或佇列出問題會讓 downstream 收不到或處理失敗，downstream 出問題通常不會回頭影響 upstream。requests、failed 是這段時間這條呼叫的請求數與失敗數。hops：1＝直接連到告警的系統，2＝再隔一個。有些邊另外有這段時間與事故前 {evidence.get('baseline_minutes', 30)} 分鐘（基線）的數字：rps＝每秒請求數、error_rate_pct＝失敗率（%）、p95_ms＝第 95 百分位的耗時、avg_ms＝平均耗時，加 _baseline 的是基線，_ratio＝事故期間 ÷ 基線；latency_from 是耗時取自哪一端（server＝被呼叫的自己量的，client＝呼叫的那一端量的、含網路，沒埋點的資料庫只有這一端）。p95 是從直方圖的桶內插出來的，桶寬粗時不準（預設 100 毫秒以下分不出來），快的呼叫看平均。這些只是數字，哪一段變慢、上下游的請求量差幾倍、是不是重試放大，要你自己比對）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數）】\n"
             f"{dump(evidence['error_logs'])}\n\n"
             f"【4. 錯誤日誌裡各識別碼的出現次數】\n{dump(evidence['id_counts'])}\n\n")
@@ -191,9 +189,7 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
         text += ("【5. 關聯時間線：同一個批號／載具在各系統的紀錄，由舊到新（只代表先後，不代表因果；各系統時鐘可能有誤差）】\n"
                  f"{dump(evidence['timelines'])}\n\n")
     if evidence.get("call_chains"):
-        slowest = any(chain.get("sample") == "slowest" for chain in evidence["call_chains"])
-        text += ("【6. 呼叫鏈：" + ("這段時間沒有失敗的請求，這是搜尋到的請求裡耗時最長的幾條（sample=slowest；只是樣本）。" if slowest else "失敗請求")
-                 + "實際的呼叫路徑（called_by 是呼叫它的系統；origin=true 是底下沒有其他失敗呼叫的失敗點；duration_ms 是那一段花的時間）】\n"
+        text += ("【6. 呼叫鏈：失敗請求實際的呼叫路徑（called_by 是呼叫它的系統；origin=true 是底下沒有其他失敗呼叫的失敗點）】\n"
                  f"{dump(evidence['call_chains'])}\n\n")
     if evidence.get("trace_logs"):
         text += ("【6b. 請求的日誌：用上面呼叫鏈的編號找到的、同一個請求在各系統留下的日誌，不限等級，由舊到新】\n"

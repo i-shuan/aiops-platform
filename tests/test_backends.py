@@ -215,7 +215,7 @@ def test_call_chains_from_tempo_fetch_only_the_traces_that_are_used(fake):
     assert [r.url.path.rsplit("/", 1)[1] for r in fake.trace_requests] == ["search", "22" * 16, "11" * 16]   # 離現在近的先取
     fake.tempo_search = {"traces": []}
     ev = rca.collect_evidence(inc, [], g, traces=Tempo(g, "tempo-uid"), id_fields=[], now=BASE)
-    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。Tempo 裡沒有這些系統的請求（失敗的與一般的都沒有）" in rca.overview_text(rca.overview(ev))
+    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。Tempo 裡沒有這些系統的失敗請求" in rca.overview_text(rca.overview(ev))
 
 
 # ── 設定 ──
@@ -268,4 +268,4 @@ def test_a_round_with_elasticsearch_and_tempo_writes_the_same_kind_of_annotation
     assert "根因分析｜[LLM 推論]" in note and "證據｜已有告警 3 筆" in note and "錯誤日誌 4 種" in note
     prompt = w.llm_calls[0]["messages"][1]["content"]
     assert "EQP-CVD-07" in prompt and "T3 timeout waiting S6F12 reply" in prompt
-    assert "缺呼叫鏈（Tempo 裡沒有這些系統的請求" in inc["evidence_note"] or "失敗請求的呼叫鏈" in inc["evidence_note"]
+    assert "缺呼叫鏈（Tempo 裡沒有這些系統的失敗請求" in inc["evidence_note"] or "失敗請求的呼叫鏈" in inc["evidence_note"]

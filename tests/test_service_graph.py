@@ -140,10 +140,11 @@ def test_systems_merge_when_the_service_graph_shows_failures_between_them(world)
     w.run(64)
     assert incidents_of(w) == [["amhs-mcs", "cim-eap", "mq-broker"]]
     assert learned(w) == [("amhs-mcs", "cim-eap", "service_graph"), ("cim-eap", "mq-broker", "service_graph")]
-    assert len(w.fake.service_graph_requests) == 2 and w.fake.trace_requests == []   # 已經連成一塊：不用再查 Trace
+    # 合併只查 2 次（請求數、失敗數）；分析時再讀一次帶延遲與基線的版本：同樣 2 次，加延遲與基線 10 次
+    assert len(w.fake.service_graph_requests) == 2 + 12 and w.fake.trace_requests == []   # 已經連成一塊：不用再查 Trace
     assert w.fake.error_searches == 1                                               # 日誌只有收集證據的那一次
     w.run(124)
-    assert len(w.fake.service_graph_requests) == 2                                  # 沒有新告警的續跑：什麼都不查
+    assert len(w.fake.service_graph_requests) == 2 + 12                             # 沒有新告警的續跑：什麼都不查
 
 
 def test_a_call_path_without_failures_does_not_merge_and_a_shared_hub_only_pulls_in_its_failing_callers(world):  # noqa: F811
