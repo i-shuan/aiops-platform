@@ -8,11 +8,13 @@ Elasticsearch＋Tempo，經 Grafana 13.0.7 的資料源代理查回來。測試�
 已知限制（沒有粉飾）：
   - 兩種 Trace 資料庫的搜尋都不能照耗時排序，「最慢」只是搜尋回來那一批（預設 20 條）裡最慢的。
   - 日誌要有記 trace id，而且寫法跟 Trace 資料庫的編號一樣；沒有的話第 3 件事什麼都撈不到，也不會提。
+  - 兩種日誌資料庫回的時間寫法不同（VictoriaLogs 去掉小數秒尾端的 0），送給 LLM 的字因此不完全一樣；內容相同。
 """
 from __future__ import annotations
 
 import json
 import pathlib
+import re
 from datetime import datetime, timedelta
 
 import httpx
@@ -89,7 +91,11 @@ def test_logs_of_a_request_are_found_by_trace_id_at_any_level_in_both_log_stores
 
 def test_a_latency_incident_gets_warnings_slowest_requests_and_their_logs_from_either_stack():
     a, b = evidence_from("victoria"), evidence_from("es_tempo")
-    same = lambda ev: {k: v for k, v in ev.items() if k not in ("log_source", "trace_source")}
+    # 時間的寫法不一樣：VictoriaLogs 把小數秒尾端的 0 去掉（.180Z → .18Z、.000Z → Z），Elasticsearch 回原文。
+    # 是同一個時間，只是送給 LLM 的字不同；比較前把兩邊都寫成去掉尾端 0 的樣子
+    trim = lambda text: re.sub(r"\.(\d*?)0*Z", lambda m: f".{m.group(1)}Z" if m.group(1) else "Z", text)
+    same = lambda ev: json.loads(trim(json.dumps({k: v for k, v in ev.items() if k not in ("log_source", "trace_source")},
+                                                 ensure_ascii=False)))
     assert same(a) == same(b)
     assert (a["log_source"]["name"], a["trace_source"], b["log_source"]["name"], b["trace_source"]) == ("VictoriaLogs", "VictoriaTraces", "Elasticsearch", "Tempo")
     assert a["error_logs"] == [] and a["sources"] == {"logs": "empty", "call_chains": "ok", "metrics": "off"}
@@ -156,8 +162,9 @@ def test_logs_carrying_the_trace_id_are_attached_and_a_failed_lookup_is_only_not
         ("mes-api", "INFO", "track-in accepted, calling mes-db"), ("mes-db", "WARN", "too many connections (max 200)")]
     assert logs_of["systems"] == ["mes-api", "mes-db"]
     # 關掉欄位：不查。日誌裡沒有這個欄位：沒有這一包，也不寫成「缺」
+    asked = len(fake.queries('"trace_id"'))
     off = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=rca.EvidenceLimits(trace_id_field=""))
-    assert "trace_logs" not in off and not any("trace_id" in q for q in fake.queries("partition by")[-2:])
+    assert "trace_logs" not in off and len(fake.queries('"trace_id"')) == asked
     fake.logs = [row for row in fake.logs if "trace_id" not in row]
     none = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid")
     assert "trace_logs" not in none and "呼叫鏈對應的日誌" not in rca.overview_text(rca.overview(none))

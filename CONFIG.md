@@ -55,7 +55,7 @@ Tempo 的 OTLP 由程式轉），分析的程式不分來源。測試把同一�
 | 1 | `llm.timeout_seconds` | 60 | 1～3600 | 等 LLM 回應的逾時。推理型模型比較慢、常逾時就調大；`healthcheck.stuck_seconds` 要跟著調大 |
 | 2 | `logs.error_levels` | ERROR、error、Error、FATAL、fatal、CRITICAL、critical | 非空清單 | 日誌等級是這些值才算錯誤日誌。公司的日誌寫 `E`、`SEVERE` 之類就要改（大小寫不同要分開列） |
 | 3 | （已移除） | — | — | 原本是 `es.error_statuses`，隨「日誌資料庫裡的 Trace 錯誤片段」那包證據一起拿掉，沒有回來。編號留著，免得後面的項目跟舊文件對不上 |
-| 4 | `logs.max_hits` | 100 | 1～10000 | 錯誤日誌最多撈幾筆（最新的在前）；識別碼的出現次數只統計這幾筆 |
+| 4 | `logs.max_hits` | 100 | 1～10000 | 錯誤與警告一次最多撈幾筆（同一次查詢，最新的在前）；識別碼的出現次數只統計其中的錯誤 |
 | 5 | `logs.window_padding_minutes` | 10 | 0～1440 | 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現） |
 | 6 | `llm.max_log_samples` | 20 | 0 以上 | 給 LLM 看幾筆錯誤日誌樣本（控制 prompt 長度） |
 | 7 | （已移除） | — | — | 原本是 `llm.max_trace_samples`，同第 3 項 |
@@ -86,8 +86,8 @@ Tempo 的 OTLP 由程式轉），分析的程式不分來源。測試把同一�
 | `llm.max_log_patterns` | 6 | 0～20 | 最多替幾種錯誤比較事故前後的筆數；0 = 不比較 |
 | `logs.warn_levels` | WARN、warn、Warn、WARNING、warning、Warning | 文字清單，可以是空的 | 日誌等級是這些值算警告；空清單 = 不撈警告。日誌沒有等級欄位（`logs.fields.level` 是空的）時不撈 |
 | `llm.max_warn_patterns` | 5 | 0～20 | 最多給 LLM 看幾種警告；0 = 不撈警告 |
-| `traces.trace_id_field` | `trace_id` | 欄位名稱；`""` = 不用 | 錯誤日誌裡記 trace id 的欄位。有的話直接用編號取（最多試 `max_traces` 的兩倍個），不夠才用搜尋補。Tempo 收到 Trace 後 8～40 秒以上才搜尋得到（2.9.0 實測），日誌帶 trace id 特別有用；VictoriaTraces 三秒內搜尋得到 |
-| `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條錯誤 Trace 的呼叫鏈；0 = 不取（連搜尋都不做） |
+| `traces.trace_id_field` | `trace_id` | 欄位名稱；`""` = 不用 | 日誌裡記 trace id 的欄位，兩個方向都用：錯誤日誌帶的編號直接取那條 Trace（最多試 `max_traces` 的兩倍個），不夠才用搜尋補；取到的呼叫鏈也用編號回頭撈同一個請求的日誌（不限等級）。Tempo 收到 Trace 後 8～40 秒以上才搜尋得到（2.9.0 實測），日誌帶 trace id 特別有用；VictoriaTraces 三秒內搜尋得到 |
+| `traces.max_traces` | 3 | 0～20 | 每個事故最多取回幾條 Trace 的呼叫鏈（失敗的優先；一條失敗的都沒有才取搜尋到的裡面最慢的）；0 = 不取（連搜尋都不做） |
 | `traces.max_spans` | 30 | 1～500 | 每條呼叫鏈最多列幾個 span（失敗的與入口優先） |
 | `traces.graph_retention_days` | 30 | 0～365 | 學到的系統關係多久沒再看到就丟掉；0 = 不學、不用，不同系統的告警也不會併成同一張。30 是估的，沒有依據，未驗證泛化 |
 | `metrics.datasource_uid` | `""` | uid；`""` = 不查 | Grafana 上 Prometheus 型別資料源的 uid（URL 指到 VictoriaMetrics；Prometheus、Mimir 也可以） |
@@ -221,7 +221,7 @@ Elasticsearch 的設定把 `extra_filter` 那一行換成 `type: elasticsearch` 
 | 哪些 span 算失敗：`error` 標籤是 true，或 `otel.status_code` 是 ERROR；錯誤訊息取 `otel.status_description` | `src/evidence.py` 的 `ERROR_TAG_VALUES`、`summarize_trace` | OTLP 的 status=ERROR 進 VictoriaTraces 之後就是這兩個標籤（實測 v0.5.0）；Tempo 回的 OTLP 由 `src/traces.py` 的 `_from_otlp` 轉成同樣的標籤。是格式，不是調整項 |
 | 指標查詢最多 20 條、佔位字是 `$service` | `src/config.py` 的 `MAX_METRIC_QUERIES`、`src/evidence.py` 的 `SERVICE_PLACEHOLDER` | 每張事故要查「查詢數 × 系統數」次，上限是保護指標資料庫；佔位字是設定檔的寫法約定 |
 | 指標走勢的算法（基準取中位數、數值留四位有效數字） | `src/evidence.py` 的 `summarize_series` | 只是把序列壓短的算術，沒有任何「算不算異常」的門檻可調 |
-| 每個系統取最早的 3 筆錯誤、警告取樣 50 筆 | `src/evidence.py` 的 `FIRST_ERRORS_PER_SYSTEM`、`WARN_SAMPLE` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
+| 每個系統取最早的 3 筆錯誤（警告跟錯誤同一次查詢，共用 `logs.max_hits`，沒有另外的取樣量） | `src/evidence.py` 的 `FIRST_ERRORS_PER_SYSTEM` | 取樣量：保證被別的系統擠掉的錯誤至少有樣本。不是判斷門檻；只在 `EVAL.md` 的人造案例上跑過，未驗證泛化 |
 | 錯誤樣板怎麼產生（UUID、長十六進位字串、數字換成 `*`）、怎麼變成計數用的條件（樣板裡固定不變的詞照順序出現：LogsQL 的 `seq`、Elasticsearch 的 intervals；固定的詞少於兩個就不數） | `src/evidence.py` 的 `log_pattern`、`pattern_words` | 歸類與計數的實作。是近似：別種訊息剛好有同樣的詞、順序也一樣時會被算在一起；未驗證泛化 |
 | 可能原因最多 3 個；信心分數 0～100，分段是 70／40；沒有直接證據指向的系統分數最高 30 | `src/rca.py` 的 `MAX_CANDIDATES`、`CONFIDENCE_HIGH`、`CONFIDENCE_MEDIUM`、`NO_DIRECT_EVIDENCE_CAP`、`DIRECT_EVIDENCE` | 3 個是註記版面的上限。分段是提示詞裡跟模型講的定義，上限 30 落在「只是推測」那一段；分數不是機率、沒有校準。「有沒有直接證據」是名稱的字串比對。都只在 `EVAL.md` 的人造案例跑過，未驗證泛化 |
 | 用「名稱原樣出現在證據文字裡」當憑據時，名稱至少要 3 個字 | `src/rca.py` 的 `MIN_NAME_CHARS` | 一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化 |

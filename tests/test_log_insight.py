@@ -82,8 +82,10 @@ def test_each_system_gets_its_own_oldest_errors_in_one_query(fake):
     [profile] = fake.queries(PROFILE)
     assert profile == ('"service.name":in("amhs-mcs","cim-eap","mq-broker") "log.level":in("ERROR","error","Error","FATAL","fatal",'
                        f'"CRITICAL","critical") | sort by (_time) partition by ("service.name") limit {rca.FIRST_ERRORS_PER_SYSTEM}')
-    [warnings] = fake.queries('"log.level":in("WARN"')
-    assert warnings.endswith(f"| sort by (_time) | limit {rca.WARN_SAMPLE}")
+    # 警告不再另外問：跟錯誤同一次查詢撈（最新的在前），撈回來再照等級分開
+    assert fake.queries('"log.level":in("WARN"') == []
+    [both] = fake.queries("sort by (_time) desc")
+    assert '"log.level":in("ERROR","error","Error","FATAL","fatal","CRITICAL","critical",\"WARN\",\"warn\",\"Warn\",\"WARNING\",\"warning\",\"Warning\")' in both
 
 
 def test_a_system_flooded_out_of_the_newest_sample_still_shows_its_earliest_errors(fake):
@@ -192,10 +194,14 @@ def test_if_the_extra_queries_fail_the_original_samples_are_kept_and_it_is_noted
 
 def test_without_error_logs_the_warnings_are_still_collected(fake):
     """延遲類的事故常常只有警告：沒有錯誤日誌也要撈警告（之前是有錯誤才撈，只有警告的事故 LLM 什麼日誌都看不到）。"""
-    fake.logs = [row for row in fake.logs if row["log.level"] != "ERROR"]
+    fake.logs = [row for row in fake.logs if row["log.level"] != "ERROR"]   # 錄下來的這批沒有警告：加兩筆
+    fake.logs += [log_row(T0 - timedelta(seconds=40), "cim-eap", "WARN", "slow reply from EQP-CVD-07: 4800ms (limit 5000ms)"),
+                  log_row(T0 - timedelta(seconds=20), "cim-eap", "WARN", "slow reply from EQP-CVD-07: 4950ms (limit 5000ms)")]
     ev = collect(fake)
-    assert ev["error_logs"] == [] and ev["error_patterns"] == [] and len(fake.queries(PROFILE)) == 1
-    assert ev["warnings"] and all(w["system"] in ("mq-broker", "cim-eap", "amhs-mcs") for w in ev["warnings"])
+    # 警告是跟錯誤同一次查詢撈回來的；沒有錯誤就不問「各系統最早的錯誤」
+    assert ev["error_logs"] == [] and ev["error_patterns"] == [] and fake.queries(PROFILE) == []
+    [warning] = ev["warnings"]                                          # 兩筆同一種：歸成一類
+    assert (warning["system"], warning["example"]) == ("cim-eap", "slow reply from EQP-CVD-07: 4800ms (limit 5000ms)")
     assert f"警告 {len(ev['warnings'])} 種" in rca.overview_text(rca.overview(ev))
 
 

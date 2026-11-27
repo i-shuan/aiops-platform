@@ -50,7 +50,6 @@ from src.evidence import (  # noqa: E402,F401
     SOURCE_TEXT,
     SPAN_ATTRIBUTES,
     TRACE_SEARCH_LIMIT,
-    WARN_SAMPLE,
     calls_in,
     collect_evidence,
     linked_spans,

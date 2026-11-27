@@ -306,7 +306,7 @@ def test_without_a_level_field_errors_are_picked_by_words_in_the_message(fake):
 def test_with_a_level_field_nothing_changes(fake):
     ev = collect(fake)
     [query] = fake.queries("sort by (_time) desc")
-    assert '"log.level":in("ERROR","error","Error","FATAL","fatal","CRITICAL","critical")' in query and "_msg:i(" not in query
+    assert '"log.level":in("ERROR","error","Error","FATAL","fatal","CRITICAL","critical","WARN","warn","Warn","WARNING","warning","Warning")' in query and "_msg:i(" not in query
     assert not any("等級字樣" in note for note in ev["notes"])
 
 

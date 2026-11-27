@@ -275,15 +275,21 @@ def _collect_trace_logs(evidence: dict[str, Any], incident: Incident, store: Any
 
 def _collect_logs(evidence: dict[str, Any], incident: Incident, store: Any, id_fields: list[str],
                   start: datetime, end: datetime, limits: EvidenceLimits) -> list[str]:
-    """填好日誌相關的幾包證據；回傳錯誤日誌裡看到的 trace id（新的在前、不重複），給呼叫鏈直接取用。"""
+    """填好日誌相關的幾包證據；回傳錯誤日誌裡看到的 trace id（新的在前、不重複），給呼叫鏈直接取用。
+    時間區間內的錯誤與警告**一次查詢一起撈**（最新的在前，最多 max_hits 筆），撈回來再照等級分開。
+    沒有等級欄位時不撈警告：只能比對訊息文字裡的字樣，warn 這個詞太常出現，分不出來。"""
     log_fields: LogFields = store.fields
+    warn_levels = limits.warn_levels if log_fields.level and limits.max_warn_patterns > 0 else ()
     try:
-        found = store.search_errors(incident.services, start, end, limits.max_hits, error_levels=limits.error_levels)
+        rows = store.search_errors(incident.services, start, end, limits.max_hits, error_levels=(*limits.error_levels, *warn_levels))
     except GrafanaError as e:
         log.warning("事故 %s 撈不到日誌證據：%s", incident.uid, e)
         evidence["notes"].append(f"日誌撈取失敗：{e}")
         evidence["sources"]["logs"] = "failed"
         return []
+    is_warning = lambda d: bool(warn_levels) and str(_dig(d, log_fields.level) or "") in warn_levels
+    found = [d for d in rows if not is_warning(d)]
+    warnings = [d for d in rows if is_warning(d)]
     evidence["sources"]["logs"] = "ok" if found else "empty"
     if not found:
         # 0 筆有三種完全不同的原因，處理方式也不同：多問一次總數，把它分清楚（只在 0 筆時多這一次查詢）
@@ -301,10 +307,9 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, store: Any, id_f
 
     entry = _entry_of(log_fields, id_fields, limits)
     evidence["error_logs"] = [entry(d) for d in found[:limits.max_log_samples]]
-    # 沒有錯誤日誌、但這些系統有別的日誌：照樣做，為的是警告。延遲類的事故常常只有警告（慢查詢、重試變多），
-    # 不能因為沒有錯誤就連警告都不看。這些系統一筆日誌都沒有（或數不出來）就不用多問
-    if found or (evidence.get("log_counts") or {}).get("services", 0) > 0:
-        _profile_logs(evidence, incident, store, start, end, limits, found, entry)
+    # 只有警告、沒有錯誤也照樣歸類與計數：延遲類的事故常常只有警告（慢查詢、重試變多）
+    if found or warnings:
+        _profile_logs(evidence, incident, store, start, end, limits, found, warnings, entry)
     if not found:
         evidence["notes"].append("事故時間窗內沒有查到這些系統的錯誤日誌")
     elif not log_fields.level:  # 讓 LLM 知道這批樣本怎麼來的，不要把每一筆都當成錯誤
@@ -339,7 +344,6 @@ _LONG_HEX = re.compile(r"\b(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{8,}\b")   # 至少帶�
 _DIGITS = re.compile(r"\d+")
 _STAR_RUN = re.compile(r"\*(?:[.:/\-_,]?\*)+")                      # *.*.*.*:* 這種連續的星號合成一個
 FIRST_ERRORS_PER_SYSTEM = 3   # 每個系統取最早的幾筆錯誤：保證被別的系統擠掉的錯誤至少有樣本，也用來決定先比較哪一種錯誤
-WARN_SAMPLE = 50              # 警告最多取樣幾筆來歸類（由早到晚）
 
 
 def log_pattern(message: str) -> str:
@@ -360,13 +364,13 @@ def pattern_words(pattern: str) -> list[str] | None:
 
 
 def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, start: datetime, end: datetime,
-                  limits: EvidenceLimits, sample: list[dict[str, Any]], entry: Any) -> None:
+                  limits: EvidenceLimits, sample: list[dict[str, Any]], warnings: list[dict[str, Any]], entry: Any) -> None:
     """錯誤日誌的前處理（都是算術與歸類，沒有「算不算異常」的門檻）：
       error_logs      同一種錯誤只留最早的一筆原文，附樣本裡同類的筆數。樣本除了最新的那一批，還加上每個系統最早的幾筆
                       （各系統分開問）：某個系統大量報錯時，別的系統較早、較少的錯誤不會被擠掉
       error_patterns  幾種主要的錯誤在事故期間與事故前各出現幾筆（向日誌資料庫計數）；new = 事故前一筆都沒有
-      warnings        這些系統的警告，同樣歸類並比較事故前後
-    多三次日誌查詢（各系統最早的錯誤、警告、計數）。任何一次失敗都只記進 notes，原本的樣本照舊。
+      warnings        這些系統的警告（跟錯誤同一次查詢撈回來的），同樣歸類並比較事故前後
+    多兩次日誌查詢（各系統最早的錯誤、計數；沒有錯誤時不問各系統最早的錯誤）。任何一次失敗都只記進 notes，原本的樣本照舊。
 
     試過但拿掉的（eval 的 16 個案例量不到差別，見 EVAL.md）：把各系統第一筆錯誤的時間排成一張表、
     列出兩個以上系統都提到的識別碼。"""
@@ -374,14 +378,13 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
     time_of = lambda d: str(_dig(d, TIME_FIELD) or "")
     system_of = lambda d: str(_dig(d, log_fields.service) or "")
     message_of = lambda d: str(_dig(d, MESSAGE_FIELD) or "")
-    warn_levels = limits.warn_levels if log_fields.level and limits.max_warn_patterns > 0 else ()
     try:
-        profile = store.error_profile(incident.services, start, end, error_levels=limits.error_levels, warn_levels=warn_levels,
-                                      first_n=FIRST_ERRORS_PER_SYSTEM, warn_n=WARN_SAMPLE)
+        profile = (store.error_profile(incident.services, start, end, error_levels=limits.error_levels,
+                                       first_n=FIRST_ERRORS_PER_SYSTEM) if sample else {"services": {}})
     except GrafanaError as e:
         log.warning("事故 %s 查不到錯誤概況：%s", incident.uid, e)
         evidence["notes"].append("錯誤概況查詢失敗：沒有事故前後的次數比較，樣本也只有最新的那一批")
-        profile = {"services": {}, "warnings": []}
+        profile = {"services": {}}
 
     # 樣本 = 最新的那一批 + 每個系統最早的幾筆（大量報錯的系統不會把別人擠掉）
     pool, seen = [], set()
@@ -407,7 +410,7 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
     chosen = [g for g in errors if earliest.get(g["system"]) == g["pattern"]]
     chosen += sorted((g for g in errors if g not in chosen), key=lambda g: -g["count"])
     chosen = chosen[:limits.max_log_patterns] if profile["services"] else []
-    warns = sorted(grouped(profile["warnings"]), key=lambda g: -g["count"])[:limits.max_warn_patterns]
+    warns = sorted(grouped(warnings), key=lambda g: -g["count"])[:limits.max_warn_patterns]
     jobs = [(g, limits.error_levels) for g in chosen] + [(g, limits.warn_levels) for g in warns]
     countable = [(g, levels, pattern_words(g["pattern"])) for g, levels in jobs]
     before_start = start - timedelta(minutes=limits.baseline_minutes)

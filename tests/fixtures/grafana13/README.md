@@ -14,6 +14,7 @@
 | `tempo_search.json`、`tempo_trace.json`、`tempo_trace_missing.json`、`tempo_search_bad_query.json` | 經 Grafana 代理查 Tempo 2.9.0：TraceQL 搜尋錯誤 Trace、用編號取、不存在（404、沒有內容）、TraceQL 寫錯（400）。送進去的三條 Trace 跟 VictoriaTraces 的是同一組。2026-11-23 錄 | `record_tempo.py` |
 | `service_graph.json` | Tempo 2.9.0 的 service graph 指標（metrics-generator 寫進 VictoriaMetrics v1.110.0），經 Grafana 代理查回來：有流量的時間窗、沒有流量的時間窗、查詢寫錯（422）。另有 VictoriaTraces v0.5.0（`-servicegraph.enableTask=true`）經 Jaeger 型別資料源查 `/api/dependencies` 的回應。2026-11-27 錄 | `record_service_graph.py` |
 | `trace_links.json` | 訊息佇列的「連結」接法：eap 發一筆訊息，service-a／b／c 各自另開一條 Trace、只用連結指回發送的那一段（四條 Trace）。同樣的資料送進 VictoriaTraces v0.5.0 與 Tempo 2.9.0，經 Grafana 代理各取回消費端與發送端那兩條。VictoriaTraces 回 `FOLLOWS_FROM` 的 reference，Tempo 回 `links`（編號是 base64）。2026-11-27 錄 | `record_trace_links.py` |
+| `slow_requests.json` | 延遲類的事故：三條都成功、只是快慢不同的 Trace（orders-api → orders-db），日誌只有 INFO 與 WARN、帶 trace_id。同一批資料送進 VictoriaLogs v1.17.0＋VictoriaTraces v0.5.0 與 Elasticsearch 8.19.23＋Tempo 2.9.0，經 Grafana 代理錄下：不限失敗的 Trace 搜尋、用 trace id 查日誌、兩組各一次完整的證據收集。2026-11-27 錄 | `record_slow_requests.py` |
 | `meta.json` | Grafana 版本、錄製時間、資料源 uid | `record.py` |
 
 webhook 檔是 `{"headers", "body"}`（body 就是 Grafana 送的 JSON）；`victoria_*.json` 是 `{"exchanges": {名稱: [{"request", "status", "response"}]}}`，
