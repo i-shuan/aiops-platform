@@ -583,10 +583,13 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
     out["have"].append(f"告警 {len(evidence['anomalies'])} 筆")
     related = [e for e in evidence["edges"] if e["upstream"] in systems and e["downstream"] in systems]
     touching = [e for e in evidence["edges"] if e["upstream"] in systems or e["downstream"] in systems]
+    further = len(evidence["edges"]) - len(touching)   # 兩跳的（兩端都沒有告警）
+    timed = sum(1 for e in evidence["edges"] if "latency_from" in e)
+    extra = "".join([f"，另有隔一個系統的 {further} 條" if further else "", f"；其中 {timed} 條有延遲與基線" if timed else ""])
     if related:
-        out["have"].append(f"這些系統之間的關係邊 {len(related)} 條")
+        out["have"].append(f"這些系統之間的關係邊 {len(related)} 條{extra}")
     elif touching:
-        out["have"].append(f"連到這個系統的關係邊 {len(touching)} 條（另一端沒有告警）")
+        out["have"].append(f"連到這個系統的關係邊 {len(touching)} 條（另一端沒有告警）{extra}")
     # 沒有宣告關係邊：不列為「缺」。關係邊是加分的（幫忙把上下游的告警併成一張、提示誰可能影響誰），
     # 沒寫照樣分析；每次都列出來只會讓人以為非寫不可（使用者的決定，2026-11-26）
 

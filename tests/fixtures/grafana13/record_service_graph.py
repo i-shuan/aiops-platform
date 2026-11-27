@@ -13,7 +13,8 @@ remote_write 到 VictoriaMetrics v1.110.0 的 /api/v1/write；直方圖的桶用
   2. **用 Editor 服務帳號的 Token**，呼叫 src/graph.py 的 service_graph（含延遲與基線）與 dependencies；
      它實際送給 Grafana 資料源代理的請求與回應原樣記下來。
 
-用法：python record_service_graph.py <Editor Token 的檔案>
+用法：python record_service_graph.py <Editor Token 的檔案> [事故流量的起點 ISO]
+  第二個參數：流量已經送過（VictoriaMetrics 裡還有），只重查、不重送。
 """
 import json
 import pathlib
@@ -63,14 +64,18 @@ def send(count: int, failing: int, db_ms: tuple[int, int], db_calls: int) -> Non
             assert r.status_code < 300, r.text
 
 
-send(20, 0, (15, 25), 1)
-print("基線送完，等 6 分半…")
-time.sleep(390)
-incident_start = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=30)
-send(20, 4, (1500, 2500), 5)
-print("事故送完，等 Tempo 把指標寫出去（60 秒）…")
-time.sleep(60)
+if len(sys.argv) > 2:
+    incident_start = datetime.fromisoformat(sys.argv[2])
+else:
+    send(20, 0, (15, 25), 1)
+    print("基線送完，等 6 分半…")
+    time.sleep(390)
+    incident_start = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=30)
+    send(20, 4, (1500, 2500), 5)
+    print("事故送完，等 Tempo 把指標寫出去（60 秒）…")
+    time.sleep(60)
 now = datetime.now(timezone.utc).replace(microsecond=0)
+quiet = now - timedelta(days=20)   # 本機的 VictoriaMetrics 那時還沒有任何資料
 
 seen: list[dict] = []
 
@@ -86,11 +91,11 @@ def recording(request: httpx.Request) -> httpx.Response:
 
 grafana = Grafana(G, token, transport=httpx.MockTransport(recording), retries=0)
 exchanges, results = {}, {}
-for name, call in (("window_with_traffic", lambda: graph.service_graph(grafana, uid, now - timedelta(minutes=15), now)),
+for name, call in (("window_with_traffic", lambda: graph.service_graph(grafana, uid, incident_start - timedelta(minutes=8), now)),
                    ("with_latency", lambda: graph.service_graph(grafana, uid, incident_start, now, baseline_minutes=30)),
-                   ("window_before_any_traffic", lambda: graph.service_graph(grafana, uid, now - timedelta(hours=5), now - timedelta(hours=4))),
+                   ("window_before_any_traffic", lambda: graph.service_graph(grafana, uid, quiet - timedelta(hours=1), quiet)),
                    ("window_before_any_traffic_with_latency",
-                    lambda: graph.service_graph(grafana, uid, now - timedelta(hours=5), now - timedelta(hours=4), baseline_minutes=30)),
+                    lambda: graph.service_graph(grafana, uid, quiet - timedelta(hours=1), quiet, baseline_minutes=30)),
                    ("bad_query", lambda: grafana.query_instant(uid, "sum by (client (increase(x[1m)", now)),
                    ("victoriatraces_dependencies", lambda: graph.dependencies(grafana, traces_uid, now - timedelta(minutes=15), now)),
                    ("victoriatraces_dependencies_before_any_traffic",
