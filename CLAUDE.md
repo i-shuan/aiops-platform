@@ -14,7 +14,7 @@
 
 | 界線 | 內容 |
 | :--- | :--- |
-| **查資料只有一把 Grafana Editor Token** | 日誌、Trace、指標、註記全部經 Grafana（資料源代理、Annotations API）。日誌可以是 VictoriaLogs 或 Elasticsearch，Trace 可以是 VictoriaTraces 或 Tempo，指標是 Prometheus 相容的（`logs.type`、`traces.type`；使用者決定兩種都支援，2026-11-26）。嚴禁直連它們，也嚴禁直連產線資料庫 |
+| **查資料只有一把 Grafana Editor Token** | 日誌、Trace、指標、註記全部經 Grafana（資料源代理、Annotations API）。日誌可以是 VictoriaLogs 或 Elasticsearch，Trace 可以是 VictoriaTraces 或 Tempo，指標一律是 VictoriaMetrics，不另外對 Prometheus 驗證（使用者決定，2026-11-27）（`logs.type`、`traces.type`；使用者決定日誌與 Trace 兩種都支援，2026-11-26）。嚴禁直連它們，也嚴禁直連產線資料庫 |
 | **什麼算異常由各系統自己的 Grafana 規則決定** | 平台不判斷數值、不放偵測器。告警沒推進來，平台就什麼都不做。指標走勢那包證據只做算術（基準、最大、倍數），不准加「超過多少算異常」的門檻；要抓趨勢就寫成 Grafana 規則（`INPUTS.md`） |
 | **進只有一個、出只有三個** | 進：Grafana 告警 Webhook。出：Grafana 註記、事故 API、修復請求（`src/outputs.py`；使用者決定照架構圖加後兩個，2026-11-26）。除此之外不對外做任何事：不重啟、不改設定、不起子行程。新增出口要使用者明確要求 |
 | **自動修復只認規則上的標籤** | 跑哪個修復流程只由告警規則上的 `aiops_remediation` 標籤決定（人事先寫好的）。**LLM 的推論不准觸發、也不准選擇修復流程**；只對還在響的告警、還沒結案的事故送；同一張事故、同一條告警、同一個流程只送一次；預設關閉。這幾條不准放寬 |
