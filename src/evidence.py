@@ -261,6 +261,35 @@ def _collect_trace_logs(evidence: dict[str, Any], incident: Incident, store: Any
         evidence["trace_logs"] = rows
 
 
+LAST_ERROR_LOOKBACK_HOURS = 24   # 時間窗內沒有錯誤的系統，往回找最後一筆錯誤最多找多久。查詢量的上限，未驗證泛化
+MAX_LAST_ERROR_SYSTEMS = 5       # 最多替幾個系統找（每個系統一次查詢）。查詢量的上限，未驗證泛化
+
+
+def _collect_last_errors(evidence: dict[str, Any], incident: Incident, store: Any, start: datetime, limits: EvidenceLimits,
+                         have_errors: set[str], entry: Any) -> None:
+    """事故時間窗內沒有錯誤日誌的系統：往回找它**最後一筆錯誤**是什麼時候、寫了什麼（每個系統一次查詢，只取一筆）。
+    「時間窗內查無資料」不等於「沒有送日誌」，也不等於「跟這次無關」：錯誤可能在告警之前就停了（感測器逾時之後才開始偏移）。
+    程式不擴大時間窗、不判斷相不相關：只給時間差與原文，由 LLM 與值班人員判斷。往回最多看 LAST_ERROR_LOOKBACK_HOURS 小時；
+    這段時間也沒有就照實寫沒有。查詢失敗只記進 notes。"""
+    quiet = [s for s in incident.services if s not in have_errors][:MAX_LAST_ERROR_SYSTEMS]
+    since = start - timedelta(hours=LAST_ERROR_LOOKBACK_HOURS)
+    rows = []
+    for system in quiet:
+        try:
+            latest = store.search_errors([system], since, start, 1, error_levels=limits.error_levels)
+        except GrafanaError as e:
+            log.warning("事故 %s 找不到 %s 最後一筆錯誤：%s", incident.uid, system, e)
+            evidence["notes"].append(f"找不到 {system} 在時間窗之前最後一筆錯誤（查詢失敗）")
+            continue
+        if latest:
+            at = stamp(_dig(latest[0], TIME_FIELD))
+            rows.append({**entry(latest[0]), "minutes_before_window": max(0, round((start - at).total_seconds() / 60))})
+        else:
+            rows.append({"system": system, "none_in_hours": LAST_ERROR_LOOKBACK_HOURS})
+    if rows:
+        evidence["last_errors"] = rows
+
+
 def _collect_logs(evidence: dict[str, Any], incident: Incident, store: Any, id_fields: list[str],
                   start: datetime, end: datetime, limits: EvidenceLimits) -> list[str]:
     """填好日誌相關的幾包證據；回傳錯誤日誌裡看到的 trace id（新的在前、不重複），給呼叫鏈直接取用。
@@ -298,6 +327,7 @@ def _collect_logs(evidence: dict[str, Any], incident: Incident, store: Any, id_f
     # 只有警告、沒有錯誤也照樣歸類與計數：延遲類的事故常常只有警告（慢查詢、重試變多）
     if found or warnings:
         _profile_logs(evidence, incident, store, start, end, limits, found, warnings, entry)
+    _collect_last_errors(evidence, incident, store, start, limits, {str(_dig(d, log_fields.service) or "") for d in found}, entry)
     if not found:
         evidence["notes"].append("事故時間窗內沒有查到這些系統的錯誤日誌")
     elif not log_fields.level:  # 讓 LLM 知道這批樣本怎麼來的，不要把每一筆都當成錯誤
@@ -339,6 +369,27 @@ def log_pattern(message: str) -> str:
     只用來歸類與計數；給 LLM 看的範例永遠是原文（機台、批號常常只寫在訊息裡，不能被洗掉）。"""
     text = _DIGITS.sub("*", _LONG_HEX.sub("*", _UUID.sub("*", message)))
     return _STAR_RUN.sub("*", " ".join(text.split()))
+
+
+_NUMBER = re.compile(r"(?<![A-Za-z0-9_\-.])\d+(?:\.\d+)?")   # 獨立的數字：前面不是字母、數字、底線、連字號、點（機台與批號裡的數字不算）
+MAX_NUMBER_RANGES = 5   # 一種錯誤最多列幾個會變的數字。版面的上限，未驗證泛化
+
+
+def number_ranges(messages: list[str]) -> list[dict[str, Any]]:
+    """同一種錯誤的幾筆樣本裡，會變的數字各自的範圍：[{"in_example": 範例（最早那一筆）裡寫的, "min", "max"}]。
+    去重只留最早一筆的原文，它裡面的數字只是那一筆剛好的值（實測模型照著「active sessions 0」下建議）；這裡補上同類樣本的範圍。
+    只是算術：不判斷哪個值算高。只看獨立的數字（機台、批號、主機名稱裡的不算）；每筆的數字個數要一樣才對得起來，
+    不一樣就不給。只有一筆、或數字都沒變：空的。範圍來自撈回來的樣本（最多 logs.max_hits 筆），不是全部的日誌。"""
+    found = [_NUMBER.findall(_LONG_HEX.sub(" ", _UUID.sub(" ", m))) for m in messages]
+    if len(found) < 2 or len({len(row) for row in found}) != 1:
+        return []
+    out = []
+    for position in range(len(found[0])):
+        values = [float(row[position]) for row in found]
+        if min(values) != max(values):
+            show = lambda v: int(v) if v == int(v) else v
+            out.append({"in_example": found[0][position], "min": show(min(values)), "max": show(max(values))})
+    return out[:MAX_NUMBER_RANGES]
 
 
 def pattern_words(pattern: str) -> list[str] | None:
@@ -385,12 +436,17 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
     def grouped(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
         for doc in sorted(docs, key=lambda d: stamp(time_of(d))):
-            item = groups.setdefault((system_of(doc), log_pattern(message_of(doc))), {"count": 0, "first": doc})
+            item = groups.setdefault((system_of(doc), log_pattern(message_of(doc))), {"count": 0, "first": doc, "messages": []})
             item["count"] += 1
+            item["messages"].append(message_of(doc))
         return [{"system": system, "pattern": pattern, **item} for (system, pattern), item in groups.items()]
 
+    def spread(g: dict[str, Any]) -> dict[str, Any]:
+        numbers = number_ranges(g["messages"])
+        return {"numbers_in_sample": numbers} if numbers else {}
+
     errors = grouped(pool)   # 已經照各組最早的時間排好
-    evidence["error_logs"] = [{**entry(g["first"]), **({"similar_in_sample": g["count"]} if g["count"] > 1 else {})}
+    evidence["error_logs"] = [{**entry(g["first"]), **({"similar_in_sample": g["count"]} if g["count"] > 1 else {}), **spread(g)}
                               for g in errors[:limits.max_log_samples]]
 
     # 要比較事故前後次數的錯誤：每個系統最早出現的那一種先選，其餘照樣本裡的筆數由多到少補滿
@@ -416,6 +472,7 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
                "first_seen": time_of(g["first"])}
         if during > 0:   # 比不到（0 筆）就不給次數：寧可沒有，也不要給一個錯的 0
             row.update(during=during, before=before, new=before == 0)
+        row.update(spread(g))
         (evidence["warnings"] if g in warns else evidence["error_patterns"]).append(row)
     if evidence["error_patterns"] or evidence["warnings"]:
         evidence["count_windows"] = {"during_minutes": max(1, round((end - start).total_seconds() / 60)),
@@ -586,7 +643,7 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
             why = "沒有查到這些系統的錯誤日誌"
         elif counts["all"] == 0:
             why = (f"事故時間窗內（{evidence.get('window_minutes', '?')} 分鐘）一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來。"
-                   f"更早有沒有，這裡沒有查。要確認的話{log_source['scope_hint']}")
+                   f"要確認的話{log_source['scope_hint']}")
         elif counts["services"] == 0:
             why = (f"這段時間有 {counts['all']} 筆日誌，但沒有一筆的 {log_fields.service} 是這些系統。"
                    f"檢查欄位名稱，以及值是否跟告警的系統名稱完全一樣")
@@ -596,7 +653,9 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
                    f"可能真的沒有錯誤，或等級的寫法對不上")
         else:
             why = f"這些系統有 {counts['services']} 筆日誌，但訊息文字裡沒有錯誤字樣。可能真的沒有錯誤"
-        out["missing"].append(("錯誤日誌", why))
+        seen = [f"{r['system']} 最後一筆錯誤在時間窗之前 {r['minutes_before_window']} 分鐘" if "minutes_before_window" in r
+                else f"{r['system']} 之前 {r['none_in_hours']} 小時內也沒有錯誤" for r in evidence.get("last_errors") or []]
+        out["missing"].append(("錯誤日誌", why + ("。往回找：" + "；".join(seen) if seen else "")))
         if evidence.get("warnings"):
             out["have"].append(f"警告 {len(evidence['warnings'])} 種")
     else:

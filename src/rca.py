@@ -92,7 +92,7 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream。有 source 的是程式觀察到的：service_graph、trace＝downstream 實際呼叫過 upstream；"
             f"log＝downstream 的錯誤日誌提到過 upstream，方向不一定對。kind 是 messaging 的是經訊息佇列的非同步關係：upstream 送訊息給 downstream，"
             f"upstream 或佇列出問題會讓 downstream 收不到或處理失敗，downstream 出問題通常不會回頭影響 upstream。requests、failed 是這段時間這條呼叫的請求數與失敗數。hops：1＝直接連到告警的系統，2＝再隔一個。有些邊另外有這段時間與事故前 {evidence.get('baseline_minutes', 30)} 分鐘（基線）的數字：rps＝每秒請求數、error_rate_pct＝失敗率（%）、p95_ms＝第 95 百分位的耗時、avg_ms＝平均耗時，加 _baseline 的是基線，_ratio＝事故期間 ÷ 基線；latency_from 是耗時取自哪一端（server＝被呼叫的自己量的，client＝呼叫的那一端量的、含網路，沒埋點的資料庫只有這一端）。p95 是從直方圖的桶內插出來的，桶寬粗時不準（比最小的那一桶還快的呼叫，彼此分不出差別），快的呼叫看平均。這些只是數字，哪一段變慢、上下游的請求量差幾倍、是不是重試放大，要你自己比對）】\n{dump(evidence['edges'])}\n\n"
-            f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數）】\n"
+            f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數；numbers_in_sample 是訊息裡會變的數字在同類樣本中的範圍，in_example 是這一筆剛好寫的值，不要把它當成固定的事實）】\n"
             f"{dump(evidence['error_logs'])}\n\n"
             f"【4. 錯誤日誌裡各識別碼的出現次數】\n{dump(evidence['id_counts'])}\n\n")
     windows = evidence.get("count_windows") or {}
@@ -101,6 +101,10 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     # pattern（把數字換成 * 的樣板）只是程式歸類用的，不給模型看：它會把樣板裡的字當成真的名稱照抄
     # （現場遇到的：k8s 被寫成 k*s）。模型看 example，那是原文。
     shown = lambda rows: [{k: v for k, v in row.items() if k != "pattern"} for row in rows]
+    if evidence.get("last_errors"):
+        text += ("【3p. 時間窗內沒有錯誤日誌的系統，往回找到的最後一筆錯誤（minutes_before_window＝它比事故時間窗的起點早幾分鐘；"
+                 "none_in_hours＝往回這麼多小時也沒有錯誤。只是時間與原文：它在告警之前就停了，跟這次有沒有關係程式沒有判斷）】\n"
+                 f"{dump(evidence['last_errors'])}\n\n")
     if evidence.get("error_patterns"):
         text += (f"【3d. 主要的錯誤種類與事故前後的次數（example 是這一種錯誤最早的一筆原文；{counts_note}）】\n"
                  f"{dump(shown(evidence['error_patterns']))}\n\n")

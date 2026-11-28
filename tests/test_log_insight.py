@@ -235,3 +235,63 @@ def test_insight_settings_are_read_from_config(tmp_path):
 def test_bad_insight_settings_are_rejected_at_startup(tmp_path, text, message):
     with pytest.raises(ConfigError, match=message):
         load(tmp_path, text)
+
+
+# ── 時間窗內沒有錯誤的系統：往回找最後一筆錯誤（只給時間差與原文）──
+
+def test_a_system_whose_errors_stopped_before_the_window_gets_its_last_error_and_how_long_ago(fake):
+    """錯誤在告警之前就停了（感測器逾時之後才開始偏移）：時間窗內 0 筆，但不是「沒有送日誌」，也不能當成沒事。"""
+    start = T0 - timedelta(minutes=10)                                   # 事故時間窗的起點（預設往前 10 分鐘）
+    fake.logs = [log_row(start - timedelta(minutes=m), "amhs-mcs", "ERROR", f"thermocouple TC-4 read timeout ({m})") for m in (33, 40, 55)]
+    fake.logs.append(log_row(start - timedelta(hours=30), "cim-eap", "ERROR", "older than the lookback"))
+    ev = collect(fake)
+    assert ev["error_logs"] == []
+    by_system = {r["system"]: r for r in ev["last_errors"]}
+    assert by_system["amhs-mcs"]["minutes_before_window"] == 33 and by_system["amhs-mcs"]["message"] == "thermocouple TC-4 read timeout (33)"
+    assert by_system["cim-eap"] == {"system": "cim-eap", "none_in_hours": gather.LAST_ERROR_LOOKBACK_HOURS}   # 30 小時前的不算，照實寫沒有
+    assert by_system["mq-broker"] == {"system": "mq-broker", "none_in_hours": 24}
+    text = gather.overview_text(gather.overview(ev))
+    assert "amhs-mcs 最後一筆錯誤在時間窗之前 33 分鐘" in text and "cim-eap 之前 24 小時內也沒有錯誤" in text
+    prompt = rca.build_prompt(ev, text)
+    assert "【3p. 時間窗內沒有錯誤日誌的系統，往回找到的最後一筆錯誤" in prompt and "thermocouple TC-4 read timeout (33)" in prompt
+    assert gather.evidence_grade("amhs-mcs", ev) == "inference"         # 時間窗之前的錯誤不拉高依據等級：只是給人與模型參考
+
+
+def test_only_the_systems_without_errors_in_the_window_are_looked_up_and_a_failure_is_only_noted(fake):
+    ev = collect(fake)                                                    # 錄下來的樣本：三個系統在時間窗內都有錯誤
+    assert "last_errors" not in ev and not [q for q in fake.queries("sort by (_time) desc") if q.endswith("limit 1")]
+    fake.logs = [row for row in fake.logs if row["service.name"] != "amhs-mcs"]
+    ev = collect(fake)
+    assert [r["system"] for r in ev["last_errors"]] == ["amhs-mcs"]       # 只查沒有錯誤的那一個
+    assert len([q for q in fake.queries("sort by (_time) desc") if q.endswith("limit 1")]) == 1
+    fake.fail_queries = {'in("amhs-mcs") "log.level"'}                      # 只有「最後一筆錯誤」那一條只查 amhs-mcs 一個系統
+    ev = collect(fake)
+    assert "last_errors" not in ev and ev["error_logs"] and any("找不到 amhs-mcs 在時間窗之前最後一筆錯誤" in n for n in ev["notes"])
+
+
+# ── 同類去重之後：會變的數字附上樣本裡的範圍 ──
+
+@pytest.mark.parametrize("messages, expected", [
+    (["statement timeout after 30s, active sessions 0", "statement timeout after 30s, active sessions 45", "statement timeout after 30s, active sessions 12"],
+     [{"in_example": "0", "min": 0, "max": 45}]),                                                  # 沒變的 30 不列
+    (["took 4.5ms attempt=1", "took 120.25ms attempt=3"], [{"in_example": "4.5", "min": 4.5, "max": 120.25}, {"in_example": "1", "min": 1, "max": 3}]),
+    (["EQP-CVD-07 lot LOT24A0031 failed", "EQP-CVD-09 lot LOT24A0060 failed"], []),                # 機台、批號裡的數字不算
+    (["host 10.3.2.15 down", "host 10.3.2.16 down"], []),                                          # 位址後面幾段也不算（前面是點）
+    (["only one sample 5"], []), ([], []),
+    (["a 1 b 2", "a 1"], []),                                                                      # 數字個數不一樣：對不起來，不給
+])
+def test_number_ranges_cover_the_standalone_numbers_that_vary_within_a_kind(messages, expected):
+    assert gather.number_ranges(messages) == expected
+
+
+def test_deduplicated_errors_carry_the_range_so_the_first_sample_is_not_taken_as_a_fact(fake):
+    fake.logs += [log_row(T0 - timedelta(seconds=s), "mq-broker", "ERROR", f"statement timeout after 30s, active sessions {n}")
+                  for s, n in ((90, 0), (60, 45), (30, 12))]
+    ev = collect(fake)
+    [kept] = [e for e in ev["error_logs"] if e["message"].startswith("statement timeout")]
+    assert kept["message"].endswith("active sessions 0") and kept["similar_in_sample"] == 3       # 原文還是最早的那一筆
+    assert kept["numbers_in_sample"] == [{"in_example": "0", "min": 0, "max": 45}]
+    [row] = [r for r in ev["error_patterns"] if r["example"].startswith("statement timeout")]
+    assert row["numbers_in_sample"] == kept["numbers_in_sample"]
+    assert "numbers_in_sample 是訊息裡會變的數字在同類樣本中的範圍" in rca.build_prompt(ev)
+    assert all("numbers_in_sample" not in e for e in ev["error_logs"] if e is not kept and e.get("similar_in_sample", 1) == 1)

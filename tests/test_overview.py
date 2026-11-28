@@ -69,7 +69,7 @@ def test_everything_present_is_listed_with_counts(fake):
 # ── 錯誤日誌 0 筆：三種原因分得出來，各有下一步 ──
 
 @pytest.mark.parametrize("dataset, says, next_step", [
-    ("count-empty", "一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來。更早有沒有，這裡沒有查", "logs.extra_filter"),
+    ("count-empty", "一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來", "logs.extra_filter"),
     ("count-mismatch", "這段時間有 4 筆日誌，但沒有一筆的 service.name 是這些系統", "值是否跟告警的系統名稱完全一樣"),
     ("count-no-errors", "這些系統有 5 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL", "等級的寫法對不上"),
 ])

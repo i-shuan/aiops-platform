@@ -190,7 +190,7 @@ def test_log_query_uses_the_configured_levels_size_and_padding(fake):
     limits = gather.EvidenceLimits(max_hits=7, window_padding_minutes=30, error_levels=("E", "SEVERE"))
     inc = incident()
     collect_evidence(inc, EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW, limits=limits)
-    [sent] = [q for q in fake.log_queries if "sort by (_time) desc" in q["query"]]
+    [sent] = [q for q in fake.log_queries if "sort by (_time) desc" in q["query"] and "limit 7" in q["query"]]   # 另一種同樣排序的查詢是「最後一筆錯誤」（limit 1）
     # 錯誤與警告同一次查詢：設定的錯誤等級在前，警告等級（預設值）接在後面
     assert sent["query"].endswith('"log.level":in("E","SEVERE","WARN","warn","Warn","WARNING","warning","Warning") | sort by (_time) desc | limit 7') and "ERROR" not in sent["query"]
     assert sent["start"] == (inc.started_at - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
