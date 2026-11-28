@@ -70,7 +70,7 @@ class MetricQuery:
 @dataclass(frozen=True)
 class MetricOptions:
     """指標走勢這一包證據（config.yaml 的 metrics.*）。datasource_uid 或 queries 是空的 = 不查。"""
-    datasource_uid: str = ""             # Grafana 上 Prometheus 相容資料源（Prometheus、VictoriaMetrics…）的 uid
+    datasource_uid: str = ""             # Grafana 上指到 VictoriaMetrics 的資料源（Prometheus 型別）的 uid
     queries: tuple[MetricQuery, ...] = ()
     lookback_minutes: int = 60           # 事故開始前往回看多久當基準：太短會把事故前的爬升也算進基準
     step_seconds: int = 60               # 取樣間隔；要不小於指標的抓取間隔，不然每一格都是同一個值
@@ -102,10 +102,6 @@ def raw_summary(incident: Incident) -> str:
         if m["title"] not in titles:
             titles.append(m["title"])
     return "；".join(f"{svc}：{'、'.join(titles)}" for svc, titles in by_service.items())
-
-
-SOURCE_TEXT = {"service_graph": "Tempo 的 service graph 看到 downstream 呼叫 upstream", "trace": "以前事故的呼叫鏈裡 downstream 呼叫過 upstream",
-               "log": "downstream 的錯誤日誌提到過 upstream（不一定是呼叫）"}
 
 
 def relation(edge: Any) -> dict[str, Any]:

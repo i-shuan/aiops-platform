@@ -47,7 +47,6 @@ from src.evidence import (  # noqa: E402,F401
     MetricOptions,
     MetricQuery,
     SERVICE_PLACEHOLDER,
-    SOURCE_TEXT,
     SPAN_ATTRIBUTES,
     TRACE_SEARCH_LIMIT,
     calls_in,
@@ -170,7 +169,7 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
     text = (f"{head}【1. 本次收斂的告警（依開始時間排序；values 是觸發當下規則各節點的數值）】\n{dump(evidence['anomalies'])}\n\n"
             f"【2. 系統上下游關係（upstream 的問題會影響 downstream。有 source 的是程式觀察到的：service_graph、trace＝downstream 實際呼叫過 upstream；"
             f"log＝downstream 的錯誤日誌提到過 upstream，方向不一定對。kind 是 messaging 的是經訊息佇列的非同步關係：upstream 送訊息給 downstream，"
-            f"upstream 或佇列出問題會讓 downstream 收不到或處理失敗，downstream 出問題通常不會回頭影響 upstream。requests、failed 是這段時間這條呼叫的請求數與失敗數。hops：1＝直接連到告警的系統，2＝再隔一個。有些邊另外有這段時間與事故前 {evidence.get('baseline_minutes', 30)} 分鐘（基線）的數字：rps＝每秒請求數、error_rate_pct＝失敗率（%）、p95_ms＝第 95 百分位的耗時、avg_ms＝平均耗時，加 _baseline 的是基線，_ratio＝事故期間 ÷ 基線；latency_from 是耗時取自哪一端（server＝被呼叫的自己量的，client＝呼叫的那一端量的、含網路，沒埋點的資料庫只有這一端）。p95 是從直方圖的桶內插出來的，桶寬粗時不準（預設 100 毫秒以下分不出來），快的呼叫看平均。這些只是數字，哪一段變慢、上下游的請求量差幾倍、是不是重試放大，要你自己比對）】\n{dump(evidence['edges'])}\n\n"
+            f"upstream 或佇列出問題會讓 downstream 收不到或處理失敗，downstream 出問題通常不會回頭影響 upstream。requests、failed 是這段時間這條呼叫的請求數與失敗數。hops：1＝直接連到告警的系統，2＝再隔一個。有些邊另外有這段時間與事故前 {evidence.get('baseline_minutes', 30)} 分鐘（基線）的數字：rps＝每秒請求數、error_rate_pct＝失敗率（%）、p95_ms＝第 95 百分位的耗時、avg_ms＝平均耗時，加 _baseline 的是基線，_ratio＝事故期間 ÷ 基線；latency_from 是耗時取自哪一端（server＝被呼叫的自己量的，client＝呼叫的那一端量的、含網路，沒埋點的資料庫只有這一端）。p95 是從直方圖的桶內插出來的，桶寬粗時不準（比最小的那一桶還快的呼叫，彼此分不出差別），快的呼叫看平均。這些只是數字，哪一段變慢、上下游的請求量差幾倍、是不是重試放大，要你自己比對）】\n{dump(evidence['edges'])}\n\n"
             f"【3. 事故時間窗內的錯誤日誌樣本（同一種錯誤只列最早的一筆原文；similar_in_sample 是樣本裡同類的筆數）】\n"
             f"{dump(evidence['error_logs'])}\n\n"
             f"【4. 錯誤日誌裡各識別碼的出現次數】\n{dump(evidence['id_counts'])}\n\n")
