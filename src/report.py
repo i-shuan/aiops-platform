@@ -67,6 +67,7 @@ def uid_tag(uid: str) -> str:
 
 # ── 各行的寫法（rca 只產生結構化的結果，字怎麼排都在這裡）──
 
+ALTERNATIVE = "另一種可能｜"
 GRADE_TEXT = {"direct": "直接證據", "indirect": "間接證據", "inference": "推測"}   # gather.evidence_grade() 的等級在註記上的寫法
 MAX_FACT_LINES = 5   # LLM 沒有分析時，註記上最多直接列幾行證據（版面的上限，不是判斷門檻）
 FACT_CHARS = 120     # 每一行引用的原文最多幾個字
@@ -119,9 +120,18 @@ def failure_line(kind: str, failures: int, retry_seconds: int) -> str:
             f"以下是程式收集到的證據，沒有經過推論：")
 
 
-def candidates_text(candidates: list[dict[str, Any]], max_chars: int = 300) -> str:
-    """可能的原因寫成註記上的列點，依據等級放最後：1. mq-broker：…（直接證據）。等級是程式判定的，見 evidence_grade()。"""
-    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（{GRADE_TEXT[c['grade']]}）" for n, c in enumerate(candidates, 1))
+def chain_text(steps: list[dict[str, Any]], max_chars: int = 300) -> str:
+    """因果鏈與別的解釋寫成註記上的幾行。鏈由原因到現象：第一步「經過｜…」，之後每一步「↳ …」；別的解釋「另一種可能｜…」。
+    每一行最後是依據等級（程式判定的，見 evidence.evidence_grade）。"""
+    out, first = [], True
+    for step in steps:
+        body = f"{step['source']}：{step['reason'][:max_chars]}（{GRADE_TEXT[step['grade']]}）"
+        if step.get("role") == "alternative":
+            out.append(f"{ALTERNATIVE}{body}")
+        else:
+            out.append(f"經過｜{body}" if first else f"↳ {body}")
+            first = False
+    return "\n".join(out)
 
 
 def actions_text(actions: list[str]) -> str:

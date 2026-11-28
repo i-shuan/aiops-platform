@@ -1,4 +1,5 @@
-"""根因分析列出 1～3 個可能的原因，每個最後帶依據等級：直接證據／間接證據／推測。
+"""根因分析寫成一條因果鏈（由原因到現象）加上最多兩個別的解釋，每一步最後帶依據等級：直接證據／間接證據／推測。
+舊格式的 candidates（自訂提示詞可能還在用）：第一個當成鏈的唯一一步，其餘當成別的解釋。這個檔案前半用舊格式測把關，後半測因果鏈。
 原因是模型列的；**等級是程式照證據判定的**（gather.evidence_grade），同一份證據永遠得到同一個等級。模型不給分數：
 它自評的分數同一份證據會飄（實測同一題給過 75、38、35），2026-11-28 起拿掉。模型給的 confidence 欄位一律不看。"""
 from __future__ import annotations
@@ -47,16 +48,19 @@ def test_candidates_get_the_grade_the_evidence_supports_whatever_score_the_model
     assert summary == "mq-broker 最可能是源頭"
     assert [(c["source"], c["grade"]) for c in got] == [("mq-broker", "direct"), ("cim-eap", "direct"), ("amhs-mcs", "direct")]
     assert all("confidence" not in c for c in got)
-    assert report.candidates_text(got).splitlines() == ["1. mq-broker：它的錯誤日誌寫 consumer lag（直接證據）",
-                                                     "2. cim-eap：T3 逾時（直接證據）", "3. amhs-mcs：只是下游（直接證據）"]
+    assert [c["role"] for c in got] == ["chain", "alternative", "alternative"]     # 舊格式：第一個是鏈，其餘是別的解釋
+    assert report.chain_text(got).splitlines() == ["經過｜mq-broker：它的錯誤日誌寫 consumer lag（直接證據）",
+                                                   "另一種可能｜cim-eap：T3 逾時（直接證據）", "另一種可能｜amhs-mcs：只是下游（直接證據）"]
 
 
-def test_a_system_known_only_from_a_relation_is_a_guess_and_is_listed_after_the_ones_with_evidence(fake):
-    """erp-core 只出現在關係邊裡（沒有它的日誌、Trace、指標）：模型給 95、排第一也沒用，等級是推測，排到有證據的後面。"""
+def test_a_system_known_only_from_a_relation_is_a_guess_even_as_the_first_step(fake):
+    """erp-core 只出現在關係邊裡（沒有它的日誌、Trace、指標）：模型給 95、放在鏈的第一步也沒用，等級是推測。
+    鏈的順序是因果順序，程式不重排；別的解釋才照等級排。"""
     ev = evidence(fake)
-    _summary, got = rca.read_answer(answer(("erp-core", 95, "它在上游"), ("mq-broker", 95, "有錯誤日誌")), ev)
-    assert [(c["source"], c["grade"]) for c in got] == [("mq-broker", "direct"), ("erp-core", "inference")]
-    assert report.candidates_text(got).splitlines()[1] == "2. erp-core：它在上游（推測）"
+    _summary, got = rca.read_answer(answer(("erp-core", 95, "它在上游"), ("amhs-mcs", 1, "只是下游"), ("mq-broker", 95, "有錯誤日誌")), ev)
+    assert [(c["source"], c["role"], c["grade"]) for c in got] == [("erp-core", "chain", "inference"), ("amhs-mcs", "alternative", "direct"),
+                                                                    ("mq-broker", "alternative", "direct")]
+    assert report.chain_text(got).splitlines()[0] == "經過｜erp-core：它在上游（推測）"
 
 
 def test_with_only_alerts_every_candidate_is_a_guess(fake):
@@ -108,9 +112,13 @@ def test_two_systems_blaming_each_other_are_both_direct_the_grade_cannot_say_who
     assert (gather.evidence_grade("a-svc", ev), gather.evidence_grade("b-svc", ev)) == ("direct", "direct")
 
 
-def test_at_most_three_candidates_are_kept(fake):
+def test_the_chain_and_the_alternatives_are_limited(fake):
     _summary, got = rca.read_answer(answer(*[("mq-broker", 20, f"理由{i}") for i in range(6)]), evidence(fake))
-    assert len(got) == rca.MAX_CANDIDATES == 3
+    assert [c["role"] for c in got] == ["chain"] + ["alternative"] * rca.MAX_ALTERNATIVES            # 舊格式：一步＋兩個別的解釋
+    long = json.dumps({"summary": "x", "systems": [], "ids": [], "chain": [{"system": "mq-broker", "what": f"第{i}步"} for i in range(9)],
+                       "alternatives": [{"system": "cim-eap", "what": f"別的{i}"} for i in range(9)]}, ensure_ascii=False)
+    _summary, got = rca.read_answer(long, evidence(fake))
+    assert [c["role"] for c in got] == ["chain"] * rca.MAX_CHAIN + ["alternative"] * rca.MAX_ALTERNATIVES and (rca.MAX_CHAIN, rca.MAX_ALTERNATIVES) == (4, 2)
 
 
 @pytest.mark.parametrize("bad, message", [
@@ -131,11 +139,11 @@ def test_answers_without_candidates_still_work(fake):
 def test_annotation_lists_causes_under_the_analysis_line_and_escapes_them():
     inc = incident()
     inc.summary = "[LLM 推論] 最可能是 mq-broker"
-    inc.candidates = "1. mq-broker：<b>磁碟滿</b>（直接證據）\n2. cim-eap：只是下游（推測）"
+    inc.candidates = "經過｜mq-broker：<b>磁碟滿</b>（直接證據）\n↳ cim-eap：只是下游（推測）"
     inc.evidence_note = "證據｜已有告警 3 筆；沒接呼叫鏈"
     l1, l2, c1, c2, proof, last = report.render(inc, "http://g", "Asia/Taipei")["text"].split("<br>")
     assert l2 == "根因分析｜[LLM 推論] 最可能是 mq-broker"
-    assert c1 == "1. mq-broker：&lt;b&gt;磁碟滿&lt;/b&gt;（直接證據）" and c2 == "2. cim-eap：只是下游（推測）"
+    assert c1 == "經過｜mq-broker：&lt;b&gt;磁碟滿&lt;/b&gt;（直接證據）" and c2 == "↳ cim-eap：只是下游（推測）"
     assert proof == "證據｜已有告警 3 筆；沒接呼叫鏈" and "台灣時間" in last   # 證據只有一行，放在列點之後
 
 
@@ -155,9 +163,9 @@ def test_a_round_stores_the_causes_and_writes_them_to_grafana(world):  # noqa: F
     w.receive("firing_mq", "firing_cim")
     assert w.run(60, llm=transport)["status"] == "ok"
     [inc] = rows(w, dbmod.incidents)
-    assert inc["candidates"].splitlines() == ["1. mq-broker：它的錯誤日誌寫 consumer lag exceeded（直接證據）", "2. cim-eap：下游（直接證據）"]
+    assert inc["candidates"].splitlines() == ["經過｜mq-broker：它的錯誤日誌寫 consumer lag exceeded（直接證據）", "另一種可能｜cim-eap：下游（直接證據）"]
     note = w.fake.annotations[inc["annotation_id"]]["text"]
-    assert note.index("根因分析｜") < note.index("<br>1. mq-broker：") < note.index("<br>2. cim-eap：") < note.index("<br>證據｜已有")
+    assert note.index("根因分析｜") < note.index("<br>經過｜mq-broker：") < note.index("<br>另一種可能｜cim-eap：") < note.index("<br>證據｜已有")
     assert note.count("證據｜") == 1   # 證據只佔一行
     assert "就算只有告警，也要" in calls[0]["messages"][0]["content"]
 
@@ -228,7 +236,7 @@ def test_an_ungrounded_runner_up_is_dropped_instead_of_throwing_everything_away(
     summary, candidates = rca.read_answer(reply("最可能是 MariaDb 連不上", ("MariaDb", 80, "日誌寫連不上"), ("PostgreSQL", 40, "猜的"),
                                                  ("instana-agent", 30, "告警在它身上"), systems=["MariaDb", "PostgreSQL"]), ev)
     assert [c["source"] for c in candidates] == ["MariaDb", "instana-agent"]   # 沒憑據的那一個拿掉，其餘照用
-    assert "PostgreSQL" not in report.candidates_text(candidates) and summary.startswith("最可能是 MariaDb")
+    assert "PostgreSQL" not in report.chain_text(candidates) and summary.startswith("最可能是 MariaDb")
 
 
 def test_very_short_names_are_not_matched_by_text_and_known_systems_keep_working():
@@ -250,17 +258,19 @@ def test_a_cause_the_model_marks_as_inferred_is_a_guess_whatever_evidence_the_sy
         {"source": "MariaDb", "kind": "evidence", "confidence": 20, "reason": "日誌直接寫 Cannot connect to MariaDb"},
         {"source": "db-host", "kind": "evidence", "confidence": 99, "reason": "主機可能關機了"}]}, ensure_ascii=False)
     _summary, candidates = rca.read_answer(raw, ev)
-    assert [(c["source"], c["grade"]) for c in candidates] == [("MariaDb", "direct"), ("db-host", "direct"), ("instana-agent", "inference")]
-    assert report.candidates_text(candidates).splitlines() == [
-        "1. MariaDb：日誌直接寫 Cannot connect to MariaDb（直接證據）",
-        "2. db-host：主機可能關機了（直接證據）",
-        "3. instana-agent：也可能是感測器的帳密設定錯了，日誌沒有寫（推測）"]
+    # 舊格式：第一個（instana-agent，模型標成推測）是鏈；其餘是別的解釋，照等級排
+    assert [(c["source"], c["role"], c["grade"]) for c in candidates] == [
+        ("instana-agent", "chain", "inference"), ("MariaDb", "alternative", "direct"), ("db-host", "alternative", "direct")]
+    assert report.chain_text(candidates).splitlines() == [
+        "經過｜instana-agent：也可能是感測器的帳密設定錯了，日誌沒有寫（推測）",
+        "另一種可能｜MariaDb：日誌直接寫 Cannot connect to MariaDb（直接證據）",
+        "另一種可能｜db-host：主機可能關機了（直接證據）"]
 
 
 def test_answers_without_the_kind_field_keep_working_and_the_prompt_asks_for_why():
     ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
     _s, candidates = rca.read_answer(reply("連不上 MariaDb", ("MariaDb", 80, "日誌寫的")), ev)   # 自訂提示詞可能沒有 kind
-    assert candidates == [{"source": "MariaDb", "grade": "direct", "reason": "日誌寫的"}]
+    assert candidates == [{"source": "MariaDb", "role": "chain", "grade": "direct", "reason": "日誌寫的"}]
     for part in ("為什麼會發生", "kind", "inference", "不要給分數", "由程式照證據判定", "不要只寫哪個系統是源頭", "有多少證據就分析多少"):
         assert part in rca.SYSTEM_PROMPT
     assert "confidence" not in rca.SYSTEM_PROMPT and "信心" not in rca.SYSTEM_PROMPT
@@ -295,5 +305,52 @@ def test_a_step_that_names_equipment_not_in_the_evidence_is_dropped_but_the_anal
 
 
 def test_the_prompt_asks_for_concrete_reasons_and_concrete_next_steps():
-    for part in ("actions", "下一步建議", "機制是什麼", "為什麼不是它", "不會被自動執行", "對任何事故都成立的話"):
+    for part in ("actions", "下一步建議", "它怎麼造成下一步", "證據為什麼比較不支持它", "不會被自動執行", "對任何事故都成立的話"):
         assert part in rca.SYSTEM_PROMPT
+
+
+# ── 因果鏈：由原因到現象，兩端共同構成的問題不用硬選一個源頭（2026-11-28）──
+
+def chain_answer(summary, chain, alternatives=()):
+    step = lambda s: {"system": s[0], "kind": s[2] if len(s) > 2 else "evidence", "what": s[1]}
+    return json.dumps({"summary": summary, "systems": [], "ids": [], "chain": [step(s) for s in chain],
+                       "alternatives": [step(s) for s in alternatives]}, ensure_ascii=False)
+
+
+def test_a_chain_keeps_its_causal_order_and_each_step_gets_its_own_grade():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    summary, steps = rca.read_answer(chain_answer(
+        "MariaDb 連不上，instana-agent 的感測器啟用失敗",
+        [("MariaDb", "db-host:3306 的 MariaDb 不接受連線"), ("instana-agent", "感測器連不上資料庫，一直重試並報錯")],
+        [("instana-agent", "也可能是感測器的帳密設定錯了", "inference")]), ev)
+    assert [(s["source"], s["role"], s["grade"]) for s in steps] == [
+        ("MariaDb", "chain", "direct"), ("instana-agent", "chain", "direct"), ("instana-agent", "alternative", "inference")]
+    assert report.chain_text(steps).splitlines() == [
+        "經過｜MariaDb：db-host:3306 的 MariaDb 不接受連線（直接證據）",
+        "↳ instana-agent：感測器連不上資料庫，一直重試並報錯（直接證據）",
+        "另一種可能｜instana-agent：也可能是感測器的帳密設定錯了（推測）"]
+    # 順序是模型說的因果順序：反過來寫，程式照樣不重排（等級高的不會被搬到前面）
+    _s, reversed_steps = rca.read_answer(chain_answer("x", [("instana-agent", "先出事", "inference"), ("MariaDb", "後出事")]), ev)
+    assert [(s["source"], s["grade"]) for s in reversed_steps] == [("instana-agent", "inference"), ("MariaDb", "direct")]
+
+
+def test_an_invented_first_step_rejects_the_answer_and_an_invented_later_step_is_dropped():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    with pytest.raises(ValueError, match="PostgreSQL"):                 # 鏈的第一步是結論說的源頭：沒憑據整份不採用
+        rca.read_answer(chain_answer("資料庫掛了", [("PostgreSQL", "x"), ("instana-agent", "y")]), ev)
+    _s, steps = rca.read_answer(chain_answer("MariaDb 連不上", [("MariaDb", "連不上"), ("kafka-proxy", "編的"), ("instana-agent", "報錯")],
+                                             [("redis-cache", "也是編的")]), ev)
+    assert [(s["source"], s["role"]) for s in steps] == [("MariaDb", "chain"), ("instana-agent", "chain")]   # 中間與別的解釋裡編的拿掉
+    with pytest.raises(ValueError, match="EQP-LITHO-11"):               # 任何一步的文字裡編了機台：整份不採用
+        rca.read_answer(chain_answer("MariaDb 連不上", [("MariaDb", "連不上"), ("instana-agent", "影響機台 EQP-LITHO-11")]), ev)
+    with pytest.raises(ValueError, match="system"):
+        rca.read_answer(json.dumps({"summary": "x", "chain": [{"what": "沒有寫是誰"}]}), ev)
+
+
+def test_an_empty_or_missing_chain_is_allowed_and_the_prompt_asks_for_a_chain():
+    ev = field_evidence("Cannot connect to MariaDb at db-host:3306")
+    assert rca.read_answer(json.dumps({"summary": "目前只能推測", "chain": [], "alternatives": []}, ensure_ascii=False), ev) == ("目前只能推測", [])
+    assert report.chain_text([]) == ""
+    for part in ("chain", "由**原因到現象**排", "兩個都寫進鏈裡", "不用硬選一個當唯一的源頭", "alternatives", "不要硬湊成一條鏈"):
+        assert part in rca.SYSTEM_PROMPT
+    assert "candidates" not in rca.SYSTEM_PROMPT

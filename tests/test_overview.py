@@ -176,7 +176,7 @@ def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):
     assert prompt.startswith("【0. 證據概況") and "service.name 是這些系統" in prompt.split("【1.")[0]
     assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的" in prompt.split("【1.")[0]   # 完整的說明（少了它哪種分析做不了）只給模型
     system = calls[0]["messages"][0]["content"]
-    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system and "不要給分數" in system
+    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "chain" in system and "不要給分數" in system
 
 
 def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_changes(world):  # noqa: F811

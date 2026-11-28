@@ -27,6 +27,7 @@ from typing import Any
 
 import httpx
 
+from src import report
 from src.grouping import Incident
 
 log = logging.getLogger("aiops_lite.outputs")
@@ -62,13 +63,16 @@ def incident_payload(incident: Incident, grafana_url: str, event: str) -> dict[s
     alerts = sorted(({"fingerprint": fp, "rule_uid": m["rule_uid"], "title": m["title"], "service": m["service"],
                       "severity": m["severity"], "status": m["status"], "starts_at": _iso(m["starts_at"])}
                      for fp, m in incident.signals.items()), key=lambda a: (a["starts_at"] or "", a["fingerprint"]))
-    return {"schema": "aiops-lite.incident.v2", "event": event,   # v2：root_cause 多了 suggestions
+    lines = [line for line in incident.candidates.splitlines() if line.strip()]
+    return {"schema": "aiops-lite.incident.v3", "event": event,   # v3：candidates 換成 chain（由原因到現象）與 alternatives
             "incident": {"uid": incident.uid, "status": incident.status, "severity": incident.severity, "services": incident.services,
                          "started_at": _iso(incident.started_at), "ended_at": _iso(incident.ended_at),
                          "alert_count": incident.alert_count, "alerts": alerts},
-            # analyzed=false 時 summary 是原始摘要（[未經分析]）；candidates 是註記上列的 1～3 個可能原因（依據等級由程式判定，不是機率）
+            # analyzed=false 時 summary 是原始摘要（[未經分析]），chain 與 alternatives 是空的。
+            # chain 是因果鏈的每一步（由原因到現象），每一步結尾的括號是程式判定的依據等級（不是機率）；alternatives 是別的解釋
             "root_cause": {"analyzed": incident.analyzed, "summary": incident.summary,
-                           "candidates": [line for line in incident.candidates.splitlines() if line.strip()],
+                           "chain": [line.removeprefix("經過｜").removeprefix("↳ ") for line in lines if not line.startswith(report.ALTERNATIVE)],
+                           "alternatives": [line.removeprefix(report.ALTERNATIVE) for line in lines if line.startswith(report.ALTERNATIVE)],
                            # LLM 建議值班人員接著確認或處理什麼。只是給人看的文字：下游不應該拿它自動執行任何操作
                            "suggestions": incident.suggestions.removeprefix("下一步建議｜")},
             "evidence": incident.evidence_note,

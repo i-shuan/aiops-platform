@@ -54,7 +54,7 @@ def test_without_a_url_nothing_is_sent_but_what_would_be_sent_is_kept(world):  #
     w.receive("firing_mq")
     assert w.run(60)["status"] == "ok"            # 沒設任何出口：預設就是佔位，不會連出去（沒有給 transport 也不會出錯）
     [row] = deliveries(w, "incident_api")
-    assert (row["status"], row["attempts"], row["payload"]["event"], row["payload"]["schema"]) == ("placeholder", 0, "opened", "aiops-lite.incident.v2")
+    assert (row["status"], row["attempts"], row["payload"]["event"], row["payload"]["schema"]) == ("placeholder", 0, "opened", "aiops-lite.incident.v3")
     assert row["payload"]["incident"]["services"] == ["mq-broker"] and row["payload"]["root_cause"]["analyzed"] is True
     w.run(120)                                    # 沒有變化的續跑：不多記一筆
     assert len(deliveries(w, "incident_api")) == 1 and deliveries(w, "remediation") == []
@@ -134,7 +134,7 @@ def test_llm_retries_do_not_send_an_update_each_time(world):  # noqa: F811
     [inc] = rows(w, dbmod.incidents)
     assert inc["llm_failures"] == 3 and "連續失敗 3 次" in inc["summary"]
     assert [json.loads(r.content)["event"] for r in seen] == ["opened"]
-    assert json.loads(seen[0].content)["root_cause"] == {"analyzed": False, "summary": inc["summary"].replace("3 次，約 4 分鐘", "1 次，約 1 分鐘"), "candidates": [], "suggestions": ""}
+    assert json.loads(seen[0].content)["root_cause"] == {"analyzed": False, "summary": inc["summary"].replace("3 次，約 4 分鐘", "1 次，約 1 分鐘"), "chain": [], "alternatives": [], "suggestions": ""}
     w.run(60 + 61 + 121 + 241, settings=settings, outputs=transport)  # LLM 回來了：內容真的變了，送一筆更新
     assert [json.loads(r.content)["event"] for r in seen] == ["opened", "updated"] and json.loads(seen[-1].content)["root_cause"]["analyzed"]
 

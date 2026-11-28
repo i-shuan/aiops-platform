@@ -130,31 +130,35 @@ def _same_name(said: str, answer: str) -> bool:
 
 
 def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
-    """問一次並計分。回傳 {ok, why, source, grade, summary}。
+    """問一次並計分。回傳 {ok, why, source, grade, root, summary}。
 
-    答案是某個系統：排第一的可能原因要是它。答案是「無法判定」：不能有依據等級是「直接證據」的可能原因
-    （可以列間接證據或推測，那正是要它做的事；等級是程式照證據判定的，排序也照等級）。
-    重點字在摘要或任何一個可能原因的理由裡出現都算。"""
+    答案是某個系統：它要出現在因果鏈的某一步（不必是第一步：憑證與握手、逾時與熔斷這類問題是兩端共同構成的，
+    硬要求誰排第一量到的是格式不是分析；它是不是第一步另外記在 root，只當參考）。只列在「另一種可能」不算。
+    答案是「無法判定」：鏈上不能有依據等級是「直接證據」的步驟。重點字在摘要或任何一步、任何別的解釋的說明裡出現都算。
+    2026-11-28 以前的算法是「排第一的可能原因要是它」，數字不能直接比。"""
     try:
         raw = rca.call_llm(llm["url"], llm["key"], llm["model"], rca.build_prompt(evidence, overview), timeout=120)
-        summary, candidates = rca.read_answer(raw, evidence)
+        summary, steps = rca.read_answer(raw, evidence)
     except Exception as e:   # 連線、格式、幻覺檢查沒過：都算這一次沒答對
         return {"ok": False, "why": f"{type(e).__name__}: {str(e).replace(llm['key'], '<key>')[:160]}", "source": None,
-                "grade": None, "summary": ""}
-    top = candidates[0] if candidates else {"source": "", "grade": ""}
-    said = " ".join([summary, *(c["reason"] for c in candidates)])
-    listed = "、".join(f"{c['source']} {report.GRADE_TEXT[c['grade']]}" for c in candidates) or "（沒有列）"
+                "grade": None, "root": False, "summary": ""}
+    chain = [c for c in steps if c["role"] == "chain"]
+    top = chain[0] if chain else {"source": "", "grade": ""}
+    said = " ".join([summary, *(c["reason"] for c in steps)])
+    listed = " → ".join(f"{c['source']} {report.GRADE_TEXT[c['grade']]}" for c in chain) or "（沒有鏈）"
+    others = "、".join(c["source"] for c in steps if c["role"] == "alternative")
     problems = []
     if scenario["source"] == "":
-        strong = [c for c in candidates if c["grade"] == "direct"]
+        strong = [c for c in chain if c["grade"] == "direct"]
         if strong:
-            problems.append(f"答案是無法判定，卻把 {strong[0]['source']} 列為直接證據")
-    elif scenario["source"] is not None and _same_name(top["source"], scenario["source"]) is False:
-        problems.append(f"排第一的是 {top['source'] or '（沒有）'}，答案是 {scenario['source']}")
+            problems.append(f"答案是無法判定，鏈上卻有直接證據的 {strong[0]['source']}")
+    elif scenario["source"] is not None and not any(_same_name(c["source"], scenario["source"]) for c in chain):
+        problems.append(f"鏈裡沒有 {scenario['source']}")
     if scenario["any"] and not any(word in said for word in scenario["any"]):
         problems.append(f"沒有提到 {'／'.join(scenario['any'])}")
     return {"ok": not problems, "why": "；".join(problems), "source": top["source"], "grade": top["grade"],
-            "count": len(candidates), "candidates": listed, "summary": summary}
+            "root": bool(scenario["source"]) and _same_name(top["source"], scenario["source"]),
+            "count": len(chain), "candidates": listed + (f"｜另一種可能：{others}" if others else ""), "summary": summary}
 
 
 def main() -> int:
@@ -208,7 +212,8 @@ def main() -> int:
         tops = "、".join(sorted({a["source"] for a in named})) or "—"
         spread = "／".join(grades) or "—"
         listed = "／".join(str(a.get("count", 0)) for a in answers)
-        print(f"{scenario['name']:<32} {ok}/{len(answers)}  排第一的：{tops}（{spread}）  各列了 {listed} 個  （提示詞 {len(prompt)} 字）")
+        roots = sum(a.get("root", False) for a in answers)
+        print(f"{scenario['name']:<32} {ok}/{len(answers)}  鏈的第一步：{tops}（{spread}；是答案的 {roots} 次）  鏈各 {listed} 步  （提示詞 {len(prompt)} 字）")
         for a in answers:
             if not a["ok"]:
                 print(f"      ✗ {a['why']}｜{a.get('candidates', '')}｜{a['summary'][:90]}")

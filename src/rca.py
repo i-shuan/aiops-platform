@@ -55,25 +55,30 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 「錯誤種類與事故前後的次數」：事故前就以差不多的頻率出現的錯誤是平常就有的，不能當成這次事故的原因；
   事故前沒出現過（new=true）或明顯變多的才是線索。沒有次數的錯誤不能推論它是新的還是平常就有的。
 - 「警告」常常寫出後來出錯的原因（資源快用完、重試變多）：錯誤訊息本身沒寫原因時，看同一個系統在出錯前的警告。
-- 一定要列出 1 到 3 個可能的原因（candidates），由最可能排到最不可能。每個寫：
-  source＝系統名稱；
-  reason＝一到兩句白話，要具體：出了什麼事、機制是什麼（怎麼從這個原因變成現在看到的現象）、依據是哪一種證據裡的什麼（直接引用內容）。
-        有別的可能被證據排除時，補一句為什麼不是它。不要只寫「它是源頭」「它有錯誤」這種沒有內容的話；
-  kind＝evidence 或 inference。evidence：證據直接寫出了這個原因（錯誤訊息自己講了原因、呼叫鏈停在它、它的指標先變壞）。
+- 把事情的經過寫成一條因果鏈（chain）：由**原因到現象**排，1 到 4 步。第一步是最源頭、你認為最先出事的地方；最後一步是告警看到的現象。
+  只有一個系統、原因就在它自己身上時，一步就夠。兩個系統共同構成問題（憑證與握手、名稱解析與被解析的對象、逾時與熔斷）時，兩個都寫進鏈裡，
+  不用硬選一個當唯一的源頭。每一步寫：
+  system＝一個系統名稱（一步只寫一個，不要用「／」「與」把兩個系統寫在一起；同一個系統接連發生的事寫在同一步，不要只為了重述告警多寫一步）；
+  what＝一到兩句白話，要具體：這一步出了什麼事、它怎麼造成下一步、依據是哪一種證據裡的什麼（直接引用內容）。
+        不要只寫「它是源頭」「它有錯誤」這種沒有內容的話；
+  kind＝evidence 或 inference。evidence：證據直接寫出了這一步（錯誤訊息自己講了、呼叫鏈停在它、它的指標先變壞）。
         inference：證據沒有直接寫，是你從現象、名稱、先後或常識推測的。可以推測，但要說是從哪一項證據推的。
-- 不要給分數或把握程度。每個原因的依據等級由程式照證據判定，不是你判定：那個系統自己有事故前沒出現過的錯誤、呼叫鏈的失敗點停在它、
+- 還有別的合理解釋時，另外列在 alternatives（最多 2 個，格式跟鏈的一步一樣），並在 what 寫清楚證據為什麼比較不支持它、或為什麼還排除不了。
+  分不出兩種解釋誰對時，不要硬湊成一條鏈：鏈寫你比較有依據的那一種，另一種放 alternatives。
+- 不要給分數或把握程度。每一步的依據等級由程式照證據判定，不是你判定：那個系統自己有事故前沒出現過的錯誤、呼叫鏈的失敗點停在它、
   別的系統的錯誤訊息指名它＝直接證據；只有警告、平常就有的錯誤、指標變化＝間接證據；只有告警或關係邊＝推測。你標成 inference 的一律算推測。
-- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊列出可能的原因（kind 標 inference），不要只回「無法判定」。
-  有別的合理可能就列出來，不要只列一個。連推測的依據都沒有時 candidates 才可以是空的。
+- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊寫出可能的經過（kind 標 inference），不要只回「無法判定」。
+  連推測的依據都沒有時 chain 才可以是空的。
 - summary 是寫給值班人員看的一句結論，用白話講這個問題為什麼會發生：哪裡出了什麼事、造成什麼現象。
-  不要只寫哪個系統是源頭，也不要抱怨缺了什麼證據（那個由程式另外顯示）。列的原因全部是 inference 時，開頭寫「目前只能推測」。
+  不要只寫哪個系統是源頭，也不要抱怨缺了什麼證據（那個由程式另外顯示）。鏈上每一步都是 inference 時，開頭寫「目前只能推測」。
 - 另外列 1 到 3 條「下一步建議」（actions）：值班人員現在該去確認或處理什麼，照先後排。要具體到看哪個系統的什麼
-  （哪一種日誌、哪個設定、哪條連線、哪個資源），而且要對得上你列的可能原因。先寫能確認原因的檢查，再寫處置。
+  （哪一種日誌、哪個設定、哪條連線、哪個資源），而且要對得上你寫的經過。先寫能確認原因的檢查，再寫處置。
   不要寫「檢查日誌」「聯絡負責人」「持續觀察」這種對任何事故都成立的話；也不要建議證據裡看不出依據的操作。這些只是建議，不會被自動執行。
 - 只輸出一個 JSON 物件，不要 Markdown：
-  {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "kind": "evidence", "reason": "一句話"}], "actions": ["下一步建議，一句話"], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+  {"summary": "繁體中文，80 字以內", "chain": [{"system": "系統名稱", "kind": "evidence", "what": "一到兩句"}], "alternatives": [{"system": "系統名稱", "kind": "inference", "what": "一到兩句"}], "actions": ["下一步建議，一句話"], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
 
-MAX_CANDIDATES = 3
+MAX_CHAIN = 4          # 因果鏈最多幾步（版面的上限）
+MAX_ALTERNATIVES = 2   # 另外最多列幾個別的解釋（版面的上限）
 MIN_NAME_CHARS = 3   # 名稱至少這麼長，才用「原樣出現在證據文字裡」當憑據：一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化
 @dataclass(frozen=True)
 class LlmOptions:
@@ -154,8 +159,10 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     （使用者的決定，2026-11-26，現場 AP1105 的兩張事故就是這樣被退回的）。
     證據裡完全找不到的名稱：排第一的可能原因是它、或結論的句子提到它 → 整份不採用；只是排在後面的可能原因 → 只拿掉那一個。
 
-    可能的原因最多留 MAX_CANDIDATES 個，每個是 {source, grade, reason}。**模型不給分數**：grade 由 evidence_grade() 照證據判定；
-    模型自己標成推測（kind=inference）的一律是 inference（只會往下調，不會往上）。排序照等級：直接證據在前、推測在後，同一級照模型給的順序。"""
+    回傳的清單是因果鏈的每一步（role="chain"，由原因到現象，最多 MAX_CHAIN 步，照模型給的順序）接著別的解釋
+    （role="alternative"，最多 MAX_ALTERNATIVES 個，照等級排），每個是 {source, role, grade, reason}。
+    **模型不給分數**：grade 由 evidence_grade() 照證據判定；模型自己標成推測（kind=inference）的一律是 inference（只會往下調）。
+    找不到憑據的名稱：鏈的第一步、或結論提到它 → 整份不採用；其餘的 → 只拿掉那一個。"""
     body = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     answer = json.loads(body)
     summary = " ".join(str(answer["summary"]).split())
@@ -186,22 +193,27 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     # 只認統計會誤擋兩種真的有憑據的情況：日誌沒拆欄位、機台與批號只寫在訊息文字裡；以及有拆欄位但沒排進 top_ids 的。
     # 這是字串比對：編出來的 EQP-1 剛好是證據裡 EQP-10 的開頭時擋不到（摘要文字的檢查本來就有同樣的限制）。
     unknown += [i for i in answer.get("ids") or [] if i not in ids and not (isinstance(i, str) and i.strip() and i in corpus)]
-    raw = answer.get("candidates")
-    raw = raw if isinstance(raw, list) else []   # 選填：自訂提示詞可以不要求
+    # 新格式：chain（由原因到現象）＋ alternatives。舊格式（自訂提示詞可能還在用）：candidates 的第一個當成鏈的唯一一步，其餘當成別的解釋
+    as_list = lambda value: value if isinstance(value, list) else []
+    legacy = as_list(answer.get("candidates"))
+    planned = ([("chain", item) for item in as_list(answer.get("chain"))[:MAX_CHAIN]] or [("chain", item) for item in legacy[:1]]) \
+        + [("alternative", item) for item in (as_list(answer.get("alternatives")) or legacy[1:])[:MAX_ALTERNATIVES]]
     candidates: list[dict[str, Any]] = []
-    for rank, item in enumerate(raw[:MAX_CANDIDATES]):
-        if not isinstance(item, dict) or not str(item.get("source") or "").strip():
-            raise ValueError("candidates 的每一項都要有 source")
-        name = str(item["source"]).strip()
+    for rank, (role, item) in enumerate(planned):
+        name = str((item.get("system") or item.get("source") or "") if isinstance(item, dict) else "").strip()
+        if not name:
+            raise ValueError("chain／alternatives 的每一項都要有 system")
         if not grounded(name):
-            if rank == 0:   # 排第一的就是結論在講的那一個：它沒有憑據，整份不能用
+            if rank == 0:   # 鏈的第一步就是結論說的源頭：它沒有憑據，整份不能用
                 unknown.append(name)
-            continue        # 排在後面的：只拿掉這一個，其他照用
-        # 模型自己說這一條是推測的（證據沒有直接寫）：不管那個系統有多少證據，這一條就是推測
+            continue        # 其餘的：只拿掉這一個，其他照用
+        # 模型自己說這一步是推測的（證據沒有直接寫）：不管那個系統有多少證據，這一步就是推測
         inferred = str(item.get("kind") or "").strip().lower() == "inference"
-        candidates.append({"source": name, "grade": "inference" if inferred else evidence_grade(name, evidence),
-                           "reason": " ".join(str(item.get("reason") or "").split())})
-    candidates.sort(key=lambda c: GRADES.index(c["grade"]))   # 穩定排序：同一級照模型給的順序
+        candidates.append({"source": name, "role": role, "grade": "inference" if inferred else evidence_grade(name, evidence),
+                           "reason": " ".join(str(item.get("what") or item.get("reason") or "").split())})
+    # 鏈照模型給的因果順序，不重排；別的解釋照等級排（穩定排序）
+    candidates = [c for c in candidates if c["role"] == "chain"] + sorted((c for c in candidates if c["role"] == "alternative"),
+                                                                         key=lambda c: GRADES.index(c["grade"]))
     # 摘要與理由的文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
@@ -242,7 +254,7 @@ class Analysis:
     line: str          # 註記的「根因分析」那一行：[LLM 推論] … 或 [未經分析] …
     analyzed: bool     # 是不是通過檢查的 LLM 推論
     reason: str        # 沒通過的原因
-    candidates: str    # 註記上「可能原因」的幾行（candidates_text）；沒有就是空字串
+    candidates: str    # 註記上「經過」與「另一種可能」的幾行（report.chain_text）；沒有就是空字串
     actions: str = ""  # 註記上「下一步建議｜…」那一行（actions_text）；沒有就是空字串
     failure: str = ""  # 沒有分析的話是哪一種：unreachable（連不上、逾時、回錯誤碼）／rejected（有回答但沒通過檢查）；其餘是空的
 
@@ -267,7 +279,7 @@ def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, 
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
         # 連不上、逾時、回 4xx／5xx 是「LLM 不通」；其餘是它有回答、但格式不對或沒通過幻覺檢查
         return Analysis(fallback, False, reason, "", failure="unreachable" if isinstance(e, httpx.HTTPError) else "rejected")
-    return Analysis(f"[LLM 推論] {summary}", True, "", report.candidates_text(candidates, options.max_summary_chars),
+    return Analysis(f"[LLM 推論] {summary}", True, "", report.chain_text(candidates, options.max_summary_chars),
                     report.actions_text(read_actions(answer, evidence, id_pattern=options.id_pattern)))
 
 
