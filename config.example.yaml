@@ -5,7 +5,7 @@
 #
 # 必填只有三個（grafana.url、grafana.token、webhook.token）。其他都是選填：
 #   - 沒有註解掉的是常用設定，寫的是預設值。
-#   - 用 # 註解掉的是「進階調整」：平常不用寫，要調的時候把該行的 # 拿掉、改值。每一項的說明見 CONFIG.md。
+#   - 用 # 註解掉的是「進階調整」：平常不用寫，要調的時候把該行的 # 拿掉、改值。每一項的說明就寫在旁邊；設計與內部常數見 README.md。
 
 grafana:
   url: https://grafana.corp.example      # 必填
@@ -52,7 +52,7 @@ logs:                                    # 整段可以不寫：沒設 datasourc
   fields:                                # 日誌的欄位名稱；下面是預設值
     service: service.name                # 要跟告警的 service 標籤值一致
     level: log.level                     # 日誌沒有等級欄位（沒拆欄位的容器輸出）就設成 ""：改用訊息文字裡的等級字樣挑錯誤日誌，
-    #                                      # 會誤撈（見 CONFIG.md「日誌沒有等級欄位」）；其他欄位不能留空
+    #                                      # 會誤撈（見 README.md 第 9 節「日誌」）；其他欄位不能留空
     # time: "@timestamp"                 # 只有 elasticsearch 能設（VictoriaLogs 的時間與訊息固定是 _time、_msg）
     # message: message                   # 只有 elasticsearch 能設
   # extra_filter: '{namespace="factory"}'  # 只有 victorialogs：加在每一條查詢最前面的 LogsQL 條件，只看某一部分的日誌

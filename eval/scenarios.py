@@ -184,7 +184,7 @@ HELD_OUT = [
         "logs": every(7, "payment-api", "ERROR", "payment {n} rejected: timeout after 3000ms calling risk-engine /score", start=240),
         "source": "risk-engine", "any": ["risk-engine"],
     },
-    {   # 2026-11-26 補的：放寬幻覺檢查之後才寫、才第一次跑。h01 從這一輪起不算乾淨的留出案例（見 EVAL.md）
+    {   # 2026-11-26 補的：放寬幻覺檢查之後才寫、才第一次跑。h01 從這一輪起不算乾淨的留出案例（見 README.md 第 12 節）
         "name": "h07_unlisted_storage_backend", "about": "告警的系統寫不進一個沒有告警、沒有關係邊的儲存元件（換一種說法、名稱帶數字）",
         "edges": [("report-job", "bi-portal")],
         "alerts": [("report-job", "Report job failures", "P2", 150), ("bi-portal", "Portal stale data", "P3", 120)],

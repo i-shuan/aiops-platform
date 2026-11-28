@@ -1,11 +1,11 @@
 # Fluent Bit 設定範例：CIM-EAP 的文字日誌 → 拆欄位 → VictoriaLogs（裝在每一台 EAP 伺服器上，只讀日誌檔）
 #
-# 只做「單行拆欄位」，不算次數、不判斷門檻（那是 Grafana 規則的事）。輸出的欄位照 FACTORY_METRICS.md 的統一欄位規範。
+# 只做「單行拆欄位」，不算次數、不判斷門檻（那是 Grafana 規則的事）。輸出的欄位照 README.md 第 9 節 的統一欄位規範。
 # 範例假設日誌長這樣（格式是假設的，請照現場的日誌改 parsers 裡的 regex）：
 #   2026-11-21 10:41:07 [ERROR] EQP-CVD-07 HSMS T3 Timeout on LOT-9921 carrier FOUP0912
 #   2026-11-21 10:41:09 [INFO] EQP-CVD-03 lot track-in complete on LOT-9940
 #
-# 用 Fluent Bit 5.2.0 + VictoriaLogs v1.17.0 實測過（2026-11-26，本機、假資料）（見 FACTORY_METRICS.md）。需要支援 YAML 設定與 parsers 區段的版本（3.2 以上）。
+# 用 Fluent Bit 5.2.0 + VictoriaLogs v1.17.0 實測過（2026-11-26，本機、假資料）（見 README.md 第 9 節）。需要支援 YAML 設定與 parsers 區段的版本（3.2 以上）。
 # 啟動：fluent-bit -c cim-eap.yaml
 
 service:

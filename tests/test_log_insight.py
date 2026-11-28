@@ -1,6 +1,6 @@
 """錯誤日誌的前處理：同類去重、各系統最早的錯誤不被擠掉、事故前後的次數、警告。
 都是歸類與算術，沒有「算不算異常」的門檻。假的 Grafana 拿錄下來的真實樣本（victoria_logs.json）照查詢條件篩；
-真的 VictoriaLogs 上的行為由 eval/run.py 的案例驗證（結果記在 EVAL.md）。"""
+真的 VictoriaLogs 上的行為由 eval/run.py 的案例驗證（結果記在 README.md 第 12 節）。"""
 from __future__ import annotations
 
 import json

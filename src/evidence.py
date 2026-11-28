@@ -367,7 +367,7 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
       warnings        這些系統的警告（跟錯誤同一次查詢撈回來的），同樣歸類並比較事故前後
     多兩次日誌查詢（各系統最早的錯誤、計數；沒有錯誤時不問各系統最早的錯誤）。任何一次失敗都只記進 notes，原本的樣本照舊。
 
-    試過但拿掉的（eval 的 16 個案例量不到差別，見 EVAL.md）：把各系統第一筆錯誤的時間排成一張表、
+    試過但拿掉的（eval 的 16 個案例量不到差別）：把各系統第一筆錯誤的時間排成一張表、
     列出兩個以上系統都提到的識別碼。"""
     log_fields: LogFields = store.fields
     time_of = lambda d: str(_dig(d, TIME_FIELD) or "")
