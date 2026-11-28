@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import rca
 from src.grafana import Grafana, GrafanaError
 from src.grouping import Alert, converge
@@ -20,9 +21,9 @@ from tests.test_main import world  # noqa: F401（fixture）
 STOPPED = datetime(2026, 11, 25, 4, 10, 28, tzinfo=timezone.utc)    # 消費者停掉的時間
 FINISHED = datetime(2026, 11, 25, 4, 12, 18, tzinfo=timezone.utc)
 EDGES = [("cim-eap", "mq-broker"), ("mq-broker", "amhs-mcs")]
-READY = rca.MetricQuery("佇列待處理訊息數", 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})')
-CONSUMERS = rca.MetricQuery("佇列的消費者數", 'sum by (queue) (rabbitmq_queue_consumers{service="$service"})')
-BROKEN = rca.MetricQuery("寫錯的查詢", 'sum(rate(rabbitmq_queue_messages_ready{service="$service"}[1m)')
+READY = gather.MetricQuery("佇列待處理訊息數", 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})')
+CONSUMERS = gather.MetricQuery("佇列的消費者數", 'sum by (queue) (rabbitmq_queue_consumers{service="$service"})')
+BROKEN = gather.MetricQuery("寫錯的查詢", 'sum(rate(rabbitmq_queue_messages_ready{service="$service"}[1m)')
 MINIMAL = "grafana: {url: 'http://g', token: 't'}\nwebhook: {token: 'w'}\n"
 
 
@@ -37,7 +38,7 @@ def incident(*services):
 def collect(fake, *queries, inc=None, **options):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
     return collect_evidence(inc or incident(), EDGES, grafana, logs_datasource_uid="", id_fields=["lot_id"], now=FINISHED,
-                                metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=queries, lookback_minutes=5,
+                                metrics=gather.MetricOptions(datasource_uid="prom-uid", queries=queries, lookback_minutes=5,
                                                           step_seconds=10, **options))
 
 
@@ -100,21 +101,21 @@ def test_real_backlog_is_summarized_as_baseline_then_growth(fake):
 def test_series_summary_arithmetic():
     t0 = datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc)
     points = [(t0 + timedelta(minutes=i), 10.0 if i < 30 else 10.0 + (i - 30) * 20) for i in range(40)]
-    got = rca.summarize_series(points, t0 + timedelta(minutes=30), 6)
+    got = gather.summarize_series(points, t0 + timedelta(minutes=30), 6)
     assert got["baseline"] == 10 and got["during"] == {"min": 10, "max": 190, "last": 190, "max_at": "01:39:00Z"}
     assert got["last_vs_baseline"] == 19 and got["max_vs_baseline"] == 19
     assert [p["t"] for p in got["points"]][0] == "01:00:00" and got["points"][-1] == {"t": "01:39:00", "v": 190}
-    only_during = rca.summarize_series(points[30:], t0 + timedelta(minutes=30), 6)
+    only_during = gather.summarize_series(points[30:], t0 + timedelta(minutes=30), 6)
     assert only_during["baseline"] is None and "last_vs_baseline" not in only_during   # 事故前沒有資料：照實給 None
-    only_before = rca.summarize_series(points[:30], t0 + timedelta(minutes=30), 6)
+    only_before = gather.summarize_series(points[:30], t0 + timedelta(minutes=30), 6)
     assert only_before["baseline"] == 10 and "during" not in only_before
-    assert rca.summarize_series([], t0, 6) is None
+    assert gather.summarize_series([], t0, 6) is None
 
 
 def test_the_summary_has_no_threshold_a_flat_series_is_reported_as_flat():
     """這一包不判斷「算不算異常」：沒變化的數值照樣列出來，倍數是 1。判斷交給 Grafana 規則與 LLM。"""
     t0 = datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc)
-    got = rca.summarize_series([(t0 + timedelta(minutes=i), 42.0) for i in range(20)], t0 + timedelta(minutes=10), 5)
+    got = gather.summarize_series([(t0 + timedelta(minutes=i), 42.0) for i in range(20)], t0 + timedelta(minutes=10), 5)
     assert got["baseline"] == 42 and got["last_vs_baseline"] == 1 and got["max_vs_baseline"] == 1
 
 
@@ -153,7 +154,7 @@ def test_many_series_keep_only_the_largest_and_say_how_many_were_dropped():
 
     grafana = Grafana("http://grafana.test", "t", transport=httpx.MockTransport(handle))
     ev = collect_evidence(incident("mq-broker"), EDGES, grafana, logs_datasource_uid="", id_fields=["lot_id"], now=FINISHED,
-                              metrics=rca.MetricOptions(datasource_uid="u", queries=(READY,), lookback_minutes=5, step_seconds=10, max_series=3))
+                              metrics=gather.MetricOptions(datasource_uid="u", queries=(READY,), lookback_minutes=5, step_seconds=10, max_series=3))
     assert [m["labels"]["queue"] for m in ev["metrics"]] == ["q7", "q6", "q5"]
     assert any("有 7 條序列，只列數值最大的 3 條" in note for note in ev["notes"])
 
@@ -161,7 +162,7 @@ def test_many_series_keep_only_the_largest_and_say_how_many_were_dropped():
 @pytest.mark.parametrize("name", ['mq"} or vector(1) #', "a\\b", "line\nbreak", 'x"y'])
 def test_service_names_from_alert_labels_cannot_break_out_of_the_query_string(name):
     """系統名稱來自告警的標籤（外部輸入）。跳脫後整段仍然是一個字串：引號前面都有反斜線、沒有裸的換行。"""
-    escaped = rca.promql_string(name)
+    escaped = gather.promql_string(name)
     assert "\n" not in escaped
     for i, ch in enumerate(escaped):
         if ch == '"':
@@ -174,7 +175,7 @@ def test_without_metrics_settings_nothing_is_queried(fake):
     assert ev["metrics"] == [] and fake.metric_requests == [] and not any("指標" in n for n in ev["notes"])
     no_uid = collect_evidence(incident(), EDGES, Grafana("http://grafana.test", "t", transport=fake.transport),
                                   logs_datasource_uid="", id_fields=["lot_id"], now=FINISHED,
-                                  metrics=rca.MetricOptions(queries=(READY,)))
+                                  metrics=gather.MetricOptions(queries=(READY,)))
     assert no_uid["metrics"] == [] and fake.metric_requests == []
 
 
@@ -197,10 +198,10 @@ def test_metrics_settings_are_read_from_config(tmp_path):
     - {name: 請求量, expr: 'sum(rate(http_requests_total{service="$service"}[5m]))'}
     - {name: 佇列, expr: 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})', services: [mq-broker]}
 """)
-    assert s.metrics == rca.MetricOptions(datasource_uid="vm-uid", lookback_minutes=30, step_seconds=15, max_points=8, max_series=2, queries=(
-        rca.MetricQuery("請求量", 'sum(rate(http_requests_total{service="$service"}[5m]))'),
-        rca.MetricQuery("佇列", 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})', ("mq-broker",))))
-    assert load(tmp_path, "").metrics == rca.MetricOptions()
+    assert s.metrics == gather.MetricOptions(datasource_uid="vm-uid", lookback_minutes=30, step_seconds=15, max_points=8, max_series=2, queries=(
+        gather.MetricQuery("請求量", 'sum(rate(http_requests_total{service="$service"}[5m]))'),
+        gather.MetricQuery("佇列", 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})', ("mq-broker",))))
+    assert load(tmp_path, "").metrics == gather.MetricOptions()
 
 
 @pytest.mark.parametrize("text, message", [
@@ -224,7 +225,7 @@ def test_bad_metrics_settings_are_rejected_at_startup(tmp_path, text, message):
 
 def test_a_round_with_metrics_configured_sends_the_trend_to_the_llm(world):  # noqa: F811
     w = world
-    settings = replace(w.settings, metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(READY, CONSUMERS)))
+    settings = replace(w.settings, metrics=gather.MetricOptions(datasource_uid="prom-uid", queries=(READY, CONSUMERS)))
     w.receive("firing_mq", "firing_cim")
     summary = w.run(60, settings=settings)
     assert summary["status"] == "ok" and w.fake.metric_requests

@@ -318,10 +318,13 @@ def test_next_steps_from_the_llm_reach_the_annotation_and_never_trigger_anything
     [inc] = rows(w, dbmod.incidents)
     assert inc["suggestions"] == "下一步建議｜1) 確認 mq-broker 的 lot.dispatch 佇列有沒有消費者；2) 重啟 mq-broker 的消費者"
     lines = w.fake.annotations[inc["annotation_id"]]["text"].split("<br>")
-    assert lines[2].startswith("1. mq-broker：") and lines[3] == inc["suggestions"] and lines[4].startswith("證據｜")
+    assert lines[2].startswith("經過｜mq-broker：") and lines[3] == inc["suggestions"] and lines[4].startswith("證據｜")
     assert [r for r in rows(w, dbmod.deliveries) if r["channel"] == "remediation"] == []   # 建議不會變成修復請求
     [sent] = [json.loads(r["payload"]) for r in rows(w, dbmod.deliveries) if r["channel"] == "incident_api"]
-    assert sent["schema"] == "aiops-lite.incident.v2" and sent["root_cause"]["suggestions"].startswith("1) 確認 mq-broker")
+    assert sent["schema"] == "aiops-lite.incident.v3" and sent["root_cause"]["suggestions"].startswith("1) 確認 mq-broker")
+    # v3：因果鏈的每一步與別的解釋分開給，前綴（經過｜、↳、另一種可能｜）拿掉，結尾的依據等級留著
+    assert sent["root_cause"]["chain"] and sent["root_cause"]["chain"][0].startswith("mq-broker：") and sent["root_cause"]["chain"][0].endswith("）")
+    assert sent["root_cause"]["alternatives"] == [] and "candidates" not in sent["root_cause"]
     w.run(64 + 61, llm=httpx.MockTransport(lambda r: (_ for _ in ()).throw(httpx.ConnectError("down"))))
     assert rows(w, dbmod.incidents)[0]["suggestions"] == inc["suggestions"]             # 沒有重新分析的輪次：建議照舊
 

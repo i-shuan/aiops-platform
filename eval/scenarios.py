@@ -3,7 +3,8 @@
 
 時間都用「幾秒前」表示（相對於執行當下）。告警的 startsAt 比真正出事的時間晚是刻意的：規則通常有持續時間的條件。
 答案的欄位：
-  source   正確的源頭系統；"" = 正確答案是「還無法判定」；None = 這個案例不評源頭
+  source   因果鏈裡要出現的系統；清單 = 其中任何一個在鏈裡都算（兩端共同構成、證據分不出哪一端的情況）；
+           "" = 正確答案是「還無法判定」；None = 這個案例不評
   any      摘要裡至少要出現其中一個詞（有講到重點）
 這些案例是人造的，用來比較改動前後，不代表產線上的準確率。"""
 from __future__ import annotations
@@ -104,7 +105,10 @@ SCENARIOS = [
         "alerts": [("instana-agent", "instana-agent 錯誤日誌異常", "P2", 150)],
         "logs": every(20, "instana-agent", "ERROR", "MariaDb | com.instana.sensor-mariadb - 1.1.33 | Cannot connect to MariaDb at db-host:3306 (attempt {n})", start=240)
                 + every(20, "instana-agent", "ERROR", "MariaDb | com.instana.sensor-mariadb - 1.1.33 | Error during sensor activation, retry {n}", start=235),
-        "source": "MariaDb", "any": ["MariaDb", "MariaDB", "mariadb"],
+        # 答案鍵 2026-11-28 改過（使用者決定）：原本只認 MariaDb。只有 instana-agent 自己的日誌、沒有 MariaDb 的日誌，分不出是感測器、
+        # 網路還是資料庫的問題；鏈寫 instana-agent、把 MariaDb 放在「另一種可能」是誠實的寫法，不該算錯。兩個任何一個在鏈裡都算，
+        # 但說明裡一定要提到 MariaDb（any）。改之前這一題在因果鏈的版本是 0/5。
+        "source": ["instana-agent", "MariaDb"], "any": ["MariaDb", "MariaDB", "mariadb"],
     },
     {
         "name": "s12_component_name_with_digits", "about": "現場回報：錯誤訊息裡的元件名稱帶數字（k8s），而且沒有寫進關係邊",

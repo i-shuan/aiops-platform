@@ -30,6 +30,8 @@ import httpx
 from dataclasses import replace
 
 from eval.scenarios import HELD_OUT, SCENARIOS
+from src import evidence as gather
+from src import report
 from src import rca
 from src.grafana import Grafana
 from src.logs import Elasticsearch, LogFields, VictoriaLogs
@@ -116,8 +118,8 @@ def build_evidence(scenario: dict, grafana: Grafana, store, now: datetime, setti
     incidents = converge([], alerts, [], edges, now=now, close_after_seconds=300)
     assert len(incidents) == 1, f"{scenario['name']}：告警沒有收斂成一張事故（{len(incidents)} 張），案例的關係邊要補"
     [incident] = incidents
-    evidence = rca.collect_evidence(incident, edges, grafana, logs=store, id_fields=list(settings.id_fields), now=now, limits=settings.evidence)
-    overview = rca.overview_text(rca.overview(evidence, store.fields, settings.evidence.error_levels))
+    evidence = gather.collect_evidence(incident, edges, grafana, logs=store, id_fields=list(settings.id_fields), now=now, limits=settings.evidence)
+    overview = gather.overview_text(gather.overview(evidence, store.fields, settings.evidence.error_levels))
     return evidence, overview
 
 
@@ -128,31 +130,36 @@ def _same_name(said: str, answer: str) -> bool:
 
 
 def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
-    """問一次並計分。回傳 {ok, why, source, confidence, summary}。
+    """問一次並計分。回傳 {ok, why, source, grade, root, summary}。
 
-    答案是某個系統：排第一的可能原因要是它。答案是「無法判定」：不能有信心分數 40 以上的可能原因
-    （可以列 39 以下的推測，那正是要它做的事；把常態雜訊講成 40 分以上才算錯）。
-    重點字在摘要或任何一個可能原因的理由裡出現都算。"""
+    答案是某個系統：它要出現在因果鏈的某一步（不必是第一步：憑證與握手、逾時與熔斷這類問題是兩端共同構成的，
+    硬要求誰排第一量到的是格式不是分析；它是不是第一步另外記在 root，只當參考）。只列在「另一種可能」不算。
+    答案是「無法判定」：鏈上不能有依據等級是「直接證據」的步驟。重點字在摘要或任何一步、任何別的解釋的說明裡出現都算。
+    2026-11-28 以前的算法是「排第一的可能原因要是它」，數字不能直接比。"""
     try:
         raw = rca.call_llm(llm["url"], llm["key"], llm["model"], rca.build_prompt(evidence, overview), timeout=120)
-        summary, candidates = rca.read_answer(raw, evidence)
+        summary, steps = rca.read_answer(raw, evidence)
     except Exception as e:   # 連線、格式、幻覺檢查沒過：都算這一次沒答對
         return {"ok": False, "why": f"{type(e).__name__}: {str(e).replace(llm['key'], '<key>')[:160]}", "source": None,
-                "confidence": None, "summary": ""}
-    top = candidates[0] if candidates else {"source": "", "confidence": 0}
-    said = " ".join([summary, *(c["reason"] for c in candidates)])
-    listed = "、".join(f"{c['source']} {c['confidence']}" for c in candidates) or "（沒有列）"
+                "grade": None, "root": False, "summary": ""}
+    chain = [c for c in steps if c["role"] == "chain"]
+    top = chain[0] if chain else {"source": "", "grade": ""}
+    said = " ".join([summary, *(c["reason"] for c in steps)])
+    listed = " → ".join(f"{c['source']} {report.GRADE_TEXT[c['grade']]}" for c in chain) or "（沒有鏈）"
+    others = "、".join(c["source"] for c in steps if c["role"] == "alternative")
     problems = []
+    accepted = [scenario["source"]] if isinstance(scenario["source"], str) and scenario["source"] else list(scenario["source"] or [])
     if scenario["source"] == "":
-        strong = [c for c in candidates if c["confidence"] >= rca.CONFIDENCE_MEDIUM]
+        strong = [c for c in chain if c["grade"] == "direct"]
         if strong:
-            problems.append(f"答案是無法判定，卻給 {strong[0]['source']} {strong[0]['confidence']} 分")
-    elif scenario["source"] is not None and _same_name(top["source"], scenario["source"]) is False:
-        problems.append(f"排第一的是 {top['source'] or '（沒有）'}，答案是 {scenario['source']}")
+            problems.append(f"答案是無法判定，鏈上卻有直接證據的 {strong[0]['source']}")
+    elif accepted and not any(_same_name(c["source"], name) for c in chain for name in accepted):
+        problems.append(f"鏈裡沒有 {'／'.join(accepted)}")
     if scenario["any"] and not any(word in said for word in scenario["any"]):
         problems.append(f"沒有提到 {'／'.join(scenario['any'])}")
-    return {"ok": not problems, "why": "；".join(problems), "source": top["source"], "confidence": top["confidence"],
-            "count": len(candidates), "candidates": listed, "summary": summary}
+    return {"ok": not problems, "why": "；".join(problems), "source": top["source"], "grade": top["grade"],
+            "root": any(_same_name(top["source"], name) for name in accepted),
+            "count": len(chain), "candidates": listed + (f"｜另一種可能：{others}" if others else ""), "summary": summary}
 
 
 def main() -> int:
@@ -202,11 +209,12 @@ def main() -> int:
         ok = sum(a["ok"] for a in answers)
         right, total = right + ok, total + len(answers)
         named = [a for a in answers if a["source"]]
-        scores = [a["confidence"] for a in named]
+        grades = sorted({report.GRADE_TEXT[a["grade"]] for a in named})
         tops = "、".join(sorted({a["source"] for a in named})) or "—"
-        spread = f"{min(scores)}～{max(scores)} 分" if scores else "—"
+        spread = "／".join(grades) or "—"
         listed = "／".join(str(a.get("count", 0)) for a in answers)
-        print(f"{scenario['name']:<32} {ok}/{len(answers)}  排第一的：{tops}（{spread}）  各列了 {listed} 個  （提示詞 {len(prompt)} 字）")
+        roots = sum(a.get("root", False) for a in answers)
+        print(f"{scenario['name']:<32} {ok}/{len(answers)}  鏈的第一步：{tops}（{spread}；是答案的 {roots} 次）  鏈各 {listed} 步  （提示詞 {len(prompt)} 字）")
         for a in answers:
             if not a["ok"]:
                 print(f"      ✗ {a['why']}｜{a.get('candidates', '')}｜{a['summary'][:90]}")

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import rca
 from src.grafana import Grafana, parse_webhook
 from src.logs import LogFields
@@ -33,7 +34,7 @@ def incident(*services):
     return inc
 
 
-def collect(fake, inc=None, *, logs="vl", traces="", limits=rca.EvidenceLimits(), **kw):
+def collect(fake, inc=None, *, logs="vl", traces="", limits=gather.EvidenceLimits(), **kw):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
     return collect_evidence(inc or incident(), EDGES, g, logs_datasource_uid=logs, id_fields=["eqp_id", "lot_id", "carrier_id"],
                                 now=NOW, limits=limits, traces_datasource_uid=traces, **kw)
@@ -71,7 +72,7 @@ def test_most_frequent_lot_and_carrier_become_cross_system_timelines(fake):
 
 
 def test_timeline_query_is_not_limited_to_errors_or_to_the_incident_systems(fake):
-    collect(fake, limits=rca.EvidenceLimits(max_timeline_events=7, window_padding_minutes=30))
+    collect(fake, limits=gather.EvidenceLimits(max_timeline_events=7, window_padding_minutes=30))
     [lots, lot_totals] = [q for q in fake.log_queries if '"lot_id":in(' in q["query"]]        # 每種關聯碼兩次：內容、筆數
     assert lots["query"] == '"lot_id":in("LOT24A0031") | sort by (_time) partition by ("lot_id") limit 7'   # 由舊到新
     assert lot_totals["query"] == '"lot_id":in("LOT24A0031") | stats by ("lot_id") count() as total'
@@ -84,16 +85,16 @@ def test_timeline_shows_normal_events_around_the_errors_and_says_when_it_is_cut(
     fake.logs = [log_row(f"2026-11-21T02:{m:02d}:00Z", svc, lvl, msg, lot_id="LOT24A0031")
                  for m, svc, lvl, msg in [(32, "cim-eap", "INFO", "lot track-in complete"), (38, "amhs-mcs", "INFO", "transfer complete"),
                                           (40, "cim-eap", "ERROR", "HSMS T3 Timeout"), (41, "amhs-mcs", "ERROR", "transfer aborted")]]
-    ev = collect(fake, limits=rca.EvidenceLimits(max_timeline_events=3))
+    ev = collect(fake, limits=gather.EvidenceLimits(max_timeline_events=3))
     [line] = ev["timelines"]                                           # 只有批號有紀錄；沒有載具編號就沒有那一條
     assert [e["level"] for e in line["events"]] == ["INFO", "INFO", "ERROR"] and line["truncated"] is True
 
 
 def test_timelines_can_be_limited_or_turned_off(fake):
-    assert [t["id"] for t in collect(fake, limits=rca.EvidenceLimits(max_timeline_ids=1))["timelines"]] in (["LOT24A0031"], ["FOUP0912"])
+    assert [t["id"] for t in collect(fake, limits=gather.EvidenceLimits(max_timeline_ids=1))["timelines"]] in (["LOT24A0031"], ["FOUP0912"])
     before = len(fake.queries("partition by (\"lot_id\")") + fake.queries("partition by (\"carrier_id\")"))
-    assert collect(fake, limits=rca.EvidenceLimits(timeline_fields=()))["timelines"] == []
-    assert collect(fake, limits=rca.EvidenceLimits(max_timeline_ids=0))["timelines"] == []
+    assert collect(fake, limits=gather.EvidenceLimits(timeline_fields=()))["timelines"] == []
+    assert collect(fake, limits=gather.EvidenceLimits(max_timeline_ids=0))["timelines"] == []
     assert len(fake.queries("partition by (\"lot_id\")") + fake.queries("partition by (\"carrier_id\")")) == before   # 關掉就不多查
 
 
@@ -129,7 +130,7 @@ def test_error_traces_become_call_chains_with_the_deepest_failure_marked(fake):
 
 
 def test_traces_are_searched_per_system_for_the_incident_window(fake):
-    collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=rca.EvidenceLimits(max_traces=2))
+    collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=gather.EvidenceLimits(max_traces=2))
     first, second = fake.trace_requests                       # Jaeger 的搜尋一次一個服務；回來的已經是完整的 Trace，不用再逐條取
     assert first.url.path == "/api/datasources/proxy/uid/vt-uid/api/traces"
     assert sorted(r.url.params["service"] for r in (first, second)) == ["mes-api", "web-portal"]
@@ -140,10 +141,10 @@ def test_traces_are_searched_per_system_for_the_incident_window(fake):
 
 def test_the_most_recent_traces_are_chosen(fake):
     fake.traces = {name: trace_copy(name, seconds) for name, seconds in (("old", 0), ("newest", 60), ("newer", 30))}
-    ev = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=rca.EvidenceLimits(max_traces=2))
+    ev = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=gather.EvidenceLimits(max_traces=2))
     assert [c["trace_id"] for c in ev["call_chains"]] == ["newest", "newer"]
     fake.trace_requests.clear()
-    assert collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=rca.EvidenceLimits(max_traces=0))["call_chains"] == []
+    assert collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=gather.EvidenceLimits(max_traces=0))["call_chains"] == []
     assert fake.trace_requests == []            # max_traces = 0：連搜尋都不做
 
 
@@ -163,10 +164,10 @@ def test_trace_ids_found_in_error_logs_are_fetched_directly_before_searching(fak
     paths = [r.url.path.rsplit("/", 1)[1] for r in fake.trace_requests]
     assert paths == ["from-log-1", "sampled-out", "from-log-2", "traces", "traces"]              # 最後兩次是搜尋（每個系統一次）
     fake.trace_requests.clear()
-    two = collect(fake, incident("mes-api", "cim-eap"), traces="vt-uid", limits=rca.EvidenceLimits(max_traces=2))
+    two = collect(fake, incident("mes-api", "cim-eap"), traces="vt-uid", limits=gather.EvidenceLimits(max_traces=2))
     assert [c["trace_id"] for c in two["call_chains"]] == ["from-log-1", "from-log-2"]
     assert all(not r.url.path.endswith("/api/traces") for r in fake.trace_requests)             # 日誌裡的就夠了：不搜尋
-    off = collect(fake, incident("mes-api", "cim-eap"), traces="vt-uid", limits=rca.EvidenceLimits(trace_id_field="", max_traces=1))
+    off = collect(fake, incident("mes-api", "cim-eap"), traces="vt-uid", limits=gather.EvidenceLimits(trace_id_field="", max_traces=1))
     assert len(off["call_chains"]) == 1 and all(r.url.path.endswith("/api/traces") for r in fake.trace_requests[-2:])
 
 
@@ -208,16 +209,16 @@ def test_long_traces_keep_failed_spans_first_and_other_ways_to_mark_failure_are_
 
     spans = [span(0, None, {})] + [span(i, "s0", {}) for i in range(1, 40)] + [span(40, "s0", {"otel.status_code": "ERROR"})]
     trace = {"traceID": "t1", "spans": spans, "processes": {"p1": {"serviceName": "svc"}}}   # 沒有 error 標籤、只有 otel.status_code
-    chain = rca.summarize_trace(trace, "t1", rca.EvidenceLimits(max_trace_spans=5))
+    chain = gather.summarize_trace(trace, "t1", gather.EvidenceLimits(max_trace_spans=5))
     assert len(chain["spans"]) == 5 and chain["truncated"] is True
     assert chain["spans"][0]["span"] == "op0" and chain["spans"][-1]["span"] == "op40" and chain["spans"][-1]["origin"] is True
-    assert rca.summarize_trace({"traceID": "t2", "spans": [], "processes": {}}, "t2", rca.EvidenceLimits()) is None
+    assert gather.summarize_trace({"traceID": "t2", "spans": [], "processes": {}}, "t2", gather.EvidenceLimits()) is None
 
 
 # ── 進 LLM 與幻覺檢查 ──
 
 def test_prompt_gains_the_two_packs_only_when_there_is_something_to_show(fake):
-    plain = rca.build_prompt(collect(fake, incident("erp"), limits=rca.EvidenceLimits(timeline_fields=())))
+    plain = rca.build_prompt(collect(fake, incident("erp"), limits=gather.EvidenceLimits(timeline_fields=())))
     assert "【5." not in plain and "【6." not in plain
     full = rca.build_prompt(collect(fake, incident("mes-api", "cim-eap"), traces="vt-uid"))
     assert "【5. 關聯時間線" in full and "只代表先後，不代表因果" in full and "LOT24A0031" in full

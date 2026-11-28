@@ -4,11 +4,11 @@
   service_graph  Trace 資料庫自己統計的誰呼叫誰。兩種都要對方有開才有：
                  Tempo：metrics-generator 的 service graph 指標，存在另一個 Prometheus 相容的資料源，有請求數與失敗數（service_graph）
                  VictoriaTraces：-servicegraph.enableTask，從同一個 Jaeger 資料源的 /api/dependencies 讀，只有誰呼叫誰（dependencies）
-  trace          事故時撈到的呼叫鏈裡的父子關係（rca.calls_in）
+  trace          事故時撈到的呼叫鏈裡的父子關係（gather.calls_in）
   log            某個系統的錯誤日誌裡，原樣出現另一個已知系統的名稱（mentions）。方向不一定是呼叫，比前兩種弱
 
 兩個用途：
-  1. 合併事故：兩個系統都在告警，而且**這段時間它們之間有失敗的呼叫、或其中一個的錯誤日誌指名另一個**，才併成一張（failing_links）。
+  1. 合併事故：這裡只提供事實（這段時間誰呼叫誰、失敗幾次、誰的日誌指名誰）；要不要併成一張的規則在 grouping.failing_links。
      只是「平常有呼叫關係」不算：大家都連的元件不會把不相干的告警拉成同一張。
   2. 給 LLM 當線索：跟事故的系統有關的關係附進證據（main.py 用 db.calls_touching 取）。
 
@@ -161,15 +161,6 @@ def mentions(logs: list[dict[str, Any]], names: set[str]) -> list[tuple[str, str
             if owner and owner != name and pattern.search(str(entry.get("message") or "")):
                 pairs.append((owner, name))
     return list(dict.fromkeys(pairs))
-
-
-def failing_links(alerting: set[str], *, graph_edges: list[dict[str, Any]], trace_calls: list[tuple[str, str]],
-                  log_mentions: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """可以拿來合併事故的連結：兩端都在告警，而且這段時間 (1) service graph 上這條呼叫有失敗，或 (2) Trace 裡這條呼叫自己失敗
-    （trace_calls 要傳 rca.calls_in(..., failed_only=True) 的結果），
-    或 (3) 一方的錯誤日誌指名另一方。回傳不分方向的 (a, b)。純函式。"""
-    pairs = [(e["caller"], e["callee"]) for e in graph_edges if (e["failed"] or 0) > 0] + list(trace_calls) + list(log_mentions)
-    return list(dict.fromkeys(tuple(sorted(p)) for p in pairs if p[0] in alerting and p[1] in alerting and p[0] != p[1]))
 
 
 def read_service_graph(grafana: Grafana, *, traces_type: str, traces_uid: str, metrics_uid: str, start: datetime, end: datetime,

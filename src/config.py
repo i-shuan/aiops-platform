@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from src import evidence as gather
 from src import grouping, rca
 from src import outputs as outlets
 from src.grafana import LabelNames
@@ -58,11 +59,11 @@ class Settings:
     graph_retention_days: int = 30             # 學到的系統關係多久沒再看到就丟掉（traces.graph_retention_days）；0 = 不學、不用、也不跨系統合併
     service_graph_datasource_uid: str = ""     # 只有 Tempo：存 service graph 指標的那個 Prometheus 相容資料源的 uid；空的 = 沒有這個來源
     #                                            # （VictoriaTraces 的 service graph 從 traces_datasource_uid 讀，不用另外設）
-    metrics: rca.MetricOptions = rca.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
+    metrics: gather.MetricOptions = gather.MetricOptions()   # 指標走勢；沒設資料源或沒有查詢 = 不查
     id_fields: tuple[str, ...] = ("eqp_id", "lot_id", "carrier_id")
     log_fields: LogFields = LogFields()
     outputs: outlets.OutputOptions = outlets.OutputOptions()   # 註記以外的出口：事故 API、自動修復（沒設 url = 佔位）
-    evidence: rca.EvidenceLimits = rca.EvidenceLimits()
+    evidence: gather.EvidenceLimits = gather.EvidenceLimits()
     labels: LabelNames = LabelNames()
     tz: str = "Asia/Taipei"
     log_level: str = "INFO"
@@ -122,7 +123,7 @@ class Settings:
         level = text(raw, "log_level", "INFO").upper()
         if level not in LOG_LEVELS:
             raise ConfigError(f"log_level={level!r} 要是 {'、'.join(LOG_LEVELS)} 其中之一")
-        d_ev, d_llm, d_lab = rca.EvidenceLimits(), rca.LlmOptions(), LabelNames()
+        d_ev, d_llm, d_lab = gather.EvidenceLimits(), rca.LlmOptions(), LabelNames()
         default_severity = text(labels, "default_severity", d_lab.default_severity, "labels.").upper()
         if default_severity not in grouping.SEVERITY_RANK:
             raise ConfigError(f"labels.default_severity={default_severity!r} 要是 P0～P3")
@@ -187,7 +188,7 @@ class Settings:
             service_graph_datasource_uid=service_graph_uid(traces),
             metrics=metric_options(metrics),
             log_fields=log_field_names(logs, logs_type), outputs=output_options(raw),
-            evidence=rca.EvidenceLimits(
+            evidence=gather.EvidenceLimits(
                 max_hits=integer(logs, "max_hits", d_ev.max_hits, 1, 10000, "logs."),
                 window_padding_minutes=integer(logs, "window_padding_minutes", d_ev.window_padding_minutes, 0, 1440, "logs."),
                 error_levels=words(logs, "error_levels", d_ev.error_levels),
@@ -360,8 +361,8 @@ def log_field_names(logs: dict[str, Any], logs_type: str) -> LogFields:
 MAX_METRIC_QUERIES = 20   # 每張事故要查「查詢數 × 系統數」次：設個上限，避免一份設定把指標資料庫打爆
 
 
-def metric_options(raw: dict[str, Any]) -> rca.MetricOptions:
-    d = rca.MetricOptions()
+def metric_options(raw: dict[str, Any]) -> gather.MetricOptions:
+    d = gather.MetricOptions()
     items = raw.get("queries") or []
     if not isinstance(items, list) or len(items) > MAX_METRIC_QUERIES:
         raise ConfigError(f"metrics.queries 要是清單，最多 {MAX_METRIC_QUERIES} 條")
@@ -376,14 +377,14 @@ def metric_options(raw: dict[str, Any]) -> rca.MetricOptions:
         if name in seen:
             raise ConfigError(f"metrics.queries 有兩條都叫 {name!r}：名稱會出現在給 LLM 的證據裡，不能重複")
         seen.add(name)
-        if rca.SERVICE_PLACEHOLDER not in expr:
-            raise ConfigError(f"metrics.queries「{name}」的 expr 裡沒有 {rca.SERVICE_PLACEHOLDER}：每個系統會各查一次，"
-                              f"查詢要用它指定系統，例如 {{service=\"{rca.SERVICE_PLACEHOLDER}\"}}")
+        if gather.SERVICE_PLACEHOLDER not in expr:
+            raise ConfigError(f"metrics.queries「{name}」的 expr 裡沒有 {gather.SERVICE_PLACEHOLDER}：每個系統會各查一次，"
+                              f"查詢要用它指定系統，例如 {{service=\"{gather.SERVICE_PLACEHOLDER}\"}}")
         only = item.get("services") or []
         if not isinstance(only, list) or not all(isinstance(s, str) and s.strip() for s in only):
             raise ConfigError(f"metrics.queries「{name}」的 services 要是系統名稱清單")
-        queries.append(rca.MetricQuery(name=name, expr=expr, services=tuple(s.strip() for s in only)))
-    return rca.MetricOptions(
+        queries.append(gather.MetricQuery(name=name, expr=expr, services=tuple(s.strip() for s in only)))
+    return gather.MetricOptions(
         datasource_uid=text(raw, "datasource_uid", "", "metrics."), queries=tuple(queries),
         lookback_minutes=integer(raw, "lookback_minutes", d.lookback_minutes, 5, 1440, "metrics."),
         step_seconds=integer(raw, "step_seconds", d.step_seconds, 5, 3600, "metrics."),

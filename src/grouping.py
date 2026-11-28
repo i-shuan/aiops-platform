@@ -170,3 +170,12 @@ def converge(open_incidents: list[Incident], firing: list[Alert], resolved: list
             inc.status, inc.ended_at = "closed", max(ends) if ends else inc.resolved_at
             inc.changed, inc.annotated = True, False
     return incidents
+
+
+def failing_links(alerting: set[str], *, graph_edges: list[dict[str, Any]], trace_calls: list[tuple[str, str]],
+                  log_mentions: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """可以拿來合併事故的連結：兩端都在告警，而且這段時間 (1) service graph 上這條呼叫有失敗，或 (2) Trace 裡這條呼叫自己失敗
+    （trace_calls 要傳 gather.calls_in(..., failed_only=True) 的結果），
+    或 (3) 一方的錯誤日誌指名另一方。回傳不分方向的 (a, b)。純函式。"""
+    pairs = [(e["caller"], e["callee"]) for e in graph_edges if (e["failed"] or 0) > 0] + list(trace_calls) + list(log_mentions)
+    return list(dict.fromkeys(tuple(sorted(p)) for p in pairs if p[0] in alerting and p[1] in alerting and p[0] != p[1]))

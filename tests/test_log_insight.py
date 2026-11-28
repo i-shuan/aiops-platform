@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import rca
 from src.grafana import Grafana
 from src.logs import LogFields, VictoriaLogs
@@ -53,14 +54,14 @@ PROFILE, COUNTS = 'partition by ("service.name")', "stats count() if"   # 各系
     ("err 42", "err *", None),
 ])
 def test_messages_become_patterns_and_countable_words(message, pattern, words):
-    assert rca.log_pattern(message) == pattern
-    assert rca.pattern_words(pattern) == words
+    assert gather.log_pattern(message) == pattern
+    assert gather.pattern_words(pattern) == words
 
 
 def test_same_kind_of_error_with_different_numbers_is_one_pattern_but_words_are_not_touched():
-    a, b = rca.log_pattern("T3 timeout eqp=EQP-CVD-07 after 5000ms"), rca.log_pattern("T3 timeout eqp=EQP-CVD-12 after 30ms")
+    a, b = gather.log_pattern("T3 timeout eqp=EQP-CVD-07 after 5000ms"), gather.log_pattern("T3 timeout eqp=EQP-CVD-12 after 30ms")
     assert a == b == "T* timeout eqp=EQP-CVD-* after *ms"
-    assert rca.log_pattern("decode failed") == "decode failed" and rca.log_pattern("cafe  bad\tface") == "cafe bad face"
+    assert gather.log_pattern("decode failed") == "decode failed" and gather.log_pattern("cafe  bad\tface") == "cafe bad face"
 
 
 # ── 去重：同一種只留最早的一筆原文 ──
@@ -81,7 +82,7 @@ def test_each_system_gets_its_own_oldest_errors_in_one_query(fake):
     collect(fake)
     [profile] = fake.queries(PROFILE)
     assert profile == ('"service.name":in("amhs-mcs","cim-eap","mq-broker") "log.level":in("ERROR","error","Error","FATAL","fatal",'
-                       f'"CRITICAL","critical") | sort by (_time) partition by ("service.name") limit {rca.FIRST_ERRORS_PER_SYSTEM}')
+                       f'"CRITICAL","critical") | sort by (_time) partition by ("service.name") limit {gather.FIRST_ERRORS_PER_SYSTEM}')
     # 警告不再另外問：跟錯誤同一次查詢撈（最新的在前），撈回來再照等級分開
     assert fake.queries('"log.level":in("WARN"') == []
     [both] = fake.queries("sort by (_time) desc")
@@ -91,7 +92,7 @@ def test_each_system_gets_its_own_oldest_errors_in_one_query(fake):
 def test_a_system_flooded_out_of_the_newest_sample_still_shows_its_earliest_errors(fake):
     """最新的那一批樣本全是 mq-broker（它在大量報錯）；cim-eap、amhs-mcs 較早的錯誤靠各系統各取最早幾筆的那一次補回來。"""
     fake.logs += [log_row(T0 + timedelta(seconds=n), "mq-broker", "ERROR", f"publish rejected: queue full ({n})") for n in range(8)]
-    limits = rca.EvidenceLimits(max_hits=8)
+    limits = gather.EvidenceLimits(max_hits=8)
     newest = VictoriaLogs(Grafana("http://grafana.test", "t", transport=fake.transport), "vl").search_errors(
         incident().services, T0 - timedelta(minutes=10), NOW, 8)
     assert {row["service.name"] for row in newest} == {"mq-broker"}      # 只看最新的 8 筆的話，另外兩個系統完全不見
@@ -137,14 +138,14 @@ def test_a_pattern_that_counts_nothing_gets_no_counts_instead_of_a_wrong_zero(fa
     fake.logsql = zero_counts
     ev = collect(fake)
     assert ev["error_patterns"] and all("during" not in r and "new" not in r for r in ev["error_patterns"])
-    assert "事故前後的次數比較" not in rca.overview_text(rca.overview(ev))
+    assert "事故前後的次數比較" not in gather.overview_text(gather.overview(ev))
 
 
 def test_comparison_can_be_turned_off_and_baseline_length_is_configurable(fake):
-    off = collect(fake, limits=rca.EvidenceLimits(max_log_patterns=0, max_warn_patterns=0))
+    off = collect(fake, limits=gather.EvidenceLimits(max_log_patterns=0, max_warn_patterns=0))
     assert off["error_patterns"] == [] and off["warnings"] == [] and fake.queries(COUNTS) == []
     assert len(off["error_logs"]) == 4 and fake.queries(PROFILE)       # 去重與各系統最早的樣本不受影響
-    collect(fake, limits=rca.EvidenceLimits(baseline_minutes=120))
+    collect(fake, limits=gather.EvidenceLimits(baseline_minutes=120))
     [counts] = [q for q in fake.log_queries if COUNTS in q["query"]]
     assert counts["start"] == "2026-11-21T00:31:10.000000Z"            # 事故時間窗的起點再往前 120 分鐘
 
@@ -162,7 +163,7 @@ def test_warnings_are_grouped_counted_and_shown_separately_from_errors(fake):
     assert [(w["system"], w["pattern"]) for w in ev["warnings"]] == [("mq-broker", "disk usage *% on /data"), ("cim-eap", "publish retry * of *")]
     assert ev["warnings"][0]["example"] == "disk usage 91% on /data"      # 原文、最早的那一筆
     assert (ev["warnings"][0]["during"], ev["warnings"][0]["before"], ev["warnings"][0]["new"]) == (2, 0, True)
-    assert "【3e. 警告" in rca.build_prompt(ev) and "警告 2 種" in rca.overview_text(rca.overview(ev))
+    assert "【3e. 警告" in rca.build_prompt(ev) and "警告 2 種" in gather.overview_text(gather.overview(ev))
     assert all("WARN" not in str(e.get("level", "")) for e in ev["error_logs"])
 
 
@@ -171,7 +172,7 @@ def test_no_warnings_are_asked_for_without_a_level_field_or_when_turned_off(fake
     collect(fake)
     assert len(asked_for_warnings()) == 1                                 # 對照：預設會問一次
     fake.log_queries.clear()
-    collect(fake, limits=rca.EvidenceLimits(warn_levels=()))
+    collect(fake, limits=gather.EvidenceLimits(warn_levels=()))
     assert fake.queries(PROFILE) and asked_for_warnings() == []
     fake.log_queries.clear()
     fake.logs = shifted(recorded_rows("unparsed"), SHIFT)                 # 沒有等級欄位：分不出警告，不問
@@ -202,7 +203,7 @@ def test_without_error_logs_the_warnings_are_still_collected(fake):
     assert ev["error_logs"] == [] and ev["error_patterns"] == [] and fake.queries(PROFILE) == []
     [warning] = ev["warnings"]                                          # 兩筆同一種：歸成一類
     assert (warning["system"], warning["example"]) == ("cim-eap", "slow reply from EQP-CVD-07: 4800ms (limit 5000ms)")
-    assert f"警告 {len(ev['warnings'])} 種" in rca.overview_text(rca.overview(ev))
+    assert f"警告 {len(ev['warnings'])} 種" in gather.overview_text(gather.overview(ev))
 
 
 def test_no_extra_queries_when_these_systems_have_no_logs_at_all(fake):
@@ -234,3 +235,69 @@ def test_insight_settings_are_read_from_config(tmp_path):
 def test_bad_insight_settings_are_rejected_at_startup(tmp_path, text, message):
     with pytest.raises(ConfigError, match=message):
         load(tmp_path, text)
+
+
+# ── 時間窗內沒有錯誤的系統：往回找最後一筆錯誤（只給時間差與原文）──
+
+def test_a_system_whose_errors_stopped_before_the_window_gets_its_last_error_and_how_long_ago(fake):
+    """錯誤在告警之前就停了（感測器逾時之後才開始偏移）：時間窗內 0 筆，但不是「沒有送日誌」，也不能當成沒事。"""
+    start = T0 - timedelta(minutes=10)                                   # 事故時間窗的起點（預設往前 10 分鐘）
+    fake.logs = [log_row(start - timedelta(minutes=m), "amhs-mcs", "ERROR", f"thermocouple TC-4 read timeout ({m})") for m in (33, 40, 55)]
+    fake.logs.append(log_row(start - timedelta(hours=30), "cim-eap", "ERROR", "older than the lookback"))
+    ev = collect(fake)
+    assert ev["error_logs"] == []
+    by_system = {r["system"]: r for r in ev["last_errors"]}
+    assert by_system["amhs-mcs"]["minutes_before_window"] == 33 and by_system["amhs-mcs"]["message"] == "thermocouple TC-4 read timeout (33)"
+    assert by_system["cim-eap"] == {"system": "cim-eap", "none_in_hours": gather.LAST_ERROR_LOOKBACK_HOURS}   # 30 小時前的不算，照實寫沒有
+    assert by_system["mq-broker"] == {"system": "mq-broker", "none_in_hours": 24}
+    text = gather.overview_text(gather.overview(ev))
+    assert "amhs-mcs 最後一筆錯誤在時間窗之前 33 分鐘" in text and "cim-eap 之前 24 小時內也沒有錯誤" in text
+    prompt = rca.build_prompt(ev, text)
+    assert "【3p. 時間窗內沒有錯誤日誌的系統，往回找到的最後一筆錯誤" in prompt and "thermocouple TC-4 read timeout (33)" in prompt
+    assert "none_in_hours" not in prompt                                  # 往回也沒有的只寫在證據概況那一行，提示詞不另外佔一段
+    fake.logs = []
+    nothing = collect(fake)
+    assert all("none_in_hours" in r for r in nothing["last_errors"]) and "【3p." not in rca.build_prompt(nothing, gather.overview_text(gather.overview(nothing)))
+    assert gather.evidence_grade("amhs-mcs", ev) == "inference"         # 時間窗之前的錯誤不拉高依據等級：只是給人與模型參考
+
+
+def test_only_the_systems_without_errors_in_the_window_are_looked_up_and_a_failure_is_only_noted(fake):
+    ev = collect(fake)                                                    # 錄下來的樣本：三個系統在時間窗內都有錯誤
+    assert "last_errors" not in ev and not [q for q in fake.queries("sort by (_time) desc") if q.endswith("limit 1")]
+    fake.logs = [row for row in fake.logs if row["service.name"] != "amhs-mcs"]
+    ev = collect(fake)
+    assert [r["system"] for r in ev["last_errors"]] == ["amhs-mcs"]       # 只查沒有錯誤的那一個
+    assert len([q for q in fake.queries("sort by (_time) desc") if q.endswith("limit 1")]) == 1
+    fake.fail_queries = {'in("amhs-mcs") "log.level"'}                      # 只有「最後一筆錯誤」那一條只查 amhs-mcs 一個系統
+    ev = collect(fake)
+    assert "last_errors" not in ev and ev["error_logs"] and any("找不到 amhs-mcs 在時間窗之前最後一筆錯誤" in n for n in ev["notes"])
+
+
+# ── 同類去重之後：會變的數字附上樣本裡的範圍 ──
+
+@pytest.mark.parametrize("messages, expected", [
+    (["statement timeout after 30s, active sessions 0", "statement timeout after 30s, active sessions 45", "statement timeout after 30s, active sessions 12"],
+     [{"in_example": "0", "min": 0, "max": 45}]),                                                  # 沒變的 30 不列
+    (["took 4.5ms attempt=1", "took 120.25ms attempt=3"], [{"in_example": "4.5", "min": 4.5, "max": 120.25}, {"in_example": "1", "min": 1, "max": 3}]),
+    (["EQP-CVD-07 lot LOT24A0031 failed", "EQP-CVD-09 lot LOT24A0060 failed"], []),                # 機台、批號裡的數字不算
+    (["host 10.3.2.15 down", "host 10.3.2.16 down"], []),                                          # 位址後面幾段也不算（前面是點）
+    (["2026-11-28T13:58:59.000Z | ERROR | w-1 | disk usage 90% on /data", "2026-11-28T14:08:09.120Z | ERROR | w-1 | disk usage 97% on /data"],
+     [{"in_example": "90", "min": 90, "max": 97}]),                                                # 訊息裡的時間戳不算（沒拆欄位的日誌）
+    (["at 14:08:09 retry 1", "at 14:09:10 retry 4"], [{"in_example": "1", "min": 1, "max": 4}]),
+    (["only one sample 5"], []), ([], []),
+    (["a 1 b 2", "a 1"], []),                                                                      # 數字個數不一樣：對不起來，不給
+])
+def test_number_ranges_cover_the_standalone_numbers_that_vary_within_a_kind(messages, expected):
+    assert gather.number_ranges(messages) == expected
+
+
+def test_deduplicated_errors_carry_the_range_so_the_first_sample_is_not_taken_as_a_fact(fake):
+    fake.logs += [log_row(T0 - timedelta(seconds=s), "mq-broker", "ERROR", f"statement timeout after 30s, active sessions {n}")
+                  for s, n in ((90, 0), (60, 45), (30, 12))]
+    ev = collect(fake)
+    [kept] = [e for e in ev["error_logs"] if e["message"].startswith("statement timeout")]
+    assert kept["message"].endswith("active sessions 0") and kept["similar_in_sample"] == 3       # 原文還是最早的那一筆
+    [row] = [r for r in ev["error_patterns"] if r["example"].startswith("statement timeout")]
+    assert row["numbers_in_sample"] == [{"in_example": "0", "min": 0, "max": 45}]
+    assert all("numbers_in_sample" not in e for e in ev["error_logs"])     # 只放在錯誤種類那一包，不重複放兩處
+    assert "numbers_in_sample＝example 裡會變的數字在同類樣本中的範圍" in rca.build_prompt(ev)

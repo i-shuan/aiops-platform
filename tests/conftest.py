@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 FIXTURES = Path(__file__).parent / "fixtures" / "grafana13"
 
 from tests import logsql  # noqa: E402
+from src import evidence as gather
 
 
 def recorded(name: str) -> dict:
@@ -244,11 +245,11 @@ class FakeGrafana:
 
 def collect_evidence(incident, edges, grafana, *, logs_datasource_uid: str = "", traces_datasource_uid: str = "",
                      log_fields=None, logs_filter: str = "", **kw):
-    """測試用的捷徑：用 VictoriaLogs／VictoriaTraces 當來源呼叫 rca.collect_evidence（uid 是空的 = 沒接）。"""
-    from src import logs, rca, traces
+    """測試用的捷徑：用 VictoriaLogs／VictoriaTraces 當來源呼叫 gather.collect_evidence（uid 是空的 = 沒接）。"""
+    from src import logs, traces
     store = logs.VictoriaLogs(grafana, logs_datasource_uid, log_fields or logs.LogFields(), logs_filter) if logs_datasource_uid else None
     chains = traces.VictoriaTraces(grafana, traces_datasource_uid) if traces_datasource_uid else None
-    return rca.collect_evidence(incident, edges, grafana, logs=store, traces=chains, **kw)
+    return gather.collect_evidence(incident, edges, grafana, logs=store, traces=chains, **kw)
 
 
 @pytest.fixture

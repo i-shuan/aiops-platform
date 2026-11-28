@@ -12,8 +12,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import db as dbmod
-from src import rca
 from src.grafana import Grafana, GrafanaError
 from src.grouping import Alert, converge
 from src.logs import Elasticsearch, LogFields, VictoriaLogs
@@ -55,7 +55,7 @@ def victoria(dataset: str = "factory", fields: LogFields = LogFields()) -> Victo
 
 def essence(row: dict, fields: LogFields = LogFields()) -> tuple:
     """一筆日誌裡分析會用到的東西：時間、系統、等級、訊息、識別碼。兩種來源的小數秒寫法不同，比的時候轉成時間。"""
-    return (rca.stamp(row["_time"]), row.get(fields.service), row.get(fields.level) if fields.level else None, row["_msg"],
+    return (gather.stamp(row["_time"]), row.get(fields.service), row.get(fields.level) if fields.level else None, row["_msg"],
             row.get("eqp_id"), row.get("lot_id"), row.get("carrier_id"))
 
 
@@ -133,23 +133,24 @@ def test_the_whole_evidence_is_the_same_whichever_log_source_it_came_from():
     """同一張事故、同一批資料：經 Elasticsearch 收集到的整包證據，跟經 VictoriaLogs 的一樣（只差時間的小數寫法與來源名稱）。"""
     seen: list[str] = []
     store = es("collect_evidence", seen=seen)
-    from_es = rca.collect_evidence(incident(), EDGES, store.grafana, logs=store, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)
+    from_es = gather.collect_evidence(incident(), EDGES, store.grafana, logs=store, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)
     assert seen == [x["request"]["body"] for x in ES["collect_evidence"]]   # 送出的五個請求跟錄製時一模一樣
     v = victoria()
-    from_victoria = rca.collect_evidence(incident(), EDGES, v.grafana, logs=v, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)
+    from_victoria = gather.collect_evidence(incident(), EDGES, v.grafana, logs=v, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)
     same_time = lambda text: json.loads(json.dumps(text, ensure_ascii=False).replace(".000Z", "Z"))
     assert from_es.pop("log_source")["name"] == "Elasticsearch" and from_victoria.pop("log_source")["name"] == "VictoriaLogs"
     assert same_time(from_es) == same_time(from_victoria)
     assert len(from_es["error_logs"]) == 4 and len(from_es["timelines"]) == 2 and all("during" in r for r in from_es["error_patterns"])
-    text = rca.overview_text(rca.overview({**from_es, "log_source": {"name": "Elasticsearch", "scope_hint": Elasticsearch.scope_hint}}))
+    text = gather.overview_text(gather.overview({**from_es, "log_source": {"name": "Elasticsearch", "scope_hint": Elasticsearch.scope_hint}}))
     assert text.startswith("已有的證據｜告警 3 筆")
 
 
 def test_zero_logs_hint_names_the_source_that_is_configured():
     store = es("count_logs_count-empty", "rec-count-empty")
     store.search_errors = lambda *a, **kw: []
-    ev = rca.collect_evidence(incident(), EDGES, store.grafana, logs=store, id_fields=["lot_id"], now=BASE)
-    assert "這段時間一筆日誌都沒有。檢查 logs.index，以及日誌有沒有在送進 Elasticsearch" in rca.overview_text(rca.overview(ev))
+    ev = gather.collect_evidence(incident(), EDGES, store.grafana, logs=store, id_fields=["lot_id"], now=BASE)
+    text = gather.overview_text(gather.overview(ev))
+    assert "一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來" in text and "要確認的話檢查 logs.index，以及日誌有沒有在送進 Elasticsearch" in text
 
 
 # ── Trace：Tempo 回的 OTLP 轉成跟 VictoriaTraces 同一種形狀 ──
@@ -189,12 +190,12 @@ def test_a_tempo_trace_becomes_the_same_call_chain_as_the_victoriatraces_one():
     parent = next(sp for sp in converted["spans"] if sp["operationName"] == "POST /api/track-in")
     # 奈秒換成微秒；父子關係還在（Tempo 經 Grafana 回的 span 編號是 base64，跟 Jaeger 的十六進位寫法不同，但自己對得起來）
     assert deepest["duration"] == 4_980_000 and deepest["references"][0]["spanID"] == parent["spanID"]
-    limits = rca.EvidenceLimits()
-    assert rca.summarize_trace(converted, "11" * 16, limits) == rca.summarize_trace(recorded_trace(), "11" * 16, limits)
+    limits = gather.EvidenceLimits()
+    assert gather.summarize_trace(converted, "11" * 16, limits) == gather.summarize_trace(recorded_trace(), "11" * 16, limits)
     numeric = {"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "svc"}}]},
                                   "scopeSpans": [{"spans": [{"spanId": "s1", "name": "op", "startTimeUnixNano": "1000000",
                                                              "endTimeUnixNano": "3000000", "status": {"code": 2}}]}]}]}
-    [only] = rca.summarize_trace(_from_otlp(numeric, "t"), "t", limits)["spans"]     # resourceSpans 與數字狀態碼（OTLP 的另一種寫法）
+    [only] = gather.summarize_trace(_from_otlp(numeric, "t"), "t", limits)["spans"]     # resourceSpans 與數字狀態碼（OTLP 的另一種寫法）
     assert (only["status"], only["duration_ms"], only["service"]) == ("error", 2, "svc")
     assert _from_otlp({"batches": []}, "t")["spans"] == []
 
@@ -209,13 +210,13 @@ def test_call_chains_from_tempo_fetch_only_the_traces_that_are_used(fake):
     alerts = [Alert(f"f{i}", "firing", f"r{i}", f"{s} errors", s, "P2", BASE, None, {}) for i, s in enumerate(("web-portal", "mes-api"))]
     [inc] = converge([], alerts, [], [("mes-api", "web-portal")], now=BASE, close_after_seconds=300)
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    ev = rca.collect_evidence(inc, [], g, traces=Tempo(g, "tempo-uid"), id_fields=[], now=BASE)
+    ev = gather.collect_evidence(inc, [], g, traces=Tempo(g, "tempo-uid"), id_fields=[], now=BASE)
     [chain] = ev["call_chains"]            # 搜到 2 條；另一條取回時 Tempo 回 404（假設已過保留期限）→ 略過
     assert chain["trace_id"] == "11" * 16 and chain["spans"][-1]["error"] == "connection refused: mes-db:5432"
     assert [r.url.path.rsplit("/", 1)[1] for r in fake.trace_requests] == ["search", "22" * 16, "11" * 16]   # 離現在近的先取
     fake.tempo_search = {"traces": []}
-    ev = rca.collect_evidence(inc, [], g, traces=Tempo(g, "tempo-uid"), id_fields=[], now=BASE)
-    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。Tempo 裡沒有這些系統的失敗請求" in rca.overview_text(rca.overview(ev))
+    ev = gather.collect_evidence(inc, [], g, traces=Tempo(g, "tempo-uid"), id_fields=[], now=BASE)
+    assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。Tempo 裡沒有這些系統的失敗請求" in gather.overview_text(gather.overview(ev))
 
 
 # ── 設定 ──

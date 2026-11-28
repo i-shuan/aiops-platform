@@ -8,8 +8,8 @@ from datetime import timedelta
 
 import httpx
 
+from src import report
 from src import db as dbmod
-from src import rca
 from tests.conftest import SHIFT, log_row, recorded_trace, shifted_trace
 from tests.test_main import T0, rows, world  # noqa: F401（fixture）
 
@@ -38,7 +38,7 @@ def test_when_the_llm_is_down_the_evidence_is_listed_under_an_honest_label(world
     assert "[LLM 推論]" not in "".join(lines)                       # 沒有經過模型的東西不准標成推論
     facts = [l for l in lines if l.startswith("・")]
     assert facts[0] == "・告警：mq-broker：MQ queue depth；cim-eap：CIM T3 timeout；amhs-mcs：AMHS transfer duration"
-    assert len(facts) == rca.MAX_FACT_LINES and all("新出現：" in f and "事故前 0 筆）" in f for f in facts[1:])
+    assert len(facts) == report.MAX_FACT_LINES and all("新出現：" in f and "事故前 0 筆）" in f for f in facts[1:])
     assert "・cim-eap 新出現：T3 timeout waiting S6F12 reply（事故期間 3 筆，事故前 0 筆）" in facts   # 原文與筆數
     assert lines[len(facts) + 2].startswith("證據｜已有告警 3 筆")     # 原本那一行還在，排在後面
     assert not inc["analyzed"] and not inc["candidates"] and inc["llm_failures"] == 1
@@ -56,7 +56,7 @@ def test_errors_that_were_already_there_come_after_the_new_ones_and_the_chain_ge
     w.run(64, llm=httpx.MockTransport(down), settings=replace(w.settings, traces_datasource_uid="vt-uid"))
     lines, _inc = note_lines(w)
     facts = [l for l in lines if l.startswith("・")]
-    assert len(facts) == rca.MAX_FACT_LINES
+    assert len(facts) == report.MAX_FACT_LINES
     assert facts[-1] == "・呼叫鏈停在：cim-eap → mes-db，connection refused: mes-db:5432"
     old = next(f for f in facts if "consumer lag" in f)
     assert old == "・mq-broker：consumer lag exceeded on queue lot.dispatch（事故期間 1 筆，事故前 4 筆）"   # 不是新出現的：不標，照實寫筆數
@@ -99,7 +99,7 @@ def test_without_logs_the_alerts_line_is_still_there_and_long_messages_are_cut(w
     lines, _ = note_lines(w)
     facts = [l for l in lines if l.startswith("・")]
     assert facts[0] == "・告警：mq-broker：MQ queue depth" and len(facts) == 2
-    assert "&lt;b&gt;disk&lt;/b&gt;" in facts[1] and "<b>" not in facts[1] and facts[1].count("x") <= rca.FACT_CHARS   # 跳脫、截斷
+    assert "&lt;b&gt;disk&lt;/b&gt;" in facts[1] and "<b>" not in facts[1] and facts[1].count("x") <= report.FACT_CHARS   # 跳脫、截斷
     w.fake.logs = []
     w.receive("firing_cim")
     w.run(64 + 61, llm=httpx.MockTransport(down))

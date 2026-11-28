@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from src import evidence as gather
 from src import rca
 from src.grafana import Grafana
 from src.grouping import Alert, converge
@@ -62,7 +63,7 @@ def slow_incident():
 def evidence_from(stack: str) -> dict:
     g = replaying(f"collect_evidence_{stack}")
     logs, traces = (vlogs(g), VictoriaTraces(g, "vt")) if stack == "victoria" else (eslogs(g), Tempo(g, "tempo"))
-    return rca.collect_evidence(slow_incident(), [], g, logs=logs, traces=traces, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)
+    return gather.collect_evidence(slow_incident(), [], g, logs=logs, traces=traces, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)
 
 
 # ── 兩種 Trace 資料庫：成功的請求不會被搜成「失敗的」──
@@ -101,7 +102,7 @@ def test_a_latency_incident_gets_its_warnings_and_no_made_up_call_chains_from_ei
 
 def test_the_note_and_the_prompt_show_the_warnings_and_say_there_were_no_failed_requests():
     ev = evidence_from("victoria")
-    text = rca.overview_text(rca.overview(ev))
+    text = gather.overview_text(gather.overview(ev))
     assert "警告 2 種" in text and "VictoriaTraces 裡沒有這些系統的失敗請求" in text
     assert "缺錯誤日誌｜" in text and "log.level 沒有一筆是 ERROR／FATAL／CRITICAL" in text   # 缺的照實寫，不因為有警告就不提
     prompt = rca.build_prompt(ev, text)
@@ -129,20 +130,20 @@ def test_logs_carrying_the_trace_id_are_attached_and_a_failed_lookup_is_only_not
     assert [(e["system"], e["level"], e["message"]) for e in logs_of["events"]] == [
         ("mes-api", "INFO", "track-in accepted, calling mes-db"), ("mes-db", "WARN", "too many connections (max 200)")]
     assert logs_of["systems"] == ["mes-api", "mes-db"]
-    text = rca.overview_text(rca.overview(ev))
+    text = gather.overview_text(gather.overview(ev))
     assert f"呼叫鏈對應的日誌 {sum(len(t['events']) for t in ev['trace_logs'])} 筆" in text
     assert "【6b. 請求的日誌" in rca.build_prompt(ev, text)
-    # mes-db 沒有告警：它在請求的日誌裡，是直接證據，分數不壓到 30
+    # mes-db 沒有告警，但呼叫鏈的失敗點指到它（peer.service）：直接證據
     answer = json.dumps({"summary": "mes-db 連線數滿了，mes-api 的 track-in 等不到連線", "systems": ["mes-db"], "ids": [],
                          "candidates": [{"source": "mes-db", "kind": "evidence", "confidence": 72, "reason": "too many connections"}]})
-    assert [(c["source"], c["confidence"]) for c in rca.read_answer(answer, ev)[1]] == [("mes-db", 72)]
+    assert [(c["source"], c["grade"]) for c in rca.read_answer(answer, ev)[1]] == [("mes-db", "direct")]
     # 關掉欄位：不查。日誌裡沒有這個欄位：沒有這一包，也不寫成「缺」
     asked = len(fake.queries('"trace_id"'))
-    off = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=rca.EvidenceLimits(trace_id_field=""))
+    off = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=gather.EvidenceLimits(trace_id_field=""))
     assert "trace_logs" not in off and len(fake.queries('"trace_id"')) == asked
     fake.logs = [row for row in fake.logs if "trace_id" not in row]
     none = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid")
-    assert "trace_logs" not in none and "呼叫鏈對應的日誌" not in rca.overview_text(rca.overview(none))
+    assert "trace_logs" not in none and "呼叫鏈對應的日誌" not in gather.overview_text(gather.overview(none))
     fake.fail_queries = {'"trace_id"'}
     failed = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid")
     assert failed["call_chains"] and "trace_logs" not in failed and any("呼叫鏈對應的日誌撈取失敗" in n for n in failed["notes"])

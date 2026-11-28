@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from src import evidence as gather
 from src import grouping, rca, report
 from src.db import Database
 from src import graph, promql
@@ -95,20 +96,20 @@ def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[gro
     failing_calls: list[tuple[str, str]] = []  # 其中自己失敗的那幾條：才能拿來合併
     messaging_calls: list[tuple[str, str]] = []   # 其中經訊息佇列的
     mentioned: list[tuple[str, str]] = []
-    linked = graph.failing_links(alerting, graph_edges=graph_edges, trace_calls=[], log_mentions=[])
+    linked = grouping.failing_links(alerting, graph_edges=graph_edges, trace_calls=[], log_mentions=[])
     if len(grouping.group_alerts([grouping.Alert(n, "firing", "", "", n, "P3", now, None) for n in alerting], linked)) >= 2:
         names = sorted(alerting)
         traces, logs = trace_store(settings, grafana), log_store(settings, grafana)
         try:
             if traces is not None:
-                found = sorted(traces.search_error_traces(names, start, now, rca.TRACE_SEARCH_LIMIT), key=lambda t: t["start"], reverse=True)
+                found = sorted(traces.search_error_traces(names, start, now, gather.TRACE_SEARCH_LIMIT), key=lambda t: t["start"], reverse=True)
                 chains = []
                 for t in found[:MAX_LINK_TRACES]:
                     raw = t["trace"] or traces.get_trace(t["id"]) or {}
-                    chains.append(rca.summarize_trace(raw, t["id"], settings.evidence, rca.senders_of(raw, traces)))
+                    chains.append(gather.summarize_trace(raw, t["id"], settings.evidence, gather.senders_of(raw, traces)))
                 seen = {"call_chains": [c for c in chains if c]}
-                trace_calls, failing_calls = rca.calls_in(seen), rca.calls_in(seen, failed_only=True)
-                messaging_calls = rca.calls_in(seen, messaging_only=True)
+                trace_calls, failing_calls = gather.calls_in(seen), gather.calls_in(seen, failed_only=True)
+                messaging_calls = gather.calls_in(seen, messaging_only=True)
             if logs is not None:
                 rows = logs.search_errors(names, start, now, settings.evidence.max_hits, error_levels=settings.evidence.error_levels)
                 mentioned = graph.mentions([{"system": r.get(logs.fields.service), "message": r.get(logstores.MESSAGE_FIELD)} for r in rows], alerting)
@@ -119,19 +120,19 @@ def observe(settings: Settings, grafana: Grafana, db: Database, firing: list[gro
             (trace_calls, "trace", messaging_calls), (mentioned, "log", [])):
         if pairs:
             db.record_calls(pairs, source, now, settings.graph_retention_days, messaging)
-    return graph.failing_links(alerting, graph_edges=graph_edges, trace_calls=failing_calls, log_mentions=mentioned), graph_edges
+    return grouping.failing_links(alerting, graph_edges=graph_edges, trace_calls=failing_calls, log_mentions=mentioned), graph_edges
 
 
 def relations_for(settings: Settings, db: Database, incident: grouping.Incident, graph_edges: list[dict[str, Any]],
                   now: datetime) -> list[dict[str, Any]]:
-    """跟這張事故的系統有關、學到過的關係（給 LLM 當線索），最多 rca.MAX_RELATIONS 條。這裡只讀資料庫：
+    """跟這張事故的系統有關、學到過的關係（給 LLM 當線索），最多 gather.MAX_RELATIONS 條。這裡只讀資料庫：
     直接連到事故系統的（一跳），再加上那些鄰居自己連到的（兩跳）；要取哪幾條、照什麼順序交給 graph.prune（純函式）。"""
     if not settings.graph_retention_days:
         return []
-    first = db.calls_touching(incident.services, now, settings.graph_retention_days, rca.MAX_RELATIONS)
+    first = db.calls_touching(incident.services, now, settings.graph_retention_days, gather.MAX_RELATIONS)
     neighbors = sorted({n for row in first for n in (row["caller"], row["callee"])} - set(incident.services))
-    second = db.calls_touching(neighbors, now, settings.graph_retention_days, rca.MAX_RELATIONS) if neighbors else []
-    return graph.prune(first, second, graph_edges, rca.MAX_RELATIONS)
+    second = db.calls_touching(neighbors, now, settings.graph_retention_days, gather.MAX_RELATIONS) if neighbors else []
+    return graph.prune(first, second, graph_edges, gather.MAX_RELATIONS)
 
 
 def process(settings: Settings, *, now: datetime | None = None, grafana_transport: httpx.BaseTransport | None = None,
@@ -167,7 +168,7 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
             if firing and not settings.service_graph_datasource_uid:
                 return graph_edges   # VictoriaTraces 只有誰呼叫誰、沒有延遲：這一輪開頭讀過的那一份就夠，不重讀
             window = promql.Window.of_incident(inc.started_at, inc.last_seen_at, now, padding_minutes=settings.evidence.window_padding_minutes)
-            if window.start not in fetched:   # 跟這張事故的證據同一個時間窗（evidence.collect_evidence 用同一個 Window）
+            if window.start not in fetched:   # 跟這張事故的證據同一個時間窗（gather.collect_evidence 用同一個 Window）
                 fetched[window.start] = service_graph_of(settings, grafana, window.start, window.end, with_latency=True)
             return fetched[window.start]
         known = {i.uid for i in incidents}
@@ -178,7 +179,7 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
         for inc in incidents:
             if inc.status != "open":
                 if not inc.summary:
-                    inc.summary = f"[未經分析] {rca.raw_summary(inc)}"
+                    inc.summary = f"[未經分析] {report.raw_summary(inc)}"
                 continue
             # 成員或嚴重度變了就重新分析；上一輪 LLM 沒成功的進行中事故，到了退避時間再試
             if not (inc.fresh or not inc.summary or (can_analyze and not inc.analyzed)):
@@ -187,33 +188,33 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 # 退避中：不查日誌、不打 LLM。摘要退回原始版本，但成員變了要跟著更新（誠實：沒有分析過）
                 # 註記上直接列的那幾行證據是上次收集的，照舊；只有第一行（哪些告警響了）跟著現在的成員更新
                 wait = int((inc.llm_next_try - now).total_seconds())
-                raw = rca.failure_line("unreachable", inc.llm_failures, wait) if inc.evidence_note.startswith("・") \
-                    else f"[未經分析] {rca.raw_summary(inc)}"
-                note = "\n".join(rca.alerts_fact(inc) if line.startswith("・告警：") else line for line in inc.evidence_note.splitlines())
+                raw = report.failure_line("unreachable", inc.llm_failures, wait) if inc.evidence_note.startswith("・") \
+                    else f"[未經分析] {report.raw_summary(inc)}"
+                note = "\n".join(report.alerts_fact(inc) if line.startswith("・告警：") else line for line in inc.evidence_note.splitlines())
                 same_text = lambda text: text.split("（連續失敗")[0]   # 剩幾分鐘每一輪都在變：只有那個數字不同不算內容變了
                 if (same_text(inc.summary), inc.analyzed, inc.candidates, inc.evidence_note, inc.suggestions) != (same_text(raw), False, "", note, ""):
                     inc.summary, inc.analyzed, inc.candidates, inc.evidence_note, inc.suggestions = raw, False, "", note, ""
                     inc.changed, inc.annotated = True, False
                 log.debug("事故 %s 的 LLM 分析退避中，%s 之前不再試", inc.uid, inc.llm_next_try.isoformat())
                 continue
-            evidence = rca.collect_evidence(
+            evidence = gather.collect_evidence(
                 inc, relations_for(settings, db, inc, graph_now(inc), now), grafana, logs=log_store(settings, grafana),
                 traces=trace_store(settings, grafana), id_fields=list(settings.id_fields), now=now, limits=settings.evidence,
                 metrics=settings.metrics)
             if settings.graph_retention_days:
                 # 這次的證據裡看到的關係記下來，之後的事故用得到：呼叫鏈裡誰呼叫誰；錯誤日誌裡提到了哪個已知的系統
                 for pairs, source, messaging in (
-                        (rca.calls_in(evidence), "trace", rca.calls_in(evidence, messaging_only=True)),
+                        (gather.calls_in(evidence), "trace", gather.calls_in(evidence, messaging_only=True)),
                         (graph.mentions(evidence["error_logs"], db.known_systems() | set(inc.services)), "log", [])):
                     if pairs:
                         db.record_calls(pairs, source, now, settings.graph_retention_days, messaging)
             before = (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates, inc.suggestions)
             # 「證據」那幾行由程式從實際撈到的結果產生；同一份也交給 LLM，讓它講得出缺的是哪一種
-            groups = rca.overview(evidence, settings.log_fields, settings.evidence.error_levels)
-            inc.evidence_note = rca.overview_brief(groups)   # 註記上只放一行；完整的說明交給 LLM
+            groups = gather.overview(evidence, settings.log_fields, settings.evidence.error_levels)
+            inc.evidence_note = gather.overview_brief(groups)   # 註記上只放一行；完整的說明交給 LLM
             got = rca.analyze_full(inc, evidence, api_url=settings.llm_api_url, api_key=settings.llm_api_key,
                                    model=settings.llm_model, transport=llm_transport, options=settings.llm,
-                                   overview_text=rca.overview_text(groups))
+                                   overview_text=gather.overview_text(groups))
             inc.summary, inc.analyzed, inc.candidates, reason = got.line, got.analyzed, got.candidates, got.reason
             inc.suggestions = got.actions
             if can_analyze and inc.analyzed:
@@ -224,8 +225,8 @@ def process(settings: Settings, *, now: datetime | None = None, grafana_transpor
                 inc.llm_failures += 1
                 delay = backoff_seconds(inc.llm_failures, settings.llm_retry_initial_seconds, settings.llm_retry_max_seconds)
                 inc.llm_next_try, inc.changed = now + timedelta(seconds=delay), True
-                inc.summary = rca.failure_line(got.failure, inc.llm_failures, delay)
-                inc.evidence_note = "\n".join([*rca.evidence_facts(inc, evidence), inc.evidence_note])
+                inc.summary = report.failure_line(got.failure, inc.llm_failures, delay)
+                inc.evidence_note = "\n".join([*report.evidence_facts(inc, evidence), inc.evidence_note])
                 errors.append(f"事故 {inc.uid} 未經 LLM 分析（連續第 {inc.llm_failures} 次）：{reason}；{delay} 秒後再試")
             # 沒設定 LLM 不是故障：不算失敗、不退避，第 2 行是原始摘要
             if (inc.summary, inc.analyzed, inc.evidence_note, inc.candidates, inc.suggestions) != before:

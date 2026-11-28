@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import db as dbmod
 from src import rca, report
 from src.grafana import Grafana
@@ -21,7 +22,7 @@ from tests.test_main import LLM_ANSWER, rows, world  # noqa: F401（fixture）
 T0 = datetime(2026, 11, 21, 2, 41, 10, tzinfo=timezone.utc)
 NOW = T0 + timedelta(seconds=64)
 EDGES = [("mq-broker", "cim-eap"), ("cim-eap", "amhs-mcs")]
-METRIC = rca.MetricQuery("佇列待處理訊息數", 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})')
+METRIC = gather.MetricQuery("佇列待處理訊息數", 'sum by (queue) (rabbitmq_queue_messages_ready{service="$service"})')
 
 
 def incident(*services):
@@ -36,7 +37,7 @@ def no_error_logs(fake):
     fake.logs = [row for row in fake.logs if row["log.level"] != "ERROR"]
 
 
-def collect(fake, inc=None, *, logs="vl", traces="", metrics=rca.MetricOptions(), edges=EDGES, **kw):
+def collect(fake, inc=None, *, logs="vl", traces="", metrics=gather.MetricOptions(), edges=EDGES, **kw):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
     return collect_evidence(inc or incident(), edges, grafana, logs_datasource_uid=logs, id_fields=["eqp_id", "lot_id", "carrier_id"],
                                 now=NOW, traces_datasource_uid=traces, metrics=metrics, **kw)
@@ -46,7 +47,7 @@ COUNT = "count() as total, count() if"   # 錯誤日誌 0 筆之後多問的那�
 
 
 def line(ev, **kw):
-    return rca.overview_text(rca.overview(ev, **kw))
+    return gather.overview_text(gather.overview(ev, **kw))
 
 
 # ── 有什麼 ──
@@ -55,20 +56,20 @@ def test_everything_present_is_listed_with_counts(fake):
     trace = shifted_trace(recorded_trace(), SHIFT)
     trace["processes"]["p1"]["serviceName"] = "cim-eap"      # 錄下來的 Trace 是 web-portal → mes-api；讓其中一段屬於這張事故的系統
     fake.traces = {trace["traceID"]: trace}
-    ev = collect(fake, traces="vt-uid", metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
-    got = rca.overview(ev)
+    ev = collect(fake, traces="vt-uid", metrics=gather.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
+    got = gather.overview(ev)
     assert got["missing"] == [] and got["off"] == [] and got["failed"] == []
     text = "、".join(got["have"])
     assert text.startswith("告警 3 筆、這些系統之間的關係邊 2 條、錯誤日誌 ")
     for part in ("識別碼", "跨系統時間線", "失敗請求的呼叫鏈 1 條", "指標走勢 1 條"):
         assert part in text
-    assert rca.overview_text(got) == "已有的證據｜" + text   # 什麼都不缺：只有一行
+    assert gather.overview_text(got) == "已有的證據｜" + text   # 什麼都不缺：只有一行
 
 
 # ── 錯誤日誌 0 筆：三種原因分得出來，各有下一步 ──
 
 @pytest.mark.parametrize("dataset, says, next_step", [
-    ("count-empty", "這段時間一筆日誌都沒有", "logs.extra_filter"),
+    ("count-empty", "一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來", "logs.extra_filter"),
     ("count-mismatch", "這段時間有 4 筆日誌，但沒有一筆的 service.name 是這些系統", "值是否跟告警的系統名稱完全一樣"),
     ("count-no-errors", "這些系統有 5 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL", "等級的寫法對不上"),
 ])
@@ -115,15 +116,15 @@ def test_sources_that_are_not_configured_are_listed_as_not_connected(fake):
 
 def test_failed_queries_are_reported_as_failed_not_as_missing(fake):
     fake.fail.add("/api/datasources/proxy/uid/")
-    ev = collect(fake, traces="vt-uid", metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
-    got = rca.overview(ev)
+    ev = collect(fake, traces="vt-uid", metrics=gather.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
+    got = gather.overview(ev)
     assert [name for name, _why in got["failed"]] == ["日誌", "呼叫鏈", "指標走勢"] and got["off"] == []
 
 
 def test_queried_but_empty_traces_and_metrics_say_why(fake):
     fake.traces = {}
     ev = collect(fake, incident("amhs-mcs"), traces="vt-uid",
-                 metrics=rca.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
+                 metrics=gather.MetricOptions(datasource_uid="prom-uid", queries=(METRIC,)))
     text = line(ev)
     assert "缺呼叫鏈｜還看不出失敗的請求實際停在哪個系統（包含沒有告警的相依服務）。VictoriaTraces 裡沒有這些系統的失敗請求" in text
     assert "缺指標走勢｜還看不出數值是怎麼變壞的（流量、佇列、資源）。設定的查詢在這段時間都沒有資料" in text
@@ -175,7 +176,7 @@ def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):
     assert prompt.startswith("【0. 證據概況") and "service.name 是這些系統" in prompt.split("【1.")[0]
     assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的" in prompt.split("【1.")[0]   # 完整的說明（少了它哪種分析做不了）只給模型
     system = calls[0]["messages"][0]["content"]
-    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system and "0 到 100 的整數" in system
+    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "chain" in system and "不要給分數" in system
 
 
 def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_changes(world):  # noqa: F811
@@ -210,12 +211,12 @@ def test_source_field_is_optional_but_must_be_a_system_in_the_evidence(fake):
 
 def test_the_annotation_gets_one_brief_line_while_the_llm_gets_the_full_explanation(fake):
     fake.logs = shifted(recorded_rows("count-mismatch"), SHIFT)
-    groups = rca.overview(collect(fake, traces="vt-uid"))
-    brief = rca.overview_brief(groups)
+    groups = gather.overview(collect(fake, traces="vt-uid"))
+    brief = gather.overview_brief(groups)
     assert "\n" not in brief and brief.startswith("證據｜已有告警 3 筆")
     assert "缺錯誤日誌（這段時間有 4 筆日誌" in brief and "還看不出" not in brief          # 留原因，不重複講能分析什麼
     assert brief.endswith("沒接指標走勢") and "metrics.queries" not in brief          # 沒接的只列名稱
-    assert "還看不出" in rca.overview_text(groups) and "metrics.queries" in rca.overview_text(groups)
+    assert "還看不出" in gather.overview_text(groups) and "metrics.queries" in gather.overview_text(groups)
 
 
 def test_logs_without_equipment_or_lot_fields_are_not_reported_as_missing(fake):

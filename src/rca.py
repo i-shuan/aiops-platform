@@ -32,39 +32,11 @@ from typing import Any
 
 import httpx
 
+from src import report
+from src.evidence import GRADES, evidence_grade
 from src.grouping import Incident
 
 log = logging.getLogger("aiops_lite.rca")
-
-# 收集證據的部分在 src/evidence.py。這裡照原名再匯出一次，讓 rca.collect_evidence、rca.EvidenceLimits 這些既有的寫法繼續可用
-from src.evidence import (  # noqa: E402,F401
-    CAN_ANSWER,
-    ERROR_TAG_VALUES,
-    EvidenceLimits,
-    FIRST_ERRORS_PER_SYSTEM,
-    MAX_LINKED_TRACES,
-    MAX_RELATIONS,
-    MetricOptions,
-    MetricQuery,
-    SERVICE_PLACEHOLDER,
-    SPAN_ATTRIBUTES,
-    TRACE_SEARCH_LIMIT,
-    calls_in,
-    collect_evidence,
-    linked_spans,
-    log_pattern,
-    overview,
-    overview_brief,
-    overview_text,
-    pattern_words,
-    promql_string,
-    raw_summary,
-    relation,
-    senders_of,
-    stamp,
-    summarize_series,
-    summarize_trace,
-)
 
 # 夾數字的識別碼樣式（EQP-CVD-07、LOT24A0031）：幻覺檢查用它在摘要文字裡找「像機台／批號的字」（llm.id_pattern 的預設值）
 DEFAULT_ID_PATTERN = r"[A-Za-z][A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*"
@@ -83,35 +55,31 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 - 「錯誤種類與事故前後的次數」：事故前就以差不多的頻率出現的錯誤是平常就有的，不能當成這次事故的原因；
   事故前沒出現過（new=true）或明顯變多的才是線索。沒有次數的錯誤不能推論它是新的還是平常就有的。
 - 「警告」常常寫出後來出錯的原因（資源快用完、重試變多）：錯誤訊息本身沒寫原因時，看同一個系統在出錯前的警告。
-- 一定要列出 1 到 3 個可能的原因（candidates），由最可能排到最不可能。每個寫：
-  source＝系統名稱；
-  reason＝一到兩句白話，要具體：出了什麼事、機制是什麼（怎麼從這個原因變成現在看到的現象）、依據是哪一種證據裡的什麼（直接引用內容）。
-        有別的可能被證據排除時，補一句為什麼不是它。不要只寫「它是源頭」「它有錯誤」這種沒有內容的話；
-  kind＝evidence 或 inference。evidence：證據直接寫出了這個原因（錯誤訊息自己講了原因、呼叫鏈停在它、它的指標先變壞）。
-        inference：證據沒有直接寫，是你從現象、名稱、先後或常識推測的。可以推測，但要說是從哪一項證據推的；
-  confidence＝0 到 100 的整數。
-- 信心分數怎麼給（依據有多直接，不是機率）：
-  70～100＝有直接指向它的證據，而且沒有別的合理解釋（它自己這次才出現的錯誤、呼叫鏈停在它、它的指標先變壞、別的系統的錯誤訊息指名連不上它）。
-  40～69＝有指向它的證據，但還有別的可能。
-  0～39＝只是從告警的名稱、觸發的數值、哪一筆先響、關係邊推測，沒有直接證據。kind 是 inference 的一律給 39 以下。
-- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊列出可能的原因（分數給 39 以下），不要只回「無法判定」。
-  有別的合理可能就列出來，不要只列一個。連推測的依據都沒有時 candidates 才可以是空的。
+- 把事情的經過寫成一條因果鏈（chain）：由**原因到現象**排，1 到 4 步。第一步是最源頭、你認為最先出事的地方；最後一步是告警看到的現象。
+  只有一個系統、原因就在它自己身上時，一步就夠。兩個系統共同構成問題（憑證與握手、名稱解析與被解析的對象、逾時與熔斷）時，兩個都寫進鏈裡，
+  不用硬選一個當唯一的源頭。每一步寫：
+  system＝一個系統名稱（一步只寫一個，不要用「／」「與」把兩個系統寫在一起；同一個系統接連發生的事寫在同一步，不要只為了重述告警多寫一步）；
+  what＝一到兩句白話，要具體：這一步出了什麼事、它怎麼造成下一步、依據是哪一種證據裡的什麼（直接引用內容）。
+        不要只寫「它是源頭」「它有錯誤」這種沒有內容的話；
+  kind＝evidence 或 inference。evidence：證據直接寫出了這一步（錯誤訊息自己講了、呼叫鏈停在它、它的指標先變壞）。
+        inference：證據沒有直接寫，是你從現象、名稱、先後或常識推測的。可以推測，但要說是從哪一項證據推的。
+- 還有別的合理解釋時，另外列在 alternatives（最多 2 個，格式跟鏈的一步一樣），並在 what 寫清楚證據為什麼比較不支持它、或為什麼還排除不了。
+  分不出兩種解釋誰對時，不要硬湊成一條鏈：鏈寫你比較有依據的那一種，另一種放 alternatives。
+- 不要給分數或把握程度。每一步的依據等級由程式照證據判定，不是你判定：那個系統自己有事故前沒出現過的錯誤、呼叫鏈的失敗點停在它、
+  別的系統的錯誤訊息指名它＝直接證據；只有警告、平常就有的錯誤、指標變化＝間接證據；只有告警或關係邊＝推測。你標成 inference 的一律算推測。
+- 就算只有告警，也要根據告警的名稱、數值、先後與關係邊寫出可能的經過（kind 標 inference），不要只回「無法判定」。
+  連推測的依據都沒有時 chain 才可以是空的。
 - summary 是寫給值班人員看的一句結論，用白話講這個問題為什麼會發生：哪裡出了什麼事、造成什麼現象。
-  不要只寫哪個系統是源頭，也不要抱怨缺了什麼證據（那個由程式另外顯示）。分數全部在 39 以下時，開頭寫「目前只能推測」。
+  不要只寫哪個系統是源頭，也不要抱怨缺了什麼證據（那個由程式另外顯示）。鏈上每一步都是 inference 時，開頭寫「目前只能推測」。
 - 另外列 1 到 3 條「下一步建議」（actions）：值班人員現在該去確認或處理什麼，照先後排。要具體到看哪個系統的什麼
-  （哪一種日誌、哪個設定、哪條連線、哪個資源），而且要對得上你列的可能原因。先寫能確認原因的檢查，再寫處置。
+  （哪一種日誌、哪個設定、哪條連線、哪個資源），而且要對得上你寫的經過。先寫能確認原因的檢查，再寫處置。
   不要寫「檢查日誌」「聯絡負責人」「持續觀察」這種對任何事故都成立的話；也不要建議證據裡看不出依據的操作。這些只是建議，不會被自動執行。
 - 只輸出一個 JSON 物件，不要 Markdown：
-  {"summary": "繁體中文，80 字以內", "candidates": [{"source": "系統名稱", "kind": "evidence", "confidence": 85, "reason": "一句話"}], "actions": ["下一步建議，一句話"], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
+  {"summary": "繁體中文，80 字以內", "chain": [{"system": "系統名稱", "kind": "evidence", "what": "一到兩句"}], "alternatives": [{"system": "系統名稱", "kind": "inference", "what": "一到兩句"}], "actions": ["下一步建議，一句話"], "systems": ["你點名的系統"], "ids": ["你點名的機台／批號／載具"]}"""
 
-MAX_CANDIDATES = 3
+MAX_CHAIN = 4          # 因果鏈最多幾步（版面的上限）
+MAX_ALTERNATIVES = 2   # 另外最多列幾個別的解釋（版面的上限）
 MIN_NAME_CHARS = 3   # 名稱至少這麼長，才用「原樣出現在證據文字裡」當憑據：一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化
-DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "trace_logs", "metrics")
-# 信心分數的分段（提示詞裡跟模型講的同一套）。分數是模型自評「依據有多直接」，不是機率、沒有校準過。
-CONFIDENCE_HIGH, CONFIDENCE_MEDIUM = 70, 40
-NO_DIRECT_EVIDENCE_CAP = 30   # 沒有直接證據指向的系統，分數最高只到這裡（落在「只是推測」那一段）
-LEGACY_CONFIDENCE = {"高": 85, "中": 55, "低": 25}   # 舊格式的高／中／低換成各段的中間值
-
 @dataclass(frozen=True)
 class LlmOptions:
     """呼叫 LLM 與檢查回答的選項（config.yaml 的 llm.*；都是選填，下面是預設值）。"""
@@ -120,47 +88,6 @@ class LlmOptions:
     max_summary_chars: int = 300         # 摘要超過就截斷（註記第 2 行）
     system_prompt: str = ""              # 空字串 = 用內建的 SYSTEM_PROMPT；來自 llm.system_prompt_file
     id_pattern: str = DEFAULT_ID_PATTERN  # 空字串 = 不檢查摘要文字裡的識別碼（systems／ids 清單照樣檢查）
-
-
-MAX_FACT_LINES = 5   # LLM 沒有分析時，註記上最多直接列幾行證據（版面的上限，不是判斷門檻）
-FACT_CHARS = 120     # 每一行引用的原文最多幾個字
-FAILURE_TEXT = {"unreachable": "LLM 目前連不上", "rejected": "LLM 的回答沒有通過檢查"}
-
-
-def alerts_fact(incident: Incident) -> str:
-    return f"・告警：{raw_summary(incident)}"
-
-
-def evidence_facts(incident: Incident, evidence: dict[str, Any]) -> list[str]:
-    """LLM 沒有分析的時候直接貼在註記上的幾行證據。全部是程式收集到的原文與筆數，沒有推論、沒有排名次：
-    第一行是哪些告警響了；再來是錯誤種類（事故前沒出現過的排前面，再照事故期間的筆數）；最後一行是呼叫鏈最底層的失敗點。"""
-    clip = lambda text: " ".join(str(text).split())[:FACT_CHARS]
-    lines = [alerts_fact(incident)]
-    chain = next((sp for c in evidence.get("call_chains") or [] for sp in c["spans"] if sp.get("origin")), None)
-    room = MAX_FACT_LINES - 1 - (1 if chain else 0)
-    patterns = sorted(evidence.get("error_patterns") or [], key=lambda r: (not r.get("new", False), -r.get("during", 0)))
-    for r in patterns[:room]:
-        if "during" not in r:
-            lines.append(f"・{r['system']}：{clip(r['example'])}")
-        else:
-            lines.append(f"・{r['system']}{' 新出現' if r['new'] else ''}：{clip(r['example'])}"
-                         f"（事故期間 {r['during']} 筆，事故前 {r['before']} 筆）")
-    if not patterns:   # 沒有做次數比較（查詢失敗或關掉了）：退而列錯誤日誌的樣本
-        for e in (evidence.get("error_logs") or [])[:room]:
-            lines.append(f"・{e['system']}：{clip(e['message'])}")
-    if chain:
-        target = (chain.get("attributes") or {}).get("peer.service")
-        path = " → ".join(x for x in (chain.get("called_by") if chain.get("called_by") != chain["service"] else None,
-                                      chain["service"], target) if x)
-        lines.append(f"・呼叫鏈停在：{path}，{clip(chain.get('error') or chain['span'])}")
-    return lines
-
-
-def failure_line(kind: str, failures: int, retry_seconds: int) -> str:
-    """LLM 沒有分析時註記第 2 行的內容：說明原因、什麼時候再試，並交代下面幾行是什麼。"""
-    minutes = max(1, round(retry_seconds / 60))
-    return (f"[未經分析] {FAILURE_TEXT.get(kind, FAILURE_TEXT['unreachable'])}（連續失敗 {failures} 次，約 {minutes} 分鐘後重試）。"
-            f"以下是程式收集到的證據，沒有經過推論：")
 
 
 def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str:
@@ -175,10 +102,16 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
             f"【4. 錯誤日誌裡各識別碼的出現次數】\n{dump(evidence['id_counts'])}\n\n")
     windows = evidence.get("count_windows") or {}
     counts_note = (f"during＝事故期間 {windows.get('during_minutes', '?')} 分鐘內的筆數，before＝事故前 {windows.get('before_minutes', '?')} 分鐘內的筆數；"
-                   f"new=true 表示事故前一筆都沒有；沒有這些欄位的是數不出來")
+                   f"new=true 表示事故前一筆都沒有；沒有這些欄位的是數不出來。"
+                   f"numbers_in_sample＝example 裡會變的數字在同類樣本中的範圍：in_example 只是最早那一筆剛好寫的值，不要當成固定的事實")
     # pattern（把數字換成 * 的樣板）只是程式歸類用的，不給模型看：它會把樣板裡的字當成真的名稱照抄
     # （現場遇到的：k8s 被寫成 k*s）。模型看 example，那是原文。
     shown = lambda rows: [{k: v for k, v in row.items() if k != "pattern"} for row in rows]
+    found_earlier = [r for r in evidence.get("last_errors") or [] if "minutes_before_window" in r]   # 往回也沒有的只寫在證據概況，不另外佔一段
+    if found_earlier:
+        text += ("【3p. 時間窗內沒有錯誤日誌的系統，往回找到的最後一筆錯誤（minutes_before_window＝它比事故時間窗的起點早幾分鐘。"
+                 "只是時間與原文：它在告警之前就停了，跟這次有沒有關係程式沒有判斷）】\n"
+                 f"{dump(found_earlier)}\n\n")
     if evidence.get("error_patterns"):
         text += (f"【3d. 主要的錯誤種類與事故前後的次數（example 是這一種錯誤最早的一筆原文；{counts_note}）】\n"
                  f"{dump(shown(evidence['error_patterns']))}\n\n")
@@ -226,9 +159,10 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     （使用者的決定，2026-11-26，現場 AP1105 的兩張事故就是這樣被退回的）。
     證據裡完全找不到的名稱：排第一的可能原因是它、或結論的句子提到它 → 整份不採用；只是排在後面的可能原因 → 只拿掉那一個。
 
-    可能的原因最多留 MAX_CANDIDATES 個，每個是 {source, confidence（0～100）, reason}。分數是模型自己給的，程式只做一件事：
-    **沒有直接證據指向那個系統，分數最高只到 NO_DIRECT_EVIDENCE_CAP**。直接證據 = 那個系統的名稱出現在日誌、警告、Trace、
-    時間線、呼叫鏈或指標裡（DIRECT_EVIDENCE）；只出現在告警與關係邊裡的不算。這不是校準：分數不是機率。"""
+    回傳的清單是因果鏈的每一步（role="chain"，由原因到現象，最多 MAX_CHAIN 步，照模型給的順序）接著別的解釋
+    （role="alternative"，最多 MAX_ALTERNATIVES 個，照等級排），每個是 {source, role, grade, reason}。
+    **模型不給分數**：grade 由 evidence_grade() 照證據判定；模型自己標成推測（kind=inference）的一律是 inference（只會往下調）。
+    找不到憑據的名稱：鏈的第一步、或結論提到它 → 整份不採用；其餘的 → 只拿掉那一個。"""
     body = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     answer = json.loads(body)
     summary = " ".join(str(answer["summary"]).split())
@@ -259,27 +193,27 @@ def read_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int =
     # 只認統計會誤擋兩種真的有憑據的情況：日誌沒拆欄位、機台與批號只寫在訊息文字裡；以及有拆欄位但沒排進 top_ids 的。
     # 這是字串比對：編出來的 EQP-1 剛好是證據裡 EQP-10 的開頭時擋不到（摘要文字的檢查本來就有同樣的限制）。
     unknown += [i for i in answer.get("ids") or [] if i not in ids and not (isinstance(i, str) and i.strip() and i in corpus)]
-    raw = answer.get("candidates")
-    raw = raw if isinstance(raw, list) else []   # 選填：自訂提示詞可以不要求
-    direct = json.dumps({key: visible.get(key) for key in DIRECT_EVIDENCE}, ensure_ascii=False).lower()
+    # 新格式：chain（由原因到現象）＋ alternatives。舊格式（自訂提示詞可能還在用）：candidates 的第一個當成鏈的唯一一步，其餘當成別的解釋
+    as_list = lambda value: value if isinstance(value, list) else []
+    legacy = as_list(answer.get("candidates"))
+    planned = ([("chain", item) for item in as_list(answer.get("chain"))[:MAX_CHAIN]] or [("chain", item) for item in legacy[:1]]) \
+        + [("alternative", item) for item in (as_list(answer.get("alternatives")) or legacy[1:])[:MAX_ALTERNATIVES]]
     candidates: list[dict[str, Any]] = []
-    for rank, item in enumerate(raw[:MAX_CANDIDATES]):
-        if not isinstance(item, dict) or not str(item.get("source") or "").strip():
-            raise ValueError("candidates 的每一項都要有 source")
-        name = str(item["source"]).strip()
+    for rank, (role, item) in enumerate(planned):
+        name = str((item.get("system") or item.get("source") or "") if isinstance(item, dict) else "").strip()
+        if not name:
+            raise ValueError("chain／alternatives 的每一項都要有 system")
         if not grounded(name):
-            if rank == 0:   # 排第一的就是結論在講的那一個：它沒有憑據，整份不能用
+            if rank == 0:   # 鏈的第一步就是結論說的源頭：它沒有憑據，整份不能用
                 unknown.append(name)
-            continue        # 排在後面的：只拿掉這一個，其他照用
-        score = _confidence(item.get("confidence"))
-        if name.lower() not in direct:   # 沒有直接證據指向它：分數最高只到「只是推測」那一段
-            score = min(score, NO_DIRECT_EVIDENCE_CAP)
-        # 模型自己說這一條是推測的（證據沒有直接寫）：可以列，但分數不能進到「有證據」那一段，註記上也會標「推測」
+            continue        # 其餘的：只拿掉這一個，其他照用
+        # 模型自己說這一步是推測的（證據沒有直接寫）：不管那個系統有多少證據，這一步就是推測
         inferred = str(item.get("kind") or "").strip().lower() == "inference"
-        if inferred:
-            score = min(score, CONFIDENCE_MEDIUM - 1)
-        candidates.append({"source": name, "confidence": score, "reason": " ".join(str(item.get("reason") or "").split()),
-                           **({"inferred": True} if inferred else {})})
+        candidates.append({"source": name, "role": role, "grade": "inference" if inferred else evidence_grade(name, evidence),
+                           "reason": " ".join(str(item.get("what") or item.get("reason") or "").split())})
+    # 鏈照模型給的因果順序，不重排；別的解釋照等級排（穩定排序）
+    candidates = [c for c in candidates if c["role"] == "chain"] + sorted((c for c in candidates if c["role"] == "alternative"),
+                                                                         key=lambda c: GRADES.index(c["grade"]))
     # 摘要與理由的文字裡夾數字的識別碼（機台、批號樣式）也要在證據裡找得到：防它只寫在句子裡、沒列進 ids
     # 泛稱（HTTP2、v2 這類）不在證據裡也會被擋：樣式不合用就改 llm.id_pattern，設成空字串 = 關掉這一項
     if id_pattern:
@@ -309,32 +243,10 @@ def read_actions(text: str, evidence: dict[str, Any], *, id_pattern: str = DEFAU
     return out[:MAX_ACTIONS]
 
 
-def actions_text(actions: list[str]) -> str:
-    """註記上的那一行：下一步建議｜1) …；2) …"""
-    return "下一步建議｜" + "；".join(f"{n}) {line}" for n, line in enumerate(actions, 1)) if actions else ""
-
-
-def _confidence(raw: Any) -> int:
-    """模型給的信心分數整理成 0～100 的整數。沒給、不是數字：當成 0（不替它猜一個分數）。"""
-    if isinstance(raw, str) and raw.strip() in LEGACY_CONFIDENCE:
-        return LEGACY_CONFIDENCE[raw.strip()]
-    try:
-        value = float(str(raw).strip().rstrip("%"))
-    except (TypeError, ValueError):
-        return 0
-    return max(0, min(100, round(value))) if value == value else 0   # value != value 是 NaN
-
-
 def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
                  id_pattern: str = DEFAULT_ID_PATTERN) -> str:
     """read_answer 只取摘要的那一半（通過檢查回傳摘要文字，不通過丟 ValueError）。"""
     return read_answer(text, evidence, max_summary_chars=max_summary_chars, id_pattern=id_pattern)[0]
-
-
-def candidates_text(candidates: list[dict[str, Any]], max_chars: int = 300) -> str:
-    """可能的原因寫成註記上的列點，分數放最後：1. mq-broker：…（信心 90）。模型標成推測的寫（推測，信心 30）。"""
-    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（{'推測，' if c.get('inferred') else ''}信心 {c['confidence']}）"
-                     for n, c in enumerate(candidates, 1))
 
 
 @dataclass(frozen=True)
@@ -342,7 +254,7 @@ class Analysis:
     line: str          # 註記的「根因分析」那一行：[LLM 推論] … 或 [未經分析] …
     analyzed: bool     # 是不是通過檢查的 LLM 推論
     reason: str        # 沒通過的原因
-    candidates: str    # 註記上「可能原因」的幾行（candidates_text）；沒有就是空字串
+    candidates: str    # 註記上「經過」與「另一種可能」的幾行（report.chain_text）；沒有就是空字串
     actions: str = ""  # 註記上「下一步建議｜…」那一行（actions_text）；沒有就是空字串
     failure: str = ""  # 沒有分析的話是哪一種：unreachable（連不上、逾時、回錯誤碼）／rejected（有回答但沒通過檢查）；其餘是空的
 
@@ -351,7 +263,7 @@ def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, 
                  transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
                  overview_text: str = "") -> Analysis:
     """問 LLM 並檢查回答。任何失敗都退回原始摘要（沒有可能原因），不丟例外。"""
-    fallback = f"[未經分析] {raw_summary(incident)}"
+    fallback = f"[未經分析] {report.raw_summary(incident)}"
     if not api_url or not model:
         return Analysis(fallback, False, "沒有設定 llm.url、llm.model", "")
     try:
@@ -367,8 +279,8 @@ def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, 
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
         # 連不上、逾時、回 4xx／5xx 是「LLM 不通」；其餘是它有回答、但格式不對或沒通過幻覺檢查
         return Analysis(fallback, False, reason, "", failure="unreachable" if isinstance(e, httpx.HTTPError) else "rejected")
-    return Analysis(f"[LLM 推論] {summary}", True, "", candidates_text(candidates, options.max_summary_chars),
-                    actions_text(read_actions(answer, evidence, id_pattern=options.id_pattern)))
+    return Analysis(f"[LLM 推論] {summary}", True, "", report.chain_text(candidates, options.max_summary_chars),
+                    report.actions_text(read_actions(answer, evidence, id_pattern=options.id_pattern)))
 
 
 def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,
