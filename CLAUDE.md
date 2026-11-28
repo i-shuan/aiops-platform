@@ -14,8 +14,8 @@
 
 | 界線 | 內容 |
 | :--- | :--- |
-| **查資料只有一把 Grafana Editor Token** | 日誌、Trace、指標、註記全部經 Grafana（資料源代理、Annotations API）。日誌可以是 VictoriaLogs 或 Elasticsearch，Trace 可以是 VictoriaTraces 或 Tempo，指標是 Prometheus 相容的（`logs.type`、`traces.type`；使用者決定兩種都支援，2026-11-26）。嚴禁直連它們，也嚴禁直連產線資料庫 |
-| **什麼算異常由各系統自己的 Grafana 規則決定** | 平台不判斷數值、不放偵測器。告警沒推進來，平台就什麼都不做。指標走勢那包證據只做算術（基準、最大、倍數），不准加「超過多少算異常」的門檻；要抓趨勢就寫成 Grafana 規則（`INPUTS.md`） |
+| **查資料只有一把 Grafana Editor Token** | 日誌、Trace、指標、註記全部經 Grafana（資料源代理、Annotations API）。日誌可以是 VictoriaLogs 或 Elasticsearch，Trace 可以是 VictoriaTraces 或 Tempo，指標一律是 VictoriaMetrics，不另外對 Prometheus 驗證（使用者決定，2026-11-27）（`logs.type`、`traces.type`；使用者決定日誌與 Trace 兩種都支援，2026-11-26）。嚴禁直連它們，也嚴禁直連產線資料庫 |
+| **什麼算異常由各系統自己的 Grafana 規則決定** | 平台不判斷數值、不放偵測器。告警沒推進來，平台就什麼都不做。指標走勢那包證據只做算術（基準、最大、倍數），不准加「超過多少算異常」的門檻；要抓趨勢就寫成 Grafana 規則（`README.md` 第 9 節） |
 | **進只有一個、出只有三個** | 進：Grafana 告警 Webhook。出：Grafana 註記、事故 API、修復請求（`src/outputs.py`；使用者決定照架構圖加後兩個，2026-11-26）。除此之外不對外做任何事：不重啟、不改設定、不起子行程。新增出口要使用者明確要求 |
 | **自動修復只認規則上的標籤** | 跑哪個修復流程只由告警規則上的 `aiops_remediation` 標籤決定（人事先寫好的）。**LLM 的推論不准觸發、也不准選擇修復流程**；只對還在響的告警、還沒結案的事故送；同一張事故、同一條告警、同一個流程只送一次；預設關閉。這幾條不准放寬 |
 | **沒有下游就佔位，不准假裝送了** | 出口沒設網址（或修復沒有 enabled）：不送，只把本來會送的內容記進 `deliveries` 表，註記上寫「佔位，沒有送出」。送出去的格式是這個專案自己定的，沒有跟真的系統對過之前，文件不准寫成已經整合 |
@@ -32,7 +32,7 @@
 ## 2. 檔案與依賴方向
 
 ```
-grouping（不依賴任何模組）
+grouping、promql（不依賴任何模組）
    ▲
 report、db、grafana、outputs
    ▲
@@ -57,7 +57,8 @@ server（HTTP 服務與排程；流程只呼叫 main 的那一輪，另外直接
 | `src/grafana.py` | 解析 Webhook、對 Grafana 的 HTTP（重試、錯誤訊息）、指標查詢、註記 |
 | `src/logs.py` | 日誌的兩種來源（VictoriaLogs、Elasticsearch）：同一組方法，回同一種形狀 |
 | `src/traces.py` | Trace 的兩種來源（VictoriaTraces、Tempo）：同一組方法，回同一種形狀（Jaeger 的） |
-| `src/graph.py` | 系統之間的關係：讀 Tempo 的 service graph、從日誌找提到的系統、判斷哪些連結可以合併事故 |
+| `src/graph.py` | 系統之間的關係。查詢與算術：讀 Tempo 的 service graph（含延遲邊列表：事故期間與事故前的請求量、失敗率、p95、平均）、從日誌找提到的系統、判斷哪些連結可以合併事故；子圖裁切：`prune`（兩跳、排序、上限，純函式）。格式化給 LLM 在 `evidence.relation` |
+| `src/promql.py` | 時間窗（事故期間與事故前的基線，全部共用同一個定義）、PromQL 組裝、捨入與倍數（純函式，不連線） |
 | `src/grouping.py` | 收斂（純函式）：同實體合併、有連結的併成一張、併入進行中事故、結案 |
 | `src/evidence.py` | 收集證據（日誌、呼叫鏈含訊息佇列的連結、指標走勢、系統關係）與證據概況 |
 | `src/rca.py` | 組 Prompt、呼叫 LLM、幻覺檢查、下一步建議 |
@@ -71,12 +72,13 @@ server（HTTP 服務與排程；流程只呼叫 main 的那一輪，另外直接
 
 ## 3. 新東西放哪裡
 
- * **要調門檻、時間、欄位名稱、標籤名稱？** 不寫程式：改 `config.yaml`（Helm 是 `values.yaml` 或 `extraConfig`）。可調項目與內部常數的分界見 `CONFIG.md`。
- * **要讓某個系統的告警進來？** 不寫程式：在公司 Grafana 的規則貼標籤、設通知路由（`README.md`、`GO_LIVE_CHECKLIST.md`）。
- * **要讓指標走勢成為 RCA 證據？** 不寫程式：`config.yaml` 的 `metrics.queries` 加一條查詢。全部的輸入與最理想的狀態見 `INPUTS.md`。
- * **要改提示詞、或改證據交給 LLM 之前的處理？** 先照 `EVAL.md` 跑一次量出現況，改完再跑。留出的案例變差就不合併；不准為了讓留出的案例過關去調程式。前處理只能歸類與計數，不准貼「暴增」「雜訊」這類要門檻的標籤。
- * **要讓日誌成為 RCA 證據？** 不寫程式：照 `FACTORY_METRICS.md` 的統一欄位規範送進 VictoriaLogs 或 Elasticsearch，範例在 `deploy/fluent-bit/`。
- * **要加新的設定項？** `src/config.py` 的 `Settings` 與 `from_dict`（要有範圍檢查），同步更新 `config.example.yaml`、`CONFIG.md`、Helm `values.yaml`。
+ * **要調門檻、時間、欄位名稱、標籤名稱？** 不寫程式：改 `config.yaml`（Helm 是 `values.yaml` 或 `extraConfig`）。可調項目見 `config.example.yaml`，內部常數見 `README.md` 第 10 節。
+ * **要讓某個系統的告警進來？** 不寫程式：在公司 Grafana 的規則貼標籤、設通知路由（`README.md` 第 9、11 節）。
+ * **要讓指標走勢成為 RCA 證據？** 不寫程式：`config.yaml` 的 `metrics.queries` 加一條查詢。全部的輸入與最理想的狀態見 `README.md` 第 9 節。
+ * **要改提示詞、或改證據交給 LLM 之前的處理？** 先照 `README.md` 第 12 節跑評估量出現況，改完再跑，數字記進那一節的表。留出的案例變差就不合併；不准為了讓留出的案例過關去調程式。前處理只能歸類與計數，不准貼「暴增」「雜訊」這類要門檻的標籤。
+ * **要讓日誌成為 RCA 證據？** 不寫程式：照 `README.md` 第 9 節的統一欄位規範送進 VictoriaLogs 或 Elasticsearch，範例在 `deploy/fluent-bit/`。
+ * **要加新的設定項？** `src/config.py` 的 `Settings` 與 `from_dict`（要有範圍檢查），同步更新 `config.example.yaml`、`README.md` 第 10 節、Helm `values.yaml`。
+ * **要算時間窗或組 PromQL？** 用 `src/promql.py`（`Window`、`increase`／`quantile`／`mean`、`round4`、`ratio`），不要在各模組各寫一份。
  * **要加新的證據來源？** 對 Grafana 的呼叫寫在 `src/grafana.py`，收集與整理寫在 `src/evidence.py`；撈不到要寫進 `evidence["notes"]`，不准讓整輪失敗。
  * **要支援另一種日誌或 Trace 的資料庫？** 在 `src/logs.py`／`src/traces.py` 加一個類別，方法與回傳的形狀跟現有的一樣，`main.py` 的 `log_store`／`trace_store` 加一個選項。
    `evidence.py`、`rca.py` 不准出現任何一種資料庫的名字或查詢語法。要有「同一批資料、兩種來源、整包證據一樣」的測試（`tests/test_backends.py`），樣本要從真的元件錄。

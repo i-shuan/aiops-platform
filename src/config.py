@@ -2,7 +2,7 @@
 
 檔案路徑預設 /etc/aiops/config.yaml，要換用環境變數 AIOPS_CONFIG_FILE 指定（唯一的一個）。
 檔案不存在、鍵名打錯、型別不對、必填沒填、數值超出範圍，啟動時直接報錯（ConfigError）。完整範例見 config.example.yaml，
-每一項的說明見 CONFIG.md。檔案裡有 Token 與密碼：不要推上 Git（.gitignore 已排除 config.yaml）；Kubernetes 用 Secret 掛載。
+每一項的說明見 config.example.yaml。檔案裡有 Token 與密碼：不要推上 Git（.gitignore 已排除 config.yaml）；Kubernetes 用 Secret 掛載。
 """
 from __future__ import annotations
 

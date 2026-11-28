@@ -127,7 +127,7 @@ class FakeGrafana:
         return len(self.queries("sort by (_time) desc"))
 
     def query_range(self, query: str) -> httpx.Response:
-        """Prometheus 相容資料源的代理：回 Grafana 13.0.7 + Prometheus 3.5.0 + RabbitMQ 3.12.1 實際錄下來的回應
+        """指標資料源的代理：回 Grafana 13.0.7 + VictoriaMetrics v1.110.0 實際錄下來的回應（序列來自 RabbitMQ 3.12.1）
         （prom_query_range_*.json）。只有 mq-broker 有佇列的指標；其他系統查得到但沒有資料；語法錯的回 400。"""
         if "[1m)" in query:
             name = "prom_query_range_bad_query"
@@ -140,8 +140,11 @@ class FakeGrafana:
         return replay(name)
 
     def instant_query(self, query: str) -> httpx.Response:
-        """service graph 的兩條查詢（請求數、失敗數的增量）。拿錄下來的真實回應當樣板，把每條序列的標籤與數值換成 self.service_graph 的。"""
+        """service graph 的請求數、失敗數（事故期間與基線都回同一組數字）。拿錄下來的真實回應當樣板，把每條序列的標籤與數值換成 self.service_graph 的。
+        延遲的查詢（_seconds）回沒有資料：跟沒開延遲直方圖的 Tempo 一樣。延遲的換算另外用錄下來的回應原樣重播測（test_service_graph_latency.py）。"""
         real = recorded_service_graph("window_with_traffic")[0]["response"]
+        if "_seconds" in query:
+            return httpx.Response(200, json={**real, "data": {**real["data"], "result": []}})
         failed = "request_failed_total" in query
         sample = real["data"]["result"][0]
         result = [{**sample, "metric": {"client": caller, "server": callee}, "value": [sample["value"][0], str(bad if failed else total)]}

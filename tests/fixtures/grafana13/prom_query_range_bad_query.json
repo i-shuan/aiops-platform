@@ -9,10 +9,14 @@
    "step": "10"
   }
  },
- "status": 400,
+ "status": 422,
  "response": {
   "status": "error",
-  "errorType": "bad_data",
-  "error": "invalid parameter \"query\": 1:63: parse error: unexpected \")\" in subquery or range, expected \":\" or \"]\""
+  "errorType": "422",
+  "error": "error when executing query=\"sum(rate(rabbitmq_queue_messages_ready{service=\\\"mq-broker\\\"}[1m)\" on the time range (start=1795579528000, end=1795579938000, step=10000): windowAndStep: unexpected token \")\"; want \"]\"; unparsed data: \")\""
+ },
+ "recorded_with": {
+  "grafana": "13.0.7",
+  "victoriametrics": "v1.110.0"
  }
 }

@@ -91,7 +91,7 @@ Grafana → Alerting → Alert rules，篩選 `state:firing`：MQ、CIM、AMHS �
 | 項目 | 內容 |
 | --- | --- |
 | 元件 | Grafana 13.0.7、Elasticsearch 8.19.23、PostgreSQL 16（aiops-lite 自己的資料庫）、aiops-lite、真的 LLM（OpenAI 相容端點，模型 `gpt-6-luna`） |
-| 資料 | 日誌依 `FACTORY_METRICS.md` 的統一欄位規範寫進 ES，先套用文件裡的 index template |
+| 資料 | 日誌依 `README.md` 第 9 節的統一欄位規範寫進 ES |
 | Grafana 規則 | 3 條，直接查 ES，每 10 秒評估一次，看最近 90 秒 |
 | 通知 | Webhook Contact Point → aiops-lite（Bearer 驗證）；路由條件 `aiops_detect = true` |
 | aiops-lite 設定 | `debounce_seconds: 45`、`followup_seconds: 20`、`close_after_seconds: 60`，關係邊 `mq-broker → cim-eap → amhs-mcs` |

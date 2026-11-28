@@ -12,8 +12,10 @@
 | `victoria_traces.json` | 經 Grafana 的 Jaeger 型別資料源查 VictoriaTraces v0.5.0：搜尋失敗的 Trace、用編號取、編號不存在（404）。2026-11-26 錄 | `record_victoria.py` |
 | `elasticsearch.json` | 經 Grafana 代理查 Elasticsearch 8.19.23：`src/logs.py` 的 Elasticsearch 每一個查詢方法、加上一次完整的證據收集，實際送出的請求與回應。資料跟 `victoria_logs.json` 是同一批。2026-11-26 錄 | `record_elasticsearch.py` |
 | `tempo_search.json`、`tempo_trace.json`、`tempo_trace_missing.json`、`tempo_search_bad_query.json` | 經 Grafana 代理查 Tempo 2.9.0：TraceQL 搜尋錯誤 Trace、用編號取、不存在（404、沒有內容）、TraceQL 寫錯（400）。送進去的三條 Trace 跟 VictoriaTraces 的是同一組。2026-11-23 錄 | `record_tempo.py` |
-| `service_graph.json` | Tempo 2.9.0 的 service graph 指標（metrics-generator 寫進 VictoriaMetrics v1.110.0），經 Grafana 代理查回來：有流量的時間窗、沒有流量的時間窗、查詢寫錯（422）。另有 VictoriaTraces v0.5.0（`-servicegraph.enableTask=true`）經 Jaeger 型別資料源查 `/api/dependencies` 的回應。2026-11-27 錄 | `record_service_graph.py` |
+| `service_graph.json` | Tempo 2.9.0 的 service graph 指標（metrics-generator 寫進 VictoriaMetrics v1.110.0，直方圖的桶用預設值），經 Grafana 代理查回來。流量是腳本自己送的兩段：基線 20 條快的請求，6 分半之後 20 條慢的（mes-db 每次 1.5～2.5 秒、每個請求查 5 次、4 條失敗）。有：請求數與失敗數、加上延遲與事故前 30 分鐘基線的 12 個查詢（with_latency）、沒有流量的時間窗、查詢寫錯（422）、VictoriaTraces v0.5.0 的 /api/dependencies。2026-11-27 錄 | `record_service_graph.py` |
 | `trace_links.json` | 訊息佇列的「連結」接法：eap 發一筆訊息，service-a／b／c 各自另開一條 Trace、只用連結指回發送的那一段（四條 Trace）。同樣的資料送進 VictoriaTraces v0.5.0 與 Tempo 2.9.0，經 Grafana 代理各取回消費端與發送端那兩條。VictoriaTraces 回 `FOLLOWS_FROM` 的 reference，Tempo 回 `links`（編號是 base64）。2026-11-27 錄 | `record_trace_links.py` |
+| `slow_requests.json` | 延遲類的事故：三條都成功、只是快慢不同的 Trace（orders-api → orders-db），日誌只有 INFO 與 WARN、帶 trace_id。同一批資料送進 VictoriaLogs v1.17.0＋VictoriaTraces v0.5.0 與 Elasticsearch 8.19.23＋Tempo 2.9.0，經 Grafana 代理錄下：不限失敗的 Trace 搜尋、用 trace id 查日誌、兩組各一次完整的證據收集。2026-11-27 錄 | `record_slow_requests.py` |
+| `prom_query_range_*.json` | 指標走勢的查詢（`/api/v1/query_range`）經 Grafana 代理查 VictoriaMetrics v1.110.0：佇列堆積、消費者數、沒有資料、查詢寫錯（422）。序列來自 RabbitMQ 3.12.1 的一次真的堆積（2026-11-25 第一次錄在 Prometheus 3.5.0），2026-11-27 照原本的時間戳寫進 VictoriaMetrics 重錄 | `record_metrics.py` |
 | `meta.json` | Grafana 版本、錄製時間、資料源 uid | `record.py` |
 
 webhook 檔是 `{"headers", "body"}`（body 就是 Grafana 送的 JSON）；`victoria_*.json` 是 `{"exchanges": {名稱: [{"request", "status", "response"}]}}`，

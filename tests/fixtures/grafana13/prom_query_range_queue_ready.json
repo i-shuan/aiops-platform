@@ -139,6 +139,14 @@
      ]
     }
    ]
+  },
+  "stats": {
+   "seriesFetched": "1",
+   "executionTimeMsec": 6
   }
+ },
+ "recorded_with": {
+  "grafana": "13.0.7",
+  "victoriametrics": "v1.110.0"
  }
 }

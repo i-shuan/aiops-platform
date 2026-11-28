@@ -15,6 +15,14 @@
   "data": {
    "resultType": "matrix",
    "result": []
+  },
+  "stats": {
+   "seriesFetched": "0",
+   "executionTimeMsec": 0
   }
+ },
+ "recorded_with": {
+  "grafana": "13.0.7",
+  "victoriametrics": "v1.110.0"
  }
 }

@@ -253,13 +253,16 @@ def test_settings_that_do_not_fit_the_chosen_source_are_rejected(extra, message)
 
 def test_a_round_with_elasticsearch_and_tempo_writes_the_same_kind_of_annotation(world):  # noqa: F811
     w = world
-    w.fake.msearch_replies = [{"status": x["status"], "response": x["response"]} for x in ES["collect_evidence"]]
+    slow = json.loads((FIXTURES / "slow_requests.json").read_text(encoding="utf-8"))["exchanges"]
+    # 五個是日誌證據；第六個是「用呼叫鏈的 trace id 查日誌」，真的 Elasticsearch 對一條日誌裡沒有的 Trace 回的內容
+    w.fake.msearch_replies = [{"status": x["status"], "response": x["response"]}
+                              for x in (*ES["collect_evidence"], *slow["es_logs_of_unknown_trace"])]
     settings = replace(w.settings, logs_type="elasticsearch", logs_datasource_uid="es-uid", logs_index="rec-factory",
                        traces_type="tempo", traces_datasource_uid="tempo-uid")
     w.receive("firing_mq", "firing_cim", "firing_amhs")
     assert w.run(64, settings=settings)["status"] == "ok"
     [inc] = rows(w, dbmod.incidents)
-    assert len(w.fake.msearch_requests) == 5 and w.fake.log_queries == [] and w.fake.msearch_replies == []   # 只打了 Elasticsearch
+    assert len(w.fake.msearch_requests) == 6 and w.fake.log_queries == [] and w.fake.msearch_replies == []   # 只打了 Elasticsearch
     assert all(json.loads(body.splitlines()[0])["index"] == "rec-factory" for body in w.fake.msearch_requests)
     note = w.fake.annotations[inc["annotation_id"]]["text"]
     assert "根因分析｜[LLM 推論]" in note and "證據｜已有告警 3 筆" in note and "錯誤日誌 4 種" in note

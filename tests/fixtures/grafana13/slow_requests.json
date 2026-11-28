@@ -1,0 +1,321 @@
+{
+ "versions": {
+  "grafana": "13.0.7",
+  "victorialogs": "v1.17.0",
+  "victoriatraces": "v0.5.0",
+  "elasticsearch": "8.19.23",
+  "tempo": "2.9.0"
+ },
+ "token_role": "Editor",
+ "base": "2026-11-27T13:37:17+00:00",
+ "trace_ids": {
+  "slow": "aa6b09878da1a1a1a1a1a1a1a1a1a1a1",
+  "medium": "bb6b09878db2b2b2b2b2b2b2b2b2b2b2",
+  "fast": "cc6b09878dc3c3c3c3c3c3c3c3c3c3c3"
+ },
+ "durations_ms": {
+  "slow": 4200,
+  "medium": 300,
+  "fast": 90
+ },
+ "dataset": "rec-slow-6b09878d",
+ "index": "rec-slow-6b09878d",
+ "inserted": [
+  {
+   "@timestamp": "2026-11-27T13:35:47.001Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history carrier=FOUP0912 started",
+   "trace_id": "aa6b09878da1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T13:35:51.185Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)",
+   "trace_id": "aa6b09878da1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T13:35:51.180Z",
+   "service": {
+    "name": "orders-db"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "seq scan on lot_history finished, 2400000 rows",
+   "trace_id": "aa6b09878da1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T13:35:51.200Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history done in 4200ms status=200",
+   "trace_id": "aa6b09878da1a1a1a1a1a1a1a1a1a1a1"
+  },
+  {
+   "@timestamp": "2026-11-27T13:36:07.001Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history carrier=FOUP0912 started",
+   "trace_id": "bb6b09878db2b2b2b2b2b2b2b2b2b2b2"
+  },
+  {
+   "@timestamp": "2026-11-27T13:36:07.300Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history done in 300ms status=200",
+   "trace_id": "bb6b09878db2b2b2b2b2b2b2b2b2b2b2"
+  },
+  {
+   "@timestamp": "2026-11-27T13:36:27.001Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history carrier=FOUP0912 started",
+   "trace_id": "cc6b09878dc3c3c3c3c3c3c3c3c3c3c3"
+  },
+  {
+   "@timestamp": "2026-11-27T13:36:27.090Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "INFO"
+   },
+   "message": "GET /orders/history done in 90ms status=200",
+   "trace_id": "cc6b09878dc3c3c3c3c3c3c3c3c3c3c3"
+  },
+  {
+   "@timestamp": "2026-11-27T13:35:57.000Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "connection pool usage 70% (14/20 active)"
+  },
+  {
+   "@timestamp": "2026-11-27T13:36:17.000Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "connection pool usage 71% (14/20 active)"
+  },
+  {
+   "@timestamp": "2026-11-27T13:36:37.000Z",
+   "service": {
+    "name": "orders-api"
+   },
+   "log": {
+    "level": "WARN"
+   },
+   "message": "connection pool usage 72% (14/20 active)"
+  }
+ ],
+ "exchanges": {
+  "vt_search_error_traces": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<vt>/api/traces",
+     "params": {
+      "service": "orders-api",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795786037000000",
+      "end": "1795786638000000"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"data\":[],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":0}"
+   }
+  ],
+  "tempo_search_error_traces": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/search",
+     "params": {
+      "q": "{ resource.service.name =~ \"orders-api\" && status = error }",
+      "start": "1795786037",
+      "end": "1795786638",
+      "limit": "20"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"traces\":[],\"metrics\":{\"inspectedBytes\":\"17172\",\"completedJobs\":3,\"totalJobs\":3}}"
+   }
+  ],
+  "vl_logs_of_traces": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b09878d%22%7D+%22trace_id%22%3Ain%28%22aa6b09878da1a1a1a1a1a1a1a1a1a1a1%22%2C%22cc6b09878dc3c3c3c3c3c3c3c3c3c3c3%22%2C%22ffffffffffffffffffffffffffffffff%22%29+%7C+sort+by+%28_time%29+partition+by+%28%22trace_id%22%29+limit+10&start=2026-11-27T13%3A27%3A17.000000Z&end=2026-11-27T13%3A37%3A17.000000Z"
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-27T13:35:47.001Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"GET /orders/history carrier=FOUP0912 started\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T13:35:51.18Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"seq scan on lot_history finished, 2400000 rows\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"INFO\",\"service.name\":\"orders-db\",\"trace_id\":\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T13:35:51.185Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T13:35:51.2Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"GET /orders/history done in 4200ms status=200\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"}\n{\"_time\":\"2026-11-27T13:36:27.001Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"GET /orders/history carrier=FOUP0912 started\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"cc6b09878dc3c3c3c3c3c3c3c3c3c3c3\"}\n{\"_time\":\"2026-11-27T13:36:27.09Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"GET /orders/history done in 90ms status=200\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"INFO\",\"service.name\":\"orders-api\",\"trace_id\":\"cc6b09878dc3c3c3c3c3c3c3c3c3c3c3\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b09878d%22%7D+%22trace_id%22%3Ain%28%22aa6b09878da1a1a1a1a1a1a1a1a1a1a1%22%2C%22cc6b09878dc3c3c3c3c3c3c3c3c3c3c3%22%2C%22ffffffffffffffffffffffffffffffff%22%29+%7C+stats+by+%28%22trace_id%22%29+count%28%29+as+total&start=2026-11-27T13%3A27%3A17.000000Z&end=2026-11-27T13%3A37%3A17.000000Z"
+    },
+    "status": 200,
+    "response": "{\"trace_id\":\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\",\"total\":\"4\"}\n{\"trace_id\":\"cc6b09878dc3c3c3c3c3c3c3c3c3c3c3\",\"total\":\"2\"}\n"
+   }
+  ],
+  "es_logs_of_traces": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795786037000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"]}}, {\"terms\": {\"trace_id.keyword\": [\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"]}}]}}]}}}\n{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795786037000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"cc6b09878dc3c3c3c3c3c3c3c3c3c3c3\"]}}, {\"terms\": {\"trace_id.keyword\": [\"cc6b09878dc3c3c3c3c3c3c3c3c3c3c3\"]}}]}}]}}}\n{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795786037000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"ffffffffffffffffffffffffffffffff\"]}}, {\"terms\": {\"trace_id.keyword\": [\"ffffffffffffffffffffffffffffffff\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":3,\"responses\":[{\"took\":2,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":4,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"s_w5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:35:47.001Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history carrier=FOUP0912 started\", \"trace_id\": \"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795786547001]},{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"tfw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:35:51.180Z\", \"service\": {\"name\": \"orders-db\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"seq scan on lot_history finished, 2400000 rows\", \"trace_id\": \"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795786551180]},{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"tPw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:35:51.185Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\", \"trace_id\": \"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795786551185]},{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"tvw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:35:51.200Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history done in 4200ms status=200\", \"trace_id\": \"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795786551200]}]},\"status\":200},{\"took\":2,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":2,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"ufw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:36:27.001Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history carrier=FOUP0912 started\", \"trace_id\": \"cc6b09878dc3c3c3c3c3c3c3c3c3c3c3\"},\"sort\":[1795786587001]},{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"uvw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:36:27.090Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"INFO\"}, \"message\": \"GET /orders/history done in 90ms status=200\", \"trace_id\": \"cc6b09878dc3c3c3c3c3c3c3c3c3c3c3\"},\"sort\":[1795786587090]}]},\"status\":200},{\"took\":1,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   }
+  ],
+  "es_logs_of_unknown_trace": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 10, \"track_total_hits\": true, \"sort\": [{\"@timestamp\": \"asc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795786037000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"trace_id\": [\"11111111111111111111111111111111\"]}}, {\"terms\": {\"trace_id.keyword\": [\"11111111111111111111111111111111\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":1,\"responses\":[{\"took\":1,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   }
+  ],
+  "collect_evidence_victoria": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b09878d%22%7D+%22service.name%22%3Ain%28%22orders-api%22%29+%22log.level%22%3Ain%28%22ERROR%22%2C%22error%22%2C%22Error%22%2C%22FATAL%22%2C%22fatal%22%2C%22CRITICAL%22%2C%22critical%22%2C%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+%7C+sort+by+%28_time%29+desc+%7C+limit+100&start=2026-11-27T13%3A26%3A17.000000Z&end=2026-11-27T13%3A37%3A17.000000Z"
+    },
+    "status": 200,
+    "response": "{\"_time\":\"2026-11-27T13:36:37Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"connection pool usage 72% (14/20 active)\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\"}\n{\"_time\":\"2026-11-27T13:36:17Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"connection pool usage 71% (14/20 active)\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\"}\n{\"_time\":\"2026-11-27T13:35:57Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"connection pool usage 70% (14/20 active)\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\"}\n{\"_time\":\"2026-11-27T13:35:51.185Z\",\"_stream_id\":\"00000000000000001546bd5feac6aa62b00ad159f12beab4\",\"_stream\":\"{dataset=\\\"rec-slow-6b09878d\\\"}\",\"_msg\":\"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\",\"dataset\":\"rec-slow-6b09878d\",\"log.level\":\"WARN\",\"service.name\":\"orders-api\",\"trace_id\":\"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b09878d%22%7D+%2A+%7C+stats+count%28%29+as+total%2C+count%28%29+if+%28%22service.name%22%3Ain%28%22orders-api%22%29%29+as+services&start=2026-11-27T13%3A26%3A17.000000Z&end=2026-11-27T13%3A37%3A17.000000Z"
+    },
+    "status": 200,
+    "response": "{\"total\":\"11\",\"services\":\"10\"}\n"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<vl>/select/logsql/query",
+     "params": {},
+     "body": "query=%7Bdataset%3D%22rec-slow-6b09878d%22%7D+%22service.name%22%3Ain%28%22orders-api%22%29+%7C+stats+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22connection%22%2C%22pool%22%2C%22usage%22%2C%22active%22%29+_time%3A%3E%3D2026-11-27T13%3A26%3A17.000000Z%29+as+d0%2C+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22connection%22%2C%22pool%22%2C%22usage%22%2C%22active%22%29+_time%3A%3C2026-11-27T13%3A26%3A17.000000Z%29+as+b0%2C+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22slow%22%2C%22query%22%2C%22SELECT%22%2C%22FROM%22%2C%22lot_history%22%2C%22WHERE%22%2C%22carrier_id%22%2C%22no%22%2C%22index%22%2C%22used%22%2C%22rows%22%2C%22examined%22%29+_time%3A%3E%3D2026-11-27T13%3A26%3A17.000000Z%29+as+d1%2C+count%28%29+if+%28%22service.name%22%3A%3D%22orders-api%22+%22log.level%22%3Ain%28%22WARN%22%2C%22warn%22%2C%22Warn%22%2C%22WARNING%22%2C%22warning%22%2C%22Warning%22%29+_msg%3Aseq%28%22slow%22%2C%22query%22%2C%22SELECT%22%2C%22FROM%22%2C%22lot_history%22%2C%22WHERE%22%2C%22carrier_id%22%2C%22no%22%2C%22index%22%2C%22used%22%2C%22rows%22%2C%22examined%22%29+_time%3A%3C2026-11-27T13%3A26%3A17.000000Z%29+as+b1&start=2026-11-27T12%3A56%3A17.000000Z&end=2026-11-27T13%3A37%3A17.000000Z"
+    },
+    "status": 200,
+    "response": "{\"d0\":\"3\",\"b0\":\"0\",\"d1\":\"1\",\"b1\":\"0\"}\n"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<vt>/api/traces",
+     "params": {
+      "service": "orders-api",
+      "tags": "{\"error\": \"true\"}",
+      "limit": "20",
+      "start": "1795785977000000",
+      "end": "1795786638000000"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"data\":[],\"errors\": null,\"limit\": 0,\"offset\": 0,\"total\":0}"
+   }
+  ],
+  "collect_evidence_es_tempo": [
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 100, \"sort\": [{\"@timestamp\": \"desc\"}], \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795785977000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\", \"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"ERROR\", \"error\", \"Error\", \"FATAL\", \"fatal\", \"CRITICAL\", \"critical\", \"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":2,\"responses\":[{\"took\":2,\"timed_out\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":4,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"vfw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:36:37.000Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"connection pool usage 72% (14/20 active)\"},\"sort\":[1795786597000]},{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"vPw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:36:17.000Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"connection pool usage 71% (14/20 active)\"},\"sort\":[1795786577000]},{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"u_w5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:35:57.000Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"connection pool usage 70% (14/20 active)\"},\"sort\":[1795786557000]},{\"_index\":\"rec-slow-6b09878d\",\"_id\":\"tPw5HaIBmdbPoubKgKDi\",\"_score\":null,\"_source\":{\"@timestamp\": \"2026-11-27T13:35:51.185Z\", \"service\": {\"name\": \"orders-api\"}, \"log\": {\"level\": \"WARN\"}, \"message\": \"slow query 4180ms: SELECT * FROM lot_history WHERE carrier_id=? (no index used, rows examined 2400000)\", \"trace_id\": \"aa6b09878da1a1a1a1a1a1a1a1a1a1a1\"},\"sort\":[1795786551185]}]},\"status\":200}]}"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795785977000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}]}}}\n{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795785977000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":1,\"responses\":[{\"took\":1,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":11,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":1,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":10,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   },
+   {
+    "request": {
+     "method": "POST",
+     "path": "/api/datasources/proxy/uid/<es>/_msearch",
+     "params": {},
+     "body": "{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795785977000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"connection\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"pool\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"usage\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"active\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795784177000, \"lt\": 1795785977000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"connection\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"pool\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"usage\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"active\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795785977000, \"lte\": 1795786637000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"slow\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"query\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"SELECT\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"FROM\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"lot_history\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"WHERE\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"carrier_id\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"no\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"index\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"used\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"rows\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"examined\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n{\"index\": \"rec-slow-6b09878d\", \"ignore_unavailable\": true}\n{\"size\": 0, \"track_total_hits\": true, \"query\": {\"bool\": {\"filter\": [{\"range\": {\"@timestamp\": {\"gte\": 1795784177000, \"lt\": 1795785977000, \"format\": \"epoch_millis\"}}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"service.name\": [\"orders-api\"]}}, {\"terms\": {\"service.name.keyword\": [\"orders-api\"]}}]}}, {\"bool\": {\"minimum_should_match\": 1, \"should\": [{\"terms\": {\"log.level\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}, {\"terms\": {\"log.level.keyword\": [\"WARN\", \"warn\", \"Warn\", \"WARNING\", \"warning\", \"Warning\"]}}]}}, {\"intervals\": {\"message\": {\"all_of\": {\"ordered\": true, \"intervals\": [{\"match\": {\"query\": \"slow\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"query\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"SELECT\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"FROM\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"lot_history\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"WHERE\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"carrier_id\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"no\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"index\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"used\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"rows\", \"ordered\": true, \"max_gaps\": 0}}, {\"match\": {\"query\": \"examined\", \"ordered\": true, \"max_gaps\": 0}}]}}}}]}}}\n"
+    },
+    "status": 200,
+    "response": "{\"took\":3,\"responses\":[{\"took\":2,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":3,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":0,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":2,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":1,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200},{\"took\":1,\"timed_out\":false,\"terminated_early\":false,\"_shards\":{\"total\":1,\"successful\":1,\"skipped\":0,\"failed\":0},\"hits\":{\"total\":{\"value\":0,\"relation\":\"eq\"},\"max_score\":null,\"hits\":[]},\"status\":200}]}"
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<tempo>/api/search",
+     "params": {
+      "q": "{ resource.service.name =~ \"orders-api\" && status = error }",
+      "start": "1795785977",
+      "end": "1795786638",
+      "limit": "20"
+     },
+     "body": ""
+    },
+    "status": 200,
+    "response": "{\"traces\":[],\"metrics\":{\"inspectedBytes\":\"34392\",\"completedJobs\":3,\"totalJobs\":3}}"
+   }
+  ]
+ }
+}

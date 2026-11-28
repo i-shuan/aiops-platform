@@ -52,7 +52,7 @@ logs:            # datasourceUid 留空 = RCA 沒有日誌證據
   extraFilter: ""      # 只有 victorialogs：加在每條日誌查詢最前面的 LogsQL 條件，例如 '{namespace="factory"}'；留空 = 全部
   index: ""            # 只有 elasticsearch：要查的索引，例如 "fluentd-*"；留空 = "*"
   idFields: [eqp_id, lot_id, carrier_id]
-  # 日誌沒有等級欄位（沒拆欄位的容器輸出）：level 設成 ""，改用訊息文字挑錯誤日誌（會誤撈，見 CONFIG.md）。
+  # 日誌沒有等級欄位（沒拆欄位的容器輸出）：level 設成 ""，改用訊息文字挑錯誤日誌（會誤撈，見 README.md 第 9 節）。
   # elasticsearch 另外可以設 time、message（預設 "@timestamp"、message）；VictoriaLogs 固定是 _time、_msg，不能設
   fields: {service: service.name, level: log.level}
 
@@ -79,7 +79,7 @@ timezone: Asia/Taipei
 logLevel: INFO
 
 # 進階的選填設定：照 config.yaml 的結構寫，會合併進產生的 config.yaml（同名的鍵以這裡為準）。
-# 可用的鍵與預設值見 config.example.yaml 裡註解掉的那些行，以及 CONFIG.md。平常留空。例如：
+# 可用的鍵與預設值見 config.example.yaml 裡註解掉的那些行，以及 README.md 第 10 節。平常留空。例如：
 #   extraConfig:
 #     llm: {timeout_seconds: 180, id_pattern: "(EQP|LOT|FOUP)[-A-Z0-9]+"}
 #     logs: {error_levels: [E, SEVERE], max_hits: 500}

@@ -1,5 +1,6 @@
-"""指標走勢（RCA 的第 7 包證據）。Grafana 的回應是真的 Grafana 13.0.7 → Prometheus 3.5.0 錄下來的（prom_query_range_*.json，
-錄製腳本 record_metrics.py）：RabbitMQ 3.12.1 的一個佇列，正常收送 180 秒後消費者停掉、生產者繼續送，佇列真的堆到一千多筆。"""
+"""指標走勢（RCA 的第 7 包證據）。Grafana 的回應是真的 Grafana 13.0.7 → VictoriaMetrics v1.110.0 錄下來的（prom_query_range_*.json，
+錄製腳本 record_metrics.py）：RabbitMQ 3.12.1 的一個佇列，正常收送 180 秒後消費者停掉、生產者繼續送，佇列真的堆到一千多筆
+（序列第一次存在 Prometheus 3.5.0；指標一律是 VictoriaMetrics 之後，同一批序列寫進 VictoriaMetrics 重錄，數值一樣）。"""
 from __future__ import annotations
 
 import json
@@ -56,7 +57,7 @@ def test_query_range_sends_what_was_recorded_and_parses_the_series(fake):
 
 def test_a_query_with_a_syntax_error_is_a_grafana_error_that_says_why(fake):
     grafana = Grafana("http://grafana.test", "t", transport=fake.transport, retries=0)
-    with pytest.raises(GrafanaError, match="parse error"):
+    with pytest.raises(GrafanaError, match=r"HTTP 422.*unexpected token"):   # VictoriaMetrics 回 422 與它自己的錯誤說明
         grafana.query_range("prom-uid", BROKEN.expr, STOPPED, FINISHED, 10)
 
 

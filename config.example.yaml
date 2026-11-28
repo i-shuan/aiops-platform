@@ -5,7 +5,7 @@
 #
 # 必填只有三個（grafana.url、grafana.token、webhook.token）。其他都是選填：
 #   - 沒有註解掉的是常用設定，寫的是預設值。
-#   - 用 # 註解掉的是「進階調整」：平常不用寫，要調的時候把該行的 # 拿掉、改值。每一項的說明見 CONFIG.md。
+#   - 用 # 註解掉的是「進階調整」：平常不用寫，要調的時候把該行的 # 拿掉、改值。每一項的說明就寫在旁邊；設計與內部常數見 README.md。
 
 grafana:
   url: https://grafana.corp.example      # 必填
@@ -52,7 +52,7 @@ logs:                                    # 整段可以不寫：沒設 datasourc
   fields:                                # 日誌的欄位名稱；下面是預設值
     service: service.name                # 要跟告警的 service 標籤值一致
     level: log.level                     # 日誌沒有等級欄位（沒拆欄位的容器輸出）就設成 ""：改用訊息文字裡的等級字樣挑錯誤日誌，
-    #                                      # 會誤撈（見 CONFIG.md「日誌沒有等級欄位」）；其他欄位不能留空
+    #                                      # 會誤撈（見 README.md 第 9 節「日誌」）；其他欄位不能留空
     # time: "@timestamp"                 # 只有 elasticsearch 能設（VictoriaLogs 的時間與訊息固定是 _time、_msg）
     # message: message                   # 只有 elasticsearch 能設
   # extra_filter: '{namespace="factory"}'  # 只有 victorialogs：加在每一條查詢最前面的 LogsQL 條件，只看某一部分的日誌
@@ -60,7 +60,7 @@ logs:                                    # 整段可以不寫：沒設 datasourc
   # error_levels: [ERROR, error, Error, FATAL, fatal, CRITICAL, critical]   # 日誌等級是這些值才算錯誤（大小寫不同要分開列）
   # warn_levels: [WARN, warn, Warn, WARNING, warning, Warning]   # 日誌等級是這些值算警告；[] = 不撈警告。日誌沒有等級欄位時不會撈
   # baseline_minutes: 30                 # 「事故前」看多久：同一種錯誤在事故前這段時間出現幾筆，用來分辨平常就有的與新出現的
-  # max_hits: 100                        # 錯誤日誌最多撈幾筆（最新的在前）；識別碼的出現次數只統計這幾筆
+  # max_hits: 100                        # 錯誤與警告一次最多撈幾筆（同一次查詢，最新的在前）
   # window_padding_minutes: 10           # 事故開始時間往前多看幾分鐘（錯誤日誌常比告警早出現）
   # timeline_fields: [lot_id, carrier_id]  # 關聯時間線：哪些識別碼要把跨系統的日誌串起來（要在 id_fields 裡）；[] = 不做。
   #                                        # 工廠沒有 trace id，批號與載具就是關聯碼；只代表先後，不代表因果
@@ -69,9 +69,9 @@ traces:                                  # 整段可以不寫：沒設 datasourc
   type: victoriatraces                   # Trace 存在哪一種：victoriatraces 或 tempo
   datasource_uid: ""                     # victoriatraces：Grafana 上 Jaeger 型別資料源的 uid（URL 指到 VictoriaTraces 的 /select/jaeger）
   #                                        # tempo：Grafana 上 Tempo 資料源的 uid
-  # trace_id_field: trace_id             # 錯誤日誌裡記 trace id 的欄位：有的話直接用編號取 Trace；沒有才用搜尋。
+  # trace_id_field: trace_id             # 日誌裡記 trace id 的欄位：錯誤日誌帶的編號直接取 Trace；呼叫鏈也用它撈回同一個請求的日誌。
   #                                        # "" = 不用日誌裡的 id
-  # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace
+  # max_traces: 3                        # 每個事故最多取回幾條錯誤 Trace（只取失敗的）
   # max_spans: 30                        # 每條呼叫鏈最多列幾個 span（失敗的優先）
   # service_graph_datasource_uid: ""     # 只有 type: tempo 能設：Tempo 有開 service graph（metrics-generator）的話，填它把指標寫進去的
   #                                        # 那個 Prometheus 相容資料源的 uid，程式從那裡讀「誰呼叫誰、有沒有失敗」。

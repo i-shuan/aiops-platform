@@ -4,7 +4,7 @@
 #   2026-11-21 10:41:50 ERROR Transfer ABORT carrier=FOUP0912 from=STK01 to=EQP-CVD-07 elapsed=412.5 reason=destination port occupied
 #   2026-11-21 10:42:10 INFO Transfer DONE carrier=FOUP0120 from=STK02 to=EQP-ETCH-02 elapsed=38.0
 #
-# 用 Fluent Bit 5.2.0 + VictoriaLogs v1.17.0 實測過（2026-11-26，本機、假資料）。MCS 沒有日誌檔、資料只在資料庫時，這份設定用不上（見 FACTORY_METRICS.md 的路線 B）。
+# 用 Fluent Bit 5.2.0 + VictoriaLogs v1.17.0 實測過（2026-11-26，本機、假資料）。MCS 沒有日誌檔、資料只在資料庫時，這份設定用不上（改用 Grafana 的 SQL 資料源查表，見 README.md 第 9 節）。
 
 service:
   flush: 5

@@ -1,11 +1,16 @@
 {
  "versions": {
   "grafana": "13.0.7",
-  "tempo": "2.9.0（metrics_generator：service-graphs）",
+  "tempo": "2.9.0（metrics_generator：service-graphs，直方圖的桶用預設值）",
   "victoriametrics": "v1.110.0",
   "victoriatraces": "v0.5.0（-servicegraph.enableTask=true）"
  },
- "recorded_at": "2026-11-27T09:09:30Z",
+ "recorded_at": "2026-11-27T13:59:27Z",
+ "incident_start": "2026-11-27T13:57:06Z",
+ "traffic": {
+  "baseline": "20 條全部成功；每個請求查 mes-db 1 次、15～25 毫秒",
+  "incident": "20 條、4 條失敗；每個請求查 mes-db 5 次、每次 1.5～2.5 秒"
+ },
  "token_role": "Editor",
  "exchanges": {
   "window_with_traffic": [
@@ -14,8 +19,8 @@
      "method": "GET",
      "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
      "params": {
-      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_total[15m]))",
-      "time": "1795770570"
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_total[11m]))",
+      "time": "1795787967"
      }
     },
     "status": 200,
@@ -31,8 +36,8 @@
          "server": "mes-db"
         },
         "value": [
-         1795770570,
-         "9"
+         1795787967,
+         "120"
         ]
        },
        {
@@ -42,8 +47,30 @@
          "server": "report-worker"
         },
         "value": [
-         1795770570,
-         "9"
+         1795787967,
+         "40"
+        ]
+       },
+       {
+        "metric": {
+         "client": "orders-api",
+         "connection_type": "database",
+         "server": "orders-db"
+        },
+        "value": [
+         1795787967,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "orders-api"
+        },
+        "value": [
+         1795787967,
+         "0"
         ]
        },
        {
@@ -53,8 +80,8 @@
          "server": "web-portal"
         },
         "value": [
-         1795770570,
-         "9"
+         1795787967,
+         "40"
         ]
        },
        {
@@ -63,15 +90,15 @@
          "server": "mes-api"
         },
         "value": [
-         1795770570,
-         "9"
+         1795787967,
+         "40"
         ]
        }
       ]
      },
      "stats": {
-      "seriesFetched": "4",
-      "executionTimeMsec": 1
+      "seriesFetched": "6",
+      "executionTimeMsec": 2
      }
     }
    },
@@ -80,8 +107,8 @@
      "method": "GET",
      "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
      "params": {
-      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_failed_total[15m]))",
-      "time": "1795770570"
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_failed_total[11m]))",
+      "time": "1795787967"
      }
     },
     "status": 200,
@@ -97,8 +124,8 @@
          "server": "mes-db"
         },
         "value": [
-         1795770570,
-         "6"
+         1795787967,
+         "4"
         ]
        },
        {
@@ -108,8 +135,8 @@
          "server": "web-portal"
         },
         "value": [
-         1795770570,
-         "6"
+         1795787967,
+         "4"
         ]
        },
        {
@@ -118,15 +145,919 @@
          "server": "mes-api"
         },
         "value": [
-         1795770570,
-         "6"
+         1795787967,
+         "4"
         ]
        }
       ]
      },
      "stats": {
       "seriesFetched": "3",
-      "executionTimeMsec": 2
+      "executionTimeMsec": 0
+     }
+    }
+   }
+  ],
+  "with_latency": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_total[3m]))",
+      "time": "1795787967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787967,
+         "100"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787967,
+         "20"
+        ]
+       },
+       {
+        "metric": {
+         "client": "orders-api",
+         "connection_type": "database",
+         "server": "orders-db"
+        },
+        "value": [
+         1795787967,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "orders-api"
+        },
+        "value": [
+         1795787967,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787967,
+         "20"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787967,
+         "20"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "6",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_failed_total[3m]))",
+      "time": "1795787967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787967,
+         "4"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787967,
+         "4"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787967,
+         "4"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "3",
+      "executionTimeMsec": 1
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_total[30m]))",
+      "time": "1795787826"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787826,
+         "20"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787826,
+         "20"
+        ]
+       },
+       {
+        "metric": {
+         "client": "orders-api",
+         "connection_type": "database",
+         "server": "orders-db"
+        },
+        "value": [
+         1795787826,
+         "1"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "orders-api"
+        },
+        "value": [
+         1795787826,
+         "1"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787826,
+         "20"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787826,
+         "20"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "6",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_failed_total[30m]))",
+      "time": "1795787826"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787826,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787826,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787826,
+         "0"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "3",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "histogram_quantile(0.95, sum by (client, server, connection_type, le) (increase(traces_service_graph_request_server_seconds_bucket[3m])))",
+      "time": "1795787967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787967,
+         "3.111111111111111"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787967,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787967,
+         "12.48"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787967,
+         "12.48"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "54",
+      "executionTimeMsec": 3
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_server_seconds_sum[3m])) / sum by (client, server, connection_type) (increase(traces_service_graph_request_server_seconds_count[3m]))",
+      "time": "1795787967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787967,
+         "1.9995500000000002"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787967,
+         "0.005"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787967,
+         "10.02275"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787967,
+         "10.01275"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "12",
+      "executionTimeMsec": 3
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "histogram_quantile(0.95, sum by (client, server, connection_type, le) (increase(traces_service_graph_request_client_seconds_bucket[3m])))",
+      "time": "1795787967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787967,
+         "3.111111111111111"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787967,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787967,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787967,
+         "12.48"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "54",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_client_seconds_sum[3m])) / sum by (client, server, connection_type) (increase(traces_service_graph_request_client_seconds_count[3m]))",
+      "time": "1795787967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787967,
+         "1.9995500000000002"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787967,
+         "0.002"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787967,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787967,
+         "10.01675"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "12",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "histogram_quantile(0.95, sum by (client, server, connection_type, le) (increase(traces_service_graph_request_server_seconds_bucket[30m])))",
+      "time": "1795787826"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "orders-api",
+         "connection_type": "database",
+         "server": "orders-db"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "orders-api"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "54",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_server_seconds_sum[30m])) / sum by (client, server, connection_type) (increase(traces_service_graph_request_server_seconds_count[30m]))",
+      "time": "1795787826"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787826,
+         "0.01255"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787826,
+         "0.0032500000000000003"
+        ]
+       },
+       {
+        "metric": {
+         "client": "orders-api",
+         "connection_type": "database",
+         "server": "orders-db"
+        },
+        "value": [
+         1795787826,
+         "0.07"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "orders-api"
+        },
+        "value": [
+         1795787826,
+         "0.09"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787826,
+         "0.02705"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787826,
+         "0.02405"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "12",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "histogram_quantile(0.95, sum by (client, server, connection_type, le) (increase(traces_service_graph_request_client_seconds_bucket[30m])))",
+      "time": "1795787826"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "orders-api",
+         "connection_type": "database",
+         "server": "orders-db"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "orders-api"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787826,
+         "0.095"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "54",
+      "executionTimeMsec": 0
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_client_seconds_sum[30m])) / sum by (client, server, connection_type) (increase(traces_service_graph_request_client_seconds_count[30m]))",
+      "time": "1795787826"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": [
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "database",
+         "server": "mes-db"
+        },
+        "value": [
+         1795787826,
+         "0.01255"
+        ]
+       },
+       {
+        "metric": {
+         "client": "mes-api",
+         "connection_type": "messaging_system",
+         "server": "report-worker"
+        },
+        "value": [
+         1795787826,
+         "0.0013000000000000002"
+        ]
+       },
+       {
+        "metric": {
+         "client": "orders-api",
+         "connection_type": "database",
+         "server": "orders-db"
+        },
+        "value": [
+         1795787826,
+         "0.07"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "orders-api"
+        },
+        "value": [
+         1795787826,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "user",
+         "connection_type": "virtual_node",
+         "server": "web-portal"
+        },
+        "value": [
+         1795787826,
+         "0"
+        ]
+       },
+       {
+        "metric": {
+         "client": "web-portal",
+         "server": "mes-api"
+        },
+        "value": [
+         1795787826,
+         "0.02455"
+        ]
+       }
+      ]
+     },
+     "stats": {
+      "seriesFetched": "12",
+      "executionTimeMsec": 1
      }
     }
    }
@@ -138,7 +1069,53 @@
      "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
      "params": {
       "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_total[60m]))",
-      "time": "1795756170"
+      "time": "1794059967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": []
+     },
+     "stats": {
+      "seriesFetched": "0",
+      "executionTimeMsec": 1
+     }
+    }
+   },
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_failed_total[60m]))",
+      "time": "1794059967"
+     }
+    },
+    "status": 200,
+    "response": {
+     "status": "success",
+     "data": {
+      "resultType": "vector",
+      "result": []
+     },
+     "stats": {
+      "seriesFetched": "0",
+      "executionTimeMsec": 0
+     }
+    }
+   }
+  ],
+  "window_before_any_traffic_with_latency": [
+   {
+    "request": {
+     "method": "GET",
+     "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
+     "params": {
+      "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_total[60m]))",
+      "time": "1794059967"
      }
     },
     "status": 200,
@@ -160,7 +1137,7 @@
      "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
      "params": {
       "query": "sum by (client, server, connection_type) (increase(traces_service_graph_request_failed_total[60m]))",
-      "time": "1795756170"
+      "time": "1794059967"
      }
     },
     "status": 200,
@@ -184,14 +1161,14 @@
      "path": "/api/datasources/proxy/uid/<uid>/api/v1/query",
      "params": {
       "query": "sum by (client (increase(x[1m)",
-      "time": "1795770570"
+      "time": "1795787967"
      }
     },
     "status": 422,
     "response": {
      "status": "error",
      "errorType": "422",
-     "error": "error when executing query=\"sum by (client (increase(x[1m)\" for (time=1795770540643, step=300000): ModifierExpr: identList: unexpected token \"(\"; want \",\", \")\"; unparsed data: \"(increase(x[1m)\""
+     "error": "error when executing query=\"sum by (client (increase(x[1m)\" for (time=1795787938049, step=300000): ModifierExpr: identList: unexpected token \"(\"; want \",\", \")\"; unparsed data: \"(increase(x[1m)\""
     }
    }
   ],
@@ -201,7 +1178,7 @@
      "method": "GET",
      "path": "/api/datasources/proxy/uid/<uid>/api/dependencies",
      "params": {
-      "endTs": "1795771505693",
+      "endTs": "1795787967000",
       "lookback": "900000"
      }
     },
@@ -209,14 +1186,14 @@
     "response": {
      "data": [
       {
-       "parent": "web-portal",
-       "child": "mes-api",
-       "callCount": 216
-      },
-      {
        "parent": "mes-api",
        "child": "report-worker",
-       "callCount": 216
+       "callCount": 800
+      },
+      {
+       "parent": "web-portal",
+       "child": "mes-api",
+       "callCount": 800
       }
      ],
      "errors": null,
@@ -232,7 +1209,7 @@
      "method": "GET",
      "path": "/api/datasources/proxy/uid/<uid>/api/dependencies",
      "params": {
-      "endTs": "1795515905693",
+      "endTs": "1795532367000",
       "lookback": "3600000"
      }
     },
@@ -246,5 +1223,126 @@
     }
    }
   ]
+ },
+ "results": {
+  "window_with_traffic": [
+   {
+    "caller": "mes-api",
+    "callee": "mes-db",
+    "requests": 120,
+    "failed": 4,
+    "kind": "database"
+   },
+   {
+    "caller": "mes-api",
+    "callee": "report-worker",
+    "requests": 40,
+    "failed": 0,
+    "kind": "messaging"
+   },
+   {
+    "caller": "orders-api",
+    "callee": "orders-db",
+    "requests": 0,
+    "failed": 0,
+    "kind": "database"
+   },
+   {
+    "caller": "web-portal",
+    "callee": "mes-api",
+    "requests": 40,
+    "failed": 4,
+    "kind": ""
+   }
+  ],
+  "with_latency": [
+   {
+    "caller": "mes-api",
+    "callee": "mes-db",
+    "requests": 100,
+    "failed": 4,
+    "kind": "database",
+    "rps": 0.5556,
+    "error_rate_pct": 4.0,
+    "rps_baseline": 0.01111,
+    "error_rate_baseline_pct": 0.0,
+    "latency_from": "server",
+    "p95_ms": 3111.0,
+    "p95_baseline_ms": 95.0,
+    "p95_ratio": 32.75,
+    "avg_ms": 2000.0,
+    "avg_baseline_ms": 12.55,
+    "avg_ratio": 159.3
+   },
+   {
+    "caller": "mes-api",
+    "callee": "report-worker",
+    "requests": 20,
+    "failed": 0,
+    "kind": "messaging",
+    "rps": 0.1111,
+    "error_rate_pct": 0.0,
+    "rps_baseline": 0.01111,
+    "error_rate_baseline_pct": 0.0,
+    "latency_from": "server",
+    "p95_ms": 95.0,
+    "p95_baseline_ms": 95.0,
+    "p95_ratio": 1.0,
+    "avg_ms": 5.0,
+    "avg_baseline_ms": 3.25,
+    "avg_ratio": 1.538
+   },
+   {
+    "caller": "orders-api",
+    "callee": "orders-db",
+    "requests": 0,
+    "failed": 0,
+    "kind": "database",
+    "rps": 0.0,
+    "rps_baseline": 0.0005556,
+    "error_rate_baseline_pct": 0.0,
+    "latency_from": "server",
+    "p95_baseline_ms": 95.0,
+    "avg_baseline_ms": 70.0
+   },
+   {
+    "caller": "web-portal",
+    "callee": "mes-api",
+    "requests": 20,
+    "failed": 4,
+    "kind": "",
+    "rps": 0.1111,
+    "error_rate_pct": 20.0,
+    "rps_baseline": 0.01111,
+    "error_rate_baseline_pct": 0.0,
+    "latency_from": "server",
+    "p95_ms": 12480.0,
+    "p95_baseline_ms": 95.0,
+    "p95_ratio": 131.4,
+    "avg_ms": 10010.0,
+    "avg_baseline_ms": 24.05,
+    "avg_ratio": 416.3
+   }
+  ],
+  "window_before_any_traffic": [],
+  "window_before_any_traffic_with_latency": [],
+  "bad_query": "GrafanaError: GET /api/datasources/proxy/uid/fg5f3odgmeps0d/api/v1/query -> HTTP 422: {\"status\":\"error\",\"errorType\":\"422\",\"error\":\"error when executing query=\\\"sum ",
+  "victoriatraces_dependencies": [
+   {
+    "caller": "mes-api",
+    "callee": "report-worker",
+    "requests": null,
+    "failed": null,
+    "kind": ""
+   },
+   {
+    "caller": "web-portal",
+    "callee": "mes-api",
+    "requests": null,
+    "failed": null,
+    "kind": ""
+   }
+  ],
+  "victoriatraces_dependencies_before_any_traffic": []
  }
 }

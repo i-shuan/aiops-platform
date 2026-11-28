@@ -57,14 +57,17 @@ def replaying(name, seen=None):
 
 def test_service_graph_is_read_from_the_recorded_tempo_metrics():
     seen = []
-    edges = graph.service_graph(replaying("window_with_traffic", seen), "vm-uid", NOW - timedelta(minutes=15), NOW)
-    assert edges == [{"caller": "mes-api", "callee": "mes-db", "requests": 9, "failed": 6, "kind": "database"},        # 沒埋點的資料庫也在
-                     {"caller": "mes-api", "callee": "report-worker", "requests": 9, "failed": 0, "kind": "messaging"},   # 經過訊息佇列的（Tempo 標 messaging_system）
-                     {"caller": "web-portal", "callee": "mes-api", "requests": 9, "failed": 6, "kind": ""}]
+    # 樣本（2026-11-27 重錄）：基線 20 條＋事故 20 條；事故的每個請求查 mes-db 5 次、4 條失敗。orders-api 那條是同一台機器上
+    # 另一份樣本留下的，這段時間沒有新的請求：Tempo 照樣回一條 0 次的序列，照實列出
+    edges = graph.service_graph(replaying("window_with_traffic", seen), "vm-uid", NOW - timedelta(minutes=11), NOW)
+    assert edges == [{"caller": "mes-api", "callee": "mes-db", "requests": 120, "failed": 4, "kind": "database"},     # 沒埋點的資料庫也在
+                     {"caller": "mes-api", "callee": "report-worker", "requests": 40, "failed": 0, "kind": "messaging"},  # 經過訊息佇列的（Tempo 標 messaging_system）
+                     {"caller": "orders-api", "callee": "orders-db", "requests": 0, "failed": 0, "kind": "database"},
+                     {"caller": "web-portal", "callee": "mes-api", "requests": 40, "failed": 4, "kind": ""}]
     assert not any(e["caller"] == "user" for e in edges)                 # Tempo 把入口請求畫成 client="user"：不是系統，不記
     assert [r.url.path for r in seen] == ["/api/datasources/proxy/uid/vm-uid/api/v1/query"] * 2
     assert [r.url.params["query"] for r in seen] == [x["request"]["params"]["query"] for x in recorded_service_graph("window_with_traffic")]
-    assert "increase(traces_service_graph_request_failed_total[15m])" in seen[1].url.params["query"]
+    assert "increase(traces_service_graph_request_failed_total[11m])" in seen[1].url.params["query"]
 
 
 def test_no_traffic_is_an_empty_graph_and_a_failing_query_does_not_stop_the_round():
@@ -140,10 +143,11 @@ def test_systems_merge_when_the_service_graph_shows_failures_between_them(world)
     w.run(64)
     assert incidents_of(w) == [["amhs-mcs", "cim-eap", "mq-broker"]]
     assert learned(w) == [("amhs-mcs", "cim-eap", "service_graph"), ("cim-eap", "mq-broker", "service_graph")]
-    assert len(w.fake.service_graph_requests) == 2 and w.fake.trace_requests == []   # 已經連成一塊：不用再查 Trace
+    # 合併只查 2 次（請求數、失敗數）；分析時再讀一次帶延遲與基線的版本：同樣 2 次，加延遲與基線 10 次
+    assert len(w.fake.service_graph_requests) == 2 + 12 and w.fake.trace_requests == []   # 已經連成一塊：不用再查 Trace
     assert w.fake.error_searches == 1                                               # 日誌只有收集證據的那一次
     w.run(124)
-    assert len(w.fake.service_graph_requests) == 2                                  # 沒有新告警的續跑：什麼都不查
+    assert len(w.fake.service_graph_requests) == 2 + 12                             # 沒有新告警的續跑：什麼都不查
 
 
 def test_a_call_path_without_failures_does_not_merge_and_a_shared_hub_only_pulls_in_its_failing_callers(world):  # noqa: F811
