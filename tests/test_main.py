@@ -363,8 +363,9 @@ def llm_down():
 
 
 def es_calls(w):   # 名字是沿用的：現在數的是對 VictoriaLogs 的錯誤日誌查詢
-    """做了幾次證據收集（每次收集是一次錯誤日誌查詢，後面可能再跟一次關聯時間線的查詢）。"""
-    return w.fake.error_searches
+    """做了幾次證據收集：數「事故系統的錯誤日誌查詢」（world 的事故都有 mq-broker）。
+    同一次收集另外可能有一次相鄰系統的查詢（關係邊上沒告警的鄰居），那一種不含事故的系統，不算在這裡。"""
+    return len([q for q in w.fake.queries("sort by (_time) desc") if '"mq-broker"' in q])
 
 
 def annotation_calls(w):

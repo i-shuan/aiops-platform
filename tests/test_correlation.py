@@ -290,7 +290,7 @@ NO_LEVEL = LogFields(service="kubernetes.container_name", level="")
 def test_without_a_level_field_errors_are_picked_by_words_in_the_message(fake):
     fake.logs = shifted(recorded_rows("unparsed"), SHIFT)   # 真的 VictoriaLogs 裡沒拆欄位的容器日誌：等級只在訊息文字裡
     ev = collect(fake, log_fields=NO_LEVEL)
-    [query] = fake.queries("sort by (_time) desc")
+    [query, _neighbors] = fake.queries("sort by (_time) desc")   # 第二條是相鄰系統（amhs-mcs、mes-api）的補撈
     # 不分大小寫比對完整的詞：預設的 ERROR／error／Error… 收成三個詞，任何一個出現就算
     assert query == ('"kubernetes.container_name":in("cim-eap","mq-broker") (_msg:i("error") or _msg:i("fatal") or _msg:i("critical"))'
                      ' | sort by (_time) desc | limit 100')
@@ -305,7 +305,7 @@ def test_without_a_level_field_errors_are_picked_by_words_in_the_message(fake):
 
 def test_with_a_level_field_nothing_changes(fake):
     ev = collect(fake)
-    [query] = fake.queries("sort by (_time) desc")
+    [query, _neighbors] = fake.queries("sort by (_time) desc")   # 第二條是相鄰系統的補撈
     assert '"log.level":in("ERROR","error","Error","FATAL","fatal","CRITICAL","critical","WARN","warn","Warn","WARNING","warning","Warning")' in query and "_msg:i(" not in query
     assert not any("等級字樣" in note for note in ev["notes"])
 

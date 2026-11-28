@@ -152,6 +152,8 @@ def collect_evidence(incident: Incident, edges: list[Any], grafana: Grafana, *, 
         _collect_call_chains(evidence, incident, traces, start, end, limits, trace_ids)
         if logs is not None and limits.trace_id_field and evidence["call_chains"]:
             _collect_trace_logs(evidence, incident, logs, id_fields, start, end, limits)
+    if logs is not None and "trace_logs" not in evidence:
+        _collect_neighbor_logs(evidence, incident, logs, start, end, limits)
     if metrics.datasource_uid and metrics.queries:
         _collect_metrics(evidence, incident, grafana, metrics, end)
     evidence["window"] = {"start": iso(start), "end": iso(end)}
@@ -429,6 +431,58 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
                                      "before_minutes": limits.baseline_minutes}
 
 
+MAX_NEIGHBORS = 5   # 最多補撈幾個相鄰系統的日誌（照關係邊的順序取）。查詢量與版面的上限，未驗證泛化
+
+
+def _collect_neighbor_logs(evidence: dict[str, Any], incident: Incident, store: Any, start: datetime, end: datetime,
+                           limits: EvidenceLimits) -> None:
+    """沒有「請求的日誌」（日誌沒記 trace id、或沒有呼叫鏈）時的備援：關係邊上跟事故系統**直接相連、但沒有告警**的系統，
+    用同一個時間區間撈它們的錯誤與警告（一次查詢），同類歸成一種、留最早的原文，再比較事故前後的次數（一次計數查詢）。
+    為的是「相依的元件自己記了原因、但只有呼叫它的系統在告警」的情況。照時間撈的，不保證跟出事的請求有關：
+    所以一定附事故前後的次數，平常就有的錯誤 LLM 才分得出來。只取一跳、最多 MAX_NEIGHBORS 個系統（照關係邊的順序）；
+    沒有相鄰的系統、它們沒有錯誤與警告：沒有這一包，註記不提。查詢失敗只記進 notes。"""
+    members = set(incident.services)
+    neighbors = list(dict.fromkeys(name for e in evidence["edges"] if e.get("hops", 1) == 1
+                                   for name in (e["upstream"], e["downstream"]) if name not in members))[:MAX_NEIGHBORS]
+    if not neighbors:
+        return
+    log_fields: LogFields = store.fields
+    warn_levels = limits.warn_levels if log_fields.level and limits.max_warn_patterns > 0 else ()
+    levels = (*limits.error_levels, *warn_levels)
+    try:
+        rows = store.search_errors(neighbors, start, end, limits.max_hits, error_levels=levels)
+    except GrafanaError as e:
+        log.warning("事故 %s 撈不到相鄰系統的日誌：%s", incident.uid, e)
+        evidence["notes"].append(f"相鄰系統的日誌撈取失敗：{e}")
+        return
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for doc in sorted(rows, key=lambda d: stamp(_dig(d, TIME_FIELD))):
+        key = (str(_dig(doc, log_fields.service) or ""), log_pattern(str(_dig(doc, MESSAGE_FIELD) or "")))
+        groups.setdefault(key, {"count": 0, "first": doc})["count"] += 1
+    kept = sorted(groups.items(), key=lambda kv: -kv[1]["count"])[:limits.max_log_patterns]
+    countable = [(system, pattern_words(pattern)) for (system, pattern), _g in kept]
+    try:
+        counted = store.count_phrases([(system, words, levels) for system, words in countable if words],
+                                      start, end, promql.Window(start, end, limits.baseline_minutes).baseline_start)
+    except GrafanaError as e:
+        log.warning("事故 %s 數不出相鄰系統事故前後的次數：%s", incident.uid, e)
+        counted = []
+    numbers, out = iter(counted), []
+    for ((system, _pattern), g), (_s, words) in zip(kept, countable):
+        during, before = next(numbers, (0, 0)) if words else (0, 0)
+        row = {"system": system, "example": str(_dig(g["first"], MESSAGE_FIELD) or "")[:limits.max_message_chars],
+               "first_seen": str(_dig(g["first"], TIME_FIELD) or "")}
+        if log_fields.level:
+            row["level"] = _dig(g["first"], log_fields.level)
+        if during > 0:   # 比不到就不給次數（跟錯誤種類那一包同一個做法）
+            row.update(during=during, before=before, new=before == 0)
+        out.append(row)
+    if out:
+        evidence["neighbor_logs"] = out
+        evidence.setdefault("count_windows", {"during_minutes": max(1, round((end - start).total_seconds() / 60)),
+                                              "before_minutes": limits.baseline_minutes})
+
+
 ERROR_TAG_VALUES = ("true", "error", "2")   # Jaeger 的 error 標籤、otel.status_code＝ERROR／2：都表示這個 span 失敗
 
 
@@ -619,6 +673,9 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
         # 日誌沒有機台、批號欄位：不列為「缺」。IT 服務本來就沒有這些欄位，有就用、沒有就照其他證據分析
         if evidence["timelines"]:
             out["have"].append(f"批號／載具的跨系統時間線 {len(evidence['timelines'])} 條")
+    if evidence.get("neighbor_logs"):
+        names = "、".join(dict.fromkeys(r["system"] for r in evidence["neighbor_logs"]))
+        out["have"].append(f"相鄰系統（{names}）的錯誤與警告 {len(evidence['neighbor_logs'])} 種")
 
     chains = sources.get("call_chains", "off")
     if chains == "ok":
