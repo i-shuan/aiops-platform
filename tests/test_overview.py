@@ -68,7 +68,7 @@ def test_everything_present_is_listed_with_counts(fake):
 # ── 錯誤日誌 0 筆：三種原因分得出來，各有下一步 ──
 
 @pytest.mark.parametrize("dataset, says, next_step", [
-    ("count-empty", "這段時間一筆日誌都沒有", "logs.extra_filter"),
+    ("count-empty", "一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來。更早有沒有，這裡沒有查", "logs.extra_filter"),
     ("count-mismatch", "這段時間有 4 筆日誌，但沒有一筆的 service.name 是這些系統", "值是否跟告警的系統名稱完全一樣"),
     ("count-no-errors", "這些系統有 5 筆日誌，但 log.level 沒有一筆是 ERROR／FATAL／CRITICAL", "等級的寫法對不上"),
 ])
@@ -175,7 +175,7 @@ def test_a_round_writes_the_reason_into_the_annotation_and_tells_the_llm(world):
     assert prompt.startswith("【0. 證據概況") and "service.name 是這些系統" in prompt.split("【1.")[0]
     assert "缺錯誤日誌｜還看不出哪個系統出了什麼錯、哪些錯誤是這次才出現的" in prompt.split("【1.")[0]   # 完整的說明（少了它哪種分析做不了）只給模型
     system = calls[0]["messages"][0]["content"]
-    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system and "0 到 100 的整數" in system
+    assert "不要只回「無法判定」" in system and "不能當成它就是源頭的依據" in system and "candidates" in system and "不要給分數" in system
 
 
 def test_the_evidence_line_survives_a_restart_and_is_kept_when_only_the_status_changes(world):  # noqa: F811

@@ -149,7 +149,8 @@ def test_zero_logs_hint_names_the_source_that_is_configured():
     store = es("count_logs_count-empty", "rec-count-empty")
     store.search_errors = lambda *a, **kw: []
     ev = rca.collect_evidence(incident(), EDGES, store.grafana, logs=store, id_fields=["lot_id"], now=BASE)
-    assert "這段時間一筆日誌都沒有。檢查 logs.index，以及日誌有沒有在送進 Elasticsearch" in rca.overview_text(rca.overview(ev))
+    text = rca.overview_text(rca.overview(ev))
+    assert "一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來" in text and "要確認的話檢查 logs.index，以及日誌有沒有在送進 Elasticsearch" in text
 
 
 # ── Trace：Tempo 回的 OTLP 轉成跟 VictoriaTraces 同一種形狀 ──

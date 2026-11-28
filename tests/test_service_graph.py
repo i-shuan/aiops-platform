@@ -263,7 +263,7 @@ def test_a_system_known_only_from_a_relation_may_be_named_but_only_as_a_guess():
     answer = json.dumps({"summary": "目前只能推測 mes-db 有狀況", "systems": [], "ids": [], "candidates": [
         {"source": "mes-db", "kind": "evidence", "confidence": 90, "reason": "mes-api 會呼叫 mes-db"}]}, ensure_ascii=False)
     _s, [candidate] = rca.read_answer(answer, ev)
-    assert (candidate["source"], candidate["confidence"]) == ("mes-db", rca.NO_DIRECT_EVIDENCE_CAP)   # 有呼叫路徑不是這次出事的證據
+    assert (candidate["source"], candidate["grade"]) == ("mes-db", "inference")   # 有呼叫路徑不是這次出事的證據：模型標 evidence、給 90 分也一樣
 
 
 def test_relations_not_seen_for_long_expire(world):  # noqa: F811

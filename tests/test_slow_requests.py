@@ -132,10 +132,10 @@ def test_logs_carrying_the_trace_id_are_attached_and_a_failed_lookup_is_only_not
     text = rca.overview_text(rca.overview(ev))
     assert f"呼叫鏈對應的日誌 {sum(len(t['events']) for t in ev['trace_logs'])} 筆" in text
     assert "【6b. 請求的日誌" in rca.build_prompt(ev, text)
-    # mes-db 沒有告警：它在請求的日誌裡，是直接證據，分數不壓到 30
+    # mes-db 沒有告警，但呼叫鏈的失敗點指到它（peer.service）：直接證據
     answer = json.dumps({"summary": "mes-db 連線數滿了，mes-api 的 track-in 等不到連線", "systems": ["mes-db"], "ids": [],
                          "candidates": [{"source": "mes-db", "kind": "evidence", "confidence": 72, "reason": "too many connections"}]})
-    assert [(c["source"], c["confidence"]) for c in rca.read_answer(answer, ev)[1]] == [("mes-db", 72)]
+    assert [(c["source"], c["grade"]) for c in rca.read_answer(answer, ev)[1]] == [("mes-db", "direct")]
     # 關掉欄位：不查。日誌裡沒有這個欄位：沒有這一包，也不寫成「缺」
     asked = len(fake.queries('"trace_id"'))
     off = collect(fake, incident("web-portal", "mes-api"), traces="vt-uid", limits=rca.EvidenceLimits(trace_id_field=""))

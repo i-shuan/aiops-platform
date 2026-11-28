@@ -128,30 +128,30 @@ def _same_name(said: str, answer: str) -> bool:
 
 
 def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
-    """問一次並計分。回傳 {ok, why, source, confidence, summary}。
+    """問一次並計分。回傳 {ok, why, source, grade, summary}。
 
-    答案是某個系統：排第一的可能原因要是它。答案是「無法判定」：不能有信心分數 40 以上的可能原因
-    （可以列 39 以下的推測，那正是要它做的事；把常態雜訊講成 40 分以上才算錯）。
+    答案是某個系統：排第一的可能原因要是它。答案是「無法判定」：不能有依據等級是「直接證據」的可能原因
+    （可以列間接證據或推測，那正是要它做的事；等級是程式照證據判定的，排序也照等級）。
     重點字在摘要或任何一個可能原因的理由裡出現都算。"""
     try:
         raw = rca.call_llm(llm["url"], llm["key"], llm["model"], rca.build_prompt(evidence, overview), timeout=120)
         summary, candidates = rca.read_answer(raw, evidence)
     except Exception as e:   # 連線、格式、幻覺檢查沒過：都算這一次沒答對
         return {"ok": False, "why": f"{type(e).__name__}: {str(e).replace(llm['key'], '<key>')[:160]}", "source": None,
-                "confidence": None, "summary": ""}
-    top = candidates[0] if candidates else {"source": "", "confidence": 0}
+                "grade": None, "summary": ""}
+    top = candidates[0] if candidates else {"source": "", "grade": ""}
     said = " ".join([summary, *(c["reason"] for c in candidates)])
-    listed = "、".join(f"{c['source']} {c['confidence']}" for c in candidates) or "（沒有列）"
+    listed = "、".join(f"{c['source']} {rca.GRADE_TEXT[c['grade']]}" for c in candidates) or "（沒有列）"
     problems = []
     if scenario["source"] == "":
-        strong = [c for c in candidates if c["confidence"] >= rca.CONFIDENCE_MEDIUM]
+        strong = [c for c in candidates if c["grade"] == "direct"]
         if strong:
-            problems.append(f"答案是無法判定，卻給 {strong[0]['source']} {strong[0]['confidence']} 分")
+            problems.append(f"答案是無法判定，卻把 {strong[0]['source']} 列為直接證據")
     elif scenario["source"] is not None and _same_name(top["source"], scenario["source"]) is False:
         problems.append(f"排第一的是 {top['source'] or '（沒有）'}，答案是 {scenario['source']}")
     if scenario["any"] and not any(word in said for word in scenario["any"]):
         problems.append(f"沒有提到 {'／'.join(scenario['any'])}")
-    return {"ok": not problems, "why": "；".join(problems), "source": top["source"], "confidence": top["confidence"],
+    return {"ok": not problems, "why": "；".join(problems), "source": top["source"], "grade": top["grade"],
             "count": len(candidates), "candidates": listed, "summary": summary}
 
 
@@ -202,9 +202,9 @@ def main() -> int:
         ok = sum(a["ok"] for a in answers)
         right, total = right + ok, total + len(answers)
         named = [a for a in answers if a["source"]]
-        scores = [a["confidence"] for a in named]
+        grades = sorted({rca.GRADE_TEXT[a["grade"]] for a in named})
         tops = "、".join(sorted({a["source"] for a in named})) or "—"
-        spread = f"{min(scores)}～{max(scores)} 分" if scores else "—"
+        spread = "／".join(grades) or "—"
         listed = "／".join(str(a.get("count", 0)) for a in answers)
         print(f"{scenario['name']:<32} {ok}/{len(answers)}  排第一的：{tops}（{spread}）  各列了 {listed} 個  （提示詞 {len(prompt)} 字）")
         for a in answers:

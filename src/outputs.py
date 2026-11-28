@@ -66,7 +66,7 @@ def incident_payload(incident: Incident, grafana_url: str, event: str) -> dict[s
             "incident": {"uid": incident.uid, "status": incident.status, "severity": incident.severity, "services": incident.services,
                          "started_at": _iso(incident.started_at), "ended_at": _iso(incident.ended_at),
                          "alert_count": incident.alert_count, "alerts": alerts},
-            # analyzed=false 時 summary 是原始摘要（[未經分析]）；candidates 是註記上列的 1～3 個可能原因（信心分數不是機率）
+            # analyzed=false 時 summary 是原始摘要（[未經分析]）；candidates 是註記上列的 1～3 個可能原因（依據等級由程式判定，不是機率）
             "root_cause": {"analyzed": incident.analyzed, "summary": incident.summary,
                            "candidates": [line for line in incident.candidates.splitlines() if line.strip()],
                            # LLM 建議值班人員接著確認或處理什麼。只是給人看的文字：下游不應該拿它自動執行任何操作

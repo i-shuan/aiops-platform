@@ -134,7 +134,8 @@ def collect_evidence(incident: Incident, edges: list[Any], grafana: Grafana, *, 
                        "started": iso(m["starts_at"]), "status": m["status"], "values": m["values"]}
                       for m in _members(incident)],
         "edges": [relation(e) for e in edges],
-        "baseline_minutes": limits.baseline_minutes,   # 「事故前」的長度：日誌的次數比較與 service graph 的基線同一段
+        "baseline_minutes": limits.baseline_minutes,
+        "window_minutes": window.minutes,   # 「事故前」的長度：日誌的次數比較與 service graph 的基線同一段
         "error_logs": [], "id_counts": {f: {} for f in id_fields},
         "timelines": [], "call_chains": [], "metrics": [], "notes": [],
         "error_patterns": [], "warnings": [],
@@ -592,7 +593,8 @@ def overview(evidence: dict[str, Any], log_fields: LogFields = LogFields(),
         if counts is None:
             why = "沒有查到這些系統的錯誤日誌"
         elif counts["all"] == 0:
-            why = f"這段時間一筆日誌都沒有。{log_source['scope_hint']}"
+            why = (f"事故時間窗內（{evidence.get('window_minutes', '?')} 分鐘）一筆日誌都沒有：可能這段時間真的沒有輸出，也可能日誌沒有送進來。"
+                   f"更早有沒有，這裡沒有查。要確認的話{log_source['scope_hint']}")
         elif counts["services"] == 0:
             why = (f"這段時間有 {counts['all']} 筆日誌，但沒有一筆的 {log_fields.service} 是這些系統。"
                    f"檢查欄位名稱，以及值是否跟告警的系統名稱完全一樣")
