@@ -254,6 +254,10 @@ def test_a_system_whose_errors_stopped_before_the_window_gets_its_last_error_and
     assert "amhs-mcs 最後一筆錯誤在時間窗之前 33 分鐘" in text and "cim-eap 之前 24 小時內也沒有錯誤" in text
     prompt = rca.build_prompt(ev, text)
     assert "【3p. 時間窗內沒有錯誤日誌的系統，往回找到的最後一筆錯誤" in prompt and "thermocouple TC-4 read timeout (33)" in prompt
+    assert "none_in_hours" not in prompt                                  # 往回也沒有的只寫在證據概況那一行，提示詞不另外佔一段
+    fake.logs = []
+    nothing = collect(fake)
+    assert all("none_in_hours" in r for r in nothing["last_errors"]) and "【3p." not in rca.build_prompt(nothing, gather.overview_text(gather.overview(nothing)))
     assert gather.evidence_grade("amhs-mcs", ev) == "inference"         # 時間窗之前的錯誤不拉高依據等級：只是給人與模型參考
 
 
@@ -277,6 +281,9 @@ def test_only_the_systems_without_errors_in_the_window_are_looked_up_and_a_failu
     (["took 4.5ms attempt=1", "took 120.25ms attempt=3"], [{"in_example": "4.5", "min": 4.5, "max": 120.25}, {"in_example": "1", "min": 1, "max": 3}]),
     (["EQP-CVD-07 lot LOT24A0031 failed", "EQP-CVD-09 lot LOT24A0060 failed"], []),                # 機台、批號裡的數字不算
     (["host 10.3.2.15 down", "host 10.3.2.16 down"], []),                                          # 位址後面幾段也不算（前面是點）
+    (["2026-11-28T13:58:59.000Z | ERROR | w-1 | disk usage 90% on /data", "2026-11-28T14:08:09.120Z | ERROR | w-1 | disk usage 97% on /data"],
+     [{"in_example": "90", "min": 90, "max": 97}]),                                                # 訊息裡的時間戳不算（沒拆欄位的日誌）
+    (["at 14:08:09 retry 1", "at 14:09:10 retry 4"], [{"in_example": "1", "min": 1, "max": 4}]),
     (["only one sample 5"], []), ([], []),
     (["a 1 b 2", "a 1"], []),                                                                      # 數字個數不一樣：對不起來，不給
 ])
@@ -290,8 +297,7 @@ def test_deduplicated_errors_carry_the_range_so_the_first_sample_is_not_taken_as
     ev = collect(fake)
     [kept] = [e for e in ev["error_logs"] if e["message"].startswith("statement timeout")]
     assert kept["message"].endswith("active sessions 0") and kept["similar_in_sample"] == 3       # 原文還是最早的那一筆
-    assert kept["numbers_in_sample"] == [{"in_example": "0", "min": 0, "max": 45}]
     [row] = [r for r in ev["error_patterns"] if r["example"].startswith("statement timeout")]
-    assert row["numbers_in_sample"] == kept["numbers_in_sample"]
-    assert "numbers_in_sample 是訊息裡會變的數字在同類樣本中的範圍" in rca.build_prompt(ev)
-    assert all("numbers_in_sample" not in e for e in ev["error_logs"] if e is not kept and e.get("similar_in_sample", 1) == 1)
+    assert row["numbers_in_sample"] == [{"in_example": "0", "min": 0, "max": 45}]
+    assert all("numbers_in_sample" not in e for e in ev["error_logs"])     # 只放在錯誤種類那一包，不重複放兩處
+    assert "numbers_in_sample＝example 裡會變的數字在同類樣本中的範圍" in rca.build_prompt(ev)

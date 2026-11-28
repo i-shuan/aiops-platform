@@ -372,6 +372,8 @@ def log_pattern(message: str) -> str:
 
 
 _NUMBER = re.compile(r"(?<![A-Za-z0-9_\-.])\d+(?:\.\d+)?")   # 獨立的數字：前面不是字母、數字、底線、連字號、點（機台與批號裡的數字不算）
+# 訊息文字裡的日期與時刻（沒拆欄位的日誌，時間戳就寫在訊息開頭）：每一筆都不同，不是要看的數字
+_CLOCK = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)?(?:Z|[+-]\d{2}:?\d{2})?|\b\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?\b")
 MAX_NUMBER_RANGES = 5   # 一種錯誤最多列幾個會變的數字。版面的上限，未驗證泛化
 
 
@@ -379,8 +381,9 @@ def number_ranges(messages: list[str]) -> list[dict[str, Any]]:
     """同一種錯誤的幾筆樣本裡，會變的數字各自的範圍：[{"in_example": 範例（最早那一筆）裡寫的, "min", "max"}]。
     去重只留最早一筆的原文，它裡面的數字只是那一筆剛好的值（實測模型照著「active sessions 0」下建議）；這裡補上同類樣本的範圍。
     只是算術：不判斷哪個值算高。只看獨立的數字（機台、批號、主機名稱裡的不算）；每筆的數字個數要一樣才對得起來，
-    不一樣就不給。只有一筆、或數字都沒變：空的。範圍來自撈回來的樣本（最多 logs.max_hits 筆），不是全部的日誌。"""
-    found = [_NUMBER.findall(_LONG_HEX.sub(" ", _UUID.sub(" ", m))) for m in messages]
+    不一樣就不給。訊息文字裡的日期與時刻先拿掉。只有一筆、或數字都沒變：空的。
+    分不出流水號與量測值：「request 0～13」這種也會列出來。範圍來自撈回來的樣本（最多 logs.max_hits 筆），不是全部的日誌。"""
+    found = [_NUMBER.findall(_CLOCK.sub(" ", _LONG_HEX.sub(" ", _UUID.sub(" ", m)))) for m in messages]
     if len(found) < 2 or len({len(row) for row in found}) != 1:
         return []
     out = []
@@ -446,8 +449,8 @@ def _profile_logs(evidence: dict[str, Any], incident: Incident, store: Any, star
         return {"numbers_in_sample": numbers} if numbers else {}
 
     errors = grouped(pool)   # 已經照各組最早的時間排好
-    evidence["error_logs"] = [{**entry(g["first"]), **({"similar_in_sample": g["count"]} if g["count"] > 1 else {}), **spread(g)}
-                              for g in errors[:limits.max_log_samples]]
+    evidence["error_logs"] = [{**entry(g["first"]), **({"similar_in_sample": g["count"]} if g["count"] > 1 else {})}
+                              for g in errors[:limits.max_log_samples]]   # 數字的範圍只放在 error_patterns／warnings，不重複放兩處
 
     # 要比較事故前後次數的錯誤：每個系統最早出現的那一種先選，其餘照樣本裡的筆數由多到少補滿
     earliest = {system_of(first[0]): log_pattern(message_of(first[0])) for first in profile["services"].values() if first}
