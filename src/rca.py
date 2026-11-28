@@ -43,7 +43,6 @@ from src.evidence import (  # noqa: E402,F401
     EvidenceLimits,
     FIRST_ERRORS_PER_SYSTEM,
     MAX_LINKED_TRACES,
-    MAX_NEIGHBORS,
     MAX_RELATIONS,
     MetricOptions,
     MetricQuery,
@@ -107,7 +106,7 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 
 MAX_CANDIDATES = 3
 MIN_NAME_CHARS = 3   # 名稱至少這麼長，才用「原樣出現在證據文字裡」當憑據：一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化
-DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "neighbor_logs", "timelines", "call_chains", "trace_logs", "metrics")
+DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "trace_logs", "metrics")
 # 信心分數的分段（提示詞裡跟模型講的同一套）。分數是模型自評「依據有多直接」，不是機率、沒有校準過。
 CONFIDENCE_HIGH, CONFIDENCE_MEDIUM = 70, 40
 NO_DIRECT_EVIDENCE_CAP = 30   # 沒有直接證據指向的系統，分數最高只到這裡（落在「只是推測」那一段）
@@ -185,10 +184,6 @@ def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str
                  f"{dump(shown(evidence['error_patterns']))}\n\n")
     if evidence.get("warnings"):
         text += (f"【3e. 警告（等級是警告的日誌，還不是錯誤；{counts_note}）】\n{dump(shown(evidence['warnings']))}\n\n")
-    if evidence.get("neighbor_logs"):
-        text += ("【3n. 相鄰系統的錯誤與警告：關係邊上跟告警的系統直接相連、但自己沒有告警的系統，同一段時間的日誌"
-                 f"（照時間撈的，不保證跟出事的請求有關；{counts_note}。事故前就以差不多的頻率出現的是平常就有的）】\n"
-                 f"{dump(evidence['neighbor_logs'])}\n\n")
     if evidence.get("timelines"):
         text += ("【5. 關聯時間線：同一個批號／載具在各系統的紀錄，由舊到新（只代表先後，不代表因果；各系統時鐘可能有誤差）】\n"
                  f"{dump(evidence['timelines'])}\n\n")

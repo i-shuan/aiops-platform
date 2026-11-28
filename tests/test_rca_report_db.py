@@ -59,12 +59,8 @@ def test_evidence_has_the_four_packs(fake):
     assert (len(ev["error_logs"]), sum(e.get("similar_in_sample", 1) for e in ev["error_logs"])) == (3, 5)
     assert ev["id_counts"]["eqp_id"] == {"EQP-CVD-07": 3, "EQP-ETCH-02": 1}
     assert ev["id_counts"]["lot_id"]["LOT24A0031"] == 2 and ev["id_counts"]["carrier_id"]["FOUP0912"] == 2
-    [query, neighbors] = fake.queries("sort by (_time) desc")
+    [query] = fake.queries("sort by (_time) desc")
     assert query.startswith('"service.name":in("cim-eap","mq-broker") ')
-    # 關係邊上直接相連、但沒有告警的 amhs-mcs：另外補撈它的錯誤與警告，放在自己的一包，不混進事故系統的樣本
-    assert neighbors.startswith('"service.name":in("amhs-mcs") ')
-    [stk] = ev["neighbor_logs"]
-    assert (stk["system"], stk["example"], stk["level"]) == ("amhs-mcs", "transfer job aborted: destination port occupied", "ERROR")
     prompt = rca.build_prompt(ev)
     for part in ("【1.", "【2.", "【3.", "【4.", "EQP-CVD-07", "T3 timeout"):
         assert part in prompt
