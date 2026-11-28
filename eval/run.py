@@ -148,16 +148,17 @@ def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
     listed = " → ".join(f"{c['source']} {report.GRADE_TEXT[c['grade']]}" for c in chain) or "（沒有鏈）"
     others = "、".join(c["source"] for c in steps if c["role"] == "alternative")
     problems = []
+    accepted = [scenario["source"]] if isinstance(scenario["source"], str) and scenario["source"] else list(scenario["source"] or [])
     if scenario["source"] == "":
         strong = [c for c in chain if c["grade"] == "direct"]
         if strong:
             problems.append(f"答案是無法判定，鏈上卻有直接證據的 {strong[0]['source']}")
-    elif scenario["source"] is not None and not any(_same_name(c["source"], scenario["source"]) for c in chain):
-        problems.append(f"鏈裡沒有 {scenario['source']}")
+    elif accepted and not any(_same_name(c["source"], name) for c in chain for name in accepted):
+        problems.append(f"鏈裡沒有 {'／'.join(accepted)}")
     if scenario["any"] and not any(word in said for word in scenario["any"]):
         problems.append(f"沒有提到 {'／'.join(scenario['any'])}")
     return {"ok": not problems, "why": "；".join(problems), "source": top["source"], "grade": top["grade"],
-            "root": bool(scenario["source"]) and _same_name(top["source"], scenario["source"]),
+            "root": any(_same_name(top["source"], name) for name in accepted),
             "count": len(chain), "candidates": listed + (f"｜另一種可能：{others}" if others else ""), "summary": summary}
 
 
