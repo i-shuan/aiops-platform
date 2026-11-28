@@ -1,5 +1,5 @@
 """根因分析列出 1～3 個可能的原因，每個最後帶依據等級：直接證據／間接證據／推測。
-原因是模型列的；**等級是程式照證據判定的**（rca.evidence_grade），同一份證據永遠得到同一個等級。模型不給分數：
+原因是模型列的；**等級是程式照證據判定的**（gather.evidence_grade），同一份證據永遠得到同一個等級。模型不給分數：
 它自評的分數同一份證據會飄（實測同一題給過 75、38、35），2026-11-28 起拿掉。模型給的 confidence 欄位一律不看。"""
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import db as dbmod
 from src import rca, report
 from src.grafana import Grafana
@@ -46,7 +47,7 @@ def test_candidates_get_the_grade_the_evidence_supports_whatever_score_the_model
     assert summary == "mq-broker 最可能是源頭"
     assert [(c["source"], c["grade"]) for c in got] == [("mq-broker", "direct"), ("cim-eap", "direct"), ("amhs-mcs", "direct")]
     assert all("confidence" not in c for c in got)
-    assert rca.candidates_text(got).splitlines() == ["1. mq-broker：它的錯誤日誌寫 consumer lag（直接證據）",
+    assert report.candidates_text(got).splitlines() == ["1. mq-broker：它的錯誤日誌寫 consumer lag（直接證據）",
                                                      "2. cim-eap：T3 逾時（直接證據）", "3. amhs-mcs：只是下游（直接證據）"]
 
 
@@ -55,7 +56,7 @@ def test_a_system_known_only_from_a_relation_is_a_guess_and_is_listed_after_the_
     ev = evidence(fake)
     _summary, got = rca.read_answer(answer(("erp-core", 95, "它在上游"), ("mq-broker", 95, "有錯誤日誌")), ev)
     assert [(c["source"], c["grade"]) for c in got] == [("mq-broker", "direct"), ("erp-core", "inference")]
-    assert rca.candidates_text(got).splitlines()[1] == "2. erp-core：它在上游（推測）"
+    assert report.candidates_text(got).splitlines()[1] == "2. erp-core：它在上游（推測）"
 
 
 def test_with_only_alerts_every_candidate_is_a_guess(fake):
@@ -95,16 +96,16 @@ def graded(**packs):
 ])
 def test_the_grade_follows_fixed_rules_about_what_kind_of_evidence_points_at_the_system(packs, name, grade):
     ev = graded(**packs)
-    assert rca.evidence_grade(name, ev) == grade
-    assert rca.evidence_grade(name.upper(), ev) == grade                 # 不分大小寫
-    assert rca.evidence_grade(name, ev) == rca.evidence_grade(name, ev)   # 同一份證據，同一個等級
+    assert gather.evidence_grade(name, ev) == grade
+    assert gather.evidence_grade(name.upper(), ev) == grade                 # 不分大小寫
+    assert gather.evidence_grade(name, ev) == gather.evidence_grade(name, ev)   # 同一份證據，同一個等級
 
 
 def test_two_systems_blaming_each_other_are_both_direct_the_grade_cannot_say_who_was_first():
     """已知限制：等級評的是證據，不是推理。互相指名時兩邊都是直接證據，誰先誰後要看模型的文字。"""
     ev = graded(anomalies=[{"system": "a-svc"}, {"system": "b-svc"}], edges=[], error_logs=[
         {"system": "a-svc", "message": "no reply from b-svc"}, {"system": "b-svc", "message": "no reply from a-svc"}])
-    assert (rca.evidence_grade("a-svc", ev), rca.evidence_grade("b-svc", ev)) == ("direct", "direct")
+    assert (gather.evidence_grade("a-svc", ev), gather.evidence_grade("b-svc", ev)) == ("direct", "direct")
 
 
 def test_at_most_three_candidates_are_kept(fake):
@@ -180,7 +181,7 @@ def test_a_failed_analysis_has_no_causes_and_clears_the_old_ones(world):  # noqa
 def field_evidence(*messages):
     """只有一個系統告警、沒有任何關係邊；錯誤日誌的訊息裡提到別的元件。形狀跟 collect_evidence 產生的一樣。"""
     logs = [{"time": f"2026-11-26T04:51:2{n}Z", "system": "instana-agent", "message": m} for n, m in enumerate(messages)]
-    patterns = [{"system": "instana-agent", "pattern": rca.log_pattern(m), "example": m, "first_seen": "2026-11-26T04:51:20Z",
+    patterns = [{"system": "instana-agent", "pattern": gather.log_pattern(m), "example": m, "first_seen": "2026-11-26T04:51:20Z",
                  "during": 3, "before": 0, "new": True} for m in messages]
     return {"anomalies": [{"system": "instana-agent", "rule": "錯誤日誌異常", "severity": "P2", "started": "2026-11-26T04:50:00Z",
                            "status": "firing", "values": {}}],
@@ -227,7 +228,7 @@ def test_an_ungrounded_runner_up_is_dropped_instead_of_throwing_everything_away(
     summary, candidates = rca.read_answer(reply("最可能是 MariaDb 連不上", ("MariaDb", 80, "日誌寫連不上"), ("PostgreSQL", 40, "猜的"),
                                                  ("instana-agent", 30, "告警在它身上"), systems=["MariaDb", "PostgreSQL"]), ev)
     assert [c["source"] for c in candidates] == ["MariaDb", "instana-agent"]   # 沒憑據的那一個拿掉，其餘照用
-    assert "PostgreSQL" not in rca.candidates_text(candidates) and summary.startswith("最可能是 MariaDb")
+    assert "PostgreSQL" not in report.candidates_text(candidates) and summary.startswith("最可能是 MariaDb")
 
 
 def test_very_short_names_are_not_matched_by_text_and_known_systems_keep_working():
@@ -250,7 +251,7 @@ def test_a_cause_the_model_marks_as_inferred_is_a_guess_whatever_evidence_the_sy
         {"source": "db-host", "kind": "evidence", "confidence": 99, "reason": "主機可能關機了"}]}, ensure_ascii=False)
     _summary, candidates = rca.read_answer(raw, ev)
     assert [(c["source"], c["grade"]) for c in candidates] == [("MariaDb", "direct"), ("db-host", "direct"), ("instana-agent", "inference")]
-    assert rca.candidates_text(candidates).splitlines() == [
+    assert report.candidates_text(candidates).splitlines() == [
         "1. MariaDb：日誌直接寫 Cannot connect to MariaDb（直接證據）",
         "2. db-host：主機可能關機了（直接證據）",
         "3. instana-agent：也可能是感測器的帳密設定錯了，日誌沒有寫（推測）"]
@@ -278,8 +279,8 @@ def test_next_steps_are_listed_cut_and_limited():
     steps = rca.read_actions(with_actions("確認 db-host:3306 的 MariaDb 有沒有在聽連線", "  檢查 instana-agent 的\n感測器帳密  ", "x" * 500, "第四條"), ev)
     assert steps[:2] == ["確認 db-host:3306 的 MariaDb 有沒有在聽連線", "檢查 instana-agent 的 感測器帳密"]
     assert len(steps) == rca.MAX_ACTIONS and len(steps[2]) == rca.ACTION_CHARS
-    assert rca.actions_text(steps[:2]) == "下一步建議｜1) 確認 db-host:3306 的 MariaDb 有沒有在聽連線；2) 檢查 instana-agent 的 感測器帳密"
-    assert rca.actions_text([]) == ""
+    assert report.actions_text(steps[:2]) == "下一步建議｜1) 確認 db-host:3306 的 MariaDb 有沒有在聽連線；2) 檢查 instana-agent 的 感測器帳密"
+    assert report.actions_text([]) == ""
     for missing in (json.dumps({"summary": "x"}), with_actions(), json.dumps({"summary": "x", "actions": "重啟"}), with_actions(7, None, "")):
         assert rca.read_actions(missing, ev) == []                       # 選填：沒有、不是清單、不是文字，都當成沒有
 

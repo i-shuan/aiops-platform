@@ -30,6 +30,8 @@ import httpx
 from dataclasses import replace
 
 from eval.scenarios import HELD_OUT, SCENARIOS
+from src import evidence as gather
+from src import report
 from src import rca
 from src.grafana import Grafana
 from src.logs import Elasticsearch, LogFields, VictoriaLogs
@@ -116,8 +118,8 @@ def build_evidence(scenario: dict, grafana: Grafana, store, now: datetime, setti
     incidents = converge([], alerts, [], edges, now=now, close_after_seconds=300)
     assert len(incidents) == 1, f"{scenario['name']}：告警沒有收斂成一張事故（{len(incidents)} 張），案例的關係邊要補"
     [incident] = incidents
-    evidence = rca.collect_evidence(incident, edges, grafana, logs=store, id_fields=list(settings.id_fields), now=now, limits=settings.evidence)
-    overview = rca.overview_text(rca.overview(evidence, store.fields, settings.evidence.error_levels))
+    evidence = gather.collect_evidence(incident, edges, grafana, logs=store, id_fields=list(settings.id_fields), now=now, limits=settings.evidence)
+    overview = gather.overview_text(gather.overview(evidence, store.fields, settings.evidence.error_levels))
     return evidence, overview
 
 
@@ -141,7 +143,7 @@ def ask(evidence: dict, overview: str, scenario: dict, llm: dict) -> dict:
                 "grade": None, "summary": ""}
     top = candidates[0] if candidates else {"source": "", "grade": ""}
     said = " ".join([summary, *(c["reason"] for c in candidates)])
-    listed = "、".join(f"{c['source']} {rca.GRADE_TEXT[c['grade']]}" for c in candidates) or "（沒有列）"
+    listed = "、".join(f"{c['source']} {report.GRADE_TEXT[c['grade']]}" for c in candidates) or "（沒有列）"
     problems = []
     if scenario["source"] == "":
         strong = [c for c in candidates if c["grade"] == "direct"]
@@ -202,7 +204,7 @@ def main() -> int:
         ok = sum(a["ok"] for a in answers)
         right, total = right + ok, total + len(answers)
         named = [a for a in answers if a["source"]]
-        grades = sorted({rca.GRADE_TEXT[a["grade"]] for a in named})
+        grades = sorted({report.GRADE_TEXT[a["grade"]] for a in named})
         tops = "、".join(sorted({a["source"] for a in named})) or "—"
         spread = "／".join(grades) or "—"
         listed = "／".join(str(a.get("count", 0)) for a in answers)

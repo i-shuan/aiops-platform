@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import statistics
@@ -20,6 +21,7 @@ from typing import Any
 
 from src import promql
 from src.grafana import Grafana, GrafanaError
+from src import graph
 from src.graph import EDGE_FIELDS
 from src.grouping import Incident
 from src.logs import ERROR_LEVELS, MESSAGE_FIELD, TIME_FIELD, WARN_LEVELS, LogFields
@@ -92,16 +94,6 @@ def _dig(doc: dict[str, Any], path: str) -> Any:
 
 def _members(incident: Incident) -> list[dict[str, Any]]:
     return sorted(incident.signals.values(), key=lambda m: (m["starts_at"], m["title"], m["service"]))
-
-
-def raw_summary(incident: Incident) -> str:
-    """不經 LLM 的原始摘要：各系統哪些告警響了（不含推論）。"""
-    by_service: dict[str, list[str]] = {}
-    for m in _members(incident):
-        titles = by_service.setdefault(m["service"], [])
-        if m["title"] not in titles:
-            titles.append(m["title"])
-    return "；".join(f"{svc}：{'、'.join(titles)}" for svc, titles in by_service.items())
 
 
 def relation(edge: Any) -> dict[str, Any]:
@@ -694,3 +686,35 @@ def calls_in(evidence: dict[str, Any], *, failed_only: bool = False, messaging_o
     return list(dict.fromkeys(pairs))
 
 
+# ── 依據等級 ──
+
+DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "trace_logs", "metrics")
+# 依據等級：由程式照證據判定，不是模型自評（模型自評的分數同一份證據會飄：實測同一題給過 75、38、35）。
+# 講的是「指向這個系統的證據有多直接」，不是機率，也不保證推理對。規則是這個專案自己定的，只在人造案例上跑過，未驗證泛化。
+GRADES = ("direct", "indirect", "inference")
+
+
+def evidence_grade(name: str, evidence: dict[str, Any]) -> str:
+    """指向這個系統的證據有多直接（純函式，同一份證據永遠得到同一個等級）：
+      direct     它自己有事故前沒出現過的錯誤（new=true）；或呼叫鏈的失敗點（origin）停在它（或那一段的 peer.service 是它）；
+                 或別的系統的錯誤日誌原樣指名它
+      indirect   名稱出現在日誌、警告、時間線、呼叫鏈、請求的日誌、指標裡（DIRECT_EVIDENCE），但不符合上面任何一條：
+                 只有警告、平常就有或數不出次數的錯誤、指標變化、呼叫鏈裡不是失敗點的那幾段
+      inference  只出現在告警與關係邊裡
+    評的是證據，不是推理：兩個系統互相指名對方時兩邊都是 direct，誰先誰後程式分不出來。"""
+    key = name.strip().lower()
+    if any(str(r.get("system", "")).lower() == key and r.get("new") is True for r in evidence.get("error_patterns") or []):
+        return "direct"
+    for chain in evidence.get("call_chains") or []:
+        for span in chain.get("spans") or []:
+            if span.get("origin") and key in (str(span.get("service", "")).lower(),
+                                              str((span.get("attributes") or {}).get("peer.service", "")).lower()):
+                return "direct"
+    said = [{"system": r.get("system"), "message": r.get("message") or r.get("example")}
+            for r in [*(evidence.get("error_logs") or []), *(evidence.get("error_patterns") or [])]
+            if str(r.get("system", "")).lower() != key]   # 自己的日誌提到自己不算被指名
+    if graph.mentions(said, {name.strip()}):
+        return "direct"
+    visible = json.dumps({k: [{f: v for f, v in row.items() if f != "pattern"} if isinstance(row, dict) else row
+                              for row in evidence.get(k) or []] for k in DIRECT_EVIDENCE}, ensure_ascii=False).lower()
+    return "indirect" if key in visible else "inference"

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import rca
 from src.grafana import Grafana
 from src.logs import LogFields, VictoriaLogs
@@ -53,14 +54,14 @@ PROFILE, COUNTS = 'partition by ("service.name")', "stats count() if"   # 各系
     ("err 42", "err *", None),
 ])
 def test_messages_become_patterns_and_countable_words(message, pattern, words):
-    assert rca.log_pattern(message) == pattern
-    assert rca.pattern_words(pattern) == words
+    assert gather.log_pattern(message) == pattern
+    assert gather.pattern_words(pattern) == words
 
 
 def test_same_kind_of_error_with_different_numbers_is_one_pattern_but_words_are_not_touched():
-    a, b = rca.log_pattern("T3 timeout eqp=EQP-CVD-07 after 5000ms"), rca.log_pattern("T3 timeout eqp=EQP-CVD-12 after 30ms")
+    a, b = gather.log_pattern("T3 timeout eqp=EQP-CVD-07 after 5000ms"), gather.log_pattern("T3 timeout eqp=EQP-CVD-12 after 30ms")
     assert a == b == "T* timeout eqp=EQP-CVD-* after *ms"
-    assert rca.log_pattern("decode failed") == "decode failed" and rca.log_pattern("cafe  bad\tface") == "cafe bad face"
+    assert gather.log_pattern("decode failed") == "decode failed" and gather.log_pattern("cafe  bad\tface") == "cafe bad face"
 
 
 # ── 去重：同一種只留最早的一筆原文 ──
@@ -81,7 +82,7 @@ def test_each_system_gets_its_own_oldest_errors_in_one_query(fake):
     collect(fake)
     [profile] = fake.queries(PROFILE)
     assert profile == ('"service.name":in("amhs-mcs","cim-eap","mq-broker") "log.level":in("ERROR","error","Error","FATAL","fatal",'
-                       f'"CRITICAL","critical") | sort by (_time) partition by ("service.name") limit {rca.FIRST_ERRORS_PER_SYSTEM}')
+                       f'"CRITICAL","critical") | sort by (_time) partition by ("service.name") limit {gather.FIRST_ERRORS_PER_SYSTEM}')
     # 警告不再另外問：跟錯誤同一次查詢撈（最新的在前），撈回來再照等級分開
     assert fake.queries('"log.level":in("WARN"') == []
     [both] = fake.queries("sort by (_time) desc")
@@ -91,7 +92,7 @@ def test_each_system_gets_its_own_oldest_errors_in_one_query(fake):
 def test_a_system_flooded_out_of_the_newest_sample_still_shows_its_earliest_errors(fake):
     """最新的那一批樣本全是 mq-broker（它在大量報錯）；cim-eap、amhs-mcs 較早的錯誤靠各系統各取最早幾筆的那一次補回來。"""
     fake.logs += [log_row(T0 + timedelta(seconds=n), "mq-broker", "ERROR", f"publish rejected: queue full ({n})") for n in range(8)]
-    limits = rca.EvidenceLimits(max_hits=8)
+    limits = gather.EvidenceLimits(max_hits=8)
     newest = VictoriaLogs(Grafana("http://grafana.test", "t", transport=fake.transport), "vl").search_errors(
         incident().services, T0 - timedelta(minutes=10), NOW, 8)
     assert {row["service.name"] for row in newest} == {"mq-broker"}      # 只看最新的 8 筆的話，另外兩個系統完全不見
@@ -137,14 +138,14 @@ def test_a_pattern_that_counts_nothing_gets_no_counts_instead_of_a_wrong_zero(fa
     fake.logsql = zero_counts
     ev = collect(fake)
     assert ev["error_patterns"] and all("during" not in r and "new" not in r for r in ev["error_patterns"])
-    assert "事故前後的次數比較" not in rca.overview_text(rca.overview(ev))
+    assert "事故前後的次數比較" not in gather.overview_text(gather.overview(ev))
 
 
 def test_comparison_can_be_turned_off_and_baseline_length_is_configurable(fake):
-    off = collect(fake, limits=rca.EvidenceLimits(max_log_patterns=0, max_warn_patterns=0))
+    off = collect(fake, limits=gather.EvidenceLimits(max_log_patterns=0, max_warn_patterns=0))
     assert off["error_patterns"] == [] and off["warnings"] == [] and fake.queries(COUNTS) == []
     assert len(off["error_logs"]) == 4 and fake.queries(PROFILE)       # 去重與各系統最早的樣本不受影響
-    collect(fake, limits=rca.EvidenceLimits(baseline_minutes=120))
+    collect(fake, limits=gather.EvidenceLimits(baseline_minutes=120))
     [counts] = [q for q in fake.log_queries if COUNTS in q["query"]]
     assert counts["start"] == "2026-11-21T00:31:10.000000Z"            # 事故時間窗的起點再往前 120 分鐘
 
@@ -162,7 +163,7 @@ def test_warnings_are_grouped_counted_and_shown_separately_from_errors(fake):
     assert [(w["system"], w["pattern"]) for w in ev["warnings"]] == [("mq-broker", "disk usage *% on /data"), ("cim-eap", "publish retry * of *")]
     assert ev["warnings"][0]["example"] == "disk usage 91% on /data"      # 原文、最早的那一筆
     assert (ev["warnings"][0]["during"], ev["warnings"][0]["before"], ev["warnings"][0]["new"]) == (2, 0, True)
-    assert "【3e. 警告" in rca.build_prompt(ev) and "警告 2 種" in rca.overview_text(rca.overview(ev))
+    assert "【3e. 警告" in rca.build_prompt(ev) and "警告 2 種" in gather.overview_text(gather.overview(ev))
     assert all("WARN" not in str(e.get("level", "")) for e in ev["error_logs"])
 
 
@@ -171,7 +172,7 @@ def test_no_warnings_are_asked_for_without_a_level_field_or_when_turned_off(fake
     collect(fake)
     assert len(asked_for_warnings()) == 1                                 # 對照：預設會問一次
     fake.log_queries.clear()
-    collect(fake, limits=rca.EvidenceLimits(warn_levels=()))
+    collect(fake, limits=gather.EvidenceLimits(warn_levels=()))
     assert fake.queries(PROFILE) and asked_for_warnings() == []
     fake.log_queries.clear()
     fake.logs = shifted(recorded_rows("unparsed"), SHIFT)                 # 沒有等級欄位：分不出警告，不問
@@ -202,7 +203,7 @@ def test_without_error_logs_the_warnings_are_still_collected(fake):
     assert ev["error_logs"] == [] and ev["error_patterns"] == [] and fake.queries(PROFILE) == []
     [warning] = ev["warnings"]                                          # 兩筆同一種：歸成一類
     assert (warning["system"], warning["example"]) == ("cim-eap", "slow reply from EQP-CVD-07: 4800ms (limit 5000ms)")
-    assert f"警告 {len(ev['warnings'])} 種" in rca.overview_text(rca.overview(ev))
+    assert f"警告 {len(ev['warnings'])} 種" in gather.overview_text(gather.overview(ev))
 
 
 def test_no_extra_queries_when_these_systems_have_no_logs_at_all(fake):

@@ -63,3 +63,67 @@ def render(incident: Incident, grafana_url: str, tz: str, max_links: int = 5) ->
 
 def uid_tag(uid: str) -> str:
     return f"aiops-incident:{uid}"
+
+
+# ── 各行的寫法（rca 只產生結構化的結果，字怎麼排都在這裡）──
+
+GRADE_TEXT = {"direct": "直接證據", "indirect": "間接證據", "inference": "推測"}   # gather.evidence_grade() 的等級在註記上的寫法
+MAX_FACT_LINES = 5   # LLM 沒有分析時，註記上最多直接列幾行證據（版面的上限，不是判斷門檻）
+FACT_CHARS = 120     # 每一行引用的原文最多幾個字
+FAILURE_TEXT = {"unreachable": "LLM 目前連不上", "rejected": "LLM 的回答沒有通過檢查"}
+
+
+def raw_summary(incident: Incident) -> str:
+    """不經 LLM 的原始摘要：各系統哪些告警響了（不含推論）。"""
+    by_service: dict[str, list[str]] = {}
+    for m in sorted(incident.signals.values(), key=lambda m: (m["starts_at"], m["title"], m["service"])):
+        titles = by_service.setdefault(m["service"], [])
+        if m["title"] not in titles:
+            titles.append(m["title"])
+    return "；".join(f"{svc}：{'、'.join(titles)}" for svc, titles in by_service.items())
+
+
+def alerts_fact(incident: Incident) -> str:
+    return f"・告警：{raw_summary(incident)}"
+
+
+def evidence_facts(incident: Incident, evidence: dict[str, Any]) -> list[str]:
+    """LLM 沒有分析的時候直接貼在註記上的幾行證據。全部是程式收集到的原文與筆數，沒有推論、沒有排名次：
+    第一行是哪些告警響了；再來是錯誤種類（事故前沒出現過的排前面，再照事故期間的筆數）；最後一行是呼叫鏈最底層的失敗點。"""
+    clip = lambda text: " ".join(str(text).split())[:FACT_CHARS]
+    lines = [alerts_fact(incident)]
+    chain = next((sp for c in evidence.get("call_chains") or [] for sp in c["spans"] if sp.get("origin")), None)
+    room = MAX_FACT_LINES - 1 - (1 if chain else 0)
+    patterns = sorted(evidence.get("error_patterns") or [], key=lambda r: (not r.get("new", False), -r.get("during", 0)))
+    for r in patterns[:room]:
+        if "during" not in r:
+            lines.append(f"・{r['system']}：{clip(r['example'])}")
+        else:
+            lines.append(f"・{r['system']}{' 新出現' if r['new'] else ''}：{clip(r['example'])}"
+                         f"（事故期間 {r['during']} 筆，事故前 {r['before']} 筆）")
+    if not patterns:   # 沒有做次數比較（查詢失敗或關掉了）：退而列錯誤日誌的樣本
+        for e in (evidence.get("error_logs") or [])[:room]:
+            lines.append(f"・{e['system']}：{clip(e['message'])}")
+    if chain:
+        target = (chain.get("attributes") or {}).get("peer.service")
+        path = " → ".join(x for x in (chain.get("called_by") if chain.get("called_by") != chain["service"] else None,
+                                      chain["service"], target) if x)
+        lines.append(f"・呼叫鏈停在：{path}，{clip(chain.get('error') or chain['span'])}")
+    return lines
+
+
+def failure_line(kind: str, failures: int, retry_seconds: int) -> str:
+    """LLM 沒有分析時註記第 2 行的內容：說明原因、什麼時候再試，並交代下面幾行是什麼。"""
+    minutes = max(1, round(retry_seconds / 60))
+    return (f"[未經分析] {FAILURE_TEXT.get(kind, FAILURE_TEXT['unreachable'])}（連續失敗 {failures} 次，約 {minutes} 分鐘後重試）。"
+            f"以下是程式收集到的證據，沒有經過推論：")
+
+
+def candidates_text(candidates: list[dict[str, Any]], max_chars: int = 300) -> str:
+    """可能的原因寫成註記上的列點，依據等級放最後：1. mq-broker：…（直接證據）。等級是程式判定的，見 evidence_grade()。"""
+    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（{GRADE_TEXT[c['grade']]}）" for n, c in enumerate(candidates, 1))
+
+
+def actions_text(actions: list[str]) -> str:
+    """註記上的那一行：下一步建議｜1) …；2) …"""
+    return "下一步建議｜" + "；".join(f"{n}) {line}" for n, line in enumerate(actions, 1)) if actions else ""

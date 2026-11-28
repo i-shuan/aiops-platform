@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from src import grouping
+from src import evidence as gather
 from src import db as dbmod
 from src import graph, rca
 from src.grafana import Grafana, GrafanaError, parse_webhook
@@ -96,7 +98,7 @@ def test_victoriatraces_dependencies_give_who_calls_whom_without_numbers():
     assert seen[0].url.path == "/api/datasources/proxy/uid/vt-uid/api/dependencies" and seen[0].url.params["lookback"] == "900000"
     assert graph.dependencies(replaying("victoriatraces_dependencies_before_any_traffic"), "vt-uid", NOW - timedelta(days=3), NOW - timedelta(days=2)) == []
     # 沒有失敗數：光靠它不能合併，只能當線索
-    assert graph.failing_links({"mes-api", "web-portal"}, graph_edges=edges, trace_calls=[], log_mentions=[]) == []
+    assert grouping.failing_links({"mes-api", "web-portal"}, graph_edges=edges, trace_calls=[], log_mentions=[]) == []
 
 
 def test_with_victoriatraces_the_graph_is_learned_from_its_dependencies_and_merging_still_needs_a_failing_trace(world):  # noqa: F811
@@ -131,7 +133,7 @@ def test_log_mentions_match_whole_known_names_only():
 def test_only_calls_that_are_failing_now_between_two_alerting_systems_can_merge():
     edges = [{"caller": "a", "callee": "hub", "requests": 9, "failed": 3, "kind": ""}, {"caller": "b", "callee": "hub", "requests": 9, "failed": 0, "kind": ""},
              {"caller": "c", "callee": "quiet", "requests": 9, "failed": 9, "kind": ""}]
-    links = graph.failing_links({"a", "b", "hub", "c"}, graph_edges=edges, trace_calls=[("b", "a"), ("x", "y")], log_mentions=[("hub", "a")])
+    links = grouping.failing_links({"a", "b", "hub", "c"}, graph_edges=edges, trace_calls=[("b", "a"), ("x", "y")], log_mentions=[("hub", "a")])
     assert links == [("a", "hub"), ("a", "b")]   # b → hub 沒有失敗：不併；c → quiet 有失敗但 quiet 沒告警：不併；方向不分，重複的只留一條
 
 
@@ -218,12 +220,12 @@ def test_turning_the_graph_off_stops_learning_and_merging(world):  # noqa: F811
 # ── 給 LLM 當線索 ──
 
 def test_calls_are_read_from_a_call_chain_at_system_level():
-    chain = rca.summarize_trace(recorded_trace(), "t", rca.EvidenceLimits())
-    assert rca.calls_in({"call_chains": [chain]}) == [("web-portal", "mes-api"), ("mes-api", "mes-db")]   # 同系統內部的呼叫不算；peer.service 也算
-    assert rca.calls_in({"call_chains": [chain]}, failed_only=True) == [("web-portal", "mes-api"), ("mes-api", "mes-db")]   # 這條 Trace 每一段都失敗
-    ok = rca.summarize_trace(recorded_trace("get_trace_ok"), "t", rca.EvidenceLimits())
-    assert rca.calls_in({"call_chains": [ok]}) and rca.calls_in({"call_chains": [ok]}, failed_only=True) == []
-    assert rca.calls_in({"call_chains": []}) == [] and rca.calls_in({}) == []
+    chain = gather.summarize_trace(recorded_trace(), "t", gather.EvidenceLimits())
+    assert gather.calls_in({"call_chains": [chain]}) == [("web-portal", "mes-api"), ("mes-api", "mes-db")]   # 同系統內部的呼叫不算；peer.service 也算
+    assert gather.calls_in({"call_chains": [chain]}, failed_only=True) == [("web-portal", "mes-api"), ("mes-api", "mes-db")]   # 這條 Trace 每一段都失敗
+    ok = gather.summarize_trace(recorded_trace("get_trace_ok"), "t", gather.EvidenceLimits())
+    assert gather.calls_in({"call_chains": [ok]}) and gather.calls_in({"call_chains": [ok]}, failed_only=True) == []
+    assert gather.calls_in({"call_chains": []}) == [] and gather.calls_in({}) == []
 
 
 def test_relations_reach_the_llm_with_where_they_came_from(world):  # noqa: F811
@@ -257,7 +259,7 @@ def test_a_later_incident_gets_what_an_earlier_one_taught_even_without_any_trace
 
 def test_a_system_known_only_from_a_relation_may_be_named_but_only_as_a_guess():
     ev = {"anomalies": [{"system": "mes-api", "rule": "errors", "severity": "P2", "started": "x", "status": "firing", "values": {}}],
-          "edges": [rca.relation({"caller": "mes-api", "callee": "mes-db", "source": "service_graph", "last_seen": "x", "times": 3})],
+          "edges": [gather.relation({"caller": "mes-api", "callee": "mes-db", "source": "service_graph", "last_seen": "x", "times": 3})],
           "error_logs": [], "error_patterns": [], "warnings": [], "id_counts": {}, "timelines": [], "call_chains": [], "metrics": [], "notes": []}
     assert ev["edges"] == [{"upstream": "mes-db", "downstream": "mes-api", "source": "service_graph", "last_seen": "x", "times": 3}]
     answer = json.dumps({"summary": "目前只能推測 mes-db 有狀況", "systems": [], "ids": [], "candidates": [

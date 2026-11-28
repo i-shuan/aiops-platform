@@ -11,6 +11,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import db as dbmod
 from src import rca
 from src.grafana import Grafana, parse_webhook
@@ -36,16 +37,16 @@ def store(backend):
 def test_a_consumer_trace_is_joined_to_the_service_that_sent_the_message(backend):
     s, ids = store(backend), LINKS["trace_ids"][backend]
     consumer = s.get_trace(ids["service-b"])
-    assert rca.linked_spans(consumer) == [(ids["eap"], "a2" * 8)]          # 連結指到發送端那條 Trace 的「publish」那一段
-    senders = rca.senders_of(consumer, s)
+    assert gather.linked_spans(consumer) == [(ids["eap"], "a2" * 8)]          # 連結指到發送端那條 Trace 的「publish」那一段
+    senders = gather.senders_of(consumer, s)
     assert senders == {(ids["eap"], "a2" * 8): "eap"}                      # 把那一條取回來看是誰送的
-    [row] = rca.summarize_trace(consumer, ids["service-b"], rca.EvidenceLimits(), senders)["spans"]
+    [row] = gather.summarize_trace(consumer, ids["service-b"], gather.EvidenceLimits(), senders)["spans"]
     assert (row["service"], row["called_by"], row["via"], row["status"], row["error"]) == ("service-b", "eap", "messaging", "error", "handler crashed")
-    chain = {"call_chains": [rca.summarize_trace(consumer, ids["service-b"], rca.EvidenceLimits(), senders)]}
-    assert rca.calls_in(chain) == rca.calls_in(chain, messaging_only=True) == rca.calls_in(chain, failed_only=True) == [("eap", "service-b")]
+    chain = {"call_chains": [gather.summarize_trace(consumer, ids["service-b"], gather.EvidenceLimits(), senders)]}
+    assert gather.calls_in(chain) == gather.calls_in(chain, messaging_only=True) == gather.calls_in(chain, failed_only=True) == [("eap", "service-b")]
     # 沒有把對方那一條取回來（過期、被取樣掉）：不知道是誰送的，就不接，不猜
-    [alone] = rca.summarize_trace(consumer, ids["service-b"], rca.EvidenceLimits())["spans"]
-    assert alone["called_by"] is None and rca.calls_in({"call_chains": [{"spans": [alone]}]}) == []
+    [alone] = gather.summarize_trace(consumer, ids["service-b"], gather.EvidenceLimits())["spans"]
+    assert alone["called_by"] is None and gather.calls_in({"call_chains": [{"spans": [alone]}]}) == []
 
 
 def test_both_sources_give_the_same_chain_for_the_same_messages():
@@ -53,7 +54,7 @@ def test_both_sources_give_the_same_chain_for_the_same_messages():
     for backend in ("vt", "tempo"):
         s, ids = store(backend), LINKS["trace_ids"][backend]
         consumer = s.get_trace(ids["service-b"])
-        chains.append(rca.summarize_trace(consumer, "t", rca.EvidenceLimits(), rca.senders_of(consumer, s))["spans"])
+        chains.append(gather.summarize_trace(consumer, "t", gather.EvidenceLimits(), gather.senders_of(consumer, s))["spans"])
     assert chains[0] == chains[1]
     raw = LINKS["exchanges"]["tempo_service-b"][0]["response"]["batches"][0]["scopeSpans"][0]["spans"][0]
     assert raw["links"][0]["traceId"].endswith("==") and _hex(raw["links"][0]["traceId"]) == LINKS["trace_ids"]["tempo"]["eap"]   # Tempo 回的編號是 base64
@@ -61,8 +62,8 @@ def test_both_sources_give_the_same_chain_for_the_same_messages():
 
 
 def test_a_messaging_relation_points_the_other_way_for_the_llm():
-    sync = rca.relation({"caller": "mes-api", "callee": "mes-db", "source": "trace", "kind": "", "last_seen": "x", "times": 1})
-    queue = rca.relation({"caller": "eap", "callee": "service-b", "source": "trace", "kind": "messaging", "last_seen": "x", "times": 1})
+    sync = gather.relation({"caller": "mes-api", "callee": "mes-db", "source": "trace", "kind": "", "last_seen": "x", "times": 1})
+    queue = gather.relation({"caller": "eap", "callee": "service-b", "source": "trace", "kind": "messaging", "last_seen": "x", "times": 1})
     assert (sync["upstream"], sync["downstream"]) == ("mes-db", "mes-api") and "kind" not in sync   # 被呼叫的出問題會影響呼叫它的
     assert (queue["upstream"], queue["downstream"], queue["kind"]) == ("eap", "service-b", "messaging")   # 送訊息的出問題，收的才受影響
     assert "downstream 出問題通常不會回頭影響 upstream" in rca.build_prompt({

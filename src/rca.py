@@ -32,40 +32,11 @@ from typing import Any
 
 import httpx
 
-from src import graph
+from src import report
+from src.evidence import GRADES, evidence_grade
 from src.grouping import Incident
 
 log = logging.getLogger("aiops_lite.rca")
-
-# 收集證據的部分在 src/evidence.py。這裡照原名再匯出一次，讓 rca.collect_evidence、rca.EvidenceLimits 這些既有的寫法繼續可用
-from src.evidence import (  # noqa: E402,F401
-    CAN_ANSWER,
-    ERROR_TAG_VALUES,
-    EvidenceLimits,
-    FIRST_ERRORS_PER_SYSTEM,
-    MAX_LINKED_TRACES,
-    MAX_RELATIONS,
-    MetricOptions,
-    MetricQuery,
-    SERVICE_PLACEHOLDER,
-    SPAN_ATTRIBUTES,
-    TRACE_SEARCH_LIMIT,
-    calls_in,
-    collect_evidence,
-    linked_spans,
-    log_pattern,
-    overview,
-    overview_brief,
-    overview_text,
-    pattern_words,
-    promql_string,
-    raw_summary,
-    relation,
-    senders_of,
-    stamp,
-    summarize_series,
-    summarize_trace,
-)
 
 # 夾數字的識別碼樣式（EQP-CVD-07、LOT24A0031）：幻覺檢查用它在摘要文字裡找「像機台／批號的字」（llm.id_pattern 的預設值）
 DEFAULT_ID_PATTERN = r"[A-Za-z][A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*"
@@ -104,39 +75,6 @@ SYSTEM_PROMPT = """你是負責工廠系統與 IT 服務的 SRE。依照使用�
 
 MAX_CANDIDATES = 3
 MIN_NAME_CHARS = 3   # 名稱至少這麼長，才用「原樣出現在證據文字裡」當憑據：一兩個字的名稱在任何文字裡都找得到。沒有依據的數字，未驗證泛化
-DIRECT_EVIDENCE = ("error_logs", "error_patterns", "warnings", "timelines", "call_chains", "trace_logs", "metrics")
-# 依據等級：由程式照證據判定，不是模型自評（模型自評的分數同一份證據會飄：實測同一題給過 75、38、35）。
-# 講的是「指向這個系統的證據有多直接」，不是機率，也不保證推理對。規則是這個專案自己定的，只在人造案例上跑過，未驗證泛化。
-GRADES = ("direct", "indirect", "inference")
-GRADE_TEXT = {"direct": "直接證據", "indirect": "間接證據", "inference": "推測"}
-
-
-def evidence_grade(name: str, evidence: dict[str, Any]) -> str:
-    """指向這個系統的證據有多直接（純函式，同一份證據永遠得到同一個等級）：
-      direct     它自己有事故前沒出現過的錯誤（new=true）；或呼叫鏈的失敗點（origin）停在它（或那一段的 peer.service 是它）；
-                 或別的系統的錯誤日誌原樣指名它
-      indirect   名稱出現在日誌、警告、時間線、呼叫鏈、請求的日誌、指標裡（DIRECT_EVIDENCE），但不符合上面任何一條：
-                 只有警告、平常就有或數不出次數的錯誤、指標變化、呼叫鏈裡不是失敗點的那幾段
-      inference  只出現在告警與關係邊裡
-    評的是證據，不是推理：兩個系統互相指名對方時兩邊都是 direct，誰先誰後程式分不出來。"""
-    key = name.strip().lower()
-    if any(str(r.get("system", "")).lower() == key and r.get("new") is True for r in evidence.get("error_patterns") or []):
-        return "direct"
-    for chain in evidence.get("call_chains") or []:
-        for span in chain.get("spans") or []:
-            if span.get("origin") and key in (str(span.get("service", "")).lower(),
-                                              str((span.get("attributes") or {}).get("peer.service", "")).lower()):
-                return "direct"
-    said = [{"system": r.get("system"), "message": r.get("message") or r.get("example")}
-            for r in [*(evidence.get("error_logs") or []), *(evidence.get("error_patterns") or [])]
-            if str(r.get("system", "")).lower() != key]   # 自己的日誌提到自己不算被指名
-    if graph.mentions(said, {name.strip()}):
-        return "direct"
-    visible = json.dumps({k: [{f: v for f, v in row.items() if f != "pattern"} if isinstance(row, dict) else row
-                              for row in evidence.get(k) or []] for k in DIRECT_EVIDENCE}, ensure_ascii=False).lower()
-    return "indirect" if key in visible else "inference"
-
-
 @dataclass(frozen=True)
 class LlmOptions:
     """呼叫 LLM 與檢查回答的選項（config.yaml 的 llm.*；都是選填，下面是預設值）。"""
@@ -145,47 +83,6 @@ class LlmOptions:
     max_summary_chars: int = 300         # 摘要超過就截斷（註記第 2 行）
     system_prompt: str = ""              # 空字串 = 用內建的 SYSTEM_PROMPT；來自 llm.system_prompt_file
     id_pattern: str = DEFAULT_ID_PATTERN  # 空字串 = 不檢查摘要文字裡的識別碼（systems／ids 清單照樣檢查）
-
-
-MAX_FACT_LINES = 5   # LLM 沒有分析時，註記上最多直接列幾行證據（版面的上限，不是判斷門檻）
-FACT_CHARS = 120     # 每一行引用的原文最多幾個字
-FAILURE_TEXT = {"unreachable": "LLM 目前連不上", "rejected": "LLM 的回答沒有通過檢查"}
-
-
-def alerts_fact(incident: Incident) -> str:
-    return f"・告警：{raw_summary(incident)}"
-
-
-def evidence_facts(incident: Incident, evidence: dict[str, Any]) -> list[str]:
-    """LLM 沒有分析的時候直接貼在註記上的幾行證據。全部是程式收集到的原文與筆數，沒有推論、沒有排名次：
-    第一行是哪些告警響了；再來是錯誤種類（事故前沒出現過的排前面，再照事故期間的筆數）；最後一行是呼叫鏈最底層的失敗點。"""
-    clip = lambda text: " ".join(str(text).split())[:FACT_CHARS]
-    lines = [alerts_fact(incident)]
-    chain = next((sp for c in evidence.get("call_chains") or [] for sp in c["spans"] if sp.get("origin")), None)
-    room = MAX_FACT_LINES - 1 - (1 if chain else 0)
-    patterns = sorted(evidence.get("error_patterns") or [], key=lambda r: (not r.get("new", False), -r.get("during", 0)))
-    for r in patterns[:room]:
-        if "during" not in r:
-            lines.append(f"・{r['system']}：{clip(r['example'])}")
-        else:
-            lines.append(f"・{r['system']}{' 新出現' if r['new'] else ''}：{clip(r['example'])}"
-                         f"（事故期間 {r['during']} 筆，事故前 {r['before']} 筆）")
-    if not patterns:   # 沒有做次數比較（查詢失敗或關掉了）：退而列錯誤日誌的樣本
-        for e in (evidence.get("error_logs") or [])[:room]:
-            lines.append(f"・{e['system']}：{clip(e['message'])}")
-    if chain:
-        target = (chain.get("attributes") or {}).get("peer.service")
-        path = " → ".join(x for x in (chain.get("called_by") if chain.get("called_by") != chain["service"] else None,
-                                      chain["service"], target) if x)
-        lines.append(f"・呼叫鏈停在：{path}，{clip(chain.get('error') or chain['span'])}")
-    return lines
-
-
-def failure_line(kind: str, failures: int, retry_seconds: int) -> str:
-    """LLM 沒有分析時註記第 2 行的內容：說明原因、什麼時候再試，並交代下面幾行是什麼。"""
-    minutes = max(1, round(retry_seconds / 60))
-    return (f"[未經分析] {FAILURE_TEXT.get(kind, FAILURE_TEXT['unreachable'])}（連續失敗 {failures} 次，約 {minutes} 分鐘後重試）。"
-            f"以下是程式收集到的證據，沒有經過推論：")
 
 
 def build_prompt(evidence: dict[str, Any], summary_of_evidence: str = "") -> str:
@@ -328,20 +225,10 @@ def read_actions(text: str, evidence: dict[str, Any], *, id_pattern: str = DEFAU
     return out[:MAX_ACTIONS]
 
 
-def actions_text(actions: list[str]) -> str:
-    """註記上的那一行：下一步建議｜1) …；2) …"""
-    return "下一步建議｜" + "；".join(f"{n}) {line}" for n, line in enumerate(actions, 1)) if actions else ""
-
-
 def check_answer(text: str, evidence: dict[str, Any], *, max_summary_chars: int = 300,
                  id_pattern: str = DEFAULT_ID_PATTERN) -> str:
     """read_answer 只取摘要的那一半（通過檢查回傳摘要文字，不通過丟 ValueError）。"""
     return read_answer(text, evidence, max_summary_chars=max_summary_chars, id_pattern=id_pattern)[0]
-
-
-def candidates_text(candidates: list[dict[str, Any]], max_chars: int = 300) -> str:
-    """可能的原因寫成註記上的列點，依據等級放最後：1. mq-broker：…（直接證據）。等級是程式判定的，見 evidence_grade()。"""
-    return "\n".join(f"{n}. {c['source']}：{c['reason'][:max_chars]}（{GRADE_TEXT[c['grade']]}）" for n, c in enumerate(candidates, 1))
 
 
 @dataclass(frozen=True)
@@ -358,7 +245,7 @@ def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, 
                  transport: httpx.BaseTransport | None = None, options: LlmOptions = LlmOptions(),
                  overview_text: str = "") -> Analysis:
     """問 LLM 並檢查回答。任何失敗都退回原始摘要（沒有可能原因），不丟例外。"""
-    fallback = f"[未經分析] {raw_summary(incident)}"
+    fallback = f"[未經分析] {report.raw_summary(incident)}"
     if not api_url or not model:
         return Analysis(fallback, False, "沒有設定 llm.url、llm.model", "")
     try:
@@ -374,8 +261,8 @@ def analyze_full(incident: Incident, evidence: dict[str, Any], *, api_url: str, 
         log.warning("事故 %s 的 LLM 分析沒有採用：%s", incident.uid, reason)
         # 連不上、逾時、回 4xx／5xx 是「LLM 不通」；其餘是它有回答、但格式不對或沒通過幻覺檢查
         return Analysis(fallback, False, reason, "", failure="unreachable" if isinstance(e, httpx.HTTPError) else "rejected")
-    return Analysis(f"[LLM 推論] {summary}", True, "", candidates_text(candidates, options.max_summary_chars),
-                    actions_text(read_actions(answer, evidence, id_pattern=options.id_pattern)))
+    return Analysis(f"[LLM 推論] {summary}", True, "", report.candidates_text(candidates, options.max_summary_chars),
+                    report.actions_text(read_actions(answer, evidence, id_pattern=options.id_pattern)))
 
 
 def analyze(incident: Incident, evidence: dict[str, Any], *, api_url: str, api_key: str, model: str,

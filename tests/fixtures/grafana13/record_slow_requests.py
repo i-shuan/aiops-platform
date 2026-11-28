@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
-from src import rca  # noqa: E402
+from src import evidence as gather
 from src.grafana import Grafana, GrafanaError  # noqa: E402
 from src.grouping import Alert, converge  # noqa: E402
 from src.logs import Elasticsearch, LogFields, VictoriaLogs  # noqa: E402
@@ -156,7 +156,7 @@ alert = Alert("slow-1", "firing", "rule-slow", "Orders API latency p95", "orders
 [incident] = converge([], [alert], [], [], now=BASE, close_after_seconds=300)
 collected = {}
 for name, logs, traces in (("victoria", vlogs, vtraces), ("es_tempo", eslogs, tempo)):
-    record(f"collect_evidence_{name}", lambda: collected.setdefault(name, rca.collect_evidence(
+    record(f"collect_evidence_{name}", lambda: collected.setdefault(name, gather.collect_evidence(
         incident, [], grafana, logs=logs, traces=traces, id_fields=["eqp_id", "lot_id", "carrier_id"], now=BASE)))
 (HERE / "slow_requests.json").write_text(json.dumps({
     "versions": {"grafana": admin.get("/api/health").json()["version"], "victorialogs": "v1.17.0", "victoriatraces": "v0.5.0",

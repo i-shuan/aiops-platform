@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from src import evidence as gather
 from src import db as dbmod
 from src import rca, report
 from src.grafana import Grafana, GrafanaError, LabelNames, parse_webhook
@@ -186,7 +187,7 @@ def test_label_names_and_default_severity_are_configurable():
 
 def test_log_query_uses_the_configured_levels_size_and_padding(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    limits = rca.EvidenceLimits(max_hits=7, window_padding_minutes=30, error_levels=("E", "SEVERE"))
+    limits = gather.EvidenceLimits(max_hits=7, window_padding_minutes=30, error_levels=("E", "SEVERE"))
     inc = incident()
     collect_evidence(inc, EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW, limits=limits)
     [sent] = [q for q in fake.log_queries if "sort by (_time) desc" in q["query"]]
@@ -198,13 +199,13 @@ def test_log_query_uses_the_configured_levels_size_and_padding(fake):
 
 def test_evidence_limits_control_how_much_the_llm_sees(fake):
     g = Grafana("http://grafana.test", "t", transport=fake.transport)
-    limits = rca.EvidenceLimits(max_log_samples=2, max_message_chars=20, top_ids=1)
+    limits = gather.EvidenceLimits(max_log_samples=2, max_message_chars=20, top_ids=1)
     ev = collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id", "lot_id"], now=NOW, limits=limits)
     assert len(ev["error_logs"]) == 2
     assert all(len(l["message"]) <= 20 for l in ev["error_logs"])
     assert ev["id_counts"] == {"eqp_id": {"EQP-CVD-07": 3}, "lot_id": {"LOT24A0031": 2}}  # 統計看全部撈到的，不是只看樣本
     none = collect_evidence(incident(), EDGES, g, logs_datasource_uid="vl", id_fields=["eqp_id"], now=NOW,
-                                limits=rca.EvidenceLimits(max_log_samples=0))
+                                limits=gather.EvidenceLimits(max_log_samples=0))
     assert none["error_logs"] == [] and none["id_counts"]["eqp_id"]["EQP-CVD-07"] == 3
 
 

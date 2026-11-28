@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from src import graph, promql, rca
+from src import evidence as gather
+from src import graph, promql
 from src.db import Database
 from src.grafana import Grafana
 from src.grouping import Alert, converge
@@ -65,7 +66,7 @@ def test_one_hop_comes_first_then_the_biggest_slowdown_and_numbers_are_carried_a
     assert [(r["caller"], r["callee"]) for r in got] == [("api", "db"), ("api", "cache"), ("portal", "api"), ("db", "storage")]
     assert {k: got[0][k] for k in ("p95_ms", "p95_baseline_ms", "p95_ratio", "latency_from", "rps", "rps_baseline", "hops")} == \
            {"p95_ms": 2400.0, "p95_baseline_ms": 95.0, "p95_ratio": 25.26, "latency_from": "client", "rps": 0.6, "rps_baseline": 0.01, "hops": 1}
-    shown = rca.collect_evidence(converge([], [Alert("f", "firing", "r", "api", "api", "P2", NOW, None, {})], [], [], now=NOW,
+    shown = gather.collect_evidence(converge([], [Alert("f", "firing", "r", "api", "api", "P2", NOW, None, {})], [], [], now=NOW,
                                           close_after_seconds=300)[0], got, Grafana("http://g", "t"), id_fields=[], now=NOW)["edges"]
     assert {k: shown[0][k] for k in ("upstream", "downstream", "hops", "p95_ms", "p95_ratio", "latency_from")} == \
            {"upstream": "db", "downstream": "api", "hops": 1, "p95_ms": 2400.0, "p95_ratio": 25.26, "latency_from": "client"}
@@ -75,7 +76,7 @@ def test_one_hop_comes_first_then_the_biggest_slowdown_and_numbers_are_carried_a
 def test_no_more_than_the_limit_are_given(db_url):
     database = Database(db_url)
     database.record_calls([("hub", f"svc-{n:02d}") for n in range(30)], "service_graph", NOW, 30)
-    assert len(relations(database, ["hub"], [])) == rca.MAX_RELATIONS
+    assert len(relations(database, ["hub"], [])) == gather.MAX_RELATIONS
 
 
 # ── 延遲換算：照錄下來的回應重播 ──

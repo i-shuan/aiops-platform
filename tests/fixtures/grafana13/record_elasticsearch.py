@@ -5,7 +5,7 @@
   1. 把跟 record_victoria.py 一模一樣的假資料直接寫進 Elasticsearch（這是這支腳本唯一直連的地方）。
      rec-factory 有明確的 mapping（keyword／text）；rec-unparsed 是動態 mapping（沒拆欄位的容器日誌）。
   2. **用 Editor 服務帳號的 Token**，呼叫 src/logs.py 的 Elasticsearch 每一個查詢方法，另外跑一次完整的
-     rca.collect_evidence；它實際送給 Grafana 資料源代理的請求與 Grafana 回的內容原樣記下來。
+     gather.collect_evidence；它實際送給 Grafana 資料源代理的請求與 Grafana 回的內容原樣記下來。
 
 用法：python record_elasticsearch.py <Editor Token 的檔案>
 """
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
-from src import rca  # noqa: E402
+from src import evidence as gather
 from src.grafana import Grafana, GrafanaError  # noqa: E402
 from src.grouping import Alert, converge  # noqa: E402
 from src.logs import Elasticsearch, LogFields  # noqa: E402
@@ -108,7 +108,7 @@ record("bad_field_type", lambda: Elasticsearch(grafana, uid, LogFields(time="mes
 alerts = [Alert(f"f{i}", "firing", f"r{i}", f"{s} 告警", s, "P2", BASE - timedelta(seconds=330 - i), None, {"A": 1})
           for i, s in enumerate(SERVICES)]
 [incident] = converge([], alerts, [], EDGES, now=BASE, close_after_seconds=300)
-record("collect_evidence", lambda: rca.collect_evidence(incident, EDGES, grafana, logs=factory, id_fields=["eqp_id", "lot_id", "carrier_id"],
+record("collect_evidence", lambda: gather.collect_evidence(incident, EDGES, grafana, logs=factory, id_fields=["eqp_id", "lot_id", "carrier_id"],
                                                         now=BASE))
 (HERE / "elasticsearch.json").write_text(json.dumps({
     "versions": {"grafana": admin.get("/api/health").json()["version"], "elasticsearch": es.get("/").json()["version"]["number"]},

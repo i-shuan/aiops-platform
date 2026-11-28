@@ -123,7 +123,7 @@ Grafana、只跑 1 個副本。多個 cluster 或廠區共用一個 Grafana 時�
 
 | 規則 | 做法 |
 | --- | --- |
-| 依據等級由程式判定 | 每個可能原因後面標「直接證據／間接證據／推測」，是程式照證據算的（`rca.evidence_grade`），同一份證據永遠得到同一個等級；講的是指向這個系統的證據有多直接，不是機率、也不保證推理對。模型自評的分數已經拿掉（2026-11-28）：同一份證據它會給 75、38、35 |
+| 依據等級由程式判定 | 每個可能原因後面標「直接證據／間接證據／推測」，是程式照證據算的（`evidence.evidence_grade`），同一份證據永遠得到同一個等級；講的是指向這個系統的證據有多直接，不是機率、也不保證推理對。模型自評的分數已經拿掉（2026-11-28）：同一份證據它會給 75、38、35 |
 | 直接證據 | 那個系統自己有事故前沒出現過的錯誤（`new=true`）；或呼叫鏈的失敗點停在它；或別的系統的錯誤日誌原樣指名它 |
 | 間接證據 | 名稱出現在日誌、警告、時間線、呼叫鏈、請求的日誌、指標裡，但不符合上面任何一條：只有警告、平常就有或數不出次數的錯誤、指標變化 |
 | 推測 | 只出現在告警與關係邊裡；或模型自己標成 `inference` 的（只會往下調，不會往上） |
@@ -341,7 +341,7 @@ python -m eval.run --only s02 --runs 1 --show-prompt               # 看實際�
 | 只有警告的慢查詢事故 + 真的 LLM | 兩組堆疊 | 都指出 orders-db 沒用到索引 |
 | 隔兩跳的資料庫變慢 + 真的 LLM | Tempo + VictoriaLogs | 有呼叫鏈：排第一 mes-db（85）。只有延遲邊列表：模型排第一也是 mes-db，但它只在關係邊上，等級是推測（當時還是分數：被壓到 30，第二名 mes-api 60） |
 | LLM 不通的版面、出口的佔位與重送 | 假的 HTTP 端點 | 照設計 |
-| 自動測試 | SQLite、PostgreSQL 16 | 393 個；Grafana、各資料庫的回應都是實際錄下來的（`tests/fixtures/grafana13/`） |
+| 自動測試 | SQLite、PostgreSQL 16 | 395 個；Grafana、各資料庫的回應都是實際錄下來的（`tests/fixtures/grafana13/`） |
 
 **沒測過的**：現場的資料與日誌；映像檔與實際部署到叢集；公司 Grafana 的權限與版本；叢集版或有認證的 Victoria、Elasticsearch、Tempo；
 內部 LLM；真的告警中心與 Conductor（兩個出口的格式都是自訂的）；查詢在大量資料上的耗時；現場 Tempo 有沒有開 service graph、日誌有沒有帶 trace id。
@@ -365,17 +365,17 @@ python -m eval.run --only s02 --runs 1 --show-prompt               # 看實際�
 | 檔案 | 行數 | 職責 |
 | --- | --- | --- |
 | `src/server.py` | 218 | 收 Webhook、debounce、單一工作執行緒、`/healthz` |
-| `src/main.py` | 306 | 一輪的流程 |
-| `src/config.py` | 393 | 讀 `config.yaml`（嚴格檢查） |
+| `src/main.py` | 307 | 一輪的流程 |
+| `src/config.py` | 394 | 讀 `config.yaml`（嚴格檢查） |
 | `src/grafana.py` | 195 | 解析 Webhook、對 Grafana 的 HTTP、指標查詢、註記 |
 | `src/logs.py` | 272 | 兩種日誌來源，同一組方法、同一種形狀 |
 | `src/traces.py` | 151 | 兩種 Trace 來源，統一成 Jaeger 的形狀 |
-| `src/graph.py` | 208 | service graph（含延遲邊列表）、日誌指名、合併判斷、子圖裁切 `prune` |
+| `src/graph.py` | 199 | service graph（含延遲邊列表）、日誌指名、子圖裁切 `prune`；只提供事實 |
 | `src/promql.py` | 71 | 時間窗 `Window`、PromQL 組裝、捨入、倍數（純函式） |
-| `src/grouping.py` | 172 | 收斂、結案（純函式） |
-| `src/evidence.py` | 694 | 收集證據與證據概況 |
-| `src/rca.py` | 380 | 組提示詞、呼叫 LLM、檢查回答、下一步建議 |
-| `src/report.py` | 65 | 註記的固定格式 |
+| `src/grouping.py` | 181 | 收斂、結案、哪些連結可以合併（`failing_links`）（純函式） |
+| `src/evidence.py` | 720 | 收集證據、證據概況、依據等級的判定 |
+| `src/rca.py` | 274 | 組提示詞、呼叫 LLM、檢查回答、下一步建議（不排版） |
+| `src/report.py` | 129 | 註記上每一行的寫法與整份註記的組裝 |
 | `src/outputs.py` | 157 | 事故 API、修復請求（佔位、不重送、重試） |
 | `src/db.py` | 286 | 建表與自動補欄位 |
 
